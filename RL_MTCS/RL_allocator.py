@@ -100,6 +100,24 @@ def _categorize(su_type: int) -> str:
         return 'terminal'
     return 'aliphatic'
 
+
+def count_su_values(values: List[int]) -> Dict[int, int]:
+    counts: Dict[int, int] = {}
+    for value in values:
+        su = int(value)
+        counts[su] = counts.get(su, 0) + 1
+    return counts
+
+
+def chain_spec_counts_match(spec: ChainSpec, values: List[int]) -> bool:
+    counts = count_su_values(values)
+    return (
+        int(counts.get(22, 0)) == int(spec.n_22) and
+        int(counts.get(23, 0)) == int(spec.n_23) and
+        int(counts.get(24, 0)) == int(spec.n_24) and
+        int(counts.get(25, 0)) == int(spec.n_25)
+    )
+
 # ==================== FlexAllocator ====================
 
 class FlexAllocator:
@@ -1275,7 +1293,7 @@ class FlexAllocator:
             return result
 
         avail = prep['pre_branch_available']
-        chains, rem_11, rem_23, rem_22, rem_25 = temp_allocator._allocate_su25_only(
+        chains, rem_11, rem_23, rem_22, _ = temp_allocator._allocate_su25_only(
             avail['11'], avail['23'], avail['22']
         )
         res = temp_allocator._result

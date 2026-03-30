@@ -1,6 +1,5 @@
 import os
 import re
-import math
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
@@ -63,7 +62,7 @@ def analyze_bridgehead_from_csv(csv_path: str) -> Tuple[int, int, int, int, int,
             template = row.get('template_key', '')
             if not isinstance(template, str):
                 continue
-            su_type, hop1, hop2 = _parse_template_key(template)
+            _, hop1, hop2 = _parse_template_key(template)
             count_12_in_hop1 = hop1.count(12)
             count_12_in_hop2 = hop2.count(12)
             if len(hop1) == 3 and count_12_in_hop1 == 3:
@@ -490,10 +489,14 @@ def initialize(nodes_csv: str, spectrum_csv: Optional[str] = None) -> Dict:
     print(f"  Aromatic(5-13): {aromatic_su}, Aliphatic(19-25): {aliphatic_su}")
     print(f"  Heteroatom(26-32): {hetero_su}, Carbonyl(0-4): {carbonyl_su}")
     print(f"  Aromatic-equivalent 13 count: {aromatic_equiv_13:.1f}")
-    print()
-    for su, cnt in sorted(su_counts.items()):
-        name = SU_NAMES.get(su, f"SU-{su}")
-        print(f"  {su:2d}: {name:20s} x {cnt}")
+    # Keep initialization output concise: show only top-count SU types.
+    top_su = sorted(su_counts.items(), key=lambda kv: (-int(kv[1]), int(kv[0])))[:8]
+    if top_su:
+        top_desc = ", ".join(
+            f"{int(su)}:{SU_NAMES.get(int(su), f'SU-{int(su)}')}×{int(cnt)}"
+            for su, cnt in top_su
+        )
+        print(f"  Top SU counts: {top_desc}")
     
     print(f"\n[Bridgehead Analysis] (from 1/2-hop info)")
     print(f"  Coronene/Pyrene bridgehead (hop1 = 12,12,12): x = {x}")
@@ -526,10 +529,9 @@ def initialize(nodes_csv: str, spectrum_csv: Optional[str] = None) -> Dict:
         f"naphthalene: {cluster_counts.get('naphthalene', 0)}, "
         f"benzene: {cluster_counts.get('benzene', 0)}"
     )
-    for c in clusters:
-        n12 = sum(1 for s in c.sites if s.su_type == 12)
-        n13 = sum(1 for s in c.sites if s.su_type == 13)
-        print(f"  {c.kind:12s} ID={c.id} | {c.rings} rings, {len(c.sites)} sites (12:{n12}, 13:{n13})")
+    total_rings = int(sum(c.rings for c in clusters))
+    total_sites = int(sum(len(c.sites) for c in clusters))
+    print(f"  Total rings/sites in clusters: {total_rings}/{total_sites}")
     
     print(f"\n[Remaining Resources]")
     print(f"  Unused 12: {gen.remaining_12}")

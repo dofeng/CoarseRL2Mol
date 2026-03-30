@@ -1319,9 +1319,9 @@ class FlexStage:
                         for v_cap in caps_to_try:
                             try:
                                 if dir_class == 'H':
-                                    coords_23, end11, last_step = horizontal_chain(axy, outward, m)
+                                    coords_23, end11, _ = horizontal_chain(axy, outward, m)
                                 else:
-                                    coords_23, end11, last_step = vertical_chain(axy, outward, m, v_cap)
+                                    coords_23, end11, _ = vertical_chain(axy, outward, m, v_cap)
                             except Exception:
                                 continue
 
@@ -1526,9 +1526,9 @@ class FlexStage:
             # Build chain geometry and verify endpoint
             try:
                 if dir_class == 'H':
-                    coords_23, end11, last_step = horizontal_chain(axy, main_dir, m)
+                    coords_23, end11, _ = horizontal_chain(axy, main_dir, m)
                 else:
-                    coords_23, end11, last_step = vertical_chain(axy, main_dir, m, cap)
+                    coords_23, end11, _ = vertical_chain(axy, main_dir, m, cap)
             except Exception:
                 continue
 

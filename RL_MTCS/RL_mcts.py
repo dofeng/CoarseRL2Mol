@@ -4,7 +4,7 @@ import random
 import copy
 import io
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Any
 from contextlib import redirect_stdout
 import torch
 
@@ -384,15 +384,6 @@ class MCTSNode:
         
         return self  # All actions exhausted
     
-    def best_action(self) -> Optional[Dict]:
-        """Get best action based on visit counts"""
-        if not self.children:
-            return None
-        
-        best_child = max(self.children.values(), key=lambda c: c.visits)
-        return best_child.action
-
-
 def _action_key(action: Dict) -> str:
     """Generate unique key for action"""
     if action is None:
@@ -617,7 +608,6 @@ class BeamMCTSSearch:
         # Final scoring: reward coverage and SU 10 exhaustion
         for cand in candidates:
             stage = RigidStage(cand.state, skip_init=True)
-            rc_map = stage.get_rc_map()
             dist = stage.get_rigid_cluster_distribution()
             cand.info['rigid_clusters'] = dist
             cand.info['num_rigid_clusters'] = len(dist)
@@ -1291,7 +1281,8 @@ class MCTSRunner:
         if stage_name == 'flex':
             if allocator is None:
                 allocator = FlexAllocator(self.nodes_csv)
-                allocator.allocate()
+                with redirect_stdout(io.StringIO()):
+                    allocator.allocate()
             alloc_result = copy.deepcopy(allocation_result) if allocation_result is not None else allocator._result
             return FlexStage(state, self.init_data['su_counts'], allocation_result=alloc_result), allocator
         if stage_name == 'branch':

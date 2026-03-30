@@ -1,13 +1,13 @@
 from typing import List, Dict, Optional, Tuple, Set
-import copy
 import random
 import math
 
 from .RL_state import (
-    MCTSState, ChainNode, EdgeSide, EdgeBranch, HexGrid, HEX_VERTEX_OFFSETS,
-    RU, RD, LU, LD, UP, DN, OPPOSITE,
+    MCTSState, ChainNode, EdgeSide, EdgeBranch, HexGrid,
+    RU, RD, LU, LD, UP, DN,
+    qr_shape_score_from_points, spatial_uniformity_score_from_points,
 )
-from .RL_allocator import FlexAllocator, ChainSpec
+from .RL_allocator import FlexAllocator, ChainSpec, chain_spec_counts_match
 from .stage_branch import (
     horizontal_branch_coords, su25_extra_branch_coord, get_branch_info_from_chain_spec
 )
@@ -313,57 +313,15 @@ class SideStage:
         r = self._repulsion_score(site_pos) * w['repulsion']
         return p + r
 
-    @staticmethod
-    def _qr_shape_score_from_points(points: Set[Tuple[int, int]],
-                                    min_ratio: float = 0.9,
-                                    max_ratio: float = 2.3) -> float:
-        if not points:
-            return 1.0
-        qs = [int(q) for q, _ in points]
-        rs = [int(r) for _, r in points]
-        q_span = float(max(qs) - min(qs))
-        r_span = float(max(rs) - min(rs))
-        if q_span < 1e-6 and r_span < 1e-6:
-            return 1.0
-        if r_span < 1e-6:
-            return -1.0
-        ratio = float(q_span / r_span)
-        if min_ratio <= ratio <= max_ratio:
-            mid = math.sqrt(min_ratio * max_ratio)
-            return max(0.0, 1.0 - abs(ratio - mid) / max(mid, 1e-6))
-        if ratio < min_ratio:
-            return -min(1.0, (min_ratio - ratio) / max(min_ratio, 1e-6))
-        return -min(1.0, (ratio - max_ratio) / max(max_ratio, 1e-6))
-
     def _preview_qr_shape_score(self, coords: List[Tuple[int, int]]) -> float:
         points = set((int(q), int(r)) for q, r in self._placed_vertices)
         points.update((int(q), int(r)) for q, r in coords)
-        return self._qr_shape_score_from_points(points, 0.9, 2.3)
+        return qr_shape_score_from_points(points, 0.9, 2.3)
 
     def _preview_uniformity_score(self, coords: List[Tuple[int, int]], bins: int = 3) -> float:
         points = set((int(q), int(r)) for q, r in self._placed_vertices)
         points.update((int(q), int(r)) for q, r in coords)
-        if len(points) <= 1:
-            return 1.0
-        qs = [q for q, _ in points]
-        rs = [r for _, r in points]
-        q0, q1 = min(qs), max(qs)
-        r0, r1 = min(rs), max(rs)
-        q_span = max(1.0, float(q1 - q0))
-        r_span = max(1.0, float(r1 - r0))
-        n_bins = max(2, int(bins))
-        counts = [[0 for _ in range(n_bins)] for _ in range(n_bins)]
-        for q, r in points:
-            qi = min(n_bins - 1, int(((float(q) - float(q0)) / q_span) * n_bins))
-            ri = min(n_bins - 1, int(((float(r) - float(r0)) / r_span) * n_bins))
-            counts[qi][ri] += 1
-        flat = [c for row in counts for c in row]
-        occupied = sum(1 for c in flat if c > 0)
-        avg = float(sum(flat)) / float(len(flat))
-        variance = float(sum((c - avg) ** 2 for c in flat)) / float(len(flat))
-        occupied_score = float(occupied) / float(len(flat))
-        variance_penalty = min(1.0, variance / max(avg * avg + 1e-6, 1.0))
-        return max(0.0, min(1.0, 0.65 * occupied_score + 0.35 * (1.0 - variance_penalty)))
+        return spatial_uniformity_score_from_points(points, bins)
 
     # ------------------------------------------------------------------
     # Outward direction
@@ -489,7 +447,7 @@ class SideStage:
                     candidate_sus += [22] * int(branch_info.get('branch_22_count', 0))
                     if branch_info.get('su_type') == 25 and extra_22_coord is not None:
                         candidate_sus += [22]
-                if not self._spec_counts_match(chain_spec, candidate_sus):
+                if not chain_spec_counts_match(chain_spec, candidate_sus):
                     continue
 
                 spatial = self._spatial_score(site.pos2d)
@@ -579,24 +537,6 @@ class SideStage:
                 return True
         return False
 
-    @staticmethod
-    def _count_su_values(values: List[int]) -> Dict[int, int]:
-        counts: Dict[int, int] = {}
-        for v in values:
-            iv = int(v)
-            counts[iv] = counts.get(iv, 0) + 1
-        return counts
-
-    @staticmethod
-    def _spec_counts_match(chain_spec: ChainSpec, values: List[int]) -> bool:
-        counts = SideStage._count_su_values(values)
-        return (
-            int(counts.get(22, 0)) == int(chain_spec.n_22) and
-            int(counts.get(23, 0)) == int(chain_spec.n_23) and
-            int(counts.get(24, 0)) == int(chain_spec.n_24) and
-            int(counts.get(25, 0)) == int(chain_spec.n_25)
-        )
-
     # ------------------------------------------------------------------
     # Step execution
     # ------------------------------------------------------------------
@@ -620,7 +560,7 @@ class SideStage:
             expected_sus += [22] * int(branch_info.get('branch_22_count', 0))
             if branch_info.get('su_type') == 25 and extra_22_coord is not None:
                 expected_sus += [22]
-        if not self._spec_counts_match(chain_spec, expected_sus):
+        if not chain_spec_counts_match(chain_spec, expected_sus):
             return False
 
         cluster = self.state.graph.clusters[cluster_id]
@@ -635,9 +575,6 @@ class SideStage:
 
         # Build ChainNode objects for main chain
         chain_nodes: List[ChainNode] = []
-        
-        # Get the length of main chain body (excluding branch parts from composition)
-        main_chain_len = len(path)
 
         for idx, p in enumerate(path):
             self._placed_vertices.add(p)

@@ -1,6 +1,5 @@
 import copy
 import random
-import re as _re
 import ast
 import pandas as pd
 from collections import Counter
@@ -52,10 +51,12 @@ class StateSubstitutor:
 
     def __init__(self, original_su_counts: Dict[int, int],
                  nodes_csv: str = None,
-                 nmr_eval_fn: Optional[Callable] = None):
+                 nmr_eval_fn: Optional[Callable] = None,
+                 verbose: bool = False):
         self.original_su_counts = copy.deepcopy(original_su_counts)
         self.nodes_csv = nodes_csv
         self.nmr_eval_fn = nmr_eval_fn
+        self.verbose = bool(verbose)
         self.su_details = self._parse_nodes()
         self.randomize = False
         self.last_summary: Dict[str, Any] = {}
@@ -65,6 +66,10 @@ class StateSubstitutor:
         for su in [0, 1, 2, 3, 14, 15, 16, 17, 18,
                    26, 27, 28, 29, 30, 31, 32]:
             self.remaining_sus[su] = original_su_counts.get(su, 0)
+
+    def _log(self, msg: str):
+        if self.verbose:
+            print(msg)
 
     # ----------------------------------------------------------------
     # Node CSV parsing
@@ -313,34 +318,42 @@ class StateSubstitutor:
         self._unsat_anchor_counts = self._build_unsat_anchor_counts()
         paths = self._extract_paths(state.graph)
 
-        print(f"\n[StateSubstitutor] Starting substitution")
-        print(f"  Initial remaining: {dict(self.remaining_sus)}")
+        self._log(f"\n[StateSubstitutor] Starting substitution")
+        self._log(f"  Initial remaining: {dict(self.remaining_sus)}")
 
         # --- PRIORITY 1: Unsaturated structures (MUST BE FIRST) ---
         self._substitute_unsaturated(state)
-        print(f"  After unsaturated: 14={self.remaining_sus.get(14, 0)}, "
-              f"15={self.remaining_sus.get(15, 0)}, 16={self.remaining_sus.get(16, 0)}, "
-              f"17={self.remaining_sus.get(17, 0)}, 18={self.remaining_sus.get(18, 0)}")
+        self._log(
+            f"  After unsaturated: 14={self.remaining_sus.get(14, 0)}, "
+            f"15={self.remaining_sus.get(15, 0)}, 16={self.remaining_sus.get(16, 0)}, "
+            f"17={self.remaining_sus.get(17, 0)}, 18={self.remaining_sus.get(18, 0)}"
+        )
 
         # --- PRIORITY 2: Chain-based substitutions ---
         self._substitute_carbonyls(paths)
-        print(f"  After carbonyls: 0={self.remaining_sus.get(0, 0)}, "
-              f"1={self.remaining_sus.get(1, 0)}, 2={self.remaining_sus.get(2, 0)}, "
-              f"3={self.remaining_sus.get(3, 0)}")
+        self._log(
+            f"  After carbonyls: 0={self.remaining_sus.get(0, 0)}, "
+            f"1={self.remaining_sus.get(1, 0)}, 2={self.remaining_sus.get(2, 0)}, "
+            f"3={self.remaining_sus.get(3, 0)}"
+        )
 
         self._substitute_oxygen(paths)
         self._substitute_nitrogen_bridge(paths)
         self._substitute_sulfur_bridge(paths)
         self._substitute_halogen(paths)
-        print(f"  After heteroatoms: 27={self.remaining_sus.get(27, 0)}, "
-              f"28={self.remaining_sus.get(28, 0)}, 29={self.remaining_sus.get(29, 0)}, "
-              f"31={self.remaining_sus.get(31, 0)}, 32={self.remaining_sus.get(32, 0)}")
+        self._log(
+            f"  After heteroatoms: 27={self.remaining_sus.get(27, 0)}, "
+            f"28={self.remaining_sus.get(28, 0)}, 29={self.remaining_sus.get(29, 0)}, "
+            f"31={self.remaining_sus.get(31, 0)}, 32={self.remaining_sus.get(32, 0)}"
+        )
 
         # --- PRIORITY 3: Cluster-internal heteroaromatic substitutions ---
         self._substitute_heteroaromatic_N(state)
         self._substitute_heteroaromatic_S(state)
-        print(f"  After heteroaromatic: 26={self.remaining_sus.get(26, 0)}, "
-              f"30={self.remaining_sus.get(30, 0)}")
+        self._log(
+            f"  After heteroaromatic: 26={self.remaining_sus.get(26, 0)}, "
+            f"30={self.remaining_sus.get(30, 0)}"
+        )
 
         applied = {
             su: before[su] - self.remaining_sus.get(su, 0)
@@ -358,9 +371,9 @@ class StateSubstitutor:
         }
 
         if remaining:
-            print(f"  [WARNING] Incomplete substitution, remaining: {remaining}")
+            self._log(f"  [WARNING] Incomplete substitution, remaining: {remaining}")
         else:
-            print(f"  [SUCCESS] All substitutions completed")
+            self._log(f"  [SUCCESS] All substitutions completed")
 
         return bool(not remaining)
 
@@ -718,9 +731,11 @@ class StateSubstitutor:
         nodes, adj, cluster_uids = self._build_graph_maps(state)
         pair_roles = self._build_pair_role_map(state, nodes)
 
-        print(f"  [Unsaturated] Plans: 14-14={len(plans['14_14'])}, "
-              f"14-15={len(plans['14_15'])}, 14-16={len(plans['14_16'])}, "
-              f"15-15={plans['15_15']}, 15-16={plans['15_16']}, 17-18={plans['17_18']}")
+        self._log(
+            f"  [Unsaturated] Plans: 14-14={len(plans['14_14'])}, "
+            f"14-15={len(plans['14_15'])}, 14-16={len(plans['14_16'])}, "
+            f"15-15={plans['15_15']}, 15-16={plans['15_16']}, 17-18={plans['17_18']}"
+        )
 
         # Priority 1: 14-15 (A/C-type 24 and branch-attached / ring 23)
         plan_14_15_by_type: Dict[str, int] = defaultdict(int)
@@ -731,7 +746,7 @@ class StateSubstitutor:
         for desired_type, target_pairs in plan_14_15_by_type.items():
             if self.remaining_sus.get(14, 0) < 1 or self.remaining_sus.get(15, 0) < 1:
                 break
-            print(f"  [Unsaturated] Processing 14-15 type={desired_type}, target={target_pairs}")
+            self._log(f"  [Unsaturated] Processing 14-15 type={desired_type}, target={target_pairs}")
             n_applied = self._apply_14_15_matches(
                 nodes,
                 adj,
@@ -746,18 +761,20 @@ class StateSubstitutor:
             )
             self.remaining_sus[14] -= int(n_applied)
             self.remaining_sus[15] -= int(n_applied)
-            print(f"  [Unsaturated] Applied {n_applied} 14-15 pairs, "
-                  f"remaining 14={self.remaining_sus.get(14, 0)}, 15={self.remaining_sus.get(15, 0)}")
+            self._log(
+                f"  [Unsaturated] Applied {n_applied} 14-15 pairs, "
+                f"remaining 14={self.remaining_sus.get(14, 0)}, 15={self.remaining_sus.get(15, 0)}"
+            )
 
         # Priority 2: 14-14 (adjacent C-type 24-24 ring positions)
         for hop1 in plans['14_14']:
             if self.remaining_sus.get(14, 0) < 2:
                 break
             if not self._replace_14_14(nodes, adj, cluster_uids, pair_roles=pair_roles):
-                print(f"  [Unsaturated] Warning: no pattern for 14-14, remaining={self.remaining_sus.get(14, 0)}")
+                self._log(f"  [Unsaturated] Warning: no pattern for 14-14, remaining={self.remaining_sus.get(14, 0)}")
                 break
             self.remaining_sus[14] -= 2
-            print(f"  [Unsaturated] Applied 14-14, remaining 14={self.remaining_sus.get(14, 0)}")
+            self._log(f"  [Unsaturated] Applied 14-14, remaining 14={self.remaining_sus.get(14, 0)}")
 
         # Priority 3: 14-16 (B/D-type 24 and terminal 22)
         for hop1 in plans['14_16']:
@@ -768,8 +785,10 @@ class StateSubstitutor:
                 continue
             self.remaining_sus[14] -= 1
             self.remaining_sus[16] -= 1
-            print(f"  [Unsaturated] Applied 14-16, remaining 14={self.remaining_sus.get(14, 0)}, "
-                  f"16={self.remaining_sus.get(16, 0)}")
+            self._log(
+                f"  [Unsaturated] Applied 14-16, remaining 14={self.remaining_sus.get(14, 0)}, "
+                f"16={self.remaining_sus.get(16, 0)}"
+            )
 
         # Saturation pass:
         # After honoring the original plan counts, keep consuming any remaining
@@ -782,27 +801,33 @@ class StateSubstitutor:
                 self.remaining_sus[14] -= 1
                 self.remaining_sus[15] -= 1
                 progressed = True
-                print(f"  [Unsaturated] Applied extra 14-15, remaining 14={self.remaining_sus.get(14, 0)}, "
-                      f"15={self.remaining_sus.get(15, 0)}")
+                self._log(
+                    f"  [Unsaturated] Applied extra 14-15, remaining 14={self.remaining_sus.get(14, 0)}, "
+                    f"15={self.remaining_sus.get(15, 0)}"
+                )
                 continue
 
             if self.remaining_sus.get(14, 0) >= 2 and self._replace_14_14(nodes, adj, cluster_uids, pair_roles=pair_roles):
                 self.remaining_sus[14] -= 2
                 progressed = True
-                print(f"  [Unsaturated] Applied extra 14-14, remaining 14={self.remaining_sus.get(14, 0)}")
+                self._log(f"  [Unsaturated] Applied extra 14-14, remaining 14={self.remaining_sus.get(14, 0)}")
                 continue
 
             if self.remaining_sus.get(16, 0) > 0 and self._apply_best_14_16(nodes, adj, cluster_uids, pair_roles=pair_roles):
                 self.remaining_sus[14] -= 1
                 self.remaining_sus[16] -= 1
                 progressed = True
-                print(f"  [Unsaturated] Applied extra 14-16, remaining 14={self.remaining_sus.get(14, 0)}, "
-                      f"16={self.remaining_sus.get(16, 0)}")
+                self._log(
+                    f"  [Unsaturated] Applied extra 14-16, remaining 14={self.remaining_sus.get(14, 0)}, "
+                    f"16={self.remaining_sus.get(16, 0)}"
+                )
                 continue
 
             if not progressed:
-                print(f"  [Unsaturated] No more feasible 14-based replacements in current graph, "
-                      f"remaining 14={self.remaining_sus.get(14, 0)}")
+                self._log(
+                    f"  [Unsaturated] No more feasible 14-based replacements in current graph, "
+                    f"remaining 14={self.remaining_sus.get(14, 0)}"
+                )
                 break
 
         # Priority 4: 15-15 (23-23 pairs, ring priority)
@@ -810,34 +835,38 @@ class StateSubstitutor:
             if self.remaining_sus.get(15, 0) < 2:
                 break
             if not self._replace_15_15_ring_priority(nodes, adj, pair_roles=pair_roles):
-                print(f"  [Unsaturated] Warning: no pattern for 15-15, remaining={self.remaining_sus.get(15, 0)}")
+                self._log(f"  [Unsaturated] Warning: no pattern for 15-15, remaining={self.remaining_sus.get(15, 0)}")
                 break
             self.remaining_sus[15] -= 2
-            print(f"  [Unsaturated] Applied 15-15, remaining 15={self.remaining_sus.get(15, 0)}")
+            self._log(f"  [Unsaturated] Applied 15-15, remaining 15={self.remaining_sus.get(15, 0)}")
 
         # Priority 5: 15-16 (23-22 pairs)
         for _ in range(plans['15_16']):
             if self.remaining_sus.get(15, 0) < 1 or self.remaining_sus.get(16, 0) < 1:
                 break
             if not self._replace_unsat_pair_by_adj(nodes, adj, '15_16', pair_roles=pair_roles):
-                print(f"  [Unsaturated] Warning: no pattern for 15-16")
+                self._log(f"  [Unsaturated] Warning: no pattern for 15-16")
                 break
             self.remaining_sus[15] -= 1
             self.remaining_sus[16] -= 1
-            print(f"  [Unsaturated] Applied 15-16, remaining 15={self.remaining_sus.get(15, 0)}, "
-                  f"16={self.remaining_sus.get(16, 0)}")
+            self._log(
+                f"  [Unsaturated] Applied 15-16, remaining 15={self.remaining_sus.get(15, 0)}, "
+                f"16={self.remaining_sus.get(16, 0)}"
+            )
 
         # Priority 6: 17-18 (23-22 pairs, triple bond)
         for _ in range(plans['17_18']):
             if self.remaining_sus.get(17, 0) < 1 or self.remaining_sus.get(18, 0) < 1:
                 break
             if not self._replace_unsat_pair_by_adj(nodes, adj, '17_18', pair_roles=pair_roles):
-                print(f"  [Unsaturated] Warning: no pattern for 17-18")
+                self._log(f"  [Unsaturated] Warning: no pattern for 17-18")
                 break
             self.remaining_sus[17] -= 1
             self.remaining_sus[18] -= 1
-            print(f"  [Unsaturated] Applied 17-18, remaining 17={self.remaining_sus.get(17, 0)}, "
-                  f"18={self.remaining_sus.get(18, 0)}")
+            self._log(
+                f"  [Unsaturated] Applied 17-18, remaining 17={self.remaining_sus.get(17, 0)}, "
+                f"18={self.remaining_sus.get(18, 0)}"
+            )
 
     def _build_unsaturated_plans(self) -> Dict[str, Any]:
         infos_14 = list(self.su_details.get(14, []))
@@ -1749,7 +1778,6 @@ class StateSubstitutor:
 
             if replace_two:
                 # Directly bonded 13-13 pairs within the same cluster
-                sites_13_set = set(sites_13)
                 for ii in range(len(sites_13)):
                     for jj in range(ii + 1, len(sites_13)):
                         si, sj = sites_13[ii], sites_13[jj]
@@ -1760,8 +1788,8 @@ class StateSubstitutor:
                     candidates.append((c_idx, [idx]))
 
         if not candidates:
-            print(f"[StateSubstitutor] Warning: no SU-13 candidate for "
-                  f"SU={target_su} (replace_two={replace_two})")
+            self._log(f"[StateSubstitutor] Warning: no SU-13 candidate for "
+                      f"SU={target_su} (replace_two={replace_two})")
             self.remaining_sus[target_su] -= 1
             return
 

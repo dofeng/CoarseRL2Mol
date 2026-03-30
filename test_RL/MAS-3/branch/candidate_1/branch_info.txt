@@ -1,0 +1,27 @@
+Candidate #1
+Score: 186.1014
+Stage: branch
+
+Branches placed: 5/5
+Branch edges: 17
+Branch chain nodes: 48
+
+Branch Edge Details:
+--------------------------------------------------
+  Branch 1: base=C4-V1 -> C4-V0, chain_len=4, SUs=[24, 24, 24, 24]
+  Branch 2: base=FSR-4-1-0-b-pu, chain_len=2, SUs=[23, 22]
+  Branch 3: base=FSR-4-1-0-b-pl, chain_len=2, SUs=[23, 22]
+  Branch 4: base=FSR-4-1-0-b-bru -> FSR-4-1-0-b-brl, chain_len=4, SUs=[23, 24, 24, 23]
+  Branch 5: base=FSR-4-1-0-o-u24, chain_len=2, SUs=[23, 22]
+  Branch 6: base=FSR-4-1-0-o-l24, chain_len=2, SUs=[23, 22]
+  Branch 7: base=C10-V9 -> VR-10-9-24a, chain_len=6, SUs=[24, 23, 24, 23, 24, 23]
+  Branch 8: base=VR-10-9-ir, chain_len=2, SUs=[23, 22]
+  Branch 9: base=VR-10-9-il, chain_len=1, SUs=[22]
+  Branch 10: base=C1-V3 -> VR-1-3-24a, chain_len=6, SUs=[24, 23, 24, 23, 23, 23]
+  Branch 11: base=VR-1-3-ir, chain_len=1, SUs=[22]
+  Branch 12: base=C13-V17 -> C13-V16, chain_len=4, SUs=[24, 23, 23, 24]
+  Branch 13: base=SR-13-17-16-p1, chain_len=2, SUs=[23, 22]
+  Branch 14: base=SR-13-17-16-p2, chain_len=2, SUs=[23, 22]
+  Branch 15: base=C10-V17 -> C10-V16, chain_len=4, SUs=[24, 23, 23, 24]
+  Branch 16: base=SR-10-17-16-p1, chain_len=2, SUs=[23, 22]
+  Branch 17: base=SR-10-17-16-p2, chain_len=2, SUs=[23, 22]

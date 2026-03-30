@@ -6,17 +6,9 @@ import random
 from .RL_state import (
     MCTSState, ChainNode, EdgeBranch, HexGrid, HEX_VERTEX_OFFSETS,
     RU, RD, LU, LD, UP, DN, OPPOSITE,
+    qr_shape_score_from_points, spatial_uniformity_score_from_points,
 )
-from .RL_allocator import FlexAllocator, ChainSpec
-
-_TYPE_A_DIRS = (RD, UP, LD)
-_TYPE_B_DIRS = (LU, DN, RU)
-
-def _valid_dirs(q, r):
-    mod = (q + r) % 3
-    if mod == 1: return _TYPE_A_DIRS
-    elif mod == 2: return _TYPE_B_DIRS
-    return ()
+from .RL_allocator import FlexAllocator, ChainSpec, chain_spec_counts_match
 
 
 def _branch_type_from_letter(letter: str) -> Optional[str]:
@@ -536,75 +528,15 @@ class BranchStage:
             if int(v) > 0
         }
 
-    @staticmethod
-    def _qr_shape_score_from_points(points: Set[Tuple[int, int]],
-                                    min_ratio: float = 0.9,
-                                    max_ratio: float = 2.3) -> float:
-        if not points:
-            return 1.0
-        qs = [int(q) for q, _ in points]
-        rs = [int(r) for _, r in points]
-        q_span = float(max(qs) - min(qs))
-        r_span = float(max(rs) - min(rs))
-        if q_span < 1e-6 and r_span < 1e-6:
-            return 1.0
-        if r_span < 1e-6:
-            return -1.0
-        ratio = float(q_span / r_span)
-        if min_ratio <= ratio <= max_ratio:
-            mid = math.sqrt(min_ratio * max_ratio)
-            return max(0.0, 1.0 - abs(ratio - mid) / max(mid, 1e-6))
-        if ratio < min_ratio:
-            return -min(1.0, (min_ratio - ratio) / max(min_ratio, 1e-6))
-        return -min(1.0, (ratio - max_ratio) / max(max_ratio, 1e-6))
-
     def _preview_qr_shape_score(self, coords: List[Tuple[int, int]]) -> float:
         points = set((int(q), int(r)) for q, r in self._placed)
         points.update((int(q), int(r)) for q, r in coords)
-        return self._qr_shape_score_from_points(points, 0.9, 2.3)
+        return qr_shape_score_from_points(points, 0.9, 2.3)
 
     def _preview_uniformity_score(self, coords: List[Tuple[int, int]], bins: int = 3) -> float:
         points = set((int(q), int(r)) for q, r in self._placed)
         points.update((int(q), int(r)) for q, r in coords)
-        if len(points) <= 1:
-            return 1.0
-        qs = [q for q, _ in points]
-        rs = [r for _, r in points]
-        q0, q1 = min(qs), max(qs)
-        r0, r1 = min(rs), max(rs)
-        q_span = max(1.0, float(q1 - q0))
-        r_span = max(1.0, float(r1 - r0))
-        n_bins = max(2, int(bins))
-        counts = [[0 for _ in range(n_bins)] for _ in range(n_bins)]
-        for q, r in points:
-            qi = min(n_bins - 1, int(((float(q) - float(q0)) / q_span) * n_bins))
-            ri = min(n_bins - 1, int(((float(r) - float(r0)) / r_span) * n_bins))
-            counts[qi][ri] += 1
-        flat = [c for row in counts for c in row]
-        occupied = sum(1 for c in flat if c > 0)
-        avg = float(sum(flat)) / float(len(flat))
-        variance = float(sum((c - avg) ** 2 for c in flat)) / float(len(flat))
-        occupied_score = float(occupied) / float(len(flat))
-        variance_penalty = min(1.0, variance / max(avg * avg + 1e-6, 1.0))
-        return max(0.0, min(1.0, 0.65 * occupied_score + 0.35 * (1.0 - variance_penalty)))
-
-    @staticmethod
-    def _count_su_values(values: List[int]) -> Dict[int, int]:
-        counts: Dict[int, int] = {}
-        for v in values:
-            iv = int(v)
-            counts[iv] = counts.get(iv, 0) + 1
-        return counts
-
-    @staticmethod
-    def _spec_counts_match(spec: ChainSpec, values: List[int]) -> bool:
-        counts = BranchStage._count_su_values(values)
-        return (
-            int(counts.get(22, 0)) == int(spec.n_22) and
-            int(counts.get(23, 0)) == int(spec.n_23) and
-            int(counts.get(24, 0)) == int(spec.n_24) and
-            int(counts.get(25, 0)) == int(spec.n_25)
-        )
+        return spatial_uniformity_score_from_points(points, bins)
 
     @staticmethod
     def _vertical_action_sus(action: Dict) -> List[int]:
@@ -638,24 +570,6 @@ class BranchStage:
         out += list(int(x) for x in list(action.get('outer_lower_branch_su', []) or []))
         return out
 
-    @staticmethod
-    def _count_su_values(values: List[int]) -> Dict[int, int]:
-        counts: Dict[int, int] = {}
-        for v in values:
-            iv = int(v)
-            counts[iv] = counts.get(iv, 0) + 1
-        return counts
-
-    @staticmethod
-    def _spec_counts_match(spec: ChainSpec, values: List[int]) -> bool:
-        counts = BranchStage._count_su_values(values)
-        return (
-            int(counts.get(22, 0)) == int(spec.n_22) and
-            int(counts.get(23, 0)) == int(spec.n_23) and
-            int(counts.get(24, 0)) == int(spec.n_24) and
-            int(counts.get(25, 0)) == int(spec.n_25)
-        )
-
     # ------------------------------------------------------------------
     # Candidate generators (existing methods follow)
     # ------------------------------------------------------------------
@@ -687,8 +601,6 @@ class BranchStage:
         if has_outer:
             outer_upper_type = _branch_type_from_letter(out_str[0]) if len(out_str) > 0 else None
             outer_lower_type = _branch_type_from_letter(out_str[1]) if len(out_str) > 1 else None
-            is_outer_upper_ab = outer_upper_type in ('24_A', '24_B')
-            is_outer_lower_ab = outer_lower_type in ('24_A', '24_B')
         else:
             outer_upper_type = None
             outer_lower_type = None
@@ -778,7 +690,7 @@ class BranchStage:
             candidate_sus = [pos1_su, pos2_su, pos3_su, pos4_su]
             candidate_sus += list(upper_branch_su) + list(lower_branch_su)
             candidate_sus += list(outer_ring_su) + list(outer_upper_branch_su) + list(outer_lower_branch_su)
-            if not self._spec_counts_match(spec, candidate_sus):
+            if not chain_spec_counts_match(spec, candidate_sus):
                 continue
 
             cx, cy = self._global_centroid()
@@ -879,7 +791,7 @@ class BranchStage:
             candidate_sus += [23] * max(0, len(left_branch_coords) - 1)
             if left_branch_coords:
                 candidate_sus += [22]
-            if not self._spec_counts_match(spec, candidate_sus):
+            if not chain_spec_counts_match(spec, candidate_sus):
                 continue
 
             # Score: prefer peripheral placement (secondary to NMR)
@@ -983,7 +895,7 @@ class BranchStage:
 
             candidate_sus = [pos1_su, pos2_su, pos3_su, pos4_su]
             candidate_sus += list(upper_branch_su) + list(lower_branch_su)
-            if not self._spec_counts_match(spec, candidate_sus):
+            if not chain_spec_counts_match(spec, candidate_sus):
                 continue
 
             cx, cy = self._global_centroid()
@@ -1014,21 +926,6 @@ class BranchStage:
         candidates.sort(key=lambda x: x['score'])
         return candidates[:k]
 
-    def _compute_ring_branch(self, node_24_pos, ring_n1, ring_n2,
-                              branch_len: int) -> List[Tuple[int, int]]:
-        """Compute branch path from a 24 node, perpendicular to its ring neighbours."""
-        if branch_len <= 0:
-            return []
-        q, r = node_24_pos
-        vd = _valid_dirs(q, r)
-        used = set()
-        used.add((ring_n1[0] - q, ring_n1[1] - r))
-        used.add((ring_n2[0] - q, ring_n2[1] - r))
-        perp = [d for d in vd if d not in used]
-        if not perp:
-            return []
-        return self._gen_linear_path(node_24_pos, perp[0], branch_len)
-
     # ------------------------------------------------------------------
     # Step execution
     # ------------------------------------------------------------------
@@ -1056,9 +953,8 @@ class BranchStage:
         site = cluster.sites[action['site_idx']]
         ring = action['ring']
         spec = action['spec']
-        if not self._spec_counts_match(spec, self._vertical_action_sus(action)):
+        if not chain_spec_counts_match(spec, self._vertical_action_sus(action)):
             return False
-        direction = action['direction']
         ir_is_24 = action['ir_is_24']
         il_is_24 = action['il_is_24']
         inter_types = action['inter_types']
@@ -1159,7 +1055,7 @@ class BranchStage:
         lower_site = cluster.sites[action['lower_idx']]
         ring = action['ring']
         spec = action['spec']
-        if not self._spec_counts_match(spec, self._side_action_sus(action)):
+        if not chain_spec_counts_match(spec, self._side_action_sus(action)):
             return False
         ring_su = action['ring_su']  # [pos1_su, pos3_su, pos4_su, pos2_su]
         node_types = action['node_types']
@@ -1261,29 +1157,6 @@ class BranchStage:
         if n == 0: return (0.0, 0.0)
         return (xs / n, ys / n)
 
-    def _gen_linear_path(self, start, outward_dir, length):
-        if length <= 0:
-            return []
-        if outward_dir in (RU, RD, LU, LD):
-            pair_map = {RU: RD, RD: RU, LU: LD, LD: LU}
-            step1, step2 = outward_dir, pair_map[outward_dir]
-            path, curr = [], start
-            for i in range(length):
-                d = step1 if i % 2 == 0 else step2
-                curr = (curr[0] + d[0], curr[1] + d[1])
-                path.append(curr)
-            return path
-        elif outward_dir in (UP, DN):
-            caps = (RU, LU) if outward_dir == UP else (RD, LD)
-            cap = caps[0]
-            path, curr = [], start
-            for i in range(length):
-                d = outward_dir if i % 2 == 0 else cap
-                curr = (curr[0] + d[0], curr[1] + d[1])
-                path.append(curr)
-            return path
-        return []
-
     def _parse_inter_types(self, desc: str) -> List[Optional[str]]:
         """Parse inter types from description like 'V-ring(A+C+D)'.
 
@@ -1349,7 +1222,7 @@ class BranchStage:
         lower_site = cluster.sites[action['lower_idx']]
         ring = action['ring']
         spec = action['spec']
-        if not self._spec_counts_match(spec, self._fused_action_sus(action)):
+        if not chain_spec_counts_match(spec, self._fused_action_sus(action)):
             return False
         ring_su = action['ring_su']
         has_outer = action['has_outer']

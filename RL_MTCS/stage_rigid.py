@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from .RL_state import (
     MCTSState, Site, AromaticCluster, EdgeRigid, HexGrid,
-    RU, RD, LU, LD, UP, DN, OPPOSITE, HEX_VERTEX_OFFSETS
+    RU, RD, LU, LD, UP, DN, HEX_VERTEX_OFFSETS
 )
 
 # Direction labels for connection sites

@@ -217,6 +217,68 @@ def compute_su_l1_delta(actual: Dict[int, int], target: Dict[int, int]) -> int:
     return int(sum(abs(diff) for diff in compute_su_delta(actual, target).values()))
 
 
+def qr_shape_score_from_ratio(ratio: float,
+                              min_ratio: float = 0.9,
+                              max_ratio: float = 2.3) -> float:
+    """Score in [-1, 1]: positive if q/r span ratio stays within range."""
+    if ratio == float('inf'):
+        return -1.0
+    lo = float(min_ratio)
+    hi = float(max_ratio)
+    if lo <= ratio <= hi:
+        mid = math.sqrt(lo * hi)
+        return max(0.0, 1.0 - abs(ratio - mid) / max(mid, 1e-6))
+    if ratio < lo:
+        return -min(1.0, (lo - ratio) / max(lo, 1e-6))
+    return -min(1.0, (ratio - hi) / max(hi, 1e-6))
+
+
+def qr_shape_score_from_points(points: Set[Tuple[int, int]],
+                               min_ratio: float = 0.9,
+                               max_ratio: float = 2.3) -> float:
+    """Evaluate the q/r span ratio over any axial point set."""
+    if not points:
+        return 1.0
+    qs = [int(q) for q, _ in points]
+    rs = [int(r) for _, r in points]
+    q_span = float(max(qs) - min(qs))
+    r_span = float(max(rs) - min(rs))
+    if q_span < 1e-6 and r_span < 1e-6:
+        return 1.0
+    if r_span < 1e-6:
+        return -1.0
+    return qr_shape_score_from_ratio(float(q_span / r_span), min_ratio, max_ratio)
+
+
+def spatial_uniformity_score_from_points(points: Set[Tuple[int, int]],
+                                         bins: int = 3) -> float:
+    """Score in [0, 1]: higher means less local concentration in q/r space."""
+    if len(points) <= 1:
+        return 1.0
+
+    qs = [int(q) for q, _ in points]
+    rs = [int(r) for _, r in points]
+    q0, q1 = min(qs), max(qs)
+    r0, r1 = min(rs), max(rs)
+    q_span = max(1.0, float(q1 - q0))
+    r_span = max(1.0, float(r1 - r0))
+    n_bins = max(2, int(bins))
+    counts = [[0 for _ in range(n_bins)] for _ in range(n_bins)]
+
+    for q, r in points:
+        qi = min(n_bins - 1, int(((float(q) - float(q0)) / q_span) * n_bins))
+        ri = min(n_bins - 1, int(((float(r) - float(r0)) / r_span) * n_bins))
+        counts[qi][ri] += 1
+
+    flat = [c for row in counts for c in row]
+    occupied = sum(1 for c in flat if c > 0)
+    avg = float(sum(flat)) / float(len(flat))
+    variance = float(sum((c - avg) ** 2 for c in flat)) / float(len(flat))
+    occupied_score = float(occupied) / float(len(flat))
+    variance_penalty = min(1.0, variance / max(avg * avg + 1e-6, 1.0))
+    return max(0.0, min(1.0, 0.65 * occupied_score + 0.35 * (1.0 - variance_penalty)))
+
+
 # ==================== SU Constants ====================
 
 SU_NAMES = {
@@ -395,42 +457,11 @@ class MCTSState:
                            min_ratio: float = 0.9,
                            max_ratio: float = 2.3) -> float:
         """Score in [-1, 1]: positive if q/r span ratio stays within range."""
-        ratio = self.get_qr_ratio()
-        if ratio == float('inf'):
-            return -1.0
-        lo = float(min_ratio)
-        hi = float(max_ratio)
-        if lo <= ratio <= hi:
-            mid = math.sqrt(lo * hi)
-            return max(0.0, 1.0 - abs(ratio - mid) / max(mid, 1e-6))
-        if ratio < lo:
-            return -min(1.0, (lo - ratio) / max(lo, 1e-6))
-        return -min(1.0, (ratio - hi) / max(hi, 1e-6))
+        return qr_shape_score_from_ratio(self.get_qr_ratio(), min_ratio, max_ratio)
 
     def get_spatial_uniformity_score(self, bins: int = 3) -> float:
         """Score in [0, 1]: higher means less local concentration in q/r space."""
-        q0, r0, q1, r1 = self.get_axial_bbox()
-        pts: List[Tuple[int, int]] = list(self.get_placed_vertices())
-        if len(pts) <= 1:
-            return 1.0
-
-        q_span = max(1.0, float(q1 - q0))
-        r_span = max(1.0, float(r1 - r0))
-        n_bins = max(2, int(bins))
-        counts = [[0 for _ in range(n_bins)] for _ in range(n_bins)]
-
-        for q, r in pts:
-            qi = min(n_bins - 1, int(((float(q) - float(q0)) / q_span) * n_bins))
-            ri = min(n_bins - 1, int(((float(r) - float(r0)) / r_span) * n_bins))
-            counts[qi][ri] += 1
-
-        flat = [c for row in counts for c in row]
-        occupied = sum(1 for c in flat if c > 0)
-        avg = float(sum(flat)) / float(len(flat))
-        variance = float(sum((c - avg) ** 2 for c in flat)) / float(len(flat))
-        occupied_score = float(occupied) / float(len(flat))
-        variance_penalty = min(1.0, variance / max(avg * avg + 1e-6, 1.0))
-        return max(0.0, min(1.0, 0.65 * occupied_score + 0.35 * (1.0 - variance_penalty)))
+        return spatial_uniformity_score_from_points(self.get_placed_vertices(), bins)
     
     def get_aspect_ratio(self) -> float:
         """Get aspect ratio of current structure"""
@@ -529,40 +560,6 @@ class MCTSState:
             side_sig,
             branch_sig,
         )
-
-
-@dataclass
-class MCTSHistory:
-    """MCTS search history recording"""
-    actions: List[Dict] = field(default_factory=list)
-    rewards: List[float] = field(default_factory=list)
-    states_info: List[Dict] = field(default_factory=list)  # Lightweight state info
-    
-    def record(self, action: Dict, reward: float, state: MCTSState):
-        """Record one step"""
-        self.actions.append(action)
-        self.rewards.append(reward)
-        self.states_info.append({
-            'stage': state.stage,
-            'step': state.step_count,
-            'components': state.get_component_count(),
-            'aspect_ratio': state.get_aspect_ratio(),
-            'rigid_edges': len(state.graph.rigid),
-        })
-    
-    def total_reward(self) -> float:
-        """Get total accumulated reward"""
-        return sum(self.rewards)
-    
-    def summary(self) -> Dict:
-        """Get history summary"""
-        return {
-            'total_steps': len(self.actions),
-            'total_reward': self.total_reward(),
-            'actions': self.actions,
-            'rewards': self.rewards,
-        }
-
 
 class BaseStageEvaluator:
     def __init__(self,
