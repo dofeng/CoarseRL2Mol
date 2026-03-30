@@ -1,0 +1,17 @@
+SU_Name,Predicted_Count
+Ester_Group,1
+O_Substituted_Aro_C,16
+N_Substituted_Aro_C,10
+X_Substituted_Aro_C,20
+Alkyl_Substituted_Aro_C,18
+Aromatic_Bridgehead_C,23
+Carbocyclic_Aro_CH,86
+Alcohol_Ether_C,14
+Halogenated_C,5
+Alkyl_CH3,18
+Alkyl_CH2,16
+Heterocyclic_N,4
+Hydroxyl_O,7
+Ether_O,22
+Thioether_S,1
+Halogen_X,3

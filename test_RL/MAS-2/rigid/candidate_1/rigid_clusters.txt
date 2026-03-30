@@ -1,0 +1,26 @@
+Candidate #1
+Score: 14.6272
+Rigid edges: 22
+Total clusters: 31 (all placed)
+Remaining SU 10: 0
+
+Rigid Clusters for Next Stage (9 total):
+--------------------------------------------------
+RC#0: 15 rings, 4 clusters (10-10) [coronene+tetracene+phenanthrene+benzene]
+  Member IDs: [0, 8, 20, 30]
+RC#1: 10 rings, 2 clusters (10-10) [benzo_pyrene+perylene]
+  Member IDs: [1, 2]
+RC#2: 16 rings, 4 clusters (10-10) [tetracene+tetracene+tetracene+chrysene]
+  Member IDs: [3, 4, 7, 13]
+RC#3: 8 rings, 2 clusters (10-10) [tetracene+tetracene]
+  Member IDs: [5, 6]
+RC#4: 8 rings, 2 clusters (10-10) [tetracene+chrysene]
+  Member IDs: [9, 10]
+RC#5: 16 rings, 4 clusters (10-10) [chrysene+chrysene+triphenylene+triphenylene]
+  Member IDs: [11, 12, 14, 15]
+RC#6: 12 rings, 4 clusters (10-10) [phenanthrene+phenanthrene+phenanthrene+phenanthrene]
+  Member IDs: [16, 18, 24, 25]
+RC#7: 10 rings, 5 clusters (10-10) [phenanthrene+phenanthrene+naphthalene+benzene+benzene]
+  Member IDs: [17, 21, 26, 28, 29]
+RC#8: 10 rings, 4 clusters (10-10) [phenanthrene+phenanthrene+phenanthrene+benzene]
+  Member IDs: [19, 22, 23, 27]

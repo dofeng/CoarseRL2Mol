@@ -1,0 +1,98 @@
+Candidate #2
+Score: 220.1999
+NMR Score: 0.8802
+Cosine Sim: 0.8802
+Stage: substitution
+
+Seed: 1000
+Subst Success: False
+Match Target: False
+L1 Delta: 16
+
+Final SU Distribution:
+--------------------------------------------------
+  SU 1: 1
+  SU 2: 1
+  SU 3: 12
+  SU 5: 6
+  SU 7: 2
+  SU 9: 15
+  SU 10: 44
+  SU 11: 45
+  SU 12: 148
+  SU 13: 187
+  SU 14: 5
+  SU 15: 17
+  SU 17: 6
+  SU 18: 6
+  SU 19: 3
+  SU 22: 18
+  SU 23: 28
+  SU 24: 10
+  SU 25: 1
+  SU 26: 10
+  SU 28: 2
+  SU 29: 2
+  SU 30: 2
+  SU 31: 2
+
+Target SU Distribution:
+--------------------------------------------------
+  SU 1: 1
+  SU 2: 1
+  SU 3: 12
+  SU 5: 6
+  SU 7: 2
+  SU 9: 15
+  SU 10: 44
+  SU 11: 46
+  SU 12: 146
+  SU 13: 192
+  SU 14: 7
+  SU 15: 19
+  SU 17: 6
+  SU 18: 6
+  SU 19: 3
+  SU 22: 18
+  SU 23: 26
+  SU 24: 8
+  SU 25: 1
+  SU 26: 10
+  SU 28: 2
+  SU 29: 2
+  SU 30: 2
+  SU 31: 2
+
+Delta (after-before):
+--------------------------------------------------
+  SU 1: +1
+  SU 2: +1
+  SU 3: +12
+  SU 5: +6
+  SU 7: +2
+  SU 9: +15
+  SU 11: -23
+  SU 13: -19
+  SU 14: +5
+  SU 15: +17
+  SU 17: +6
+  SU 18: +6
+  SU 19: +3
+  SU 22: -9
+  SU 23: -43
+  SU 24: -5
+  SU 26: +10
+  SU 28: +2
+  SU 29: +2
+  SU 30: +2
+  SU 31: +2
+
+Delta (actual-target):
+--------------------------------------------------
+  SU 11: -1
+  SU 12: +2
+  SU 13: -5
+  SU 14: -2
+  SU 15: -2
+  SU 23: +2
+  SU 24: +2

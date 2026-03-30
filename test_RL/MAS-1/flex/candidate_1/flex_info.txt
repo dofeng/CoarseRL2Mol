@@ -1,0 +1,41 @@
+Candidate #1
+Score: 122.3906
+Stage: flex
+
+Flex edges: 23
+Connections: 23/7
+All connected: True
+Components: 1
+sp2 ratio: 0.00%
+Quota tier: 0
+SU 23 consumed/quota: 44/0
+SU 11 consumed: 46
+H chains: 0
+V chains: 0
+Aspect ratio: 1.60
+
+Flex Edge Details:
+--------------------------------------------------
+  Edge 1: C7-V1 -> C5-V17, chain_len=1, SUs=[23]
+  Edge 2: C5-V7 -> C16-V6, chain_len=1, SUs=[23]
+  Edge 3: C3-V1 -> C2-V17, chain_len=1, SUs=[23]
+  Edge 4: C9-V11 -> C0-V6, chain_len=2, SUs=[23, 23]
+  Edge 5: C7-V16 -> C18-V1, chain_len=2, SUs=[23, 23]
+  Edge 6: C8-V2 -> C6-V3, chain_len=2, SUs=[23, 23]
+  Edge 7: C21-V0 -> C1-V19, chain_len=2, SUs=[23, 23]
+  Edge 8: C16-V2 -> C5-V3, chain_len=2, SUs=[23, 23]
+  Edge 9: C8-V10 -> C6-V15, chain_len=2, SUs=[23, 23]
+  Edge 10: C7-V14 -> C11-V3, chain_len=2, SUs=[23, 23]
+  Edge 11: C16-V11 -> C10-V0, chain_len=2, SUs=[23, 23]
+  Edge 12: C1-V15 -> C0-V17, chain_len=2, SUs=[23, 23]
+  Edge 13: C11-V2 -> C17-V8, chain_len=2, SUs=[23, 23]
+  Edge 14: C4-V3 -> C15-V16, chain_len=3, SUs=[23, 23, 23]
+  Edge 15: C11-V11 -> C18-V6, chain_len=2, SUs=[23, 23]
+  Edge 16: C20-V9 -> C3-V3, chain_len=2, SUs=[23, 23]
+  Edge 17: C8-V6 -> C6-V7, chain_len=2, SUs=[23, 23]
+  Edge 18: C0-V14 -> C9-V15, chain_len=2, SUs=[23, 23]
+  Edge 19: C0-V9 -> C1-V9, chain_len=2, SUs=[23, 23]
+  Edge 20: C9-V14 -> C5-V1, chain_len=1, SUs=[23]
+  Edge 21: C11-V14 -> C17-V13, chain_len=3, SUs=[23, 23, 23]
+  Edge 22: C13-V14 -> C6-V1, chain_len=1, SUs=[23]
+  Edge 23: C3-V7 -> C20-V12, chain_len=3, SUs=[23, 23, 23]
