@@ -11,7 +11,8 @@ from .coarse_graph import SU_DEFS, E_SU, NUM_SU_TYPES, PPM_AXIS
 from .inverse_common import (
     _NodeV3, SU_CONNECTION_DEGREE, HOP1_PORT_COMBINATIONS, SU_FIXED_CONNECTIONS,
     lorentzian_spectrum, compute_r2_score, compute_segment_r2,
-    visualize_spectrum_comparison, validate_connection, check_external_connection_requirement
+    visualize_spectrum_comparison, validate_connection, check_external_connection_requirement,
+    evaluate_spectrum_reconstruction,
 )
 from .hop1_adjuster import Hop1Adjuster
 
@@ -1543,14 +1544,18 @@ class Layer1Assigner:
                 'n_peaks': 0,
                 'error': str(e),
             }
+        grouped_assignments = self._assign_grouped_mu_pi_by_hop1(nodes, lib_index, allow_approx)
         mus = []
         pis = []
         for n in nodes:
             center_su = int(n.su_type)
             if float(self.E_SU[center_su, 0].detach().cpu().item()) <= 0:
                 continue
-            hop1_ms = self._hop1_to_multiset(n.hop1_su)
-            mu, pi, _meta = self._lookup_mu_pi_by_hop1(center_su, hop1_ms, lib_index, allow_approx=allow_approx)
+            assigned = grouped_assignments.get(int(n.global_id), None)
+            if assigned is None:
+                continue
+            mu = assigned.get('mu')
+            pi = assigned.get('pi')
             if mu is None or pi is None:
                 continue
             mus.append(float(mu))
@@ -1568,16 +1573,20 @@ class Layer1Assigner:
         mu_t = torch.tensor(mus, dtype=torch.float, device=device)
         pi_t = torch.tensor(pis, dtype=torch.float, device=device)
         S_recon = lorentzian_spectrum(mu_t, pi_t, ppm_axis, hwhm=float(hwhm))
-        denom = (S_recon * S_recon).sum().clamp(min=1e-8)
-        alpha = (S_target * S_recon).sum() / denom
-        S_fit = alpha * S_recon
-        r2 = compute_r2_score(S_target, S_fit)
-        diff = (S_target - S_fit).detach().cpu().numpy()
+        eval_info = evaluate_spectrum_reconstruction(
+            S_target,
+            S_recon,
+            ppm_axis=ppm_axis,
+            fit_scale=True,
+            nonnegative_alpha=True,
+        )
+        S_fit = eval_info['S_fit']
+        diff = (eval_info['S_target'] - S_fit).detach().cpu().numpy()
         return {
             'ppm': ppm_axis.detach().cpu().numpy(),
             'diff': diff,
-            'r2': float(r2),
-            'alpha': float(alpha.detach().cpu().item()),
+            'r2': float(eval_info.get('r2', 0.0)),
+            'alpha': float(eval_info.get('alpha', 1.0)),
             'n_peaks': int(len(mus)),
         }
 
@@ -1643,6 +1652,7 @@ class Layer1Assigner:
             if key not in agg:
                 agg[key] = {
                     'mu_values': [],
+                    'pi_values': [],
                     'weights': [],
                     'mu_min': float(tpl.get('mu_min', cmu)),
                     'mu_max': float(tpl.get('mu_max', cmu)),
@@ -1652,6 +1662,17 @@ class Layer1Assigner:
 
             a = agg[key]
             a['mu_values'].append(float(cmu))
+            cpi = None
+            try:
+                cpi = float(tpl.get('center_pi', 0.0))
+            except Exception:
+                cpi = None
+            if cpi is None or cpi <= 0.0:
+                try:
+                    cpi = float(torch.median(pi_s.detach().float()).item())
+                except Exception:
+                    cpi = 1.0
+            a['pi_values'].append(float(max(1e-6, cpi)))
             a['weights'].append(float(sc))
             a['mu_min'] = float(min(a['mu_min'], float(tpl.get('mu_min', cmu))))
             a['mu_max'] = float(max(a['mu_max'], float(tpl.get('mu_max', cmu))))
@@ -1816,8 +1837,9 @@ class Layer1Assigner:
             }
 
         mu_values = info.get('mu_values', [])
+        pi_values = info.get('pi_values', [])
         weights = info.get('weights', [])
-        if not mu_values or not weights:
+        if not mu_values or not pi_values or not weights:
             return None, None, {
                 'matched': False,
                 'approx_used': approx_used,
@@ -1829,10 +1851,11 @@ class Layer1Assigner:
             }
 
         v = np.asarray(mu_values, dtype=np.float64)
+        p = np.asarray(pi_values, dtype=np.float64)
         w = np.asarray(weights, dtype=np.float64)
         w_sum = float(w.sum())
         mu = self._weighted_quantile(v, w, 0.5)
-        pi = 1.0
+        pi = self._weighted_quantile(p, w, 0.5)
         return mu, pi, {
             'matched': True,
             'approx_used': approx_used,
@@ -1842,6 +1865,111 @@ class Layer1Assigner:
             'mu_min': float(info.get('mu_min', 0.0)),
             'mu_max': float(info.get('mu_max', 0.0)),
         }
+
+    def _assign_grouped_mu_pi_by_hop1(self,
+                                      nodes: List[_NodeV3],
+                                      lib_index: dict,
+                                      allow_approx: bool) -> Dict[int, Dict[str, object]]:
+        """
+        对具有相同 (center_su, hop1_ms) 的节点做组内展开，避免所有节点都落到同一中位 ppm。
+        """
+        grouped = defaultdict(list)
+        for node in nodes:
+            try:
+                center_su = int(node.su_type)
+                is_carbon = float(self.E_SU[center_su, 0].detach().cpu().item()) > 0
+            except Exception:
+                is_carbon = False
+            if not bool(is_carbon):
+                continue
+            hop1_ms = self._hop1_to_multiset(node.hop1_su)
+            grouped[(int(node.su_type), tuple(hop1_ms))].append(node)
+
+        assignments: Dict[int, Dict[str, object]] = {}
+        agg = lib_index.get('agg', {})
+        center_to_hop1 = lib_index.get('center_to_hop1', {})
+
+        for (center_su, hop1_ms), group_nodes in grouped.items():
+            info = agg.get((int(center_su), tuple(hop1_ms)))
+            chosen_hop1 = tuple(hop1_ms)
+            approx_used = False
+
+            if info is None and allow_approx:
+                hop1_keys = center_to_hop1.get(int(center_su), [])
+                if hop1_keys:
+                    best = min(
+                        hop1_keys,
+                        key=lambda ms: (self._multiset_l1_distance(ms, hop1_ms), abs(len(ms) - len(hop1_ms)))
+                    )
+                    info = agg.get((int(center_su), tuple(best)))
+                    chosen_hop1 = tuple(best)
+                    approx_used = True
+
+            if info is None:
+                for node in group_nodes:
+                    assignments[int(node.global_id)] = {
+                        'mu': None,
+                        'pi': None,
+                        'meta': {
+                            'matched': False,
+                            'approx_used': False,
+                            'chosen_hop1_ms': chosen_hop1,
+                            'n_templates': 0,
+                            'w_sum': 0.0,
+                            'mu_min': 0.0,
+                            'mu_max': 0.0,
+                        },
+                    }
+                continue
+
+            mu_values = np.asarray(info.get('mu_values', []), dtype=np.float64)
+            pi_values = np.asarray(info.get('pi_values', []), dtype=np.float64)
+            weights = np.asarray(info.get('weights', []), dtype=np.float64)
+
+            if mu_values.size == 0 or pi_values.size == 0 or weights.size == 0:
+                for node in group_nodes:
+                    assignments[int(node.global_id)] = {
+                        'mu': None,
+                        'pi': None,
+                        'meta': {
+                            'matched': False,
+                            'approx_used': approx_used,
+                            'chosen_hop1_ms': chosen_hop1,
+                            'n_templates': int(info.get('n_templates', 0)),
+                            'w_sum': 0.0,
+                            'mu_min': float(info.get('mu_min', 0.0)),
+                            'mu_max': float(info.get('mu_max', 0.0)),
+                        },
+                    }
+                continue
+
+            order = np.argsort(mu_values)
+            mu_sorted = mu_values[order]
+            pi_sorted = pi_values[order]
+            w_sorted = np.maximum(weights[order], 1e-8)
+            cdf = np.cumsum(w_sorted) / float(np.sum(w_sorted))
+
+            ordered_nodes = sorted(group_nodes, key=lambda n: int(getattr(n, 'global_id', 0)))
+            n_nodes = len(ordered_nodes)
+            for idx, node in enumerate(ordered_nodes):
+                q = (idx + 0.5) / max(1.0, float(n_nodes))
+                pick = int(np.searchsorted(cdf, q, side='left'))
+                pick = min(max(pick, 0), len(mu_sorted) - 1)
+                assignments[int(node.global_id)] = {
+                    'mu': float(mu_sorted[pick]),
+                    'pi': float(max(1e-6, pi_sorted[pick])),
+                    'meta': {
+                        'matched': True,
+                        'approx_used': approx_used,
+                        'chosen_hop1_ms': chosen_hop1,
+                        'n_templates': int(info.get('n_templates', 0)),
+                        'w_sum': float(np.sum(w_sorted)),
+                        'mu_min': float(info.get('mu_min', 0.0)),
+                        'mu_max': float(info.get('mu_max', 0.0)),
+                    },
+                }
+
+        return assignments
 
     def evaluate_layer1_nmr_with_library(self,
                                          nodes: List[_NodeV3],
@@ -1862,6 +1990,7 @@ class Layer1Assigner:
             ppm_axis = PPM_AXIS.to(device)
 
         lib_index = self._get_layer1_library_index(lib_path)
+        grouped_assignments = self._assign_grouped_mu_pi_by_hop1(nodes, lib_index, allow_approx)
         su_names = [name for name, _ in SU_DEFS]
 
         mus = []
@@ -1877,7 +2006,21 @@ class Layer1Assigner:
             hop1_ms = self._hop1_to_multiset(n.hop1_su)
             if is_carbon:
                 carbon_cnt += 1
-                mu, pi, meta = self._lookup_mu_pi_by_hop1(center_su, hop1_ms, lib_index, allow_approx)
+                assigned = grouped_assignments.get(int(n.global_id), None)
+                if assigned is None:
+                    mu, pi, meta = None, None, {
+                        'matched': False,
+                        'approx_used': False,
+                        'chosen_hop1_ms': tuple(hop1_ms),
+                        'n_templates': 0,
+                        'w_sum': 0.0,
+                        'mu_min': 0.0,
+                        'mu_max': 0.0,
+                    }
+                else:
+                    mu = assigned.get('mu')
+                    pi = assigned.get('pi')
+                    meta = assigned.get('meta', {})
                 if bool(meta.get('matched')):
                     matched_cnt += 1
 
@@ -1936,21 +2079,24 @@ class Layer1Assigner:
         pi_t = torch.tensor(pis, dtype=torch.float, device=device)
         S_recon = lorentzian_spectrum(mu_t, pi_t, ppm_axis, hwhm=float(hwhm))
 
-        denom = (S_recon * S_recon).sum().clamp(min=1e-8)
-        alpha = (S_target * S_recon).sum() / denom
-        S_fit = alpha * S_recon
-
-        r2 = compute_r2_score(S_target, S_fit)
-        if int(ppm_axis.numel()) == int(PPM_AXIS.numel()):
-            r2_carb = compute_segment_r2(S_target, S_fit, ppm_axis, 'carbonyl')
-            r2_aro = compute_segment_r2(S_target, S_fit, ppm_axis, 'aromatic')
-            r2_ali = compute_segment_r2(S_target, S_fit, ppm_axis, 'aliphatic')
-        else:
-            r2_carb, r2_aro, r2_ali = 0.0, 0.0, 0.0
+        eval_info = evaluate_spectrum_reconstruction(
+            S_target,
+            S_recon,
+            ppm_axis=ppm_axis,
+            fit_scale=True,
+            nonnegative_alpha=True,
+        )
+        S_fit = eval_info['S_fit']
+        r2 = float(eval_info.get('r2', 0.0))
+        r2_carb = float(eval_info.get('r2_carbonyl', 0.0))
+        r2_aro = float(eval_info.get('r2_aromatic', 0.0))
+        r2_ali = float(eval_info.get('r2_aliphatic', 0.0))
+        alpha = float(eval_info.get('alpha', 1.0))
 
         df_spec = pd.DataFrame({
             'ppm': ppm_axis.detach().cpu().numpy(),
             'target': S_target.detach().cpu().numpy(),
+            'reconstructed_raw': S_recon.detach().cpu().numpy(),
             'reconstructed': S_fit.detach().cpu().numpy(),
             'difference': (S_target - S_fit).detach().cpu().numpy(),
         })
@@ -1961,7 +2107,7 @@ class Layer1Assigner:
         except Exception as e:
             print(f"[Layer1-NMR-Eval] 绘图失败: {e}")
 
-        print(f"[Layer1-NMR-Eval] R2={r2:.4f} (carbonyl={r2_carb:.4f}, aromatic={r2_aro:.4f}, aliphatic={r2_ali:.4f}), alpha={float(alpha.detach().cpu().item()):.4f}")
+        print(f"[Layer1-NMR-Eval] R2={r2:.4f} (carbonyl={r2_carb:.4f}, aromatic={r2_aro:.4f}, aliphatic={r2_ali:.4f}), alpha={alpha:.4f}")
         return {
             'r2': float(r2),
             'r2_carbonyl': float(r2_carb),

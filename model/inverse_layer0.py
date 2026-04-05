@@ -93,6 +93,62 @@ class Layer0Estimator:
 
         return torch.clamp(H_new, min=0).long()
 
+    @staticmethod
+    def _compute_region_area_ratios(S_target: torch.Tensor) -> Tuple[float, float, float]:
+        spectrum = S_target.detach().cpu().numpy()
+        total_area = float(spectrum.sum() * 0.1)
+
+        aliphatic_area = float(spectrum[:900].sum() * 0.1)
+        aromatic_area = float(spectrum[900:1600].sum() * 0.1)
+        carbonyl_area = float(spectrum[1600:].sum() * 0.1)
+
+        if total_area > 1e-6:
+            x = float(aliphatic_area / total_area)
+            y = float(aromatic_area / total_area)
+            z = float(carbonyl_area / total_area)
+        else:
+            x, y, z = 0.33, 0.33, 0.34
+        return x, y, z
+
+    def _estimate_region_carbon_budgets(self,
+                                        S_target: torch.Tensor,
+                                        E_target: torch.Tensor) -> Dict[str, float]:
+        """
+        根据谱图三个区域面积比例估计 C 元素预算。
+
+        约定:
+          x: 0-90 ppm 脂肪区面积占比
+          y: 90-160 ppm 芳香/非饱和区面积占比
+          z: 160-240 ppm 羰基区面积占比
+
+        碳预算:
+          aliphatic_C = 0.82 * x * N
+          carbonyl_C = 1.35 * z * N
+          aromatic_C = N - aliphatic_C - carbonyl_C
+        """
+        x, y, z = self._compute_region_area_ratios(S_target)
+        total_C = float(E_target[0].item())
+        xN = float(x) * float(total_C)
+        yN = float(y) * float(total_C)
+        zN = float(z) * float(total_C)
+
+        aliphatic_C = max(0.0, 0.82 * float(xN))
+        carbonyl_C = max(0.0, 1.35 * float(zN))
+        aromatic_C = max(0.0, float(total_C) - float(aliphatic_C) - float(carbonyl_C))
+
+        return {
+            'x': float(x),
+            'y': float(y),
+            'z': float(z),
+            'N': float(total_C),
+            'xN': float(xN),
+            'yN': float(yN),
+            'zN': float(zN),
+            'aliphatic_C': float(aliphatic_C),
+            'aromatic_C': float(aromatic_C),
+            'carbonyl_C': float(carbonyl_C),
+        }
+
     def estimate_su_histogram(self, S_target: torch.Tensor, 
                                E_target: torch.Tensor) -> torch.Tensor:
         """
@@ -111,7 +167,12 @@ class Layer0Estimator:
         
         # Step 1: S2N模型预测初始SU分布
         with torch.no_grad():
-            H_pred = self.s2n(S_target.unsqueeze(0), E_target.unsqueeze(0)).squeeze(0)
+            if hasattr(self.s2n, 'infer_su_hist'):
+                H_pred = self.s2n.infer_su_hist(S_target.unsqueeze(0), E_target.unsqueeze(0)).squeeze(0)
+            else:
+                H_pred = torch.nn.functional.softplus(
+                    self.s2n(S_target.unsqueeze(0), E_target.unsqueeze(0))
+                ).squeeze(0)
         
         # 整数化（四舍五入）
         H_init = torch.round(H_pred).long()
@@ -400,28 +461,8 @@ class Layer0Estimator:
         """
         修正C=O羰基分布（1, 2, 3号）
         """
-        # 计算光谱区域比例
-        spectrum = S_target.cpu().numpy()
-        total_area = spectrum.sum() * 0.1
-        
-        # 0-90ppm (0-900点): 脂肪区域
-        aliphatic_area = spectrum[:900].sum() * 0.1
-        # 90-160ppm (900-1600点): 芳香区域
-        aromatic_area = spectrum[900:1600].sum() * 0.1
-        # 160-240ppm (1600-2400点): 羰基区域
-        carbonyl_area = spectrum[1600:].sum() * 0.1
-        
-        # 归一化比例
-        if total_area > 1e-6:
-            x = aliphatic_area / total_area
-            y = aromatic_area / total_area
-            z = carbonyl_area / total_area
-        else:
-            x, y, z = 0.33, 0.33, 0.34
-        
-        # 计算羰基结构数量
-        total_C = int(E_target[0].item())
-        carbonyl_C = int(z * total_C)
+        budgets = self._estimate_region_carbon_budgets(S_target, E_target)
+        carbonyl_C = int(round(float(budgets['carbonyl_C'])))
         
         # 0号由N修正固定，保持不变
         n_0 = int(H[0].item())
@@ -694,7 +735,7 @@ class Layer0Estimator:
         
         # 计算C=O总连接量
         W = n_0 * 1 + n_1 * 1 + n_2 * 1 + n_3 * 2
-        target_9 = int(W * 0.6)
+        target_9 = int(round(float(W) * 0.45))
         
         current_9 = int(H[9].item())
         
@@ -997,20 +1038,8 @@ class Layer0Estimator:
         """
         修正脂肪碳结构（22, 23, 24, 25号）
         """
-        spectrum = S_target.cpu().numpy()
-        total_area = spectrum.sum() * 0.1
-        aliphatic_area = spectrum[:900].sum() * 0.1  # 0-90ppm
-        
-        if total_area > 1e-6:
-            x = aliphatic_area / total_area
-        else:
-            x = 0.33
-        
-        total_C = int(E_target[0].item())
-        xN = x * total_C
-
-        # 新规则：M = 0.82 * xN
-        M_float = 0.82 * float(xN)
+        budgets = self._estimate_region_carbon_budgets(S_target, E_target)
+        M_float = float(budgets['aliphatic_C'])
         M = int(round(M_float))
         
         # 已用脂肪碳
@@ -1043,26 +1072,12 @@ class Layer0Estimator:
         """
         修正非饱和结构（14, 15, 16, 17, 18号）
         """
-        spectrum = S_target.cpu().numpy()
-        total_area = spectrum.sum() * 0.1
-        aliphatic_area = spectrum[:900].sum() * 0.1  # 0-90ppm
-        aromatic_area = spectrum[900:1600].sum() * 0.1  # 90-160ppm
-        
-        if total_area > 1e-6:
-            x = aliphatic_area / total_area
-            y = aromatic_area / total_area
-        else:
-            x = 0.33
-            y = 0.33
-        
-        total_C = int(E_target[0].item())
-        xN = x * total_C
-        yN = y * total_C
+        budgets = self._estimate_region_carbon_budgets(S_target, E_target)
+        aromatic_C = float(budgets['aromatic_C'])
 
         # 新规则：
-        # W = 0.05 * (yN + 0.18 * xN)，W 取最近偶数
-        base = float(yN) + 0.18 * float(xN)
-        W = max(0, self._nearest_even_int(0.05 * base))
+        # W = 0.05 * aromatic_C，W 取最近偶数
+        W = max(0, self._nearest_even_int(0.05 * float(aromatic_C)))
         
         if W == 0:
             return H
@@ -1103,28 +1118,18 @@ class Layer0Estimator:
         """
         修正芳香结构（10, 11, 12, 13号）
         """
-        spectrum = S_target.cpu().numpy()
-        total_area = spectrum.sum() * 0.1
-        aliphatic_area = spectrum[:900].sum() * 0.1
-        aromatic_area = spectrum[900:1600].sum() * 0.1  # 90-160ppm
-        
-        if total_area > 1e-6:
-            x = aliphatic_area / total_area
-            y = aromatic_area / total_area
-        else:
-            x, y = 0.33, 0.33
-        
-        total_C = int(E_target[0].item())
-        xN = x * total_C
-        yN = y * total_C
-        
+        budgets = self._estimate_region_carbon_budgets(S_target, E_target)
+        total_C = float(budgets['N'])
+        xN = float(budgets['xN'])
+        yN = float(budgets['yN'])
+        aromatic_C = float(budgets['aromatic_C'])
+
         # 新规则：
-        # W = (yN + 0.18*xN) - 0.05*(yN + 0.18*xN) - 4号
-        base_aromatic = float(yN) + 0.18 * float(xN)
+        # W = 0.95 * aromatic_C - 4号
         fa = float(yN + 0.1 * xN) / max(1.0, float(total_C))
         n_4 = int(H[4].item())
-        
-        W_float = float(base_aromatic - 0.05 * base_aromatic - float(n_4))
+
+        W_float = float(0.95 * float(aromatic_C) - float(n_4))
         W = max(0, int(round(W_float)))
         
         if W == 0:

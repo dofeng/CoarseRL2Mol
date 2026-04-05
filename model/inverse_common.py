@@ -1,10 +1,11 @@
+import math
 import torch
 import torch.nn as nn
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from collections import Counter
-from typing import List, Tuple, Dict, Optional, Set
+from typing import Any, List, Tuple, Dict, Optional, Set
 import matplotlib.pyplot as plt
 
 from .coarse_graph import (
@@ -351,6 +352,139 @@ def compute_segment_r2(y_true: torch.Tensor, y_pred: torch.Tensor,
     if not mask.any():
         return 0.0
     return compute_r2_score(y_true[mask], y_pred[mask])
+
+
+def resample_spectrum_to_ppm_axis(
+    ppm_values: np.ndarray | torch.Tensor | List[float],
+    intensities: np.ndarray | torch.Tensor | List[float],
+    ppm_axis: torch.Tensor = PPM_AXIS,
+) -> torch.Tensor:
+    """
+    将任意 ppm 采样顺序/间距的谱图重采样到项目统一的 PPM_AXIS 上。
+
+    这样可避免直接忽略 CSV 第一列 ppm 而导致升降序或非等间距输入被错误解释。
+    """
+    ppm_np = np.asarray(ppm_values, dtype=np.float64).reshape(-1)
+    intensity_np = np.asarray(intensities, dtype=np.float64).reshape(-1)
+
+    mask = np.isfinite(ppm_np) & np.isfinite(intensity_np)
+    ppm_np = ppm_np[mask]
+    intensity_np = intensity_np[mask]
+
+    if ppm_np.size == 0 or intensity_np.size == 0:
+        return torch.zeros_like(ppm_axis, dtype=torch.float)
+
+    order = np.argsort(ppm_np)
+    ppm_sorted = ppm_np[order]
+    intensity_sorted = intensity_np[order]
+
+    ppm_unique, inverse = np.unique(ppm_sorted, return_inverse=True)
+    if ppm_unique.size != ppm_sorted.size:
+        sums = np.zeros_like(ppm_unique, dtype=np.float64)
+        counts = np.zeros_like(ppm_unique, dtype=np.float64)
+        np.add.at(sums, inverse, intensity_sorted)
+        np.add.at(counts, inverse, 1.0)
+        intensity_sorted = sums / np.maximum(counts, 1.0)
+        ppm_sorted = ppm_unique
+
+    axis_np = ppm_axis.detach().cpu().numpy().astype(np.float64).reshape(-1)
+    y_interp = np.interp(axis_np, ppm_sorted, intensity_sorted, left=0.0, right=0.0)
+    return torch.tensor(y_interp, dtype=torch.float)
+
+
+def normalize_spectrum_to_carbon_count(
+    spectrum: torch.Tensor,
+    carbon_count: float,
+    ppm_step: float = PPM_STEP,
+) -> torch.Tensor:
+    """
+    将输入谱图面积缩放到与训练数据一致的目标面积: pi * num_carbons。
+    """
+    y = spectrum.detach().clone().float().flatten()
+    carbon = max(0.0, float(carbon_count))
+    if carbon <= 0.0:
+        return y
+
+    current_area = float(y.sum().item()) * float(ppm_step)
+    if current_area <= 1e-8:
+        return y
+
+    target_area = float(math.pi) * float(carbon)
+    scale = float(target_area / current_area)
+    return y * scale
+
+
+def fit_spectrum_scale(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    nonnegative: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    计算最优全局缩放因子 alpha，使 alpha * y_pred 最贴近 y_true。
+    """
+    y_true = y_true.flatten().float()
+    y_pred = y_pred.flatten().float().to(y_true.device)
+
+    n = int(min(y_true.numel(), y_pred.numel()))
+    y_true = y_true[:n]
+    y_pred = y_pred[:n]
+
+    denom = torch.sum(y_pred * y_pred).clamp(min=1e-8)
+    alpha = torch.sum(y_true * y_pred) / denom
+    if bool(nonnegative):
+        alpha = torch.clamp(alpha, min=0.0)
+    y_fit = alpha * y_pred
+    return y_fit, alpha
+
+
+def evaluate_spectrum_reconstruction(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    ppm_axis: Optional[torch.Tensor] = None,
+    fit_scale: bool = True,
+    nonnegative_alpha: bool = True,
+) -> Dict[str, Any]:
+    """
+    统一的谱图评估入口。
+
+    返回 raw recon、alpha-fitted recon、R² 与分段 R²，确保各层评估口径一致。
+    """
+    y_true_t = y_true.flatten().float()
+    y_pred_t = y_pred.flatten().float().to(y_true_t.device)
+
+    n = int(min(y_true_t.numel(), y_pred_t.numel()))
+    y_true_t = y_true_t[:n]
+    y_pred_t = y_pred_t[:n]
+
+    ppm_eval = None
+    if ppm_axis is not None:
+        ppm_eval = ppm_axis.flatten().float().to(y_true_t.device)[:n]
+
+    if bool(fit_scale):
+        y_fit_t, alpha_t = fit_spectrum_scale(
+            y_true_t,
+            y_pred_t,
+            nonnegative=bool(nonnegative_alpha),
+        )
+    else:
+        y_fit_t = y_pred_t
+        alpha_t = torch.tensor(1.0, dtype=y_true_t.dtype, device=y_true_t.device)
+
+    out: Dict[str, Any] = {
+        'S_target': y_true_t,
+        'S_recon_raw': y_pred_t,
+        'S_fit': y_fit_t,
+        'alpha': float(alpha_t.detach().cpu().item()),
+        'r2': float(compute_r2_score(y_true_t, y_fit_t)),
+    }
+
+    if ppm_eval is not None and int(ppm_eval.numel()) == int(y_true_t.numel()):
+        out['ppm_axis'] = ppm_eval
+        out['r2_carbonyl'] = float(compute_segment_r2(y_true_t, y_fit_t, ppm_eval, 'carbonyl'))
+        out['r2_aromatic'] = float(compute_segment_r2(y_true_t, y_fit_t, ppm_eval, 'aromatic'))
+        out['r2_aliphatic'] = float(compute_segment_r2(y_true_t, y_fit_t, ppm_eval, 'aliphatic'))
+
+    return out
 
 
 def compute_element_diff(E_pred: torch.Tensor, E_target: torch.Tensor) -> torch.Tensor:

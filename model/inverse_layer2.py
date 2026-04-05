@@ -9,7 +9,7 @@ from pathlib import Path
 from .coarse_graph import SU_DEFS, E_SU, NUM_SU_TYPES, PPM_AXIS
 from .inverse_common import (
     _NodeV3, lorentzian_spectrum, compute_r2_score, compute_segment_r2,
-    visualize_spectrum_comparison
+    visualize_spectrum_comparison, evaluate_spectrum_reconstruction
 )
 
 # ============================================================================
@@ -88,6 +88,91 @@ class Layer2Estimator:
             'approx_match': 0,
             'missing': 0,
         }
+
+    def _assign_diverse_template_samples(
+        self,
+        nodes: List[_NodeV3],
+        templates: Dict,
+        g_embed: torch.Tensor,
+    ) -> None:
+        """
+        对共享同一 template_key 的节点做样本展开，避免所有节点坍缩到同一个 center_z/center_mu。
+        """
+        grouped: Dict[Tuple, List[_NodeV3]] = defaultdict(list)
+        for node in nodes:
+            tpl_key = getattr(node, 'template_key', None)
+            if tpl_key is None:
+                continue
+            grouped[tpl_key].append(node)
+
+        for tpl_key, group_nodes in grouped.items():
+            tpl = templates.get(tpl_key, None)
+            if not isinstance(tpl, dict):
+                continue
+            samples = tpl.get('samples', {}) or {}
+            z_samples = samples.get('z', None)
+            mu_samples = samples.get('mu', None)
+            pi_samples = samples.get('pi', None)
+
+            if z_samples is None or mu_samples is None or pi_samples is None:
+                continue
+            if not torch.is_tensor(mu_samples) or int(mu_samples.numel()) <= 0:
+                continue
+
+            sorted_idx = tpl.get('sorted_idx_by_mu', None)
+            if torch.is_tensor(sorted_idx) and int(sorted_idx.numel()) > 0:
+                sorted_ids = [int(x) for x in sorted_idx.detach().cpu().tolist()]
+            else:
+                sorted_ids = list(range(int(mu_samples.numel())))
+
+            if not sorted_ids:
+                continue
+
+            def _node_order_key(node: _NodeV3):
+                try:
+                    prior = float((getattr(node, 'score_components', {}) or {}).get('layer2_mu_prior', 0.0) or 0.0)
+                except Exception:
+                    prior = 0.0
+                if prior <= 0.0:
+                    try:
+                        prior = float(getattr(node, 'mu', 0.0) or 0.0)
+                    except Exception:
+                        prior = 0.0
+                return (float(prior), int(getattr(node, 'global_id', 0)))
+
+            ordered_nodes = sorted(group_nodes, key=_node_order_key)
+            n_nodes = len(ordered_nodes)
+            n_samples = len(sorted_ids)
+
+            chosen_ids: List[int] = []
+            if n_nodes <= 1:
+                chosen_ids = [sorted_ids[n_samples // 2]]
+            else:
+                for pos in np.linspace(0, n_samples - 1, num=n_nodes):
+                    idx = sorted_ids[int(round(float(pos)))]
+                    chosen_ids.append(int(idx))
+
+            for node, sample_idx in zip(ordered_nodes, chosen_ids):
+                try:
+                    z_cand = z_samples[int(sample_idx)].detach().clone().to(self.device)
+                    mu_lib = float(mu_samples[int(sample_idx)].detach().cpu().item())
+                    pi_lib = float(pi_samples[int(sample_idx)].detach().cpu().item())
+                except Exception:
+                    continue
+
+                node.z_vec = z_cand
+                decoded = self._decode_mu_pi_from_z(int(node.su_type), z_cand, g_embed)
+                if decoded is not None:
+                    node.mu, node.pi = decoded
+                else:
+                    node.mu = float(mu_lib)
+                    node.pi = float(max(1e-6, pi_lib))
+
+                try:
+                    if isinstance(getattr(node, 'score_components', None), dict):
+                        node.score_components['layer2_sample_idx'] = int(sample_idx)
+                except Exception:
+                    pass
     
     # ========================================================================
     # 主方法
@@ -118,6 +203,12 @@ class Layer2Estimator:
         print("\n" + "=" * 60)
         print("Layer2: 2-hop推导 & 模板匹配")
         print("=" * 60)
+
+        self.stats = {
+            'exact_match': 0,
+            'approx_match': 0,
+            'missing': 0,
+        }
         
         # 2-hop推导
         self._derive_hop2(nodes)
@@ -189,6 +280,8 @@ class Layer2Estimator:
             elif isinstance(tpl, dict):
                 n.mu = float(tpl.get('center_mu', n.mu))
                 n.pi = float(tpl.get('center_pi', n.pi))
+
+        self._assign_diverse_template_samples(nodes, templates, g_embed)
         
         print(f"  匹配: 精确={self.stats['exact_match']}, 近似={self.stats['approx_match']}, 未匹配={self.stats['missing']}")
         
@@ -196,16 +289,21 @@ class Layer2Estimator:
         S_recon = self.reconstruct_spectrum(nodes, hwhm=hwhm)
         
         # 计算最优缩放因子
-        denom = (S_recon * S_recon).sum().clamp(min=1e-8)
-        alpha = (S_target * S_recon).sum() / denom
-        S_fit = alpha * S_recon
-        
-        r2 = compute_r2_score(S_target, S_fit)
-        print(f"  R²={r2:.4f}, α={float(alpha.detach().cpu().item()):.4f}")
+        eval_info = evaluate_spectrum_reconstruction(
+            S_target,
+            S_recon,
+            ppm_axis=PPM_AXIS.to(device),
+            fit_scale=True,
+            nonnegative_alpha=True,
+        )
+        S_fit = eval_info['S_fit']
+        alpha = float(eval_info.get('alpha', 1.0))
+        r2 = float(eval_info.get('r2', 0.0))
+        print(f"  R²={r2:.4f}, α={alpha:.4f}")
         
         # 保存结果
         if output_dir:
-            self._save_results(nodes, S_target, S_fit, r2, float(alpha.detach().cpu().item()), output_dir)
+            self._save_results(nodes, S_target, S_fit, r2, alpha, output_dir, S_recon_raw=S_recon)
         
         print("Layer2 完成\n")
         
@@ -462,7 +560,8 @@ class Layer2Estimator:
                       S_fit: torch.Tensor,
                       r2: float,
                       alpha: float,
-                      output_dir: str):
+                      output_dir: str,
+                      S_recon_raw: Optional[torch.Tensor] = None):
         """保存Layer2结果"""
         try:
             out_dir = Path(output_dir)
@@ -474,6 +573,7 @@ class Layer2Estimator:
             df = pd.DataFrame({
                 'ppm': ppm_axis,
                 'target': S_target.cpu().numpy(),
+                'reconstructed_raw': S_recon_raw.cpu().numpy() if S_recon_raw is not None else S_fit.cpu().numpy(),
                 'reconstructed': S_fit.cpu().numpy(),
                 'difference': (S_target - S_fit).cpu().numpy(),
             })

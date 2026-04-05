@@ -10,6 +10,7 @@ import re
 
 from s2n_model import S2NModel
 from coarse_graph import SU_DEFS, _node_color
+from inverse_common import normalize_spectrum_to_carbon_count, resample_spectrum_to_ppm_axis
 import torch.nn.functional as F
 
 def predict_from_csv_and_elements(model_path: Path, spectrum_csv: Path, elements_str: str, output_name: str):
@@ -28,7 +29,12 @@ def predict_from_csv_and_elements(model_path: Path, spectrum_csv: Path, elements
     # 2. 加载和处理输入数据
     # 从CSV加载谱图
     df_spec = pd.read_csv(spectrum_csv, sep=r'[;, \t]', engine='python', header=None)
-    S_target = torch.tensor(df_spec.iloc[:, 1].values, dtype=torch.float).to(device)
+    if df_spec.shape[1] < 2:
+        raise ValueError("谱图CSV需要两列: ppm, intensity")
+    S_target = resample_spectrum_to_ppm_axis(
+        df_spec.iloc[:, 0].values,
+        df_spec.iloc[:, 1].values,
+    ).to(device)
     
     # 解析元素字符串
     matches = dict(re.findall(r"([CHONSX])\s*=\s*(\d+)", elements_str.upper()))
@@ -36,12 +42,7 @@ def predict_from_csv_and_elements(model_path: Path, spectrum_csv: Path, elements
     
     # 预处理：强度缩放 (与 inverse_pipeline.py 保持一致)
     num_carbons = E_target[0].item()
-    if num_carbons > 0:
-        target_total_area = torch.pi * num_carbons
-        current_spec_sum = S_target.sum() * 0.1
-        if current_spec_sum > 1e-6:
-            scaling_factor = target_total_area / current_spec_sum
-            S_target = S_target * scaling_factor
+    S_target = normalize_spectrum_to_carbon_count(S_target, float(num_carbons)).to(device)
     
     print("\n--- 输入数据 ---")
     print(f"谱图文件: {spectrum_csv}")

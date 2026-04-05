@@ -23,7 +23,9 @@ from .inverse_common import (
     _NodeV3, L4_CONFIG, HOP1_PORT_COMBINATIONS,
     lorentzian_spectrum, compute_r2_score, compute_segment_r2,
     visualize_su_distribution, visualize_spectrum_comparison,
-    validate_connection, check_external_connection_requirement
+    validate_connection, check_external_connection_requirement,
+    evaluate_spectrum_reconstruction, resample_spectrum_to_ppm_axis,
+    normalize_spectrum_to_carbon_count,
 )
 from .inverse_layer0 import Layer0Estimator
 from .inverse_layer1 import Layer1Assigner
@@ -221,28 +223,23 @@ class InversePipelineV3:
         ppm_axis = PPM_AXIS.to(device).flatten()
 
         S_recon = self.reconstruct_spectrum(nodes, E_target=E_target, hwhm=float(hwhm)).to(device).flatten()
-
-        if int(S_target.numel()) != int(ppm_axis.numel()):
-            n = int(min(S_target.numel(), ppm_axis.numel()))
-            S_target = S_target[:n]
-            ppm_axis = ppm_axis[:n]
-        if int(S_recon.numel()) != int(S_target.numel()):
-            n = int(min(S_target.numel(), S_recon.numel()))
-            S_target = S_target[:n]
-            ppm_axis = ppm_axis[:n]
-            S_recon = S_recon[:n]
-
-        denom = (S_recon * S_recon).sum().clamp(min=1e-8)
-        alpha = (S_target * S_recon).sum() / denom
-        S_fit = alpha * S_recon
-        r2 = compute_r2_score(S_target, S_fit)
-        diff = (S_target - S_fit).detach().cpu().numpy()
+        eval_info = evaluate_spectrum_reconstruction(
+            S_target,
+            S_recon,
+            ppm_axis=ppm_axis,
+            fit_scale=True,
+            nonnegative_alpha=True,
+        )
+        ppm_eval = eval_info.get('ppm_axis', ppm_axis)
+        S_target_eval = eval_info['S_target']
+        S_fit = eval_info['S_fit']
+        diff = (S_target_eval - S_fit).detach().cpu().numpy()
 
         return {
-            'ppm': ppm_axis.detach().cpu().numpy(),
+            'ppm': ppm_eval.detach().cpu().numpy(),
             'diff': diff,
-            'r2': float(r2),
-            'alpha': float(alpha.detach().cpu().item()),
+            'r2': float(eval_info.get('r2', 0.0)),
+            'alpha': float(eval_info.get('alpha', 1.0)),
         }
 
     def optimize_layer1_2_3_4_multistage(self,
@@ -874,8 +871,9 @@ def read_spectrum_csv(path: str) -> torch.Tensor:
     df = pd.read_csv(path, sep=r'[;, \t]', engine='python', header=None)
     if df.shape[1] < 2:
         raise ValueError("CSV需要两列: ppm, intensity")
-    y = pd.to_numeric(df.iloc[:, 1], errors='coerce').dropna().values
-    return torch.tensor(y, dtype=torch.float)
+    ppm = pd.to_numeric(df.iloc[:, 0], errors='coerce').values
+    intensity = pd.to_numeric(df.iloc[:, 1], errors='coerce').values
+    return resample_spectrum_to_ppm_axis(ppm, intensity, ppm_axis=PPM_AXIS)
 
 
 def parse_elements(expr: str) -> torch.Tensor:
@@ -910,10 +908,11 @@ if __name__ == '__main__':
     
     # 读取输入
     print(f"读取谱图: {args.spectrum}")
-    S_target = read_spectrum_csv(args.spectrum)
+    S_target_raw = read_spectrum_csv(args.spectrum)
     
     print(f"解析元素: {args.elements}")
     E_target = parse_elements(args.elements)
+    S_target = normalize_spectrum_to_carbon_count(S_target_raw, float(E_target[0].item()))
     
     print(f"目标谱图维度: {S_target.shape}, 元素组成: {E_target.tolist()}")
     

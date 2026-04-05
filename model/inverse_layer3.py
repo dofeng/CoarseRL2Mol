@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .coarse_graph import NUM_SU_TYPES, PPM_AXIS, E_SU, SU_DEFS
-from .inverse_common import _NodeV3, lorentzian_spectrum, compute_r2_score, visualize_spectrum_comparison
+from .inverse_common import _NodeV3, lorentzian_spectrum, compute_r2_score, visualize_spectrum_comparison, evaluate_spectrum_reconstruction
 
 class Layer3Estimator:
     def __init__(self, device: torch.device, vae_model=None, lib_path: Optional[str] = None):
@@ -622,8 +622,17 @@ class Layer3Estimator:
                 if not accepted:
                     break
 
-        diff = S_t - recon
-        r2 = compute_r2_score(S_t, recon)
+        eval_info = evaluate_spectrum_reconstruction(
+            S_t,
+            recon,
+            ppm_axis=ppm_axis,
+            fit_scale=True,
+            nonnegative_alpha=True,
+        )
+        S_fit = eval_info['S_fit']
+        diff = eval_info['S_target'] - S_fit
+        r2 = float(eval_info.get('r2', 0.0))
+        alpha = float(eval_info.get('alpha', 1.0))
         
         if output_dir:
             out = Path(output_dir)
@@ -631,11 +640,13 @@ class Layer3Estimator:
             df_spec = pd.DataFrame({
                 'ppm': ppm_axis.detach().cpu().numpy(),
                 'target': S_t.detach().cpu().numpy(),
-                'reconstructed': recon.detach().cpu().numpy(),
+                'reconstructed_raw': recon.detach().cpu().numpy(),
+                'reconstructed': S_fit.detach().cpu().numpy(),
                 'difference': diff.detach().cpu().numpy(),
+                'alpha': np.full(int(ppm_axis.numel()), float(alpha), dtype=np.float64),
             })
             df_spec.to_csv(str(out / 'layer3_spectrum.csv'), index=False)
 
-        print(f"  R²={r2:.4f}")
+        print(f"  R²={r2:.4f}, α={alpha:.4f}")
         print("Layer3 完成\n")
         return nodes, float(r2)

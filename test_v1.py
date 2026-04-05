@@ -19,7 +19,10 @@ from model.s2n_model import S2NModel
 from model.g2s_model import NMR_VAE
 from model.inverse_pipeline import InversePipelineV3, read_spectrum_csv, parse_elements
 from model.coarse_graph import NUM_SU_TYPES, E_SU, SU_DEFS
-from model.inverse_common import PPM_AXIS, visualize_spectrum_comparison, visualize_su_distribution, SU_CONNECTION_DEGREE
+from model.inverse_common import (
+    PPM_AXIS, visualize_spectrum_comparison, visualize_su_distribution,
+    SU_CONNECTION_DEGREE, normalize_spectrum_to_carbon_count
+)
 
 SU_NAMES = [name for name, _ in SU_DEFS]
 STAGE_ORDER = ['carbonyl', 'su9', 'ether', 'amine', 'thioether', 'halogen', 'skeleton']
@@ -29,7 +32,7 @@ STAGE_ORDER = ['carbonyl', 'su9', 'ether', 'amine', 'thioether', 'halogen', 'ske
 # ========================================================================
 DEFAULT_CONFIG = {
     # Layer3
-    'layer3_max_iters': 200,
+    'layer3_max_iters': 180,
     'layer3_pos_window': 15.0,
     'layer3_neg_window': 2.0,
     'layer3_top_k': 12,
@@ -643,12 +646,7 @@ def run_inverse_pipeline(
         S_target_raw = read_spectrum_csv(str(spectrum_csv))
     E_target = parse_elements(elements_str)
 
-    if E_target[0] > 0:
-        target_area = float(torch.pi) * float(E_target[0].item())
-        current_area = float(S_target_raw.sum().item()) * 0.1
-        S_target = S_target_raw * (target_area / current_area) if current_area > 1e-6 else S_target_raw
-    else:
-        S_target = S_target_raw
+    S_target = normalize_spectrum_to_carbon_count(S_target_raw, float(E_target[0].item()))
 
     print(f"  谱图: {S_target.shape}, 元素: C={int(E_target[0])},H={int(E_target[1])},O={int(E_target[2])},N={int(E_target[3])},S={int(E_target[4])},X={int(E_target[5])}")
 
