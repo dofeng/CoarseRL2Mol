@@ -36,7 +36,6 @@ class Layer4Adjuster:
                  su_hop1_ranges_path: Optional[str] = None,
                  su_common_ranges_path: Optional[str] = None):
         self.device = device or torch.device('cpu')
-        self.layer0 = layer0_estimator
         self.E_SU = E_SU.to(self.device)
         
         # 加载 hop1 NMR范围数据
@@ -1956,9 +1955,137 @@ class Layer4Adjuster:
             'cluster_kind_counts': {str(k): int(v) for k, v in sorted(kind_counts.items())},
         }
 
+    def _evaluate_required_hist_constraints(self,
+                                            H: torch.Tensor,
+                                            E_target: Optional[torch.Tensor],
+                                            su22_ratio: float = 0.1,
+                                            su22_h_tol: float = 0.03) -> Dict[str, Any]:
+        H_cpu = torch.clamp(H, min=0).long().detach().cpu()
+        if E_target is None:
+            return {
+                'ok': True,
+                'h_ok': True,
+                'h_rel': 0.0,
+                'h_tol': float(max(0.04, float(su22_h_tol))),
+                'su22_ok': True,
+                'req22': 0,
+                'n22': int(H_cpu[22].item()) if int(H_cpu.numel()) > 22 else 0,
+                'n23': int(H_cpu[23].item()) if int(H_cpu.numel()) > 23 else 0,
+                'even10_ok': True,
+                'unsat_even_ok': True,
+                'unsat_total': 0,
+            }
+
+        E_target_cpu = E_target.detach().cpu().float() if hasattr(E_target, 'detach') else torch.tensor(E_target, dtype=torch.float)
+        E_pred = torch.matmul(H_cpu.float(), self.E_SU.cpu())
+        target_h = float(E_target_cpu[1].item()) if int(E_target_cpu.numel()) > 1 else 0.0
+        current_h = float(E_pred[1].item()) if int(E_pred.numel()) > 1 else 0.0
+        h_tol = max(0.04, float(su22_h_tol))
+        if target_h > 1e-8:
+            h_rel = abs(float(current_h - target_h)) / float(target_h)
+            h_ok = bool(h_rel <= float(h_tol) + 1e-9)
+        else:
+            h_rel = 0.0
+            h_ok = True
+
+        n22 = int(H_cpu[22].item()) if int(H_cpu.numel()) > 22 else 0
+        n23 = int(H_cpu[23].item()) if int(H_cpu.numel()) > 23 else 0
+        req22 = max(1, int(math.ceil(float(max(0.0, su22_ratio)) * float(n23)))) if int(n23) > 0 else 0
+        su22_ok = True if int(n23) <= 0 else bool(int(n22) >= int(req22))
+
+        even10_ok = True
+        if int(H_cpu.numel()) > 10:
+            even10_ok = bool(int(H_cpu[10].item()) % 2 == 0)
+
+        if int(H_cpu.numel()) > 16:
+            unsat_total = int(H_cpu[14].item()) + int(H_cpu[15].item()) + int(H_cpu[16].item())
+            unsat_even_ok = bool(int(unsat_total) % 2 == 0)
+        else:
+            unsat_total = 0
+            unsat_even_ok = True
+
+        return {
+            'ok': bool(h_ok and su22_ok and even10_ok and unsat_even_ok),
+            'h_ok': bool(h_ok),
+            'h_rel': float(h_rel),
+            'h_tol': float(h_tol),
+            'su22_ok': bool(su22_ok),
+            'req22': int(req22),
+            'n22': int(n22),
+            'n23': int(n23),
+            'even10_ok': bool(even10_ok),
+            'unsat_even_ok': bool(unsat_even_ok),
+            'unsat_total': int(unsat_total),
+        }
+
+    @staticmethod
+    def _pick_nodes_by_type(nodes: List[_NodeV3], su_type: int, count: int) -> List[_NodeV3]:
+        picked = [n for n in nodes if int(getattr(n, 'su_type', -1)) == int(su_type)]
+        picked.sort(key=lambda n: (int(getattr(n, 'global_id', 0))))
+        return picked[:max(0, int(count))]
+
+    def _apply_node_type_conversion(self,
+                                    nodes: List[_NodeV3],
+                                    src_type: int,
+                                    dst_type: int,
+                                    count: int = 1) -> int:
+        if int(dst_type) < 0:
+            return 0
+        picked = self._pick_nodes_by_type(nodes, int(src_type), int(count))
+        for node in picked:
+            node.su_type = int(dst_type)
+        if picked:
+            self._refresh_node_counters(nodes)
+        return int(len(picked))
+
+    def _apply_post_moves_to_nodes(self,
+                                   nodes: Optional[List[_NodeV3]],
+                                   moves: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if nodes is None:
+            return []
+        synced: List[Dict[str, Any]] = []
+        for mv in list(moves or []):
+            applied = 0
+            if isinstance(mv, dict) and 'from' in mv and 'to' in mv:
+                try:
+                    src = int(mv['from'])
+                    dst = int(mv['to'])
+                except Exception:
+                    src = dst = -999
+                if int(dst) >= 0:
+                    applied = self._apply_node_type_conversion(nodes, src, dst, 1)
+            elif isinstance(mv, dict) and 'op' in mv:
+                op = str(mv.get('op', ''))
+                if op.startswith('H:') and '->' in op:
+                    left, right = op[2:].split('->', 1)
+                    src_parts = [p for p in left.split('+') if p]
+                    dst_parts = [p for p in right.split('+') if p]
+                    if len(src_parts) == len(dst_parts):
+                        ok = True
+                        total = 0
+                        for src_txt, dst_txt in zip(src_parts, dst_parts):
+                            try:
+                                src = int(src_txt)
+                                dst = int(dst_txt)
+                            except Exception:
+                                ok = False
+                                break
+                            n_applied = self._apply_node_type_conversion(nodes, src, dst, 1)
+                            if n_applied <= 0:
+                                ok = False
+                                break
+                            total += int(n_applied)
+                        applied = int(total) if ok else 0
+            if applied > 0:
+                rec = dict(mv)
+                rec['node_sync_applied'] = int(applied)
+                synced.append(rec)
+        return synced
+
     def _apply_aromatic_cluster_alignment(self,
                                           nodes: Optional[List[_NodeV3]],
-                                          H_work: torch.Tensor) -> Tuple[torch.Tensor, List[Dict[str, Any]], Dict[str, Any]]:
+                                          H_work: torch.Tensor,
+                                          protect_11: bool = False) -> Tuple[torch.Tensor, List[Dict[str, Any]], Dict[str, Any]]:
         """
         Materialize ClusterGenerator's 12<->13 balancing on the current node list.
 
@@ -2032,7 +2159,8 @@ class Layer4Adjuster:
                 })
 
         applied_to12 = 0
-        for node in _pick_nodes([13, 11], need_to12):
+        src_pool = [13] if bool(protect_11) else [13, 11]
+        for node in _pick_nodes(src_pool, need_to12):
             src_su = int(getattr(node, 'su_type', -1))
             if _convert(node, 12):
                 applied_to12 += 1
@@ -2054,6 +2182,7 @@ class Layer4Adjuster:
             'requested_13_to_12': int(need_to12),
             'applied_12_to_13': int(applied_to13),
             'applied_13_to_12': int(applied_to12),
+            'protect_11': bool(protect_11),
         }
 
     @staticmethod
@@ -2770,6 +2899,20 @@ class Layer4Adjuster:
             h_cap = float(target_H) * (1.0 + float(max_ratio))
             return float(curr_h + delta_h) <= float(h_cap) + 1e-9
 
+        def _h_move_within_limit(src_type: int, dst_type: int, max_ratio: float = 0.04) -> bool:
+            try:
+                target_H = float(self.E_target[1].item()) if self.E_target is not None else 0.0
+            except Exception:
+                target_H = 0.0
+            if target_H <= 0.0:
+                return True
+            curr_h = float(_current_h(H_work))
+            delta_h = float(_h_delta(src_type, dst_type))
+            next_h = float(curr_h + delta_h)
+            h_lo = float(target_H) * (1.0 - float(max_ratio))
+            h_hi = float(target_H) * (1.0 + float(max_ratio))
+            return float(h_lo) - 1e-9 <= float(next_h) <= float(h_hi) + 1e-9
+
         while True:
             step = 0
             while step < max_steps:
@@ -2801,8 +2944,28 @@ class Layer4Adjuster:
                 flex_excess = 'flex_excess' in str(res_extra.get('reason', ''))
                 flex_short = 'flex_shortage' in str(res_extra.get('reason', ''))
                 aliphatic_excess = 'aliphatic_excess' in str(res_extra.get('reason', ''))
+                req11 = int(res_extra.get('required_extra_11', 0))
+                req22 = int(res_extra.get('required_extra_22', 0))
+                req23 = int(res_extra.get('required_extra_23', 0))
+                branch_short = bool(int(res_extra.get('unallocated_branch', 0)) > 0 or int(req11) > 0 or int(req22) > 0 or int(req23) > 0)
 
-                rigid_op = _apply_rigid10_rebalance() if rigid_excess else None
+                if not op and branch_short and int(req11) > 0:
+                    if _apply_bulk_convert(12, [11]):
+                        op = 'S2_req11_12->11'
+                    elif _h_move_within_limit(13, 11, max_ratio=0.04) and _apply_bulk_convert(13, [11]):
+                        op = 'S2_req11_13->11'
+
+                if not op and branch_short and int(req22) > 0:
+                    if _apply_bulk_convert(23, [22]):
+                        op = 'S2_req22_23->22'
+
+                if not op and branch_short and int(req23) > 0:
+                    if _can_increase_aliphatic(1, res_extra) and _has_h_headroom(13, 23, max_ratio=0.04) and _apply_bulk_convert(13, [23]):
+                        op = 'S2_req23_13->23'
+                    elif _can_increase_aliphatic(1, res_extra) and _has_h_headroom(12, 23, max_ratio=0.04) and _apply_bulk_convert(12, [23]):
+                        op = 'S2_req23_12->23'
+
+                rigid_op = _apply_rigid10_rebalance() if (not op and rigid_excess) else None
                 if rigid_op:
                     op = str(rigid_op)
                 elif aliphatic_excess and int(H_work[23].item()) > 0:
@@ -3013,8 +3176,20 @@ class Layer4Adjuster:
             'applied': False,
             'reason': 'not_run',
         }
+        protect_11_count = 0
         try:
-            H_aligned, align_moves, align_meta = self._apply_aromatic_cluster_alignment(nodes, H_work)
+            protect_11_count = max(
+                int((branch_meta.get('final_diag', {}) or {}).get('req_11', 0)),
+                int((extra_meta.get('final_diag', {}) or {}).get('required_extra_11', 0)),
+            )
+        except Exception:
+            protect_11_count = 0
+        try:
+            H_aligned, align_moves, align_meta = self._apply_aromatic_cluster_alignment(
+                nodes,
+                H_work,
+                protect_11=bool(int(protect_11_count) > 0),
+            )
             H_work = H_aligned.detach().clone().cpu()
             if align_moves:
                 all_moves.extend(align_moves)
@@ -3028,61 +3203,6 @@ class Layer4Adjuster:
                 'error': str(e),
             }
         H_after_align = H_work.detach().clone().cpu()
-
-        final_alloc_diag = {}
-        try:
-            strict_balance_diag = self._evaluate_full_allocation_balance(
-                nodes,
-                flex_ratio=float(kwargs.get('extra_flexible_ratio', 0.80)),
-                flex_lower_extra=int(kwargs.get('extra_flexible_lower_extra', 1)),
-                S_target=S_target,
-                E_target=E_target,
-            )
-            relaxed_balance_diag = self._evaluate_full_allocation_balance(
-                nodes,
-                flex_ratio=float(kwargs.get('extra_relaxed_flexible_ratio', 0.82)),
-                flex_lower_extra=int(kwargs.get('extra_relaxed_lower_extra', 0)),
-                S_target=S_target,
-                E_target=E_target,
-            )
-            balance_diag = relaxed_balance_diag if bool(extra_meta.get('relaxed_mode', False)) else strict_balance_diag
-            alloc_res = balance_diag.get('allocation_result', None)
-            if alloc_res is not None:
-                self._print_allocation_details(alloc_res, header="最终完整资源分配结果")
-            final_alloc_diag = {
-                'ok': bool(balance_diag.get('ok', False)),
-                'reason': str(balance_diag.get('reason', 'unknown')),
-                'selected_mode': 'relaxed' if bool(extra_meta.get('relaxed_mode', False)) else 'strict',
-                'strict_ok': bool(strict_balance_diag.get('ok', False)),
-                'strict_reason': str(strict_balance_diag.get('reason', 'unknown')),
-                'relaxed_ok': bool(relaxed_balance_diag.get('ok', False)),
-                'relaxed_reason': str(relaxed_balance_diag.get('reason', 'unknown')),
-                'cluster_count': int(balance_diag.get('cluster_count', 0)),
-                'effective_cluster_count': int(balance_diag.get('effective_cluster_count', 0)),
-                'rigid_cluster_count': int(balance_diag.get('rigid_cluster_count', 0)),
-                'flexible_bridge_count': int(balance_diag.get('flexible_bridge_count', 0)),
-                'flexible_bridge_min': int(balance_diag.get('flexible_bridge_min', 0)),
-                'flexible_bridge_limit': int(balance_diag.get('flexible_bridge_limit', 0)),
-                'rigid_pairs': int(balance_diag.get('rigid_pairs', 0)),
-                'side_to_22_count': int(balance_diag.get('side_to_22_count', 0)),
-                'aliphatic_total': int(balance_diag.get('aliphatic_total', 0)),
-                'aliphatic_min_total': int(balance_diag.get('aliphatic_min_total', 0)),
-                'aliphatic_max_total': int(balance_diag.get('aliphatic_max_total', 0)),
-                'unallocated_bridge': int(balance_diag.get('unallocated_bridge', 0)),
-                'unallocated_branch': int(balance_diag.get('unallocated_branch', 0)),
-                'required_extra_11': int(balance_diag.get('required_extra_11', 0)),
-                'required_extra_22': int(balance_diag.get('required_extra_22', 0)),
-                'required_extra_23': int(balance_diag.get('required_extra_23', 0)),
-                'remaining_11': int((balance_diag.get('remaining', {}) or {}).get('11', 0)),
-                'remaining_22': int((balance_diag.get('remaining', {}) or {}).get('22', 0)),
-                'remaining_23': int((balance_diag.get('remaining', {}) or {}).get('23', 0)),
-                'remaining_24': int((balance_diag.get('remaining', {}) or {}).get('24', 0)),
-                'remaining_25': int((balance_diag.get('remaining', {}) or {}).get('25', 0)),
-                'allocation_details': dict(balance_diag.get('allocation_details', {}) or {}),
-                'cluster_meta': dict(balance_diag.get('cluster_meta', {}) or {}),
-            }
-        except Exception as e:
-            print(f"  [Skeleton-Alloc] 最终完整资源分配输出失败: {e}")
 
         final_h_ratio = float(branch_meta.get('final_h_ratio', 0.0))
         if 'final_h_ratio' in extra_meta:
@@ -3164,10 +3284,79 @@ class Layer4Adjuster:
         except Exception:
             pass
 
+        try:
+            synced_post_moves = self._apply_post_moves_to_nodes(nodes, post_moves)
+            post_meta['node_sync_post_moves'] = list(synced_post_moves)
+        except Exception as e:
+            post_meta['node_sync_error'] = str(e)
+
         phase_moves['post'].extend(list(post_moves))
         H_after_post = H_work.detach().clone().cpu()
 
-        overall_ok = bool(overall_ok) and (not bool(recheck_required))
+        final_alloc_diag = {}
+        try:
+            strict_balance_diag = self._evaluate_full_allocation_balance(
+                nodes,
+                flex_ratio=float(kwargs.get('extra_flexible_ratio', 0.80)),
+                flex_lower_extra=int(kwargs.get('extra_flexible_lower_extra', 1)),
+                S_target=S_target,
+                E_target=E_target,
+            )
+            relaxed_balance_diag = self._evaluate_full_allocation_balance(
+                nodes,
+                flex_ratio=float(kwargs.get('extra_relaxed_flexible_ratio', 0.82)),
+                flex_lower_extra=int(kwargs.get('extra_relaxed_lower_extra', 0)),
+                S_target=S_target,
+                E_target=E_target,
+            )
+            balance_diag = relaxed_balance_diag if bool(extra_meta.get('relaxed_mode', False)) else strict_balance_diag
+            alloc_res = balance_diag.get('allocation_result', None)
+            if alloc_res is not None:
+                self._print_allocation_details(alloc_res, header="最终完整资源分配结果")
+            final_alloc_diag = {
+                'ok': bool(balance_diag.get('ok', False)),
+                'reason': str(balance_diag.get('reason', 'unknown')),
+                'selected_mode': 'relaxed' if bool(extra_meta.get('relaxed_mode', False)) else 'strict',
+                'strict_ok': bool(strict_balance_diag.get('ok', False)),
+                'strict_reason': str(strict_balance_diag.get('reason', 'unknown')),
+                'relaxed_ok': bool(relaxed_balance_diag.get('ok', False)),
+                'relaxed_reason': str(relaxed_balance_diag.get('reason', 'unknown')),
+                'cluster_count': int(balance_diag.get('cluster_count', 0)),
+                'effective_cluster_count': int(balance_diag.get('effective_cluster_count', 0)),
+                'rigid_cluster_count': int(balance_diag.get('rigid_cluster_count', 0)),
+                'flexible_bridge_count': int(balance_diag.get('flexible_bridge_count', 0)),
+                'flexible_bridge_min': int(balance_diag.get('flexible_bridge_min', 0)),
+                'flexible_bridge_limit': int(balance_diag.get('flexible_bridge_limit', 0)),
+                'rigid_pairs': int(balance_diag.get('rigid_pairs', 0)),
+                'side_to_22_count': int(balance_diag.get('side_to_22_count', 0)),
+                'aliphatic_total': int(balance_diag.get('aliphatic_total', 0)),
+                'aliphatic_min_total': int(balance_diag.get('aliphatic_min_total', 0)),
+                'aliphatic_max_total': int(balance_diag.get('aliphatic_max_total', 0)),
+                'unallocated_bridge': int(balance_diag.get('unallocated_bridge', 0)),
+                'unallocated_branch': int(balance_diag.get('unallocated_branch', 0)),
+                'required_extra_11': int(balance_diag.get('required_extra_11', 0)),
+                'required_extra_22': int(balance_diag.get('required_extra_22', 0)),
+                'required_extra_23': int(balance_diag.get('required_extra_23', 0)),
+                'remaining_11': int((balance_diag.get('remaining', {}) or {}).get('11', 0)),
+                'remaining_22': int((balance_diag.get('remaining', {}) or {}).get('22', 0)),
+                'remaining_23': int((balance_diag.get('remaining', {}) or {}).get('23', 0)),
+                'remaining_24': int((balance_diag.get('remaining', {}) or {}).get('24', 0)),
+                'remaining_25': int((balance_diag.get('remaining', {}) or {}).get('25', 0)),
+                'allocation_details': dict(balance_diag.get('allocation_details', {}) or {}),
+                'cluster_meta': dict(balance_diag.get('cluster_meta', {}) or {}),
+            }
+        except Exception as e:
+            print(f"  [Skeleton-Alloc] 最终完整资源分配输出失败: {e}")
+
+        try:
+            if E_target is not None:
+                self.E_target = E_target.detach().cpu() if hasattr(E_target, 'detach') else E_target
+                _, h_ratio_fn, _, _ = self._make_h_helpers()
+                final_h_ratio = float(h_ratio_fn(H_work.detach().cpu()))
+        except Exception:
+            pass
+
+        overall_ok = bool(overall_ok) and (not bool(recheck_required)) and bool(final_alloc_diag.get('ok', True))
         return H_work, all_moves, {
             'n_moves': len(all_moves),
             'ok': overall_ok,
@@ -3195,7 +3384,7 @@ class Layer4Adjuster:
                 if overall_ok else (
                     'branch_not_ok'
                     if not bool(branch_meta.get('ok', False))
-                    else str(extra_meta.get('reason', 'extra_not_ok'))
+                    else str(final_alloc_diag.get('reason', extra_meta.get('reason', 'extra_not_ok')))
                 )
             ),
         }

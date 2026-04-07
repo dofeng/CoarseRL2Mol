@@ -49,7 +49,12 @@ def _can_partial_match_ports(neighbors: List[int], port_sets: List[set]) -> bool
 class Layer1Assigner:
     """Layer1的1-hop分配器"""
     
-    def __init__(self, device: str = 'cpu', vae_model=None, E_SU_tensor: torch.Tensor = None, layer0_estimator=None):
+    def __init__(self,
+                 device: str = 'cpu',
+                 vae_model=None,
+                 E_SU_tensor: torch.Tensor = None,
+                 layer0_estimator=None,
+                 intensity_scale: float = 1.0):
         """
         初始化Layer1分配器
         """
@@ -57,6 +62,7 @@ class Layer1Assigner:
         self.vae = vae_model
         self.E_SU = E_SU_tensor.to(device) if E_SU_tensor is not None else E_SU.to(device)
         self.layer0 = layer0_estimator
+        self.intensity_scale = float(intensity_scale)
     
     def _histogram_from_nodes(self, nodes: List[_NodeV3]) -> torch.Tensor:
         """从节点列表构建SU直方图"""
@@ -1478,6 +1484,12 @@ class Layer1Assigner:
 
         mu_t = torch.tensor(mus, dtype=torch.float, device=device)
         pi_t = torch.tensor(pis, dtype=torch.float, device=device)
+        try:
+            s = float(getattr(self, 'intensity_scale', 1.0))
+        except Exception:
+            s = 1.0
+        if float(s) != 1.0:
+            pi_t = pi_t * float(s)
         S_recon = lorentzian_spectrum(mu_t, pi_t, ppm_axis, hwhm=float(hwhm))
         eval_info = evaluate_spectrum_reconstruction(
             S_target,
@@ -2141,6 +2153,12 @@ class Layer1Assigner:
 
         mu_t = torch.tensor(mus, dtype=torch.float, device=device)
         pi_t = torch.tensor(pis, dtype=torch.float, device=device)
+        try:
+            s = float(getattr(self, 'intensity_scale', 1.0))
+        except Exception:
+            s = 1.0
+        if float(s) != 1.0:
+            pi_t = pi_t * float(s)
         S_recon = lorentzian_spectrum(mu_t, pi_t, ppm_axis, hwhm=float(hwhm))
 
         eval_info = evaluate_spectrum_reconstruction(

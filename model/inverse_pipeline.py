@@ -1,9 +1,8 @@
 import torch
 import pandas as pd
 import copy
-import pickle
 from pathlib import Path
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Any
 
 # 导入项目内部模块
 from .coarse_graph import (
@@ -41,7 +40,7 @@ class InversePipelineV3:
     def __init__(self, 
                  s2n_model: S2NModel,
                  vae_model: NMR_VAE,
-                 templates: Dict,
+                 templates: Optional[Any],
                  device: str = 'cuda',
                  nmr_intensity_scale: float = 0.95):
         """
@@ -57,6 +56,16 @@ class InversePipelineV3:
         self.vae = vae_model.to(device).eval()
         self.device = device
         self.nmr_intensity_scale = float(nmr_intensity_scale)
+        self.default_template_lib_path: Optional[str] = None
+        if isinstance(templates, (str, Path)):
+            self.default_template_lib_path = str(Path(templates))
+        elif isinstance(templates, dict):
+            try:
+                lib_path = templates.get('_lib_path')
+                if isinstance(lib_path, (str, Path)):
+                    self.default_template_lib_path = str(Path(lib_path))
+            except Exception:
+                pass
         
         # 加载常量到设备
         self.E_SU = E_SU.to(device)
@@ -77,7 +86,8 @@ class InversePipelineV3:
             device=device,
             vae_model=self.vae,
             E_SU_tensor=self.E_SU,
-            layer0_estimator=self.layer0_estimator  # 传递Layer0实例
+            layer0_estimator=self.layer0_estimator,  # 传递Layer0实例
+            intensity_scale=float(self.nmr_intensity_scale),
         )
         self.layer2_estimator = Layer2Estimator(
             device=torch.device(device),
@@ -87,8 +97,10 @@ class InversePipelineV3:
         self.layer3_estimator = Layer3Estimator(
             device=torch.device(device),
             vae_model=self.vae,
-            lib_path=None,
+            lib_path=self.default_template_lib_path,
         )
+        if self.default_template_lib_path:
+            self.layer2_estimator.lib_path = str(self.default_template_lib_path)
 
         try:
             self.layer2_estimator.intensity_scale = float(self.nmr_intensity_scale)
@@ -279,7 +291,6 @@ class InversePipelineV3:
         H_curr = H_init.detach().clone()
         best_nodes: Optional[List[_NodeV3]] = None
         best_H: Optional[torch.Tensor] = None
-        best_seed_H: Optional[torch.Tensor] = H_curr.detach().clone()
         best_r2 = -1e9
         global_history: List[Dict[str, object]] = []
         
@@ -443,11 +454,55 @@ class InversePipelineV3:
                     'changed': changed,
                 })
                 
-                # 更新最佳结果 (skeleton 拓扑调整允许暂时的小幅 R2 下降)
+                # 更新最佳结果
                 is_accepted = False
                 if stage == 'skeleton':
-                    if changed:
-                        is_accepted = True
+                    candidate_alloc = {}
+                    prev_alloc_ok = True
+                    prev_req_ok = True
+                    candidate_req_ok = True
+                    try:
+                        candidate_alloc = dict((meta or {}).get('final_allocation', {}) or {})
+                    except Exception:
+                        candidate_alloc = {}
+                    try:
+                        prev_alloc_diag = self.layer4_adjuster._evaluate_full_allocation_balance(
+                            prev_nodes,
+                            S_target=S_target,
+                            E_target=E_target,
+                        )
+                        prev_alloc_ok = bool(prev_alloc_diag.get('ok', True))
+                    except Exception:
+                        prev_alloc_ok = True
+                    try:
+                        prev_req_diag = self.layer4_adjuster._evaluate_required_hist_constraints(
+                            H_base,
+                            E_target,
+                            su22_ratio=float(stage_cfg.get('su22_ratio', 0.1)),
+                            su22_h_tol=float(stage_cfg.get('su22_h_tol', 0.03)),
+                        )
+                        prev_req_ok = bool(prev_req_diag.get('ok', True))
+                    except Exception:
+                        prev_req_ok = True
+                    try:
+                        candidate_req_diag = self.layer4_adjuster._evaluate_required_hist_constraints(
+                            candidate_H,
+                            E_target,
+                            su22_ratio=float(stage_cfg.get('su22_ratio', 0.1)),
+                            su22_h_tol=float(stage_cfg.get('su22_h_tol', 0.03)),
+                        )
+                        candidate_req_ok = bool(candidate_req_diag.get('ok', True))
+                    except Exception:
+                        candidate_req_ok = True
+
+                    alloc_ok = bool(candidate_alloc.get('ok', False))
+                    post_ok = bool(not bool((meta or {}).get('recheck_required', False)))
+                    mandatory_fix = bool((not prev_alloc_ok and alloc_ok) or (not prev_req_ok and candidate_req_ok))
+                    if changed and alloc_ok and candidate_req_ok and post_ok:
+                        if mandatory_fix:
+                            is_accepted = True
+                        else:
+                            is_accepted = bool(candidate_r2 >= (r2_before - float(outer_improve_eps)))
                 else:
                     if candidate_r2 > best_r2 + outer_improve_eps:
                         is_accepted = True
@@ -459,7 +514,6 @@ class InversePipelineV3:
                         best_r2 = candidate_r2
                     best_nodes = copy.deepcopy(candidate_nodes)
                     best_H = candidate_H.detach().clone()
-                    best_seed_H = H_curr.detach().clone()
                     stage_no_improve = 0
                     print(f"  ✓ 接受 ({stage} 策略): r2={candidate_r2:.4f}, 历史 best_r2={best_r2:.4f}")
                 else:
@@ -558,6 +612,7 @@ class InversePipelineV3:
                       hop1_neg_threshold: float = -0.5,
                       hop1_pos_threshold: float = 0.5) -> List[_NodeV3]:
         """委托给Layer1Assigner执行1-hop分配"""
+        eval_lib_path = eval_lib_path or self.default_template_lib_path
         return self.layer1_assigner.layer1_assign(
             H_init=H_init, S_target=S_target, E_target=E_target,
             eval_nmr=eval_nmr, eval_output_dir=eval_output_dir,
@@ -578,6 +633,7 @@ class InversePipelineV3:
                                             lib_path: Optional[str], hwhm: float,
                                             allow_approx: bool) -> Dict[str, object]:
         """委托给Layer1Assigner计算差谱"""
+        lib_path = lib_path or self.default_template_lib_path
         return self.layer1_assigner._compute_layer1_difference_spectrum(
             nodes=nodes, S_target=S_target, lib_path=lib_path,
             hwhm=hwhm, allow_approx=allow_approx
@@ -587,6 +643,7 @@ class InversePipelineV3:
                                          lib_path: Optional[str] = None, output_dir: str = 'inverse_result',
                                          hwhm: float = 1.0, allow_approx: bool = True) -> Dict[str, float]:
         """委托给Layer1Assigner评估Layer1 NMR"""
+        lib_path = lib_path or self.default_template_lib_path
         return self.layer1_assigner.evaluate_layer1_nmr_with_library(
             nodes=nodes, S_target=S_target, lib_path=lib_path,
             output_dir=output_dir, hwhm=hwhm, allow_approx=allow_approx
@@ -610,6 +667,7 @@ class InversePipelineV3:
         3. z向量初始化和mu/pi解码
         4. NMR谱图重建和评估
         """
+        lib_path = lib_path or self.default_template_lib_path
         if lib_path:
             try:
                 if getattr(self.layer2_estimator, 'lib_path', None) != lib_path:
@@ -689,6 +747,7 @@ class InversePipelineV3:
         approx_hop2_max_diff_nodes: int = 3,
         approx_hop2_top_k_templates: int = 80,
     ) -> Tuple[List[_NodeV3], float]:
+        lib_path = lib_path or self.default_template_lib_path
         if lib_path:
             try:
                 if getattr(self.layer3_estimator, 'lib_path', None) != lib_path:
@@ -777,11 +836,8 @@ def load_pipeline(s2n_ckpt: str, vae_ckpt: str, templates_pkl: str,
     vae_model = NMR_VAE()
     vae_model.load_state_dict(torch.load(vae_ckpt, map_location=device))
     
-    # 加载模板库
-    with open(templates_pkl, 'rb') as f:
-        templates = pickle.load(f)
-    
-    pipeline = InversePipelineV3(s2n_model, vae_model, templates, device)
+    template_path = str(Path(templates_pkl))
+    pipeline = InversePipelineV3(s2n_model, vae_model, template_path, device)
     return pipeline
 
 
