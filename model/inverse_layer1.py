@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 import random
@@ -9,8 +8,8 @@ from collections import Counter, defaultdict
 
 from .coarse_graph import SU_DEFS, E_SU, NUM_SU_TYPES, PPM_AXIS
 from .inverse_common import (
-    _NodeV3, SU_CONNECTION_DEGREE, HOP1_PORT_COMBINATIONS, SU_FIXED_CONNECTIONS,
-    lorentzian_spectrum, compute_r2_score, compute_segment_r2,
+    _NodeV3, HOP1_PORT_COMBINATIONS, SU_FIXED_CONNECTIONS,
+    lorentzian_spectrum, compute_r2_score,
     visualize_spectrum_comparison, validate_connection, check_external_connection_requirement,
     evaluate_spectrum_reconstruction,
 )
@@ -236,15 +235,6 @@ class Layer1Assigner:
             for i, elem_name in enumerate(['C', 'H', 'O', 'N', 'S', 'X']):
                 if rel_err[i] > 0.05:  # 5%误差容忍
                     errors.append(f"元素{elem_name}误差过大: 预测{E_pred[i]:.1f} vs 目标{E_target[i]:.1f} (相对误差{rel_err[i]:.2%})")
-        
-        if verbose and errors:
-            pass # pass # print("\n" + "=" * 60)
-            pass # pass # print("⚠️  图一致性验证失败:")
-            for i, err in enumerate(errors[:10], 1):  # 只显示前10个错误
-                pass # pass # print(f"  {i}. {err}")
-            if len(errors) > 10:
-                pass # pass # print(f"  ... 还有 {len(errors) - 10} 个错误")
-            pass # pass # print("=" * 60)
         
         return len(errors) == 0, errors
     
@@ -592,8 +582,6 @@ class Layer1Assigner:
         su8_nodes = self._get_nodes_by_su_type(nodes, 8)
         su21_nodes = self._get_nodes_by_su_type(nodes, 21)
         
-        pass # pass # print(f"\n[a] 分配32号X (共{len(x_nodes)}个)")
-        
         for x_node in x_nodes:
             target = self._pick_fixed_target(nodes, x_node, su8_nodes, [8])
             if target is None:
@@ -606,8 +594,6 @@ class Layer1Assigner:
         s_nodes = self._get_nodes_by_su_type(nodes, 31)
         su7_nodes = self._get_nodes_by_su_type(nodes, 7)
         su19_nodes = self._get_nodes_by_su_type(nodes, 19)
-        
-        pass # pass # print(f"\n[b] 分配31号S (共{len(s_nodes)}个)")
         
         random.shuffle(s_nodes)
 
@@ -639,8 +625,6 @@ class Layer1Assigner:
         su27_nodes = self._get_nodes_by_su_type(nodes, 27)
         su6_nodes = self._get_nodes_by_su_type(nodes, 6)
         su20_nodes = self._get_nodes_by_su_type(nodes, 20)
-        
-        pass # pass # print(f"\n[c] 分配0号氨基端和27号 (0: {len(su0_nodes)}个, 27: {len(su27_nodes)}个)")
         
         random.shuffle(su27_nodes)
 
@@ -692,22 +676,9 @@ class Layer1Assigner:
                         if n.remaining_hop1_slots() > 0 
                         and 31 not in n.hop1_su]
         
-        # 统计S专用的19号数量（用于调试）
-        su19_nodes_s = [n for n in su19_nodes_all if 31 in n.hop1_su]
-        
-        pass # pass # print(f"\n[d] 分配2号醚端、28号、29号 (2: {len(su2_nodes)}个, 28: {len(su28_nodes)}个, 29: {len(su29_nodes)}个)")
-        pass # pass # print(f"    5号总计: {len(su5_nodes_all)}个, 可用: {len(su5_nodes)}个")
-        pass # pass # print(f"    19号总计: {len(su19_nodes_all)}个, O专用(可用): {len(su19_nodes_o)}个, S专用: {len(su19_nodes_s)}个")
-        
         # 计算需求量
         W_needed = len(su2_nodes) * 1 + len(su28_nodes) * 1 + len(su29_nodes) * 2
         W_available = len(su5_nodes) + len(su19_nodes_o)
-        pass # pass # print(f"    需求量W={W_needed}, 可用量={W_available}")
-        
-        # 守恒约束检查
-        if W_available < W_needed:
-            pass # pass # print(f"    ⚠️  守恒约束违反! 需求{W_needed} > 可用{W_available}，差{W_needed - W_available}个")
-            pass # pass # print(f"       请检查: H[5]+H[19](O专用) 应该等于 2*1+28*1+29*2={W_needed}")
         
         # 第一轮：29/28/2 都尽量先分一个5
         first_round_nodes = list(su29_nodes) + list(su28_nodes) + list(su2_nodes)
@@ -741,8 +712,6 @@ class Layer1Assigner:
             t = self._pick_fixed_target(nodes, n28, su19_nodes_o, [19])
             if t is not None:
                 self._add_bidirectional_hop1(nodes, n28.global_id, t.global_id)
-            else:
-                pass # pass # print(f"  28(id={n28.global_id}) -> [警告:无法分配!]")
         
         # 最后分配2号醚端（需要1个邻居，羰基端后续补充）
         for n2 in su2_nodes:
@@ -764,9 +733,6 @@ class Layer1Assigner:
         su3_nodes = self._get_nodes_by_su_type(nodes, 3)
         su9_nodes = [n for n in self._get_nodes_by_su_type(nodes, 9) if n.remaining_hop1_slots() > 0]
         
-        pass # pass # print(f"\n[e] 分配羰基端 (0: {len(su0_nodes)}个, 1: {len(su1_nodes)}个, 2: {len(su2_nodes)}个, 3: {len(su3_nodes)}个)")
-        pass # pass # print(f"    SU9可用: {len(su9_nodes)}个（必须全部被羰基消耗）")
-
         def _can_pair(center_su: int, neigh_su: int) -> bool:
             try:
                 c_allowed = set(self._get_allowed_neighbor_types(int(center_su)))
@@ -798,7 +764,6 @@ class Layer1Assigner:
         # ---- 阶段1：先给每个0/1/2/3尽量分一个9号 ----
         first_round = list(su0_nodes) + list(su1_nodes) + list(su2_nodes) + list(su3_nodes)
         random.shuffle(first_round)
-        su9_assigned = 0
         for carb in first_round:
             if carb.remaining_hop1_slots() <= 0:
                 continue
@@ -809,7 +774,6 @@ class Layer1Assigner:
             if su9 is None:
                 continue
             self._add_bidirectional_hop1(nodes, carb.global_id, su9.global_id)
-            su9_assigned += 1
 
         # ---- 阶段1.5：如果9号还有剩余，再继续给3号分配第二个9 ----
         for n3 in su3_nodes:
@@ -821,9 +785,6 @@ class Layer1Assigner:
                 if su9 is None:
                     break
                 self._add_bidirectional_hop1(nodes, n3.global_id, su9.global_id)
-                su9_assigned += 1
-
-        pass # pass # print(f"    阶段1完成: {su9_assigned}/{len(su9_nodes)}个SU9已分配给羰基")
 
         # ---- 阶段2：填充羰基节点的剩余槽位（非SU9类型） ----
         pri_su3 = [23, 24, 25, 22, 19, 20, 21, 14, 15, 17]
@@ -877,27 +838,9 @@ class Layer1Assigner:
                     break
                 self._add_bidirectional_hop1(nodes, n1.global_id, t.global_id)
 
-        try:
-            su1_cnt = Counter()
-            for n1 in su1_nodes:
-                for k, v in n1.hop1_su.items():
-                    su1_cnt[int(k)] += int(v)
-            su3_cnt = Counter()
-            for n3 in su3_nodes:
-                for k, v in n3.hop1_su.items():
-                    su3_cnt[int(k)] += int(v)
-            pass # pass # print("\n[e] 羰基端分配统计:")
-            pass # pass # print(f"  SU1 hop1 neighbors: {dict(su1_cnt)}")
-            pass # pass # print(f"  SU3 hop1 neighbors: {dict(su3_cnt)}")
-        except Exception as e:
-            import logging
-            logging.debug(f"Exception in carbonyl stats: {e}")
-    
     def _assign_unsaturated_pairs(self, nodes: List[_NodeV3]):
         """f) 14/15/16双键配对，17/18三键配对
         """
-        pass # pass # print(f"\n[f] 分配不饱和键配对")
-        
         # 收集所有需要配对的双键节点（不饱和端连接度=1）
         su14_nodes = self._get_nodes_by_su_type(nodes, 14)
         su15_nodes = self._get_nodes_by_su_type(nodes, 15)
@@ -937,7 +880,6 @@ class Layer1Assigner:
             else:
                 # 没有可配对的伙伴，跳过
                 paired.add(node1.global_id)
-                pass # pass # print(f"  警告：{node1.su_type}(id={node1.global_id})找不到配对伙伴")
         
         # 三键配对 (17, 18) - 17的不饱和端连接度=1，18的连接度=1
         su17_nodes = self._get_nodes_by_su_type(nodes, 17)
@@ -964,8 +906,6 @@ class Layer1Assigner:
     
     def _assign_heterocyclic_NS(self, nodes: List[_NodeV3]):
         """f2) 26号杂环N和30号杂环S的1-hop分配（连接度=2）"""
-        pass # pass # print(f"\n[f2] 26号杂环N和30号杂环S分配")
-        
         aromatic_priority = [13, 11, 12, 10, 5, 6, 7, 8, 9]
         
         # 处理26号杂环N（连接度=2）
@@ -988,7 +928,6 @@ class Layer1Assigner:
                         break
                     self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
                 else:
-                    pass # pass # print(f"  警告：26号(id={node.global_id})找不到可用的芳香结构")
                     break
         
         # 处理30号杂环S（连接度=2）
@@ -1009,9 +948,7 @@ class Layer1Assigner:
                     if target is None:
                         break
                     self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
-                    pass # pass # print(f"  30(id={node.global_id}) -> {target.su_type}(id={target.global_id})")
                 else:
-                    pass # pass # print(f"  警告：30号(id={node.global_id})找不到可用的芳香结构")
                     break
     
     def _assign_aryl_connections(self, nodes: List[_NodeV3]):
@@ -1026,10 +963,7 @@ class Layer1Assigner:
         su4_nodes = [n for n in self._get_nodes_by_su_type(nodes, 4) if n.remaining_hop1_slots() > 0]
         su10_nodes = self._get_nodes_by_su_type(nodes, 10)
         
-        pass # pass # print(f"\n[f3] 分配10号芳基取代的port3 (SU4: {len(su4_nodes)}个, SU10: {len(su10_nodes)}个)")
-        
         # 阶段1：SU4 -> SU10 配对（SU4的唯一端口允许{23,24,25,10}，优先连10）
-        su4_assigned = 0
         for n4 in su4_nodes:
             # 找一个有空闲槽位的SU10来连接
             available_10 = [n for n in su10_nodes 
@@ -1039,9 +973,6 @@ class Layer1Assigner:
             if available_10:
                 target = available_10[0]
                 self._add_bidirectional_hop1(nodes, n4.global_id, target.global_id)
-                su4_assigned += 1
-        
-        pass # pass # print(f"    阶段1: {su4_assigned}/{len(su4_nodes)}个SU4已连接SU10")
         
         # 阶段2：剩余SU10之间10-10配对
         # 收集port3尚未填充的SU10（即还没有SU4或SU10邻居占据port3）
@@ -1049,27 +980,18 @@ class Layer1Assigner:
                           if n.remaining_hop1_slots() > 0
                           and 4 not in n.hop1_su and 10 not in n.hop1_su]
         
-        if len(su10_need_port3) % 2 != 0:
-            pass # pass # print(f"    ⚠️ 需要10-10配对的SU10数量为奇数({len(su10_need_port3)})，"
-        
         random.shuffle(su10_need_port3)
-        su10_paired = 0
         while len(su10_need_port3) >= 2:
             n1 = su10_need_port3.pop(0)
             n2 = su10_need_port3.pop(0)
             self._add_bidirectional_hop1(nodes, n1.global_id, n2.global_id)
-            su10_paired += 1
         
-        pass # pass # print(f"    阶段2: {su10_paired}对SU10已完成10-10配对")
-
     # ========================================================================
     # Layer1: 完成1-hop分配方法（g-i）
     # ========================================================================
     
     def _complete_aromatic_hop1(self, nodes: List[_NodeV3]):
         """g) 完成芳香结构的互为1-hop（5/6/7/8/9需要完成剩余连接）"""
-        pass # pass # print(f"\n[g] 完成芳香结构1-hop")
-        
         aromatic_types = [5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 30]
         priority_list = [13, 12, 11, 10, 5, 6, 7, 8, 9, 26, 30]
         
@@ -1106,8 +1028,6 @@ class Layer1Assigner:
     def _complete_aliphatic_hetero_hop1(self, nodes: List[_NodeV3]):
         """g2) 完成19/20/21号脂肪杂原子碳的1-hop（与X/N/S/O互为1-hop后补全剩余）
         """
-        pass # pass # print(f"\n[g2] 完成19/20/21号1-hop")
-        
         # SU19/20/21 端口1: {23,11,22,24,25,19,20,21,2,3,1,0,14,15,17}
         # 不含 SU16 和 SU18
         priority_list = [23, 11, 22, 24, 25, 19, 20, 21, 2, 3, 1, 0, 14, 15, 17]
@@ -1138,15 +1058,12 @@ class Layer1Assigner:
                             if target is None:
                                 break
                         else:
-                            pass # pass # print(f"  警告：{su_type}号(id={node.global_id})找不到可用的候选")
                             break
                     
                     self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
     
     def _complete_unsaturated_saturated_end(self, nodes: List[_NodeV3]):
         """h) 完成不饱和结构的饱和端和4号腈"""
-        pass # pass # print(f"\n[h] 完成不饱和结构的饱和端")
-        
         # SU14 端口1/2: {23,24,25,22,19,20,21,2,1,0,3,4} (脂肪碳优先级)
         # SU15 端口1:   {23,24,25,22,19,20,21,2,1,0,3,4} (脂肪碳优先级)
         # SU17 端口1:   {23,24,25,19,20,21,2,0,3}        (饱和/羰基优先级)
@@ -1201,19 +1118,15 @@ class Layer1Assigner:
                     if available_candidates:
                         target = self._choose_weighted_candidate(node, available_candidates, priority_list, nodes=nodes)
                     else:
-                        pass # pass # print(f"  警告：4号(id={node.global_id})找不到可用的候选")
                         continue
 
                 if target is None:
-                    pass # pass # print(f"  警告：4号(id={node.global_id})找不到可用的候选")
                     continue
                 
                 self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
     
     def _complete_remaining_aliphatic_aromatic(self, nodes: List[_NodeV3]):
         """i) 完成剩余脂肪碳(22-25)和芳香碳(10-13)"""
-        pass # pass # print(f"\n[i] 完成剩余脂肪碳和芳香碳")
-
         # 先定向补全11号的脂肪端口，避免22/23/24/25被先耗尽后11长期停在芳香半成品状态
         su11_aliphatic_priority = [23, 22, 24, 25, 19, 20, 21, 2, 3, 1, 0, 14, 15, 17]
         for node in [n for n in nodes if n.su_type == 11 and not n.is_hop1_complete()]:
@@ -1306,7 +1219,6 @@ class Layer1Assigner:
                         break
                     
                     self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
-                    pass # pass # print(f"  {su_type}(id={node.global_id}) -> {target.su_type}(id={target.global_id})")
 
         # 完成芳香结构（10-13互相补全，候选池包含全部芳香类型以满足SU10等端口规则）
         aromatic_types = [5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 30]
@@ -1337,42 +1249,6 @@ class Layer1Assigner:
                     
                     self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
  
-    def _print_hop1_summary(self, nodes: List[_NodeV3]):
-        """打印1-hop分配总结"""
-        pass # pass # print(f"\n总节点数: {len(nodes)}")
-        
-        # 统计每种SU的1-hop完成情况
-        su_stats = {}
-        for su_type in range(NUM_SU_TYPES):
-            su_nodes = self._get_nodes_by_su_type(nodes, su_type)
-            if su_nodes:
-                complete_count = sum(1 for n in su_nodes if n.is_hop1_complete())
-                incomplete_count = sum(1 for n in su_nodes if not n.is_hop1_empty() and not n.is_hop1_complete())
-                empty_count = sum(1 for n in su_nodes if n.is_hop1_empty())
-                
-                su_stats[su_type] = {
-                    'total': len(su_nodes),
-                    'complete': complete_count,
-                    'incomplete': incomplete_count,
-                    'empty': empty_count,
-                    'max_degree': su_nodes[0].get_max_degree()
-                }
-        
-        # 打印统计信息
-        incomplete_sus = [su for su, stats in su_stats.items() if stats['incomplete'] > 0 or stats['empty'] > 0]
-        if incomplete_sus:
-            pass # pass # print(f"\n⚠️ 存在不完整的1-hop分配:")
-            for su_type in sorted(incomplete_sus):
-                stats = su_stats[su_type]
-                pass # pass # print(f"  SU {su_type:2d}: 完整={stats['complete']:3d}, 不完整={stats['incomplete']:3d}, 空={stats['empty']:3d} (度数≤{stats['max_degree']})")
-        else:
-            pass # pass # print(f"\n✓ 所有节点的1-hop分配完成")
-        
-        # 打印已完成的SU类型
-        complete_sus = [su for su, stats in su_stats.items() if stats['incomplete'] == 0 and stats['empty'] == 0]
-        if complete_sus:
-            pass # pass # print(f"\n✓ 已完成1-hop分配的SU类型: {sorted(complete_sus)}")
-
     def layer1_assign(self, H_init: torch.Tensor, S_target: torch.Tensor,
                       E_target: torch.Tensor,
                       eval_nmr: bool = True,
@@ -1380,6 +1256,11 @@ class Layer1Assigner:
                       eval_lib_path: Optional[str] = None,
                       eval_hwhm: float = 1.0,
                       eval_allow_approx: bool = True,
+                      enable_carbonyl_joint_adjust: bool = True,
+                      carbonyl_joint_iterations: int = 3,
+                      carbonyl_joint_max_adjustments: int = 3,
+                      carbonyl_joint_pos_threshold: float = 0.08,
+                      carbonyl_joint_neg_threshold: float = 0.08,
                       enable_hop1_adjust: bool = False,
                       hop1_adjust_iterations: int = 3,
                       hop1_neg_threshold: float = -0.5,
@@ -1405,6 +1286,11 @@ class Layer1Assigner:
             eval_lib_path: 子图库路径
             eval_hwhm: 谱峰半高宽
             eval_allow_approx: 是否允许近似匹配
+            enable_carbonyl_joint_adjust: 是否启用羰基-锚点联合调整
+            carbonyl_joint_iterations: 联合调整最大迭代次数
+            carbonyl_joint_max_adjustments: 每轮最大换边次数
+            carbonyl_joint_pos_threshold: 联合调整正峰相对阈值
+            carbonyl_joint_neg_threshold: 联合调整负峰相对阈值
             enable_hop1_adjust: 是否启用1-hop调整
             hop1_adjust_iterations: 1-hop调整最大迭代次数
             hop1_neg_threshold: 负峰阈值
@@ -1470,6 +1356,26 @@ class Layer1Assigner:
         )
         if not is_valid:
             print(f"  ⚠ 图结构存在{len(errors)}个不一致")
+
+        if eval_lib_path and bool(enable_carbonyl_joint_adjust):
+            try:
+                nodes, joint_summary = self.adjust_carbonyl_anchor_jointly(
+                    nodes=nodes,
+                    S_target=S_target,
+                    E_target=E_target,
+                    lib_path=eval_lib_path,
+                    hwhm=eval_hwhm,
+                    allow_approx=eval_allow_approx,
+                    max_iterations=int(carbonyl_joint_iterations),
+                    max_adjustments_per_iter=int(carbonyl_joint_max_adjustments),
+                    pos_rel_threshold=float(carbonyl_joint_pos_threshold),
+                    neg_rel_threshold=float(carbonyl_joint_neg_threshold),
+                )
+                n_joint = int(joint_summary.get('adjustments', 0))
+                if n_joint > 0:
+                    print(f"  Carbonyl联合调整: {n_joint}次")
+            except Exception as e:
+                print(f"  [Carbonyl联合调整失败] {e}")
         
         # NMR评估
         if eval_nmr and eval_lib_path:
@@ -1693,116 +1599,6 @@ class Layer1Assigner:
         keys = set(ca.keys()) | set(cb.keys())
         return int(sum(abs(int(ca.get(k, 0)) - int(cb.get(k, 0))) for k in keys))
 
-    def _get_template_library(self, lib_path: Optional[str]) -> Dict[str, object]:
-        if lib_path is None:
-            lib_path = str(Path(__file__).resolve().parents[1] / 'z_library' / 'subgraph_library.pt')
-
-        cache = getattr(self, '_template_lib_cache', None)
-        if isinstance(cache, dict) and cache.get('path') == lib_path:
-            return cache
-
-        lib = torch.load(lib_path, map_location='cpu')
-        templates = lib.get('templates', {}) if isinstance(lib, dict) else {}
-        center_index = lib.get('center_index', {}) if isinstance(lib, dict) else {}
-
-        new_cache = {
-            'path': lib_path,
-            'templates': templates,
-            'center_index': center_index,
-        }
-        setattr(self, '_template_lib_cache', new_cache)
-        return new_cache
-
-    def _multiset_from_counter(self, cnt: Counter) -> Tuple[int, ...]:
-        vec = []
-        for k, v in cnt.items():
-            vec.extend([int(k)] * int(v))
-        vec.sort()
-        return tuple(vec)
-
-    def _select_template_key_layer2(self,
-                                   center_su: int,
-                                   hop1_ms: Tuple[int, ...],
-                                   hop2_ms: Tuple[int, ...],
-                                   lib: Dict[str, object]) -> Tuple[Optional[Tuple], str]:
-        templates = lib.get('templates', {}) if isinstance(lib, dict) else {}
-        center_index = lib.get('center_index', {}) if isinstance(lib, dict) else {}
-
-        key_exact = (int(center_su), tuple(hop1_ms), tuple(hop2_ms))
-        if key_exact in templates:
-            return key_exact, 'exact'
-
-        cand_keys = center_index.get(int(center_su), [])
-        pool = []
-        for k in cand_keys:
-            kt = tuple(k) if not isinstance(k, tuple) else k
-            if len(kt) != 3:
-                continue
-            try:
-                c, h1, h2 = kt
-                c = int(c)
-                h1_t = tuple(h1) if not isinstance(h1, tuple) else h1
-                h2_t = tuple(h2) if not isinstance(h2, tuple) else h2
-            except Exception:
-                continue
-            if int(c) != int(center_su):
-                continue
-            pool.append((kt, h1_t, h2_t))
-
-        if not pool:
-            return None, 'missing'
-
-        same_h1 = [it for it in pool if tuple(it[1]) == tuple(hop1_ms)]
-        mode = 'approx_h2' if same_h1 else 'approx_h1h2'
-        use_pool = same_h1 if same_h1 else pool
-
-        best = None
-        for kt, h1_t, h2_t in use_pool:
-            d_h2 = self._multiset_l1_distance(tuple(hop2_ms), tuple(h2_t))
-            d_h1 = 0 if tuple(h1_t) == tuple(hop1_ms) else self._multiset_l1_distance(tuple(hop1_ms), tuple(h1_t))
-            d = int(d_h1 + d_h2)
-            tpl = templates.get(kt, {}) if isinstance(templates, dict) else {}
-            sc = int(tpl.get('sample_count', 0)) if isinstance(tpl, dict) else 0
-            cand = (d, -sc, kt)
-            if best is None or cand < best:
-                best = cand
-        return best[2], mode
-
-    def _global_embed_from_elements(self, E_target: torch.Tensor) -> torch.Tensor:
-        device = self.device
-        e = E_target.to(device).view(1, -1)
-        if float(e.max().item()) > 1.1:
-            s = e.sum(dim=1, keepdim=True).clamp(min=1.0)
-            e = e / s
-        try:
-            g = self.vae.global_mlp(e)
-            g = 0.02 * g
-            return g
-        except Exception as e:
-            import logging
-            logging.warning(f"Failed to compute global embedding: {e}")
-            return torch.zeros((1, 2), dtype=torch.float, device=device)
-
-    def _decode_mu_pi_from_z(self,
-                             center_su: int,
-                             z_vec: torch.Tensor,
-                             g_embed: torch.Tensor) -> Optional[Tuple[float, float]]:
-        device = self.device
-        try:
-            su_feat = F.one_hot(
-                torch.tensor([int(center_su)], dtype=torch.long, device=device),
-                num_classes=NUM_SU_TYPES,
-            ).float()
-            z = z_vec.to(device).view(1, -1)
-            pred = self.vae.decoder(su_feat, z, g_embed)
-            mu_pred = float(pred[:, 0].detach().item())
-            pi_pred = float(F.softplus(pred[:, 1]).detach().item())
-            return mu_pred, pi_pred
-        except Exception as e:
-            import logging
-            logging.warning(f"Failed to decode mu/pi from z: {e}")
-            return None
-
     def _lookup_mu_pi_by_hop1(self,
                               center_su: int,
                               hop1_ms: Tuple[int, ...],
@@ -1970,6 +1766,274 @@ class Layer1Assigner:
                 }
 
         return assignments
+
+    def _get_carbonyl_anchor_ids(self, nodes: List[_NodeV3], node: _NodeV3) -> List[int]:
+        """
+        返回羰基节点中“真正决定羰基位移”的锚点邻居 ID。
+        当前联合调整先聚焦 SU1 / SU2：
+          - SU1: 唯一邻居就是羰基锚点
+          - SU2: 排除 O 端 {5,19} 后，剩余邻居视为羰基锚点
+        """
+        center_su = int(node.su_type)
+        hop1_ids = [int(nid) for nid in list(getattr(node, 'hop1_ids', []) or []) if 0 <= int(nid) < len(nodes)]
+
+        if center_su == 1:
+            return hop1_ids[:1]
+        if center_su == 2:
+            return [nid for nid in hop1_ids if int(nodes[nid].su_type) not in {5, 19}]
+        return []
+
+    @staticmethod
+    def _joint_window_score(ppm: np.ndarray, diff: np.ndarray, lo: float, hi: float) -> Dict[str, float]:
+        mask = (ppm >= float(lo)) & (ppm <= float(hi))
+        if not mask.any():
+            return {'pos': 0.0, 'neg': 0.0, 'net': 0.0, 'abs': 0.0}
+        seg = diff[mask]
+        pos = float(np.sum(seg[seg > 0])) if np.any(seg > 0) else 0.0
+        neg = float(-np.sum(seg[seg < 0])) if np.any(seg < 0) else 0.0
+        abs_sum = float(np.sum(np.abs(seg)))
+        return {
+            'pos': pos,
+            'neg': neg,
+            'net': float(pos - neg),
+            'abs': abs_sum,
+        }
+
+    def _decide_carbonyl_joint_direction(self,
+                                         ppm: np.ndarray,
+                                         diff: np.ndarray,
+                                         pos_rel_threshold: float = 0.08,
+                                         neg_rel_threshold: float = 0.08) -> Dict[str, object]:
+        """
+        判定当前应当把羰基锚点从 9 往脂肪锚点迁移，还是反向迁回 9。
+
+        判据:
+          - 160-170 过强且 172-180 不足 -> 9 -> 23/24/25
+          - 160-170 不足且 172-180 过强 -> 23/24/25 -> 9
+        """
+        low = self._joint_window_score(ppm, diff, 160.0, 170.0)
+        mid = self._joint_window_score(ppm, diff, 172.0, 180.0)
+        ket = self._joint_window_score(ppm, diff, 186.0, 205.0)
+
+        carbonyl_mask = (ppm >= 160.0) & (ppm <= 205.0)
+        carbonyl_abs = float(np.sum(np.abs(diff[carbonyl_mask]))) if np.any(carbonyl_mask) else float(np.sum(np.abs(diff)))
+        pos_thr = float(pos_rel_threshold) * max(1e-8, carbonyl_abs)
+        neg_thr = float(neg_rel_threshold) * max(1e-8, carbonyl_abs)
+
+        direction = None
+        if float(low['neg']) > float(neg_thr) and float(mid['pos']) > float(pos_thr):
+            direction = 'to_aliphatic'
+        elif float(low['pos']) > float(pos_thr) and float(mid['neg']) > float(neg_thr):
+            direction = 'to_aryl9'
+
+        return {
+            'direction': direction,
+            'thresholds': {'pos': float(pos_thr), 'neg': float(neg_thr), 'carbonyl_abs': float(carbonyl_abs)},
+            'windows': {
+                '160_170': low,
+                '172_180': mid,
+                '186_205': ket,
+            },
+        }
+
+    def _rank_joint_target_anchor_types(self,
+                                        ppm: np.ndarray,
+                                        diff: np.ndarray,
+                                        direction: str) -> List[int]:
+        if direction == 'to_aryl9':
+            return [9]
+
+        scores = {
+            23: self._joint_window_score(ppm, diff, 18.0, 35.0),
+            24: self._joint_window_score(ppm, diff, 32.0, 50.0),
+            25: self._joint_window_score(ppm, diff, 40.0, 60.0),
+        }
+        ranked = sorted(
+            scores.keys(),
+            key=lambda su: (float(scores[su]['net']), float(scores[su]['pos']), -float(scores[su]['neg'])),
+            reverse=True,
+        )
+        return [int(su) for su in ranked]
+
+    def _try_joint_carbonyl_swap(self,
+                                 nodes: List[_NodeV3],
+                                 center_id: int,
+                                 old_anchor_id: int,
+                                 target_anchor_types: List[int],
+                                 E_target: torch.Tensor,
+                                 swap_helper: Hop1Adjuster) -> Optional[Dict[str, object]]:
+        center_node = nodes[int(center_id)]
+        old_anchor = nodes[int(old_anchor_id)]
+
+        for target_type in target_anchor_types:
+            candidates = [
+                n for n in nodes
+                if int(n.su_type) == int(target_type)
+                and int(n.global_id) not in center_node.hop1_ids
+                and int(n.global_id) != int(center_id)
+            ]
+            candidates.sort(key=lambda n: (int(n.remaining_hop1_slots()) > 0, -int(n.remaining_hop1_slots()), -int(n.global_id)), reverse=True)
+
+            for target in candidates:
+                success, swap_tail_id, affected = swap_helper._try_two_edge_swap(
+                    nodes,
+                    t=int(center_id),
+                    u=int(old_anchor_id),
+                    v=int(target.global_id),
+                    E_target=E_target,
+                )
+                if not success:
+                    continue
+
+                swap_helper._remove_hop1_edge(nodes, int(center_id), int(old_anchor_id))
+                swap_helper._remove_hop1_edge(nodes, int(target.global_id), int(swap_tail_id))
+                swap_helper._add_hop1_edge(nodes, int(center_id), int(target.global_id))
+                swap_helper._add_hop1_edge(nodes, int(old_anchor_id), int(swap_tail_id))
+                return {
+                    'center_id': int(center_id),
+                    'center_su': int(center_node.su_type),
+                    'old_anchor_id': int(old_anchor_id),
+                    'old_anchor_su': int(old_anchor.su_type),
+                    'new_anchor_id': int(target.global_id),
+                    'new_anchor_su': int(target.su_type),
+                    'swap_tail_id': int(swap_tail_id),
+                    'affected_nodes': list(sorted(set(int(x) for x in affected))),
+                }
+        return None
+
+    def adjust_carbonyl_anchor_jointly(self,
+                                       nodes: List[_NodeV3],
+                                       S_target: torch.Tensor,
+                                       E_target: torch.Tensor,
+                                       lib_path: Optional[str] = None,
+                                       hwhm: float = 1.0,
+                                       allow_approx: bool = True,
+                                       max_iterations: int = 3,
+                                       max_adjustments_per_iter: int = 3,
+                                       pos_rel_threshold: float = 0.08,
+                                       neg_rel_threshold: float = 0.08) -> Tuple[List[_NodeV3], Dict[str, object]]:
+        """
+        羰基类型 + SU9/脂肪锚点联合调整。
+
+        操作表:
+          - SU1/SU2: 9 -> 23/24/25
+          - SU1/SU2: 23/24/25 -> 9
+
+        判据表:
+          - 160-170 负峰显著 && 172-180 正峰显著: 往脂肪锚点迁移
+          - 160-170 正峰显著 && 172-180 负峰显著: 往 9 迁回
+
+        该阶段只重连 hop1，不直接修改 H 直方图。
+        """
+        if lib_path is None:
+            return nodes, {'adjustments': 0, 'iterations': 0, 'details': [], 'reason': 'missing_lib'}
+
+        swap_helper = Hop1Adjuster(
+            port_combinations=HOP1_PORT_COMBINATIONS,
+            validate_connection_fn=validate_connection,
+            external_requirement_fn=check_external_connection_requirement,
+        )
+
+        all_moves: List[Dict[str, object]] = []
+        diagnostics: List[Dict[str, object]] = []
+
+        for iter_idx in range(max(1, int(max_iterations))):
+            diff_info = self._compute_layer1_difference_spectrum(
+                nodes=nodes,
+                S_target=S_target,
+                lib_path=lib_path,
+                hwhm=hwhm,
+                allow_approx=allow_approx,
+            )
+            ppm = np.asarray(diff_info.get('ppm', []), dtype=np.float64)
+            diff = np.asarray(diff_info.get('diff', []), dtype=np.float64)
+            if ppm.size == 0 or diff.size == 0:
+                break
+
+            decision = self._decide_carbonyl_joint_direction(
+                ppm,
+                diff,
+                pos_rel_threshold=float(pos_rel_threshold),
+                neg_rel_threshold=float(neg_rel_threshold),
+            )
+            direction = decision.get('direction')
+            diagnostics.append({
+                'iteration': int(iter_idx + 1),
+                'direction': direction,
+                'decision': decision,
+                'r2_before': float(diff_info.get('r2', 0.0)),
+            })
+
+            if direction is None:
+                break
+
+            if direction == 'to_aliphatic':
+                source_anchor_types = {9}
+                target_anchor_types = self._rank_joint_target_anchor_types(ppm, diff, direction)
+            else:
+                source_anchor_types = {23, 24, 25}
+                target_anchor_types = [9]
+
+            grouped_assignments = self._assign_grouped_mu_pi_by_hop1(nodes, self._get_layer1_library_index(lib_path), allow_approx)
+            candidates: List[Dict[str, object]] = []
+            for node in nodes:
+                center_su = int(node.su_type)
+                if center_su not in {1, 2}:
+                    continue
+                anchor_ids = self._get_carbonyl_anchor_ids(nodes, node)
+                if not anchor_ids:
+                    continue
+                mu_pred = grouped_assignments.get(int(node.global_id), {}).get('mu', 0.0)
+                for anchor_id in anchor_ids:
+                    anchor_su = int(nodes[int(anchor_id)].su_type)
+                    if anchor_su not in source_anchor_types:
+                        continue
+                    candidates.append({
+                        'center_id': int(node.global_id),
+                        'center_su': int(center_su),
+                        'mu_pred': float(mu_pred or 0.0),
+                        'old_anchor_id': int(anchor_id),
+                        'old_anchor_su': int(anchor_su),
+                    })
+
+            if direction == 'to_aliphatic':
+                candidates.sort(key=lambda c: (0 if int(c['center_su']) == 1 else 1, abs(float(c['mu_pred']) - 165.0), int(c['center_id'])))
+            else:
+                candidates.sort(key=lambda c: (0 if int(c['center_su']) == 2 else 1, abs(float(c['mu_pred']) - 176.0), int(c['center_id'])))
+
+            iter_moves: List[Dict[str, object]] = []
+            used_centers = set()
+            for cand in candidates:
+                if len(iter_moves) >= int(max_adjustments_per_iter):
+                    break
+                if int(cand['center_id']) in used_centers:
+                    continue
+                move = self._try_joint_carbonyl_swap(
+                    nodes=nodes,
+                    center_id=int(cand['center_id']),
+                    old_anchor_id=int(cand['old_anchor_id']),
+                    target_anchor_types=target_anchor_types,
+                    E_target=E_target,
+                    swap_helper=swap_helper,
+                )
+                if move is None:
+                    continue
+                move['iteration'] = int(iter_idx + 1)
+                move['direction'] = str(direction)
+                iter_moves.append(move)
+                used_centers.add(int(cand['center_id']))
+
+            if not iter_moves:
+                break
+            all_moves.extend(iter_moves)
+
+        summary = {
+            'adjustments': int(len(all_moves)),
+            'iterations': int(len(diagnostics)),
+            'details': all_moves,
+            'diagnostics': diagnostics,
+        }
+        return nodes, summary
 
     def evaluate_layer1_nmr_with_library(self,
                                          nodes: List[_NodeV3],
@@ -2286,8 +2350,5 @@ class Layer1Assigner:
             'final_r2': final_metrics.get('r2', 0.0),
             'adjuster_stats': adjuster.stats,
         }
-        
-        pass # pass # print(f"总调整次数: {total_adjustments}")
-        pass # pass # print(f"最终R²: {final_metrics.get('r2', 0.0):.4f}")
         
         return nodes, summary

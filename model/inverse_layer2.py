@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .coarse_graph import SU_DEFS, E_SU, NUM_SU_TYPES, PPM_AXIS
 from .inverse_common import (
-    _NodeV3, lorentzian_spectrum, compute_r2_score, compute_segment_r2,
+    _NodeV3, lorentzian_spectrum, compute_segment_r2,
     visualize_spectrum_comparison, evaluate_spectrum_reconstruction
 )
 

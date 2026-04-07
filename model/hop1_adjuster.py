@@ -7,9 +7,6 @@ from typing import List, Tuple, Dict, Optional, Set, Callable
 from pathlib import Path
 from dataclasses import dataclass
 
-# 导入项目内部模块
-from .coarse_graph import SU_DEFS, SU_MAX_DEGREE, PPM_AXIS
-
 # SU分类
 SU_CARBONYL = [0, 1, 2, 3, 4]
 SU_AROMATIC = [5, 6, 7, 8, 9, 10, 11, 12, 13]
@@ -61,17 +58,6 @@ class PeakRegion:
     ppm_max: float
     intensity: float  
     center_ppm: float
-
-
-@dataclass
-class AdjustmentCandidate:
-    """调整候选"""
-    node_id: int
-    current_hop1_ms: Tuple[int, ...]
-    current_mu: float
-    target_hop1_ms: Tuple[int, ...]
-    target_mu: float
-    score: float 
 
 
 class Hop1Adjuster:
@@ -181,8 +167,7 @@ class Hop1Adjuster:
             
             df['hop1_tuple'] = df['hop1_multiset'].apply(parse_multiset)
             return df
-        except Exception as e:
-            pass # print(f"[Hop1Adjuster] 加载{path}失败: {e}")
+        except Exception:
             return pd.DataFrame()
     
     def _load_su_nmr_ranges(self, path: str) -> Dict[int, Dict]:
@@ -197,8 +182,8 @@ class Hop1Adjuster:
                     'mu_common_min': float(row['mu_common_min']),
                     'mu_common_max': float(row['mu_common_max']),
                 }
-        except Exception as e:
-            pass # print(f"[Hop1Adjuster] 加载{path}失败: {e}")
+        except Exception:
+            return ranges
         return ranges
     
     def _build_template_index(self):
@@ -207,8 +192,6 @@ class Hop1Adjuster:
         self.template_by_key = {}
         # 按center_su索引所有可用的hop1组合
         self.hop1_by_su = defaultdict(list)
-        # 按mu范围索引
-        self.templates_by_mu_range = defaultdict(list)
         
         if self.hop1_templates.empty:
             return
@@ -234,14 +217,6 @@ class Hop1Adjuster:
                 'mu_median': mu_median,
                 'mu_min': mu_min,
                 'mu_max': mu_max,
-            })
-            
-            # 按mu范围分桶（每10ppm一个桶）
-            bucket = int(mu_median // 10) * 10
-            self.templates_by_mu_range[bucket].append({
-                'center_su': su_idx,
-                'hop1_tuple': hop1_tuple,
-                'mu_median': mu_median,
             })
     
     def _default_connection_rules(self) -> Dict:
@@ -994,21 +969,10 @@ def adjust_hop1_connections(nodes: List,
 
 
 if __name__ == '__main__':
-    # 测试代码
-    pass # print("Hop1Adjuster 测试")
-    
-    # 创建调整器
     adjuster = Hop1Adjuster()
-    
-    pass # print(f"已加载 {len(adjuster.hop1_templates)} 个1-hop模板")
-    pass # print(f"已加载 {len(adjuster.su_nmr_ranges)} 个SU NMR范围")
-    
-    # 测试差谱分析
     test_diff = np.sin(np.linspace(0, 4*np.pi, 100)) * 0.8
     test_ppm = np.linspace(0, 200, 100)
     
-    neg_peaks, pos_peaks = adjuster.analyze_difference_spectrum(
+    adjuster.analyze_difference_spectrum(
         test_diff, test_ppm, neg_threshold=-0.3, pos_threshold=0.3
     )
-    
-    pass # print(f"测试差谱: 检测到 {len(neg_peaks)} 个负峰, {len(pos_peaks)} 个正峰")

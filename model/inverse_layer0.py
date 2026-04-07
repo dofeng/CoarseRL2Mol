@@ -3,9 +3,7 @@ Inverse Pipeline Layer0 Module - Layer0: SU直方图估计器
 """
 import math
 import torch
-import numpy as np
-from typing import Optional, Tuple, Dict
-from .inverse_common import E_SU, NUM_SU_TYPES, PPM_AXIS
+from typing import Tuple, Dict
 
 class Layer0Estimator:
     """Layer0直方图估计器"""
@@ -178,8 +176,6 @@ class Layer0Estimator:
         H_init = torch.round(H_pred).long()
         H_init = torch.clamp(H_init, min=0)
         
-        E_init = torch.matmul(H_init.float(), self.E_SU)
-        
         # Step 2: 杂原子元素修正（X → S → N 顺序）
         H_corrected = H_init.clone()
         
@@ -254,8 +250,6 @@ class Layer0Estimator:
         # 确保所有值为非负整数
         H_corrected = torch.clamp(H_corrected, min=0).long()
             
-        # 验证最终元素组成
-        E_final = torch.matmul(H_corrected.float(), self.E_SU)
         print(f"[Layer0] 完成 - 总SU={int(H_corrected.sum().item())}")
         
         return H_corrected
@@ -267,22 +261,17 @@ class Layer0Estimator:
         """
         target_X = int(E_target[5].item())
         current_X = int(H[32].item())
-        
-        pass # print(f"\n[X修正] 当前X={current_X}, 目标X={target_X}")
-        
+
         if current_X == target_X:
-            pass # print("  X元素已匹配，无需修正")
             return H
         
         H_new = H.clone()
         
         if current_X > target_X:
             # 删除多余的32号
-            to_remove = current_X - target_X
             H_new[32] = target_X
         else:
             # 补充缺少的32号
-            to_add = target_X - current_X
             H_new[32] = target_X
         
         return H_new
@@ -298,11 +287,8 @@ class Layer0Estimator:
         m = int(H[30].item())  # 30号当前数量
         n = int(H[31].item())  # 31号当前数量
         current_S = m + n
-        
-        pass # print(f"\n[S修正] 当前30号={m}, 31号={n}, 总S={current_S}, 目标S={target_S}")
-        
+
         if current_S == target_S:
-            pass # print("  S元素已匹配，无需修正")
             return H
         
         H_new = H.clone()
@@ -314,7 +300,6 @@ class Layer0Estimator:
         if current_S < target_S:
             # 需要补充
             diff = target_S - current_S
-            pass # print(f"  需要补充{diff}个S结构单元")
             
             for _ in range(diff):
                 # 计算当前偏差
@@ -331,7 +316,6 @@ class Layer0Estimator:
         else:
             # 需要删除
             diff = current_S - target_S
-            pass # print(f"  需要删除{diff}个S结构单元")
             
             for _ in range(diff):
                 # 计算当前偏差
@@ -367,11 +351,8 @@ class Layer0Estimator:
         z = int(H[26].item())  
         w = int(H[27].item())  
         current_N = x + y + z + w
-        
-        pass # print(f"\n[N修正] 当前0号={x}, 4号={y}, 26号={z}, 27号={w}, 总N={current_N}, 目标N={target_N}")
-        
+
         if current_N == target_N:
-            pass # print("  N元素已匹配，无需修正")
             return H
         
         H_new = H.clone()
@@ -385,7 +366,6 @@ class Layer0Estimator:
         if current_N < target_N:
             # 需要补充
             diff = target_N - current_N
-            pass # print(f"  需要补充{diff}个N结构单元")
             
             for _ in range(diff):
                 # 计算当前偏差
@@ -413,7 +393,6 @@ class Layer0Estimator:
         else:
             # 需要删除
             diff = current_N - target_N
-            pass # print(f"  需要删除{diff}个N结构单元")
             
             for _ in range(diff):
                 # 计算当前偏差
@@ -434,7 +413,6 @@ class Layer0Estimator:
                     candidates.append((delta_27, -priority[27], 27, '27号'))
                 
                 if not candidates:
-                    pass # print("    警告：无法继续删除，所有N结构单元已为0")
                     break
                 
                 _, _, su_idx, su_name = max(candidates, key=lambda t: (t[0], t[1]))
@@ -470,11 +448,8 @@ class Layer0Estimator:
         # 需要修正的羰基结构数量
         W = carbonyl_C - n_0
         W = max(0, W)  # 防止负数
-        
-        pass # print(f"  总C={total_C}, 羰基区C={carbonyl_C}, 0号(固定)={n_0}, 需要修正羰基数={W}")
-        
+
         if W == 0:
-            pass # print("  无需修正羰基分布")
             self._carbonyl_shortage = 0
             self._o_cap_triggered = False
             return H
@@ -488,21 +463,17 @@ class Layer0Estimator:
         
         current_total = m + n + p
         
-        pass # print(f"  当前1号={m}, 2号={n}, 3号={p}, 总计={current_total}")
-        
         # 目标分布：1:2:3 = 0.35:0.25:0.4
         target_1 = W * 0.35
         target_2 = W * 0.25
         target_3 = W * 0.4
         
         if current_total == W:
-            pass # print(f"  羰基数量已匹配，无需修正")
             return H_new
         
         if current_total < W:
             # 需要补充
             diff = W - current_total
-            pass # print(f"  需要补充{diff}个羰基结构")
             
             for _ in range(diff):
                 delta_1 = m - target_1
@@ -527,7 +498,6 @@ class Layer0Estimator:
         else:
             # 需要删除
             diff = current_total - W
-            pass # print(f"  需要删除{diff}个羰基结构")
             
             for _ in range(diff):
                 delta_1 = m - target_1
@@ -614,12 +584,6 @@ class Layer0Estimator:
             H_new[2] = n
             H_new[3] = p
             used_O_03 = int(n_0 + 2 * m + 2 * n + p)
-            pass # print(f"  O上限修正后: 1号={m}, 2号={n}, 3号={p}, 0-3号已用O={used_O_03} (目标O={target_O})")
-        
-        final_total = m + n + p
-        pass # print(f"  修正后: 1号={m}, 2号={n}, 3号={p}, 总计={final_total}")
-        if final_total > 0:
-            pass # print(f"  比例: {m/final_total:.3f}:{n/final_total:.3f}:{p/final_total:.3f} (目标: 0.35:0.25:0.4)")
 
         try:
             carbonyl_target_total = int(carbonyl_C)
@@ -650,7 +614,6 @@ class Layer0Estimator:
         W = max(0, W)  # 防止负数
         
         if W == 0:
-            pass # print("  无需修正O元素")
             return H
         
         H_new = H.clone()
@@ -661,20 +624,16 @@ class Layer0Estimator:
         
         current_total = m + n
         
-        pass # print(f"  当前28号={m}, 29号={n}, 总计={current_total}")
-        
         # 目标分布：28:29 = 0.55:0.45
         target_28 = W * 0.55
         target_29 = W * 0.45
         
         if current_total == W:
-            pass # print(f"  O数量已匹配，无需修正")
             return H_new
         
         if current_total < W:
             # 需要补充
             diff = W - current_total
-            pass # print(f"  需要补充{diff}个O")
             
             for _ in range(diff):
                 delta_28 = m - target_28
@@ -690,7 +649,6 @@ class Layer0Estimator:
         else:
             # 需要删除
             diff = current_total - W
-            pass # print(f"  需要删除{diff}个O")
             
             for _ in range(diff):
                 delta_28 = m - target_28
@@ -713,15 +671,6 @@ class Layer0Estimator:
         H_new[28] = m
         H_new[29] = n
         
-        final_total = m + n
-        pass # print(f"  修正后: 28号={m}, 29号={n}, 总计={final_total}")
-        if final_total > 0:
-            pass # print(f"  比例: {m/final_total:.3f}:{n/final_total:.3f} (目标: 0.55:0.45)")
-        
-        # 验证总O数量
-        total_O = n_0 + n_1*2 + n_2*2 + n_3 + m + n
-        pass # print(f"  总O验证: {total_O} (目标: {target_O}, 差异: {abs(total_O - target_O)})")
-        
         return H_new
     
     def _correct_carbonyl_connection(self, H: torch.Tensor) -> torch.Tensor:
@@ -741,8 +690,6 @@ class Layer0Estimator:
         
         H_new = H.clone()
         H_new[9] = target_9
-        
-        pass # print(f"  修正后: 9号={target_9}")
         return H_new
     
     def _correct_ether_connection(self, H: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, int]]:
@@ -775,10 +722,8 @@ class Layer0Estimator:
         if current_total == int(W_ether):
             m_target = int(m)
             n_19_target = int(n_current)
-            pass # print("  O连接数量已匹配，无需修正")
         elif current_total < int(W_ether):
             diff = int(W_ether) - int(current_total)
-            pass # print(f"  需要补充{diff}个O连接")
             m_target = int(m)
             n_19_target = int(n_current)
             for _ in range(diff):
@@ -792,7 +737,6 @@ class Layer0Estimator:
                     m_target += 1
         else:
             diff = int(current_total) - int(W_ether)
-            pass # print(f"  需要删除{diff}个O连接")
             m_target = int(m)
             n_19_target = int(n_current)
             for _ in range(diff):
@@ -814,8 +758,6 @@ class Layer0Estimator:
             n_19_target = 0
         if int(m_target + n_19_target) != int(W_ether):
             n_19_target = max(0, int(W_ether) - int(m_target))
-        
-        pass # print(f"  修正后: 5号={m_target}, 19号(O专用)={n_19_target}, 总计={m_target + n_19_target}")
         
         H_new[5] = int(m_target)
         H_new[19] = int(n_19_target)  
@@ -857,12 +799,9 @@ class Layer0Estimator:
         
         current_total = m + n_19_thioether
         
-        if current_total == W_thioether:
-            pass # print(f"  S连接数量已匹配，无需修正")
-        elif current_total < W_thioether:
+        if current_total < W_thioether:
             # 需要补充
             diff = W_thioether - current_total
-            pass # print(f"  需要补充{diff}个S连接")
             
             for _ in range(diff):
                 delta_7 = m - target_7
@@ -915,13 +854,11 @@ class Layer0Estimator:
         target_20 = W * 0.4
         
         if current_total == W:
-            pass # print(f"  连接数量已匹配，无需修正")
             return H_new
         
         if current_total < W:
             # 需要补充
             diff = W - current_total
-            pass # print(f"  需要补充{diff}个连接")
             
             for _ in range(diff):
                 delta_6 = m - target_6
@@ -937,7 +874,6 @@ class Layer0Estimator:
         else:
             # 需要删除
             diff = current_total - W
-            pass # print(f"  需要删除{diff}个连接")
             
             for _ in range(diff):
                 delta_6 = m - target_6
@@ -960,7 +896,6 @@ class Layer0Estimator:
         
         H_new[6] = m
         H_new[20] = n
-        pass # print(f"  修正后: 6号={m}, 20号={n}, 总计={m+n}")
         
         return H_new
     
@@ -984,13 +919,11 @@ class Layer0Estimator:
         target_21 = W * 0.4
         
         if current_total == W:
-            pass # print(f"  连接数量已匹配，无需修正")
             return H_new
         
         if current_total < W:
             # 需要补充
             diff = W - current_total
-            pass # print(f"  需要补充{diff}个连接")
             
             for _ in range(diff):
                 delta_8 = m - target_8
@@ -1006,7 +939,6 @@ class Layer0Estimator:
         else:
             # 需要删除
             diff = current_total - W
-            pass # print(f"  需要删除{diff}个连接")
             
             for _ in range(diff):
                 delta_8 = m - target_8
@@ -1029,7 +961,6 @@ class Layer0Estimator:
         
         H_new[8] = m
         H_new[21] = n
-        pass # print(f"  修正后: 8号={m}, 21号={n}, 总计={m+n}")
         return H_new
     
 

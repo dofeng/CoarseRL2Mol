@@ -1055,60 +1055,39 @@ class FlexAllocator:
     # ---------- Phase 5: Allocate remaining (balanced) ----------
     def _allocate_remaining(self, avail_11: int, avail_23: int, avail_22: int) -> Tuple[List[ChainSpec], int]:
         chains = []
-        cap = MAX_23_PER_CHAIN
-        # Reserve 11 for side chains: each 22 needs 1×11
-        reserved_11_for_side = min(avail_22, avail_11)
-        bridge_11 = avail_11 - reserved_11_for_side
+        # 先把 side/bridge 两类 extra 都“种出来”，再把剩余 23 交给水填充做均衡注水。
+        # 这样可避免一开始就把绝大多数 23 吃进长 bridge extra，而 side extra 只剩 11-22。
 
-        # Bridges: use bridge_11 pool, but distribute 23s as evenly as possible
-        # to avoid creating too many dense 11-23-11 extras.
-        n_bridges = bridge_11 // 2
-        if n_bridges > 0 and avail_23 > 0:
-            actual_bridges = min(n_bridges, avail_23)
-            base_len = max(1, min(cap, avail_23 // actual_bridges))
-            if avail_23 >= actual_bridges * 2:
-                base_len = max(base_len, 2)
+        # 1) 先创建全部可行的 extra side 基础链：11-22
+        side_count = min(avail_11, avail_22)
+        for _ in range(int(side_count)):
+            chains.append(ChainSpec('side', [11, 22], 'extra'))
+        avail_11 -= int(side_count)
+        avail_22 -= int(side_count)
 
-            bridge_lengths = [base_len] * actual_bridges
-            consumed_23 = base_len * actual_bridges
-            rem_23 = avail_23 - consumed_23
-            idx = 0
-            while rem_23 > 0 and bridge_lengths:
-                if bridge_lengths[idx] < cap:
-                    bridge_lengths[idx] += 1
-                    rem_23 -= 1
-                idx = (idx + 1) % len(bridge_lengths)
-                if idx == 0 and all(bl >= cap for bl in bridge_lengths):
-                    break
+        # 2) 再创建 extra bridge 的“种子”链，但只给最小种子长度，保留更多 23 给 Phase 5b 均衡注水
+        bridge_slots = int(avail_11 // 2)
+        if bridge_slots > 0 and avail_23 > 0:
+            if avail_23 >= 2:
+                seed_len = 2
+                actual_bridges = min(int(bridge_slots), int(avail_23 // 2))
+            else:
+                seed_len = 1
+                actual_bridges = min(int(bridge_slots), int(avail_23))
 
-            for n_23 in sorted(bridge_lengths, reverse=True):
-                comp = [11] + [23] * n_23 + [11]
+            for _ in range(int(actual_bridges)):
+                comp = [11] + [23] * int(seed_len) + [11]
                 chains.append(ChainSpec('bridge', comp, 'extra'))
+            avail_11 -= int(actual_bridges) * 2
+            avail_23 -= int(actual_bridges) * int(seed_len)
 
-            avail_11 -= actual_bridges * 2
-            avail_23 -= sum(bridge_lengths)
-
-        # Side chains: 11-22 (needs 0x23)
-        while avail_11 >= 1 and avail_22 >= 1:
-            comp = [11, 22]
-            chains.append(ChainSpec('side', comp, 'extra'))
-            avail_11 -= 1
-            avail_22 -= 1
-
-        # If bridge resources remain, prefer len>=2 extras before falling back to len=1.
-        while avail_11 >= 2 and avail_23 >= 2:
-            comp = [11, 23, 23, 11]
-            chains.append(ChainSpec('bridge', comp, 'extra'))
-            avail_11 -= 2
-            avail_23 -= 2
-
+        # 3) 若还没有任何 bridge extra，但又还有桥资源，则补最短 bridge 种子
         if not any(ch.origin_type == 'extra' and ch.chain_type == 'bridge' for ch in chains):
             while avail_11 >= 2 and avail_23 >= 1:
-                comp = [11, 23, 11]
-                chains.append(ChainSpec('bridge', comp, 'extra'))
+                chains.append(ChainSpec('bridge', [11, 23, 11], 'extra'))
                 avail_11 -= 2
                 avail_23 -= 1
-            
+
         return chains, avail_23
 
     def _prepare_branch_phase_resources(self) -> Dict[str, Any]:
@@ -1197,14 +1176,12 @@ class FlexAllocator:
             return excess_23
 
         def priority_key(ch: ChainSpec) -> Tuple[int, int, int]:
-            if ch.origin_type == 'extra' and ch.chain_type == 'bridge':
-                if ch.n_23 < 2:
-                    return (0, ch.n_23, 0)
-                if ch.n_23 < 3:
-                    return (1, ch.n_23, 0)
-                return (3, ch.n_23, 0)
+            # extra bridge / extra side 采用统一的“当前 n23 更短者优先”策略，
+            # tie 时轻微偏向 side，避免 bridge 独占所有剩余 23。
             if ch.origin_type == 'extra' and ch.chain_type == 'side':
-                return (2, ch.n_23, 1)
+                return (0, ch.n_23, 0)
+            if ch.origin_type == 'extra' and ch.chain_type == 'bridge':
+                return (0, ch.n_23, 1)
             return (4, ch.n_23, 2)
 
         # Water-filling: iteratively add 1 to the shortest fillable chain

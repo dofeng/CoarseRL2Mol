@@ -1,30 +1,20 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 import pandas as pd
 import copy
 import pickle
-import random
 from pathlib import Path
-from collections import Counter, defaultdict
-from typing import List, Tuple, Dict, Optional, Set
-import matplotlib.pyplot as plt
+from typing import List, Tuple, Dict, Optional
 
 # 导入项目内部模块
 from .coarse_graph import (
-    SU_DEFS, E_SU, SU_MAX_DEGREE, SU_PPM_RANGES,
-    NUM_SU_TYPES, NMR_DATA_POINTS, PPM_AXIS, PPM_MIN, PPM_MAX, PPM_STEP
+    E_SU, SU_PPM_RANGES, NUM_SU_TYPES, PPM_AXIS
 )
 from .s2n_model import S2NModel
 from .g2s_model import NMR_VAE
 # 导入拆分模块
 from .inverse_common import (
-    _NodeV3, L4_CONFIG, HOP1_PORT_COMBINATIONS,
-    lorentzian_spectrum, compute_r2_score, compute_segment_r2,
-    visualize_su_distribution, visualize_spectrum_comparison,
-    validate_connection, check_external_connection_requirement,
-    evaluate_spectrum_reconstruction, resample_spectrum_to_ppm_axis,
+    _NodeV3, L4_CONFIG, lorentzian_spectrum,
+    visualize_su_distribution, evaluate_spectrum_reconstruction, resample_spectrum_to_ppm_axis,
     normalize_spectrum_to_carbon_count,
 )
 from .inverse_layer0 import Layer0Estimator
@@ -53,7 +43,7 @@ class InversePipelineV3:
                  vae_model: NMR_VAE,
                  templates: Dict,
                  device: str = 'cuda',
-                 nmr_intensity_scale: float = 0.9):
+                 nmr_intensity_scale: float = 0.95):
         """
         初始化推理管道
         
@@ -65,7 +55,6 @@ class InversePipelineV3:
         """
         self.s2n = s2n_model.to(device).eval()
         self.vae = vae_model.to(device).eval()
-        self.templates = templates
         self.device = device
         self.nmr_intensity_scale = float(nmr_intensity_scale)
         
@@ -114,13 +103,6 @@ class InversePipelineV3:
              device=torch.device(device),
              layer0_estimator=self.layer0_estimator,
          )
-        
-        # 统计信息（用于调试）
-        self.stats = {
-            'synthetic_templates_created': 0,
-            'constraint_relaxations': 0,
-            'backtrack_operations': 0,
-        }
     
     def infer(self, S_target: torch.Tensor, E_target: torch.Tensor,
               save_intermediates: bool = True,
@@ -208,7 +190,6 @@ class InversePipelineV3:
         
         print("\n" + "=" * 80)
         print("逆向推理完成！")
-        print(f"统计信息: {self.stats}")
         print("=" * 80)
         
         return nodes, H_final
@@ -262,7 +243,9 @@ class InversePipelineV3:
                                          outer_patience: int = 3,
                                          outer_improve_eps: float = 1e-4) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object]]:
         """
-        多阶段调整流程：羰基→SU9→O→N→S→X，每个阶段都执行 L1→L2→L3→差谱→Layer4(stage)→L0修正
+        多阶段调整流程：
+        - 小循环仅执行 L1→L2→差谱→Layer4(stage)
+        - Layer3 只在所有阶段结束后做一次最终精修
         
         Args:
             stage_configs: 每个阶段的配置，格式如:
@@ -280,12 +263,9 @@ class InversePipelineV3:
         
         # 默认阶段配置
         default_stage_configs = {
-            'carbonyl': {'max_cycles': 3, 'max_moves': 5, 'score_rel_threshold': 0.15},
-            'su9': {'max_cycles': 3, 'max_moves': 5, 'score_rel_threshold': 0.15},
-            'ether': {'max_cycles': 2, 'max_moves': 10, 'peak_rel_threshold': 0.01},
-            'amine': {'max_cycles': 2, 'max_moves': 5, 'peak_rel_threshold': 0.01},
-            'thioether': {'max_cycles': 2, 'max_moves': 5, 'peak_rel_threshold': 0.01},
-            'halogen': {'max_cycles': 2, 'max_moves': 5, 'peak_rel_threshold': 0.01},
+            'block_a': {'max_cycles': 3, 'max_moves': 6, 'carbonyl_max_moves': 2, 'score_rel_threshold': 0.02, 'peak_rel_threshold': 0.01},
+            'block_b': {'max_cycles': 2, 'max_moves_each': 3, 'peak_rel_threshold': 0.01},
+            'block_c': {'max_cycles': 3, 'max_moves': 6, 'peak_rel_threshold': 0.01, 'enable_su22_adjust': False},
             'skeleton': {'max_cycles': 10, 'max_steps': 4},  # Resource-allocation-based skeleton SU adjustment
         }
         
@@ -294,7 +274,7 @@ class InversePipelineV3:
                 if stage in default_stage_configs:
                     default_stage_configs[stage].update(cfg)
         
-        stages = ['carbonyl', 'su9', 'ether', 'amine', 'thioether', 'halogen', 'skeleton']
+        stages = ['block_a', 'block_b', 'block_c', 'skeleton']
         
         H_curr = H_init.detach().clone()
         best_nodes: Optional[List[_NodeV3]] = None
@@ -359,21 +339,7 @@ class InversePipelineV3:
                 except Exception as e:
                     print(f"  [Layer2] 失败: {e}")
                 
-                # L3: z向量微调
-                try:
-                    nodes, _r2_l3 = self.layer3_adjust_templates(
-                        nodes=nodes,
-                        S_target=S_target,
-                        E_target=E_target,
-                        max_iters=30,
-                        lib_path=eval_lib_path,
-                        output_dir=str(Path(cycle_dir) / 'layer3_eval'),
-                        hwhm=float(eval_hwhm),
-                    )
-                except Exception as e:
-                    print(f"  [Layer3] 失败: {e}")
-                
-                # 计算差谱
+                # 计算 Layer1-2 差谱
                 diff_info = self._compute_difference_spectrum_from_nodes_mu(
                     nodes=nodes,
                     S_target=S_target,
@@ -381,10 +347,14 @@ class InversePipelineV3:
                     hwhm=float(eval_hwhm),
                 )
                 r2_before = float(diff_info.get('r2', 0.0))
-                print(f"  [L1-2-3] r2={r2_before:.4f}")
+                print(f"  [L1-2] r2={r2_before:.4f}")
                 
                 # Layer4: 当前阶段的SU调整
                 H_base = self._histogram_from_nodes(nodes)
+                prev_H = H_curr.detach().clone()
+                prev_nodes = copy.deepcopy(nodes)
+                moves = []
+                meta: Dict[str, object] = {}
                 try:
                     # 如果是 Skeleton 阶段，首次循环仅进行纯资源分配修复（不传差谱），
                     # 修复好资源拓扑并重构图之后，后续循环才有有意义的差谱。
@@ -412,14 +382,63 @@ class InversePipelineV3:
                     H_adjusted = H_base
                     n_moves = 0
                 
-                changed = not bool(torch.equal(H_adjusted.detach().cpu(), H_base.detach().cpu()))
-                H_curr = H_adjusted.detach().clone()
+                counts_changed = not bool(torch.equal(H_adjusted.detach().cpu(), H_base.detach().cpu()))
+                topology_changed = bool(int(n_moves) > 0)
+                changed = bool(counts_changed or topology_changed)
+                candidate_nodes = nodes
+                candidate_H = H_base.detach().clone()
+                candidate_r2 = r2_before
+
+                if changed:
+                    try:
+                        candidate_H = H_adjusted.detach().clone()
+
+                        if stage == 'skeleton' and topology_changed and not counts_changed:
+                            candidate_nodes = copy.deepcopy(nodes)
+                        else:
+                            candidate_nodes = self.layer1_assign(
+                                H_init=candidate_H,
+                                S_target=S_target,
+                                E_target=E_target,
+                                eval_nmr=False,
+                                eval_output_dir=str(Path(cycle_dir) / 'layer1_post_stage'),
+                                eval_lib_path=eval_lib_path,
+                                eval_hwhm=eval_hwhm,
+                                eval_allow_approx=eval_allow_approx,
+                                enable_hop1_adjust=enable_hop1_adjust,
+                                hop1_adjust_iterations=hop1_adjust_iterations,
+                                hop1_neg_threshold=hop1_neg_threshold,
+                                hop1_pos_threshold=hop1_pos_threshold,
+                            )
+                        candidate_nodes = self.layer2_assign(
+                            nodes=candidate_nodes,
+                            H_center=self._histogram_from_nodes(candidate_nodes),
+                            S_target=S_target,
+                            E_target=E_target,
+                            lib_path=eval_lib_path,
+                            output_dir=str(Path(cycle_dir) / 'layer2_post_stage'),
+                            eval_hwhm=float(eval_hwhm),
+                        )
+                        candidate_diff = self._compute_difference_spectrum_from_nodes_mu(
+                            nodes=candidate_nodes,
+                            S_target=S_target,
+                            E_target=E_target,
+                            hwhm=float(eval_hwhm),
+                        )
+                        candidate_r2 = float(candidate_diff.get('r2', 0.0))
+                        print(f"  [Layer4-{stage.upper()} 后 L1-2] r2={candidate_r2:.4f}")
+                    except Exception as e:
+                        print(f"  [Layer4-{stage.upper()} 后重建失败] {e}")
+                        candidate_nodes = prev_nodes
+                        candidate_H = H_base.detach().clone()
+                        candidate_r2 = r2_before
+                        changed = False
                 
                 # 记录历史
                 global_history.append({
                     'stage': stage,
                     'cycle': cycle + 1,
-                    'r2': r2_before,
+                    'r2': candidate_r2,
                     'n_moves': n_moves,
                     'changed': changed,
                 })
@@ -427,29 +446,27 @@ class InversePipelineV3:
                 # 更新最佳结果 (skeleton 拓扑调整允许暂时的小幅 R2 下降)
                 is_accepted = False
                 if stage == 'skeleton':
-                    # 对于拓扑调整，只要不发生断崖式下跌 (>0.2)，且发生变化，就倾向于接受，让拓扑约束起效
-                    if r2_before > best_r2 - 0.2:
-                        is_accepted = True
-                    elif r2_before > best_r2 + outer_improve_eps:
+                    if changed:
                         is_accepted = True
                 else:
-                    if r2_before > best_r2 + outer_improve_eps:
+                    if candidate_r2 > best_r2 + outer_improve_eps:
                         is_accepted = True
 
                 if is_accepted:
-                    if r2_before > best_r2:
-                        best_r2 = r2_before
-                    # 保存“已评估”的一致状态，避免把未评估的 Layer4 直方图和旧 nodes 混在一起
-                    best_nodes = copy.deepcopy(nodes)
-                    best_H = H_base.detach().clone()
+                    H_curr = candidate_H.detach().clone()
+                    nodes = candidate_nodes
+                    if candidate_r2 > best_r2:
+                        best_r2 = candidate_r2
+                    best_nodes = copy.deepcopy(candidate_nodes)
+                    best_H = candidate_H.detach().clone()
                     best_seed_H = H_curr.detach().clone()
                     stage_no_improve = 0
-                    print(f"  ✓ 接受 ({stage} 策略): r2={r2_before:.4f}, 历史 best_r2={best_r2:.4f}")
+                    print(f"  ✓ 接受 ({stage} 策略): r2={candidate_r2:.4f}, 历史 best_r2={best_r2:.4f}")
                 else:
                     stage_no_improve += 1
-                    print(f"  ✗ 拒绝 ({stage} 策略): r2={r2_before:.4f}, 历史 best_r2={best_r2:.4f}, no_improve={stage_no_improve}/{outer_patience}")
-                    # 如果拒绝，回退 H
-                    H_curr = best_seed_H.detach().clone() if best_seed_H is not None else H_curr
+                    print(f"  ✗ 拒绝 ({stage} 策略): r2={candidate_r2:.4f}, 历史 best_r2={best_r2:.4f}, no_improve={stage_no_improve}/{outer_patience}")
+                    H_curr = prev_H
+                    nodes = prev_nodes
                 
                 # 本阶段提前终止条件
                 if not changed and stage_no_improve >= outer_patience:
@@ -469,6 +486,44 @@ class InversePipelineV3:
         
         out_nodes = best_nodes if best_nodes is not None else nodes
         out_H = best_H if best_H is not None else H_curr
+        try:
+            final_nodes = self.layer1_assign(
+                H_init=out_H,
+                S_target=S_target,
+                E_target=E_target,
+                eval_nmr=False,
+                eval_output_dir=str(Path(output_dir) / 'final_layer1'),
+                eval_lib_path=eval_lib_path,
+                eval_hwhm=eval_hwhm,
+                eval_allow_approx=eval_allow_approx,
+                enable_hop1_adjust=enable_hop1_adjust,
+                hop1_adjust_iterations=hop1_adjust_iterations,
+                hop1_neg_threshold=hop1_neg_threshold,
+                hop1_pos_threshold=hop1_pos_threshold,
+            )
+            final_nodes = self.layer2_assign(
+                nodes=final_nodes,
+                H_center=self._histogram_from_nodes(final_nodes),
+                S_target=S_target,
+                E_target=E_target,
+                lib_path=eval_lib_path,
+                output_dir=str(Path(output_dir) / 'final_layer2'),
+                eval_hwhm=float(eval_hwhm),
+            )
+            final_nodes, final_r2 = self.layer3_adjust_templates(
+                nodes=final_nodes,
+                S_target=S_target,
+                E_target=E_target,
+                max_iters=30,
+                lib_path=eval_lib_path,
+                output_dir=str(Path(output_dir) / 'final_layer3'),
+                hwhm=float(eval_hwhm),
+            )
+            out_nodes = final_nodes
+            out_H = self._histogram_from_nodes(final_nodes).detach().clone()
+            best_r2 = max(float(best_r2), float(final_r2))
+        except Exception as e:
+            print(f"[Final Layer3] 失败: {e}")
         summary = {
             'best_r2': float(best_r2),
             'total_stages': len(stages),
@@ -493,6 +548,11 @@ class InversePipelineV3:
                       eval_nmr: bool = True, eval_output_dir: str = 'inverse_result',
                       eval_lib_path: Optional[str] = None, eval_hwhm: float = 1.0,
                       eval_allow_approx: bool = True,
+                      enable_carbonyl_joint_adjust: bool = True,
+                      carbonyl_joint_iterations: int = 3,
+                      carbonyl_joint_max_adjustments: int = 3,
+                      carbonyl_joint_pos_threshold: float = 0.08,
+                      carbonyl_joint_neg_threshold: float = 0.08,
                       enable_hop1_adjust: bool = False,
                       hop1_adjust_iterations: int = 3,
                       hop1_neg_threshold: float = -0.5,
@@ -503,6 +563,11 @@ class InversePipelineV3:
             eval_nmr=eval_nmr, eval_output_dir=eval_output_dir,
             eval_lib_path=eval_lib_path, eval_hwhm=eval_hwhm,
             eval_allow_approx=eval_allow_approx,
+            enable_carbonyl_joint_adjust=enable_carbonyl_joint_adjust,
+            carbonyl_joint_iterations=carbonyl_joint_iterations,
+            carbonyl_joint_max_adjustments=carbonyl_joint_max_adjustments,
+            carbonyl_joint_pos_threshold=carbonyl_joint_pos_threshold,
+            carbonyl_joint_neg_threshold=carbonyl_joint_neg_threshold,
             enable_hop1_adjust=enable_hop1_adjust,
             hop1_adjust_iterations=hop1_adjust_iterations,
             hop1_neg_threshold=hop1_neg_threshold,
@@ -518,41 +583,6 @@ class InversePipelineV3:
             hwhm=hwhm, allow_approx=allow_approx
         )
     
-    def _get_template_library(self, lib_path: Optional[str]) -> Dict[str, object]:
-        """委托给Layer1Assigner获取模板库"""
-        return self.layer1_assigner._get_template_library(lib_path)
-    
-    def _multiset_from_counter(self, cnt: Counter) -> Tuple[int, ...]:
-        """委托给Layer1Assigner转换multiset"""
-        return self.layer1_assigner._multiset_from_counter(cnt)
-    
-    def _select_template_key_layer2(self, center_su: int, hop1_ms: Tuple[int, ...],
-                                    hop2_ms: Tuple[int, ...], lib: Dict[str, object]) -> Tuple[Optional[Tuple], str]:
-        """委托给Layer1Assigner选择模板键"""
-        return self.layer1_assigner._select_template_key_layer2(center_su, hop1_ms, hop2_ms, lib)
-    
-    def _global_embed_from_elements(self, E_target: torch.Tensor) -> torch.Tensor:
-        """委托给Layer1Assigner获取全局嵌入"""
-        return self.layer1_assigner._global_embed_from_elements(E_target)
-    
-    def _decode_mu_pi_from_z(self, center_su: int, z_vec: torch.Tensor, 
-                             g_embed: torch.Tensor) -> Optional[Tuple[float, float]]:
-        """委托给Layer1Assigner解码mu/pi"""
-        return self.layer1_assigner._decode_mu_pi_from_z(center_su, z_vec, g_embed)
-    
-    def _hop1_to_multiset(self, hop1_su: Dict[int, int]) -> Tuple[int, ...]:
-        """委托给Layer1Assigner转换hop1 multiset"""
-        return self.layer1_assigner._hop1_to_multiset(hop1_su)
-    
-    def _get_layer1_library_index(self, lib_path: Optional[str]) -> Dict[str, object]:
-        """委托给Layer1Assigner获取Layer1库索引"""
-        return self.layer1_assigner._get_layer1_library_index(lib_path)
-    
-    def _lookup_mu_pi_by_hop1(self, center_su: int, hop1_ms: Tuple[int, ...], 
-                              lib_index: Dict[str, object], allow_approx: bool = True):
-        """委托给Layer1Assigner查找mu/pi"""
-        return self.layer1_assigner._lookup_mu_pi_by_hop1(center_su, hop1_ms, lib_index, allow_approx)
-    
     def evaluate_layer1_nmr_with_library(self, nodes: List[_NodeV3], S_target: torch.Tensor,
                                          lib_path: Optional[str] = None, output_dir: str = 'inverse_result',
                                          hwhm: float = 1.0, allow_approx: bool = True) -> Dict[str, float]:
@@ -561,98 +591,6 @@ class InversePipelineV3:
             nodes=nodes, S_target=S_target, lib_path=lib_path,
             output_dir=output_dir, hwhm=hwhm, allow_approx=allow_approx
         )
-    
-    def _adjust_hydrogen(self, H: torch.Tensor, E_target: torch.Tensor) -> torch.Tensor:
-        """委托给Layer0Estimator调整氢元素"""
-        return self.layer0_estimator._adjust_hydrogen(H, E_target)
-    
-    def validate_graph_consistency(self, nodes: List[_NodeV3], 
-                                    H: torch.Tensor, 
-                                    E_target: Optional[torch.Tensor] = None,
-                                    verbose: bool = False) -> Tuple[bool, List[str]]:
-        """
-        验证图的全局一致性
-        
-        检查项：
-        1. 节点数量与直方图匹配
-        2. SU类型分布与直方图匹配
-        3. 互为1-hop对称性
-        4. hop1_su与hop1_ids一致性
-        5. 度数约束
-        6. 元素组成匹配（可选）
-        
-        Args:
-            nodes: 节点列表
-            H: 预期的SU直方图
-            E_target: 目标元素组成（可选）
-            verbose: 是否打印详细错误信息
-        
-        Returns:
-            (is_valid, error_messages)
-        """
-        errors = []
-        
-        # 1. 检查节点数量
-        expected_total = int(H.sum().item())
-        actual_total = len(nodes)
-        if actual_total != expected_total:
-            errors.append(f"节点数量不匹配: 实际{actual_total} vs 预期{expected_total}")
-        
-        # 2. 检查SU类型分布
-        H_actual = self._histogram_from_nodes(nodes)
-        for su_type in range(NUM_SU_TYPES):
-            expected = int(H[su_type].item())
-            actual = int(H_actual[su_type].item())
-            if expected != actual:
-                errors.append(f"SU{su_type}数量不匹配: 实际{actual} vs 预期{expected}")
-        
-        # 3. 检查互为1-hop对称性
-        for n in nodes:
-            for neighbor_id in n.hop1_ids:
-                if neighbor_id >= len(nodes):
-                    errors.append(f"节点{n.global_id}: hop1_ids包含越界ID {neighbor_id}")
-                    continue
-                neighbor = nodes[neighbor_id]
-                if n.global_id not in neighbor.hop1_ids:
-                    errors.append(f"1-hop不对称: {n.global_id}->{neighbor_id} 但反向缺失")
-        
-        # 4. 检查hop1_su与hop1_ids一致性
-        for n in nodes:
-            actual_counter = Counter()
-            for nid in n.hop1_ids:
-                if nid < len(nodes):
-                    actual_counter[nodes[nid].su_type] += 1
-            
-            if actual_counter != n.hop1_su:
-                errors.append(f"节点{n.global_id}(SU{n.su_type}): hop1_su={dict(n.hop1_su)} != 实际={dict(actual_counter)}")
-        
-        # 5. 检查每个节点的内部一致性
-        for n in nodes:
-            is_valid, node_errors = n.validate_hop1_consistency()
-            if not is_valid:
-                errors.extend(node_errors)
-        
-        # 6. 检查元素组成（可选）
-        if E_target is not None:
-            E_pred = torch.matmul(H_actual.float().to(self.device), self.E_SU)
-            E_target = E_target.to(self.device)
-            E_diff = torch.abs(E_pred - E_target)
-            rel_err = E_diff / (E_target + 1e-6)
-            
-            for i, elem_name in enumerate(['C', 'H', 'O', 'N', 'S', 'X']):
-                if rel_err[i] > 0.05:  # 5%误差容忍
-                    errors.append(f"元素{elem_name}误差过大: 预测{E_pred[i]:.1f} vs 目标{E_target[i]:.1f} (相对误差{rel_err[i]:.2%})")
-        
-        if verbose and errors:
-            print("\n" + "=" * 60)
-            print("⚠️  图一致性验证失败:")
-            for i, err in enumerate(errors[:10], 1):  # 只显示前10个错误
-                print(f"  {i}. {err}")
-            if len(errors) > 10:
-                print(f"  ... 还有 {len(errors) - 10} 个错误")
-            print("=" * 60)
-        
-        return len(errors) == 0, errors
 
     # ========================================================================
     # Layer2: 2-hop分配（改进版）
@@ -824,25 +762,6 @@ class InversePipelineV3:
         if float(s) != 1.0:
             pi_t = pi_t * float(s)
         return lorentzian_spectrum(mu_t, pi_t, ppm_axis, hwhm=float(hwhm))
-    
-    def _save_layer1_results(self, nodes: List[_NodeV3], E_target: torch.Tensor):
-        """保存Layer1结果"""
-        pass
-    
-    def _save_layer2_results(self, nodes: List[_NodeV3], S_target: torch.Tensor, 
-                             E_target: torch.Tensor):
-        """保存Layer2结果"""
-        pass
-    
-    def _save_layer3_results(self, nodes: List[_NodeV3], S_target: torch.Tensor,
-                             E_target: torch.Tensor, r2: float):
-        """保存Layer3结果"""
-        pass
-    
-    def _save_layer4_results(self, nodes: List[_NodeV3], S_target: torch.Tensor,
-                             E_target: torch.Tensor):
-        """保存Layer4结果"""
-        pass
 
 # ============================================================================
 # 工具函数（用于外部调用）

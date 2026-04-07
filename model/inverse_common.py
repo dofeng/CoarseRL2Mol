@@ -1,16 +1,13 @@
 import math
 import torch
-import torch.nn as nn
 import numpy as np
-import pandas as pd
 from pathlib import Path
 from collections import Counter
 from typing import Any, List, Tuple, Dict, Optional, Set
 import matplotlib.pyplot as plt
 
 from .coarse_graph import (
-    SU_DEFS, E_SU, SU_MAX_DEGREE, SU_PPM_RANGES,
-    NUM_SU_TYPES, NMR_DATA_POINTS, PPM_AXIS, PPM_MIN, PPM_MAX, PPM_STEP
+    SU_DEFS, E_SU, NUM_SU_TYPES, PPM_AXIS, PPM_STEP
 )
 # ============================================================================
 # 全局常量配置

@@ -6,8 +6,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .coarse_graph import NUM_SU_TYPES, PPM_AXIS, E_SU, SU_DEFS
-from .inverse_common import _NodeV3, lorentzian_spectrum, compute_r2_score, visualize_spectrum_comparison, evaluate_spectrum_reconstruction
+from .coarse_graph import NUM_SU_TYPES, PPM_AXIS, E_SU
+from .inverse_common import _NodeV3, lorentzian_spectrum, evaluate_spectrum_reconstruction
 
 class Layer3Estimator:
     def __init__(self, device: torch.device, vae_model=None, lib_path: Optional[str] = None):
