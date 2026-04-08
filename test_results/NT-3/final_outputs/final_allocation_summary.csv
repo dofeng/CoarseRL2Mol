@@ -1,2 +1,0 @@
-ok,reason,selected_mode,strict_ok,strict_reason,relaxed_ok,relaxed_reason,unallocated_bridge,unallocated_branch,required_extra_11,required_extra_22,required_extra_23,remaining_11,remaining_22,remaining_23,remaining_24,remaining_25,cluster_count,rigid_pairs,flexible_bridge_count,flexible_bridge_min,flexible_bridge_limit,side_to_22_count,aliphatic_total,aliphatic_min_total
-True,ok,strict,True,ok,True,ok,0,0,0,0,0,0,0,0,0,0,26,21,19,6,20,12,140,89
