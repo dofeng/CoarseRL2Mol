@@ -132,11 +132,11 @@ class FlexAllocator:
 
     @staticmethod
     def _refresh_chain_counts(chain: ChainSpec):
-        chain.n_11 = chain.composition.count(11)
-        chain.n_23 = chain.composition.count(23)
-        chain.n_22 = chain.composition.count(22)
-        chain.n_24 = chain.composition.count(24)
-        chain.n_25 = chain.composition.count(25)
+        chain.n_11 = int(sum(1 for x in chain.composition if int(x) in TO_11))
+        chain.n_23 = int(sum(1 for x in chain.composition if int(x) in TO_23))
+        chain.n_22 = int(sum(1 for x in chain.composition if int(x) in TO_22))
+        chain.n_24 = int(sum(1 for x in chain.composition if int(x) in TO_24))
+        chain.n_25 = int(sum(1 for x in chain.composition if int(x) == 25))
 
     @staticmethod
     def _side_branch_insert_index(chain: ChainSpec) -> int:
@@ -506,13 +506,25 @@ class FlexAllocator:
         """Prefer reserved terminal chains for branch-side ending.
         Returns (n_23, n_22, source_tag).
         """
-        if btype in ('24_A', '24_C'):
+        prefer_long = btype in ('24_A', '24_C', '25_aro', '25_ali')
+        if prefer_long:
+            if remaining_E:
+                remaining_E.pop(0)
+                return 2, 1, 'E'
+            if remaining_G:
+                remaining_G.pop(0)
+                return 1, 1, 'G'
+        else:
             if remaining_G:
                 remaining_G.pop(0)
                 return 1, 1, 'G'
             if remaining_E:
                 remaining_E.pop(0)
                 return 2, 1, 'E'
+        if btype in ('24_A', '24_C'):
+            return 1, 1, 'raw'
+        if btype in ('25_aro', '25_ali'):
+            return 1, 1, 'raw'
         b23, b22 = self._branch_cost(btype)
         return int(b23), int(b22), 'raw'
 
@@ -648,12 +660,16 @@ class FlexAllocator:
     
     def _allocate_branches(self, avail_11: int, avail_23: int, avail_22: int,
                            remaining_E: Optional[List[SUNode]] = None,
-                           remaining_G: Optional[List[SUNode]] = None):
+                           remaining_G: Optional[List[SUNode]] = None,
+                           remaining_B: Optional[List[SUNode]] = None,
+                           remaining_D: Optional[List[SUNode]] = None):
         """Allocate branch structures for SU 24 and 25.
         Returns: (chains, avail_11, avail_23, avail_22, avail_24, avail_25)
         """
         remaining_E = list(remaining_E or [])
         remaining_G = list(remaining_G or [])
+        remaining_B = list(remaining_B if remaining_B is not None else self._type_lists.get('B', []))
+        remaining_D = list(remaining_D if remaining_D is not None else self._type_lists.get('D', []))
         avail_24 = self._result.total_24
         chains, avail_11, avail_23, avail_22, avail_25 = self._allocate_su25_only(
             avail_11, avail_23, avail_22
@@ -718,16 +734,26 @@ class FlexAllocator:
             tail_sources = []
             prev_E = list(remaining_E)
             prev_G = list(remaining_G)
+            prev_D = list(remaining_D)
             for n in base_nodes + outer_nodes:
                 b23, b22, tail_src = self._consume_reserved_branch_tail(n[1], remaining_E, remaining_G)
                 branch_23 += b23
                 branch_22 += b22
                 tail_sources.append(tail_src)
 
-            total_23_needed = ring_23_needed + branch_23
+            inner_connectors = []
+            for node in list(remaining_D):
+                if int(node.su_type) not in {3, 27, 29}:
+                    continue
+                inner_connectors.append(node)
+                if len(inner_connectors) >= min(2, int(ring_23_needed)):
+                    break
+            ring_23_effective = max(0, int(ring_23_needed - len(inner_connectors)))
+            total_23_needed = ring_23_effective + branch_23
 
             if avail_11 >= 2 and avail_23 >= total_23_needed and avail_22 >= branch_22 and avail_24 >= nodes_to_consume:
-                comp = [11] + [24] * nodes_to_consume + [23] * total_23_needed + [22] * branch_22 + [11]
+                ring_core = [24] * nodes_to_consume + [int(n.su_type) for n in inner_connectors] + [23] * ring_23_effective
+                comp = [11] + ring_core + [23] * branch_23 + [22] * branch_22 + [11]
                 ids = [bridge1[0].global_id, bridge2[0].global_id] + [n[0].global_id for n in base_nodes + outer_nodes]
                 desc = f"Fused-S-ring(Base:{base_str}+Br:CC)+Out:{out_str}"
 
@@ -743,6 +769,8 @@ class FlexAllocator:
 
                 fused_meta = {
                     'tail_sources': tail_sources,
+                    'inner_connector_ids': [int(n.global_id) for n in inner_connectors],
+                    'inner_connector_types': [int(n.su_type) for n in inner_connectors],
                     'branch_tail_lengths': {
                         'base_upper': int(base_upper_len),
                         'base_lower': int(base_lower_len),
@@ -755,10 +783,14 @@ class FlexAllocator:
                 avail_23 -= total_23_needed
                 avail_22 -= branch_22
                 avail_24 -= nodes_to_consume
+                for node in inner_connectors:
+                    if node in remaining_D:
+                        remaining_D.remove(node)
                 continue
 
             remaining_E = prev_E
             remaining_G = prev_G
+            remaining_D = prev_D
             C.insert(0, bridge2)
             C.insert(0, bridge1)
             for s in reversed(base_nodes):
@@ -863,10 +895,264 @@ class FlexAllocator:
                 CD.insert(0, cd1)
             a_idx += 1
 
+        # ===== Step 2.25: Dedicated vertical rings with 27 / 29 pairs =====
+        def _extract_connectors(pool_b: List[SUNode], pool_d: List[SUNode], target_su: int, count: int) -> List[SUNode]:
+            picked: List[SUNode] = []
+            for seq in (pool_b, pool_d):
+                for node in list(seq):
+                    if int(node.su_type) != int(target_su):
+                        continue
+                    picked.append(node)
+                    if len(picked) >= int(count):
+                        return picked
+            return picked
+
+        for special_su, label in ((29, '29'), (27, '27')):
+            while A:
+                special_nodes = _extract_connectors(remaining_B, remaining_D, special_su, 2)
+                if len(special_nodes) < 2:
+                    break
+                a_node = A.pop(0)
+                ring_23 = 5
+                if avail_11 >= 1 and avail_23 >= ring_23 and avail_24 >= 1:
+                    bridge_core = [
+                        19 if int(special_su) == 29 else (20 if int(special_su) == 27 else 23),
+                        int(special_su),
+                        19 if int(special_su) == 29 else (20 if int(special_su) == 27 else 23),
+                        int(special_su),
+                        19 if int(special_su) == 29 else (20 if int(special_su) == 27 else 23),
+                    ]
+                    comp = [11, 24] + bridge_core
+                    ids = [a_node[0].global_id] + [n.global_id for n in special_nodes]
+                    desc = f"V-ring(A+{label}+{label})"
+                    vr_meta = {
+                        'connector_bridge_ids': [int(n.global_id) for n in special_nodes],
+                        'connector_bridge_types': [int(n.su_type) for n in special_nodes],
+                    }
+                    chains.append(ChainSpec('vertical_ring_special', comp, desc, ids, metadata=vr_meta))
+                    avail_11 -= 1
+                    avail_23 -= ring_23
+                    avail_24 -= 1
+                    for node in special_nodes:
+                        if node in remaining_B:
+                            remaining_B.remove(node)
+                        if node in remaining_D:
+                            remaining_D.remove(node)
+                    continue
+                A.insert(0, a_node)
+                break
+
+        # ===== Step 2.5: Vertical Rings with special bridge connectors =====
+        # Allow a single A-type 24 to close a vertical aliphatic ring using
+        # two special bridge nodes (e.g. SU3 / SU27 / SU29) when CD-type 24
+        # resources are insufficient.
+        connector_B = [n for n in remaining_B if int(n.su_type) in {3, 27, 29}]
+        connector_D = [n for n in remaining_D if int(n.su_type) in {3, 27, 29}]
+        connector_pool = connector_B + connector_D
+        while A and len(connector_pool) >= 2:
+            a_node = A.pop(0)
+            conn1 = connector_pool.pop(0)
+            conn2 = connector_pool.pop(0)
+            ring_23 = 5
+            if avail_11 >= 1 and avail_23 >= ring_23 and avail_24 >= 1:
+                bridge_core = [23, int(conn1.su_type), 23, int(conn2.su_type), 23]
+                comp = [11, 24] + bridge_core
+                ids = [a_node[0].global_id, conn1.global_id, conn2.global_id]
+                desc = f"V-ring(A+bridge:{int(conn1.su_type)}+{int(conn2.su_type)})"
+                vr_meta = {
+                    'connector_bridge_ids': [int(conn1.global_id), int(conn2.global_id)],
+                    'connector_bridge_types': [int(conn1.su_type), int(conn2.su_type)],
+                }
+                chains.append(ChainSpec('vertical_ring_connector', comp, desc, ids, metadata=vr_meta))
+                avail_11 -= 1
+                avail_23 -= ring_23
+                avail_24 -= 1
+                if conn1 in remaining_B:
+                    remaining_B.remove(conn1)
+                if conn1 in remaining_D:
+                    remaining_D.remove(conn1)
+                if conn2 in remaining_B:
+                    remaining_B.remove(conn2)
+                if conn2 in remaining_D:
+                    remaining_D.remove(conn2)
+                connector_B = [n for n in remaining_B if int(n.su_type) in {3, 27, 29}]
+                connector_D = [n for n in remaining_D if int(n.su_type) in {3, 27, 29}]
+                connector_pool = connector_B + connector_D
+                continue
+            A.insert(0, a_node)
+            break
+
         # ===== Step 3: Side Rings (侧边脂肪环) =====
         AB = A + B
         remaining = AB + CD
-        
+
+        # ===== Step 2.75: C-dominant fused side rings =====
+        c_pool = [n for n in C]
+        mixed_cd_pool = [n for n in (C + D) if n not in c_pool[:2]]
+        while len(c_pool) >= 2 and len(mixed_cd_pool) >= 2:
+            fixed_c1 = c_pool.pop(0)
+            fixed_c2 = c_pool.pop(0)
+            node1 = mixed_cd_pool.pop(0)
+            node2 = mixed_cd_pool.pop(0)
+            for candidate in (fixed_c1, fixed_c2, node1, node2):
+                if candidate in C:
+                    C.remove(candidate)
+                if candidate in D:
+                    D.remove(candidate)
+
+            prev_E = list(remaining_E)
+            prev_G = list(remaining_G)
+            b1_23, b1_22, src1 = self._consume_reserved_branch_tail(node1[1], remaining_E, remaining_G)
+            b2_23, b2_22, src2 = self._consume_reserved_branch_tail(node2[1], remaining_E, remaining_G)
+            branch_23 = b1_23 + b2_23
+            branch_22 = b1_22 + b2_22
+            ring_23_needed = 4
+            c_inner_connectors = []
+            for node in list(remaining_D):
+                if int(node.su_type) not in {3, 27, 29}:
+                    continue
+                c_inner_connectors.append(node)
+                if len(c_inner_connectors) >= min(2, int(ring_23_needed)):
+                    break
+            ring_23_effective = max(0, int(ring_23_needed - len(c_inner_connectors)))
+            total_23_needed = ring_23_effective + branch_23
+
+            if avail_11 >= 2 and avail_23 >= total_23_needed and avail_22 >= branch_22 and avail_24 >= 4:
+                comp = [11, 24, 24] + [int(n.su_type) for n in c_inner_connectors] + [23] * ring_23_effective + [24, 24, 11]
+                comp += [23] * branch_23 + [22] * branch_22
+                ids = [fixed_c1[0].global_id, fixed_c2[0].global_id, node1[0].global_id, node2[0].global_id]
+                desc = f"Fused-S-ring(Cdom:{node1[1][-1]}+{node2[1][-1]})"
+                fused_meta = {
+                    'fixed_c_ids': [int(fixed_c1[0].global_id), int(fixed_c2[0].global_id)],
+                    'inner_connector_ids': [int(n.global_id) for n in c_inner_connectors],
+                    'inner_connector_types': [int(n.su_type) for n in c_inner_connectors],
+                    'tail_sources': [src1, src2],
+                    'branch_tail_lengths': {
+                        'outer_upper': b1_23 + b1_22,
+                        'outer_lower': b2_23 + b2_22,
+                    },
+                }
+                chains.append(ChainSpec('fused_side_ring_c', comp, desc, ids, metadata=fused_meta))
+                avail_11 -= 2
+                avail_23 -= total_23_needed
+                avail_22 -= branch_22
+                avail_24 -= 4
+                for node in c_inner_connectors:
+                    if node in remaining_D:
+                        remaining_D.remove(node)
+                continue
+
+            remaining_E = prev_E
+            remaining_G = prev_G
+            for candidate in (node2, node1, fixed_c2, fixed_c1):
+                if candidate[1] == '24_C':
+                    C.insert(0, candidate)
+                else:
+                    D.insert(0, candidate)
+            break
+
+        special_b_connectors = [
+            n for n in remaining_B
+            if int(n.su_type) == 3 and any(int(h) == 9 for h in list(n.hop1))
+        ]
+        while len(CD) >= 2 and len(special_b_connectors) >= 2:
+            n1 = CD.pop(0)
+            n2 = CD.pop(0)
+            conn1 = special_b_connectors.pop(0)
+            conn2 = special_b_connectors.pop(0)
+            if conn1 in remaining_B:
+                remaining_B.remove(conn1)
+            if conn2 in remaining_B:
+                remaining_B.remove(conn2)
+
+            prev_E = list(remaining_E)
+            prev_G = list(remaining_G)
+            b1_23, b1_22, src1 = self._consume_reserved_branch_tail(n1[1], remaining_E, remaining_G)
+            b2_23, b2_22, src2 = self._consume_reserved_branch_tail(n2[1], remaining_E, remaining_G)
+            branch_23 = b1_23 + b2_23
+            ring_22 = b1_22 + b2_22
+            total_23 = 2 + branch_23
+
+            if avail_11 >= 2 and avail_23 >= total_23 and avail_22 >= ring_22 and avail_24 >= 2:
+                comp = [11, int(conn1.su_type), 24, 24, int(conn2.su_type), 11] + [23] * branch_23 + [22] * ring_22
+                ids = [n1[0].global_id, n2[0].global_id, conn1.global_id, conn2.global_id]
+                desc = f"S-ring(connB3:{n1[1][-1]}+{n2[1][-1]})"
+                sr_meta = {
+                    'tail_sources': [src1, src2],
+                    'connector_ids': [int(conn1.global_id), int(conn2.global_id)],
+                    'connector_types': [int(conn1.su_type), int(conn2.su_type)],
+                    'side_ring_node_types': [n1[1], n2[1]],
+                    'branch_tail_lengths': {
+                        'upper': b1_23 + b1_22,
+                        'lower': b2_23 + b2_22,
+                    },
+                }
+                chains.append(ChainSpec('side_ring_connector', comp, desc, ids, metadata=sr_meta))
+                avail_11 -= 2
+                avail_23 -= total_23
+                avail_22 -= ring_22
+                avail_24 -= 2
+                continue
+
+            remaining_E = prev_E
+            remaining_G = prev_G
+            CD.insert(0, n2)
+            CD.insert(0, n1)
+            remaining_B.extend([conn1, conn2])
+            break
+
+        remaining = AB + CD
+
+        special_d_connectors = [
+            n for n in remaining_D
+            if int(n.su_type) in {3, 27, 29}
+        ]
+        while len(remaining) >= 2 and len(special_d_connectors) >= 2:
+            n1 = remaining.pop(0)
+            n2 = remaining.pop(0)
+            conn1 = special_d_connectors.pop(0)
+            conn2 = special_d_connectors.pop(0)
+            if conn1 in remaining_D:
+                remaining_D.remove(conn1)
+            if conn2 in remaining_D:
+                remaining_D.remove(conn2)
+
+            prev_E = list(remaining_E)
+            prev_G = list(remaining_G)
+            b1_23, b1_22, src1 = self._consume_reserved_branch_tail(n1[1], remaining_E, remaining_G)
+            b2_23, b2_22, src2 = self._consume_reserved_branch_tail(n2[1], remaining_E, remaining_G)
+            branch_23 = b1_23 + b2_23
+            ring_22 = b1_22 + b2_22
+            total_23 = 2 + branch_23
+
+            if avail_11 >= 2 and avail_23 >= total_23 and avail_22 >= ring_22 and avail_24 >= 2:
+                comp = [11, int(conn1.su_type), 24, 24, int(conn2.su_type), 11] + [23] * branch_23 + [22] * ring_22
+                ids = [n1[0].global_id, n2[0].global_id, conn1.global_id, conn2.global_id]
+                desc = f"S-ring(connD:{n1[1][-1]}+{n2[1][-1]})"
+                sr_meta = {
+                    'tail_sources': [src1, src2],
+                    'connector_ids': [int(conn1.global_id), int(conn2.global_id)],
+                    'connector_types': [int(conn1.su_type), int(conn2.su_type)],
+                    'side_ring_node_types': [n1[1], n2[1]],
+                    'branch_tail_lengths': {
+                        'upper': b1_23 + b1_22,
+                        'lower': b2_23 + b2_22,
+                    },
+                }
+                chains.append(ChainSpec('side_ring_connector_d', comp, desc, ids, metadata=sr_meta))
+                avail_11 -= 2
+                avail_23 -= total_23
+                avail_22 -= ring_22
+                avail_24 -= 2
+                continue
+
+            remaining_E = prev_E
+            remaining_G = prev_G
+            remaining.insert(0, n2)
+            remaining.insert(0, n1)
+            remaining_D.extend([conn1, conn2])
+            break
+
         while len(remaining) >= 2:
             n1 = remaining.pop(0)
             n2 = remaining.pop(0)
@@ -874,9 +1160,7 @@ class FlexAllocator:
             is_ab_1 = n1[1] in ('24_A', '24_B')
             is_ab_2 = n2[1] in ('24_A', '24_B')
             
-            ring_body_23 = 2 
-            if not is_ab_1: ring_body_23 += 1
-            if not is_ab_2: ring_body_23 += 1
+            ring_body_23 = 2
             
             prev_E = list(remaining_E)
             prev_G = list(remaining_G)
@@ -976,7 +1260,7 @@ class FlexAllocator:
                 remaining_G = prev_G
 
 
-        return chains, avail_11, avail_23, avail_22, avail_24, avail_25, remaining_E, remaining_G
+        return chains, avail_11, avail_23, avail_22, avail_24, avail_25, remaining_E, remaining_G, remaining_B, remaining_D
 
     # ---------- Phase 4: Build chains ----------
     def _build_closed_chains(self) -> List[ChainSpec]:
@@ -992,25 +1276,34 @@ class FlexAllocator:
             chains.append(ChainSpec('side', [11, 22], 'F', [n.global_id]))
         return chains
 
-    def _allocate_open_chains(self, avail_11: int, avail_23: int, avail_22: int):
+    def _allocate_open_chains(self,
+                              avail_11: int,
+                              avail_23: int,
+                              avail_22: int,
+                              remaining_E: Optional[List[SUNode]] = None,
+                              remaining_G: Optional[List[SUNode]] = None,
+                              remaining_B: Optional[List[SUNode]] = None,
+                              remaining_D: Optional[List[SUNode]] = None):
         chains = []
-        remaining_E = list(self._type_lists['E'])
-        remaining_G = list(self._type_lists['G'])
+        remaining_E = list(remaining_E if remaining_E is not None else self._type_lists['E'])
+        remaining_G = list(remaining_G if remaining_G is not None else self._type_lists['G'])
+        remaining_B = list(remaining_B if remaining_B is not None else self._type_lists['B'])
+        remaining_D = list(remaining_D if remaining_D is not None else self._type_lists['D'])
 
-        # ----- Type B: 11-23-23-... -----
-        for n in self._type_lists['B']:
+        # ----- Type B: 11-23-... -----
+        for n in remaining_B:
             if remaining_E and avail_23 >= 2:
                 e = remaining_E.pop(0)
-                # B(11-23-23) + E(23-23-22) = 11-23-23-23-23-22
-                comp = [11, 23, 23, 23, 23, 22]
+                # B(11-23-...) + E(22-23-23-...) = 11-23-23-23-22
+                comp = [11, 23, 23, 23, 22]
                 chains.append(ChainSpec('side', comp, 'B+E', [n.global_id, e.global_id]))
-                avail_11 -= 1; avail_23 -= 4; avail_22 -= 1
+                avail_11 -= 1; avail_23 -= 3; avail_22 -= 1
             elif remaining_G and avail_23 >= 1:
                 g = remaining_G.pop(0)
-                # B(11-23-23) + G(23-22) = 11-23-23-23-22
-                comp = [11, 23, 23, 23, 22]
+                # B(11-23-...) + G(22-23-...) = 11-23-23-22
+                comp = [11, 23, 23, 22]
                 chains.append(ChainSpec('side', comp, 'B+G', [n.global_id, g.global_id]))
-                avail_11 -= 1; avail_23 -= 3; avail_22 -= 1
+                avail_11 -= 1; avail_23 -= 2; avail_22 -= 1
             elif avail_11 >= 2 and avail_23 >= 2:
                 # Close with 11: 11-23-23-11
                 comp = [11, 23, 23, 11]
@@ -1027,8 +1320,13 @@ class FlexAllocator:
                 self._result.required_extra_11 += 1
 
         # ----- Type D: ...-23-23-23-... -----
-        for n in self._type_lists['D']:
-            if remaining_G and avail_11 >= 1 and avail_23 >= 1:
+        for n in remaining_D:
+            if remaining_E and avail_11 >= 1 and avail_23 >= 2:
+                e = remaining_E.pop(0)
+                comp = [11, 23, 23, 23, 23, 23, 22]
+                chains.append(ChainSpec('side', comp, 'D+E', [n.global_id, e.global_id]))
+                avail_11 -= 1; avail_23 -= 5; avail_22 -= 1
+            elif remaining_G and avail_11 >= 1 and avail_23 >= 1:
                 g = remaining_G.pop(0)
                 # 11 + D(23-23-23) + G(23-22) = 11-23-23-23-23-22
                 comp = [11, 23, 23, 23, 23, 22]
@@ -1106,18 +1404,8 @@ class FlexAllocator:
         avail_11 = r.total_11 - c11
         avail_23 = r.total_23 - c23
         avail_22 = r.total_22 - c22
-
-        open_chains, avail_11, avail_23, avail_22, remaining_E, remaining_G = self._allocate_open_chains(
-            avail_11, avail_23, avail_22
-        )
-        o11 = sum(c.n_11 for c in open_chains)
-        o23 = sum(c.n_23 for c in open_chains)
-        o22 = sum(c.n_22 for c in open_chains)
-
-        pre_branch_unallocated_bridge = int(r.unallocated_bridge)
-        pre_branch_req_11 = int(r.required_extra_11)
-        pre_branch_req_22 = int(r.required_extra_22)
-        pre_branch_req_23 = int(r.required_extra_23)
+        remaining_E = list(self._type_lists['E'])
+        remaining_G = list(self._type_lists['G'])
 
         r.unallocated_bridge = 0
         r.unallocated_branch = 0
@@ -1127,17 +1415,19 @@ class FlexAllocator:
 
         return {
             'closed_chains': closed,
-            'open_chains': open_chains,
+            'open_chains': [],
             'remaining_E': remaining_E,
             'remaining_G': remaining_G,
+            'remaining_B': list(self._type_lists['B']),
+            'remaining_D': list(self._type_lists['D']),
             'closed_consumed': {'11': c11, '23': c23, '22': c22},
-            'open_consumed': {'11': o11, '23': o23, '22': o22},
+            'open_consumed': {'11': 0, '23': 0, '22': 0},
             'pre_branch_available': {'11': avail_11, '23': avail_23, '22': avail_22},
             'pre_branch_bridge_diag': {
-                'unallocated_bridge': pre_branch_unallocated_bridge,
-                'req_11': pre_branch_req_11,
-                'req_22': pre_branch_req_22,
-                'req_23': pre_branch_req_23,
+                'unallocated_bridge': 0,
+                'req_11': 0,
+                'req_22': 0,
+                'req_23': 0,
             }
         }
 
@@ -1359,10 +1649,12 @@ class FlexAllocator:
             avail_23 = prep['pre_branch_available']['23']
             avail_22 = prep['pre_branch_available']['22']
 
-            branch_chains, rem_11, rem_23, rem_22, rem_24, rem_25, _rem_E, _rem_G = allocator._allocate_branches(
+            branch_chains, rem_11, rem_23, rem_22, rem_24, rem_25, _rem_E, _rem_G, _rem_B, _rem_D = allocator._allocate_branches(
                 avail_11, avail_23, avail_22,
                 prep.get('remaining_E', []),
                 prep.get('remaining_G', []),
+                prep.get('remaining_B', []),
+                prep.get('remaining_D', []),
             )
 
             res = allocator._result
@@ -1530,29 +1822,37 @@ class FlexAllocator:
         avail_22 = r.total_22 - c22
         print(f"    Available after closed: 11×{avail_11}, 23×{avail_23}, 22×{avail_22}")
 
-        # Phase 4b: open chains
-        open_chains, avail_11, avail_23, avail_22, remaining_E, remaining_G = self._allocate_open_chains(
-            avail_11, avail_23, avail_22
-        )
-        all_chains = closed + open_chains
-        o11 = sum(c.n_11 for c in open_chains)
-        o23 = sum(c.n_23 for c in open_chains)
-        o22 = sum(c.n_22 for c in open_chains)
-        print(f"\n  [Phase 4b] Open chain allocation: {len(open_chains)}")
-        print(f"    Consumed: 11×{o11}, 23×{o23}, 22×{o22}")
-        print(f"    Available after open: 11×{avail_11}, 23×{avail_23}, 22×{avail_22}")
+        remaining_E = list(self._type_lists['E'])
+        remaining_G = list(self._type_lists['G'])
 
-        # Phase 4.5: Branch allocation (24/25)
-        branch_chains, avail_11, avail_23, avail_22, avail_24, avail_25, remaining_E, remaining_G = \
-            self._allocate_branches(avail_11, avail_23, avail_22, remaining_E, remaining_G)
+        # Phase 4b: Branch allocation (24/25) first
+        branch_chains, avail_11, avail_23, avail_22, avail_24, avail_25, remaining_E, remaining_G, remaining_B, remaining_D = \
+            self._allocate_branches(
+                avail_11, avail_23, avail_22,
+                remaining_E, remaining_G,
+                list(self._type_lists['B']),
+                list(self._type_lists['D']),
+            )
         br11 = sum(c.n_11 for c in branch_chains)
         br23 = sum(c.n_23 for c in branch_chains)
         br22 = sum(c.n_22 for c in branch_chains)
         br24 = sum(c.n_24 for c in branch_chains)
         br25 = sum(c.n_25 for c in branch_chains)
-        print(f"\n  [Phase 4.5] Branch allocation (24/25): {len(branch_chains)}")
+        print(f"\n  [Phase 4b] Branch allocation (24/25): {len(branch_chains)}")
         print(f"    Consumed: 11×{br11}, 23×{br23}, 22×{br22}, 24×{br24}, 25×{br25}")
         print(f"    Available after branch: 11×{avail_11}, 23×{avail_23}, 22×{avail_22}, 24×{avail_24}, 25×{avail_25}")
+
+        # Phase 4c: open chains using leftover E/G after branches
+        open_chains, avail_11, avail_23, avail_22, remaining_E, remaining_G = self._allocate_open_chains(
+            avail_11, avail_23, avail_22, remaining_E, remaining_G, remaining_B, remaining_D
+        )
+        all_chains = closed + open_chains
+        o11 = sum(c.n_11 for c in open_chains)
+        o23 = sum(c.n_23 for c in open_chains)
+        o22 = sum(c.n_22 for c in open_chains)
+        print(f"\n  [Phase 4c] Open chain allocation: {len(open_chains)}")
+        print(f"    Consumed: 11×{o11}, 23×{o23}, 22×{o22}")
+        print(f"    Available after open: 11×{avail_11}, 23×{avail_23}, 22×{avail_22}")
 
         reserved_sides, avail_11, avail_23, avail_22 = self._allocate_reserved_terminal_sides(
             remaining_E, remaining_G, avail_11, avail_23, avail_22
@@ -1561,7 +1861,7 @@ class FlexAllocator:
         rs11 = sum(c.n_11 for c in reserved_sides)
         rs23 = sum(c.n_23 for c in reserved_sides)
         rs22 = sum(c.n_22 for c in reserved_sides)
-        print(f"\n  [Phase 4.6] Reserved E/G side chains: {len(reserved_sides)}")
+        print(f"\n  [Phase 4d] Reserved E/G side chains: {len(reserved_sides)}")
         print(f"    Consumed: 11×{rs11}, 23×{rs23}, 22×{rs22}")
         print(f"    Available after reserved tails: 11×{avail_11}, 23×{avail_23}, 22×{avail_22}")
 
@@ -1610,9 +1910,9 @@ class FlexAllocator:
         r.extra_long_23_chains = int(final_extra_metrics['extra_long_23_chains'])
 
         # Build result
-        total_consumed_11 = c11 + o11 + br11 + e11
-        total_consumed_23 = c23 + o23 + br23 + e23
-        total_consumed_22 = c22 + o22 + br22 + e22
+        total_consumed_11 = c11 + br11 + o11 + rs11 + e11
+        total_consumed_23 = c23 + br23 + o23 + rs23 + e23
+        total_consumed_22 = c22 + br22 + o22 + rs22 + e22
         r.consumed_11 = total_consumed_11
         r.consumed_23 = total_consumed_23
         r.consumed_22 = total_consumed_22
