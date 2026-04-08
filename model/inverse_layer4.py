@@ -2205,6 +2205,8 @@ class Layer4Adjuster:
         src = list(getattr(chain, 'source_ids', []) or [])
         meta = getattr(chain, 'metadata', {}) or {}
         meta_brief = []
+        src_su = list(meta.get('source_su_types', []) or [])
+        src_hop1 = list(meta.get('source_hop1', []) or [])
         if meta:
             if 'branch_type' in meta:
                 meta_brief.append(f"branch_type={meta['branch_type']}")
@@ -2212,6 +2214,10 @@ class Layer4Adjuster:
                 meta_brief.append(f"tail={meta['tail_source']}")
             if 'tail_sources' in meta:
                 meta_brief.append(f"tails={meta['tail_sources']}")
+            if src_su:
+                meta_brief.append(f"src_su={src_su}")
+            if src_hop1:
+                meta_brief.append(f"src_hop1={src_hop1}")
         meta_txt = f" | {', '.join(meta_brief)}" if meta_brief else ""
         return f"{ctype}/{origin}: {comp} src={src}{meta_txt}"
 

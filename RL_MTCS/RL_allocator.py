@@ -12,12 +12,15 @@ AROMATIC_SET = {5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 30}
 TO_11 = {5, 6, 7, 8, 9, 11}
 TO_23 = {0, 2, 3, 15, 17, 19, 20, 21, 23, 27, 29, 31}
 TO_24 = {14, 24}
-STRUCTURAL_PLACEHOLDER_TO_23 = {14, 24, 25}
 TO_22 = {1, 4, 16, 18, 22, 28, 32}
 AROMATIC_5_13 = {5, 6, 7, 8, 9, 10, 11, 12, 13}
 BRIDGE_SU = {0, 2, 3, 27, 29, 31}
 TERMINAL_SU = {1, 4, 28}
 MAX_23_PER_CHAIN = 6
+
+
+def _resource_count(values: List[int], allowed: set[int]) -> int:
+    return int(sum(1 for x in values if int(x) in allowed))
 
 # ==================== Data Structures ====================
 
@@ -42,11 +45,11 @@ class ChainSpec:
     n_25: int = 0
 
     def __post_init__(self):
-        self.n_11 = self.composition.count(11)
-        self.n_23 = self.composition.count(23)
-        self.n_22 = self.composition.count(22)
-        self.n_24 = self.composition.count(24)
-        self.n_25 = self.composition.count(25)
+        self.n_11 = _resource_count(self.composition, TO_11)
+        self.n_23 = _resource_count(self.composition, TO_23)
+        self.n_22 = _resource_count(self.composition, TO_22)
+        self.n_24 = _resource_count(self.composition, TO_24)
+        self.n_25 = _resource_count(self.composition, {25})
 
 @dataclass
 class AllocationResult:
@@ -101,23 +104,6 @@ def _categorize(su_type: int) -> str:
     return 'aliphatic'
 
 
-def count_su_values(values: List[int]) -> Dict[int, int]:
-    counts: Dict[int, int] = {}
-    for value in values:
-        su = int(value)
-        counts[su] = counts.get(su, 0) + 1
-    return counts
-
-
-def chain_spec_counts_match(spec: ChainSpec, values: List[int]) -> bool:
-    counts = count_su_values(values)
-    return (
-        int(counts.get(22, 0)) == int(spec.n_22) and
-        int(counts.get(23, 0)) == int(spec.n_23) and
-        int(counts.get(24, 0)) == int(spec.n_24) and
-        int(counts.get(25, 0)) == int(spec.n_25)
-    )
-
 # ==================== FlexAllocator ====================
 
 class FlexAllocator:
@@ -125,6 +111,7 @@ class FlexAllocator:
     def __init__(self, csv_path: Optional[str] = None, su_counts: Optional[Dict[int, int]] = None, nodes: Optional[List] = None):
         self.csv_path = csv_path
         self._nodes: List[SUNode] = []
+        self._node_lookup: Dict[int, SUNode] = {}
         self._type_lists: Dict[str, List[SUNode]] = {}
         self._result = AllocationResult()
         self._su_counts = su_counts.copy() if su_counts is not None else {}
@@ -132,11 +119,11 @@ class FlexAllocator:
 
     @staticmethod
     def _refresh_chain_counts(chain: ChainSpec):
-        chain.n_11 = int(sum(1 for x in chain.composition if int(x) in TO_11))
-        chain.n_23 = int(sum(1 for x in chain.composition if int(x) in TO_23))
-        chain.n_22 = int(sum(1 for x in chain.composition if int(x) in TO_22))
-        chain.n_24 = int(sum(1 for x in chain.composition if int(x) in TO_24))
-        chain.n_25 = int(sum(1 for x in chain.composition if int(x) == 25))
+        chain.n_11 = _resource_count(chain.composition, TO_11)
+        chain.n_23 = _resource_count(chain.composition, TO_23)
+        chain.n_22 = _resource_count(chain.composition, TO_22)
+        chain.n_24 = _resource_count(chain.composition, TO_24)
+        chain.n_25 = _resource_count(chain.composition, {25})
 
     @staticmethod
     def _side_branch_insert_index(chain: ChainSpec) -> int:
@@ -191,6 +178,33 @@ class FlexAllocator:
             )
             tail_lengths[slot] += 1
             meta['branch_tail_lengths'] = tail_lengths
+            chain.composition.append(23)
+            chain.metadata = meta
+            FlexAllocator._refresh_chain_counts(chain)
+            return True
+
+        if chain.chain_type in (
+            'vertical_ring_special',
+            'vertical_ring_connector',
+            'side_ring_connector',
+            'side_ring_connector_d',
+            'fused_side_ring_c',
+        ):
+            tail_lengths = {
+                str(k): int(v)
+                for k, v in (meta.get('branch_tail_lengths', {}) or {}).items()
+                if int(v) > 0
+            }
+            if tail_lengths:
+                slot = branch_slot if branch_slot in tail_lengths else min(
+                    tail_lengths.keys(), key=lambda key: (tail_lengths[key], key)
+                )
+                tail_lengths[slot] += 1
+                meta['branch_tail_lengths'] = tail_lengths
+                chain.composition.append(23)
+                chain.metadata = meta
+                FlexAllocator._refresh_chain_counts(chain)
+                return True
             chain.composition.append(23)
             chain.metadata = meta
             FlexAllocator._refresh_chain_counts(chain)
@@ -375,7 +389,9 @@ class FlexAllocator:
                         for k, v in n.hop2_su.items():
                             hop2.extend([int(k)] * int(v))
                         
-                self._nodes.append(SUNode(int(n.global_id), su_type, tuple(hop1), tuple(hop2)))
+                su_node = SUNode(int(n.global_id), su_type, tuple(hop1), tuple(hop2))
+                self._nodes.append(su_node)
+                self._node_lookup[int(su_node.global_id)] = su_node
             return
 
         # su_counts-only 模式：无节点拓扑信息，仅基于粗粒化计数进行分配评估
@@ -405,7 +421,25 @@ class FlexAllocator:
             gid = int(row.get('global_id', row.name))
             su_type = int(row[su_col])
             _, hop1, hop2 = _parse_template_key(str(row['template_key']))
-            self._nodes.append(SUNode(gid, su_type, tuple(hop1), tuple(hop2)))
+            su_node = SUNode(gid, su_type, tuple(hop1), tuple(hop2))
+            self._nodes.append(su_node)
+            self._node_lookup[int(su_node.global_id)] = su_node
+
+    def _annotate_chain_sources(self, chain: ChainSpec) -> ChainSpec:
+        meta = dict(chain.metadata or {})
+        src_ids = [int(x) for x in list(getattr(chain, 'source_ids', []) or [])]
+        src_su = []
+        src_hop1 = []
+        for gid in src_ids:
+            node = self._node_lookup.get(int(gid))
+            if node is None:
+                continue
+            src_su.append(int(node.su_type))
+            src_hop1.append(list(int(x) for x in tuple(node.hop1)))
+        meta['source_su_types'] = list(src_su)
+        meta['source_hop1'] = list(src_hop1)
+        chain.metadata = meta
+        return chain
 
     # ---------- Phase 2: Convert & Count ----------
     def _convert_and_count(self):
@@ -1445,6 +1479,9 @@ class FlexAllocator:
         expandable_chain_types = {
             'branch_side', 'branch_bridge',
             'vertical_ring', 'side_ring', 'fused_side_ring',
+            'vertical_ring_special', 'vertical_ring_connector',
+            'side_ring_connector', 'side_ring_connector_d',
+            'fused_side_ring_c',
         }
         
         eligible = []
@@ -1925,6 +1962,7 @@ class FlexAllocator:
         r.remaining_25 = r.total_25 - r.consumed_25
 
         for ch in all_chains:
+            ch = self._annotate_chain_sources(ch)
             if ch.chain_type == 'bridge':
                 r.bridge_chains.append(ch)
             else:
@@ -1932,6 +1970,7 @@ class FlexAllocator:
         
         # Integrate branch_bridge and branch_side into flex/side stages
         for ch in branch_chains:
+            ch = self._annotate_chain_sources(ch)
             if ch.chain_type == 'branch_bridge':
                 r.bridge_chains.append(ch)
             elif ch.chain_type == 'branch_side':
@@ -1948,22 +1987,34 @@ class FlexAllocator:
         print("\n" + "=" * 60)
         print("[FlexAllocator] Allocation Summary")
         print("=" * 60)
+
+        def _source_text(ch: ChainSpec) -> str:
+            meta = getattr(ch, 'metadata', {}) or {}
+            src_su = list(meta.get('source_su_types', []) or [])
+            src_hop1 = list(meta.get('source_hop1', []) or [])
+            if not src_su:
+                return ""
+            extra = f" src_su={src_su}"
+            if src_hop1:
+                extra += f" src_hop1={src_hop1}"
+            return extra
+
         print(f"  Bridge chains: {len(r.bridge_chains)}")
         for i, ch in enumerate(r.bridge_chains):
             comp_str = '-'.join(str(x) for x in ch.composition)
-            print(f"    [{i}] {comp_str}  (type={ch.origin_type}, len_23={ch.n_23})")
+            print(f"    [{i}] {comp_str}  (type={ch.origin_type}, len_23={ch.n_23}){_source_text(ch)}")
 
         print(f"\n  Side chains: {len(r.side_chains)}")
         for i, ch in enumerate(r.side_chains):
             comp_str = '-'.join(str(x) for x in ch.composition)
-            print(f"    [{i}] {comp_str}  (type={ch.origin_type}, len_23={ch.n_23})")
+            print(f"    [{i}] {comp_str}  (type={ch.origin_type}, len_23={ch.n_23}){_source_text(ch)}")
 
         print(f"\n  Branch structures (24/25): {len(r.branch_chains)}")
         for i, ch in enumerate(r.branch_chains):
             comp_str = '-'.join(str(x) for x in ch.composition)
             extra = f", 24×{ch.n_24}" if ch.n_24 else ""
             extra += f", 25×{ch.n_25}" if ch.n_25 else ""
-            print(f"    [{i}] {comp_str}  (type={ch.origin_type}, 23×{ch.n_23}, 22×{ch.n_22}{extra})")
+            print(f"    [{i}] {comp_str}  (type={ch.origin_type}, 23×{ch.n_23}, 22×{ch.n_22}{extra}){_source_text(ch)}")
 
         print(f"\n  Resource Usage:")
         print(f"    {'':>10} {'Total':>8} {'Consumed':>10} {'Remaining':>10}")

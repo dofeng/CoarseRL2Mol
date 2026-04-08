@@ -1,3 +1,8 @@
 z_library/
 test_results/
 test_RL/
+__pycache__/
+.vscode/
+checkpoints_g2s/
+checkpoints_s2n/
+analysis_report/

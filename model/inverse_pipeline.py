@@ -49,7 +49,7 @@ class InversePipelineV3:
         Args:
             s2n_model: Spectrum-to-Node模型
             vae_model: NMR VAE模型（用于解码mu/pi）
-            templates: 预建模板库
+            templates: 模板库路径或包含'_lib_path'的配置对象
             device: 计算设备
         """
         self.s2n = s2n_model.to(device).eval()
