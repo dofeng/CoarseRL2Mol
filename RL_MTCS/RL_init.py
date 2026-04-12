@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Tuple
 from collections import Counter
 from .RL_state import HexGrid, Site, AromaticCluster, ConnectionGraph, SU_NAMES, HEX_VERTEX_OFFSETS
 
+MAIN_PPM_STEP = 0.1
+
 
 def load_su_counts(csv_path: str) -> Dict[int, int]:
     """Load SU counts from CSV, compatible with multiple formats"""
@@ -86,25 +88,62 @@ def analyze_bridgehead_from_csv(csv_path: str) -> Tuple[int, int, int, int, int,
     return x, y, z, m, n, p, q
 
 
+def _build_rl_ppm_axis(ppm_range: Tuple[float, float], num_points: int) -> np.ndarray:
+    lo = float(ppm_range[0])
+    hi = float(ppm_range[1])
+    if abs(lo - 0.0) <= 1e-9 and abs(hi - 240.0) <= 1e-9 and int(num_points) == 2400:
+        # Align the default RL path with the project's main PPM axis: 0..240 inclusive, step=0.1.
+        return np.arange(lo, hi + MAIN_PPM_STEP, MAIN_PPM_STEP, dtype=np.float64)
+    return np.linspace(lo, hi, int(num_points), dtype=np.float64)
+
+
+def _resample_to_axis(ppm_values: np.ndarray, intensities: np.ndarray, axis: np.ndarray) -> np.ndarray:
+    ppm_np = np.asarray(ppm_values, dtype=np.float64).reshape(-1)
+    intensity_np = np.asarray(intensities, dtype=np.float64).reshape(-1)
+
+    mask = np.isfinite(ppm_np) & np.isfinite(intensity_np)
+    ppm_np = ppm_np[mask]
+    intensity_np = intensity_np[mask]
+    if ppm_np.size == 0 or intensity_np.size == 0:
+        return np.zeros_like(axis, dtype=np.float64)
+
+    order = np.argsort(ppm_np)
+    ppm_sorted = ppm_np[order]
+    intensity_sorted = intensity_np[order]
+
+    ppm_unique, inverse = np.unique(ppm_sorted, return_inverse=True)
+    if ppm_unique.size != ppm_sorted.size:
+        sums = np.zeros_like(ppm_unique, dtype=np.float64)
+        counts = np.zeros_like(ppm_unique, dtype=np.float64)
+        np.add.at(sums, inverse, intensity_sorted)
+        np.add.at(counts, inverse, 1.0)
+        intensity_sorted = sums / np.maximum(counts, 1.0)
+        ppm_sorted = ppm_unique
+
+    return np.interp(axis, ppm_sorted, intensity_sorted, left=0.0, right=0.0)
+
+
 def load_spectrum(csv_path: str, ppm_range: Tuple[float, float] = (0, 240), 
                   num_points: int = 2400) -> np.ndarray:
-    """从CSV加载NMR谱图，自动检测分隔符"""
+    """从CSV加载NMR谱图，按ppm轴重采样并兼容单列/双列输入"""
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"谱图文件不存在: {csv_path}")
     
     df = pd.read_csv(csv_path, header=None, sep=None, engine='python')
-    
+
+    axis = _build_rl_ppm_axis(ppm_range, num_points)
+
     if df.shape[1] == 1:
-        spectrum = df.iloc[:, 0].values.astype(float)
+        spectrum = pd.to_numeric(df.iloc[:, 0], errors='coerce').values.astype(float)
+        if len(spectrum) != len(axis):
+            x_old = np.linspace(float(ppm_range[0]), float(ppm_range[1]), len(spectrum))
+            spectrum = np.interp(axis, x_old, spectrum, left=0.0, right=0.0)
     else:
-        spectrum = df.iloc[:, 1].values.astype(float)
-    
-    if len(spectrum) != num_points:
-        x_old = np.linspace(ppm_range[0], ppm_range[1], len(spectrum))
-        x_new = np.linspace(ppm_range[0], ppm_range[1], num_points)
-        spectrum = np.interp(x_new, x_old, spectrum)
-    
-    max_val = spectrum.max()
+        ppm_values = pd.to_numeric(df.iloc[:, 0], errors='coerce').values.astype(float)
+        intensities = pd.to_numeric(df.iloc[:, 1], errors='coerce').values.astype(float)
+        spectrum = _resample_to_axis(ppm_values, intensities, axis)
+
+    max_val = float(np.max(spectrum)) if int(np.size(spectrum)) > 0 else 0.0
     if max_val > 0:
         spectrum = spectrum / max_val
     return spectrum.astype(np.float32)

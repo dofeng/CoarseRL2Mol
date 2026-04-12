@@ -8,7 +8,7 @@ import math
 import io
 from contextlib import redirect_stdout
 
-from .inverse_common import SU_ALIPHATIC, SU_AROMATIC, E_SU, _NodeV3
+from .inverse_common import SU_ALIPHATIC, SU_AROMATIC, E_SU, _NodeV3, get_aliphatic_carbon_policy
 from RL_MTCS.RL_allocator import FlexAllocator
 from RL_MTCS.RL_init import ClusterGenerator
 from .inverse_layer0 import Layer0Estimator
@@ -54,6 +54,7 @@ class Layer4Adjuster:
         # Persist H-adjust rotation state across repeated skeleton adjustment calls.
         self._h_rotation_state = 0
         self._rigid10_rotation_state = 0
+        self._h_rotation_aliphatic_cap: Optional[int] = None
 
     @staticmethod
     def _build_node_lookup(nodes: List[_NodeV3]) -> Dict[int, _NodeV3]:
@@ -149,98 +150,14 @@ class Layer4Adjuster:
         for node in nodes:
             node.hop2_su = self._current_hop2_counter(node, nodes, node_lookup=node_lookup)
 
-    def _enforce_su22_ratio_and_h(self,
-                                 H: torch.Tensor,
-                                 E_target: Optional[torch.Tensor],
-                                 enable: bool = True,
-                                 ratio: float = 0.1,
-                                 h_tol: float = 0.03) -> Tuple[torch.Tensor, List[Dict], Dict]:
-        H_work = torch.clamp(H, min=0).long().clone()
-        moves: List[Dict] = []
-
-        if not bool(enable):
-            return H_work, moves, {}
-
-        try:
-            n22 = int(H_work[22].item())
-            n23 = int(H_work[23].item())
-        except Exception:
-            return H_work, moves, {}
-
-        try:
-            ratio_f = float(ratio)
-        except Exception:
-            ratio_f = 0.1
-        ratio_f = max(0.0, float(ratio_f))
-
-        req22 = int(math.ceil(float(ratio_f) * float(n23)))
-        req22 = max(1, int(req22))
-
-        while int(n22) < int(req22):
-            if int(H_work[23].item()) <= 0:
-                break
-            H_work[23] -= 1
-            H_work[22] += 1
-            moves.append({'op': 'enforce_22_ratio', 'from': 23, 'to': 22})
-            try:
-                n22 = int(H_work[22].item())
-                n23 = int(H_work[23].item())
-                req22 = int(math.ceil(float(ratio_f) * float(n23)))
-                req22 = max(1, int(req22))
-            except Exception:
-                break
-
-        if int(H_work[22].item()) <= 0:
-            if int(H_work[23].item()) > 0:
-                H_work[23] -= 1
-                H_work[22] += 1
-                moves.append({'op': 'enforce_22_nonzero', 'from': 23, 'to': 22})
-
-        meta: Dict[str, Any] = {
-            'req22': int(req22),
-            'final_22': int(H_work[22].item()),
-            'final_23': int(H_work[23].item()),
-        }
-
-        if E_target is not None:
-            try:
-                E_curr = torch.matmul(H_work.float(), self.E_SU)
-                curr_H = float(E_curr[1].item())
-                tgt_H = float(E_target.to(E_curr.device)[1].item())
-                meta['curr_H'] = float(curr_H)
-                meta['tgt_H'] = float(tgt_H)
-            except Exception:
-                curr_H = None
-                tgt_H = None
-
-            if curr_H is not None and tgt_H is not None and float(tgt_H) > 1e-9:
-                try:
-                    h_tol_f = float(h_tol)
-                except Exception:
-                    h_tol_f = 0.03
-                h_tol_f = max(0.0, float(h_tol_f))
-                h_cap = float(tgt_H) * (1.0 + float(h_tol_f))
-                while float(curr_H) > float(h_cap) + 1e-9:
-                    if int(H_work[13].item()) <= 0:
-                        break
-                    H_work[13] -= 1
-                    H_work[10] += 1
-                    moves.append({'op': 'reduce_H_13_to_10', 'from': 13, 'to': 10})
-                    curr_H = float(curr_H) - 1.0
-                meta['final_H_after_cap'] = float(curr_H)
-                meta['h_cap'] = float(h_cap)
-
-        H_work = torch.clamp(H_work, min=0).long()
-        return H_work, moves, meta
-
     def _apply_final_structure_constraints(self, H: torch.Tensor) -> Tuple[torch.Tensor, List[Dict[str, int]], Dict[str, Any]]:
         """
         Final discrete constraints applied after Layer4 finishes.
 
         Current rules:
-        1. SU10 count must be even; if odd, remove one SU10.
-        2. SU14+SU15+SU16 total must be even; if odd, remove one SU15 first,
-           otherwise SU16, otherwise SU14.
+        1. SU10 count must be even; if odd, convert one SU10 to SU11.
+        2. SU14+SU15+SU16 total must be even; if odd, use count-preserving conversion:
+           prefer 15->13, else 16->23, else 14->11.
         """
         H_work = torch.clamp(H, min=0).long().clone()
         moves: List[Dict[str, int]] = []
@@ -251,16 +168,18 @@ class Layer4Adjuster:
             unsat_total = 0
 
         if int(unsat_total) % 2 != 0:
-            for su_idx in (15, 16, 14):
-                if int(H_work[su_idx].item()) > 0:
-                    H_work[su_idx] -= 1
-                    moves.append({'op': 'final_even_14_15_16', 'from': int(su_idx), 'to': -1})
+            for src_idx, dst_idx in ((15, 13), (16, 23), (14, 11)):
+                if int(H_work[src_idx].item()) > 0:
+                    H_work[src_idx] -= 1
+                    H_work[dst_idx] += 1
+                    moves.append({'op': 'final_even_14_15_16', 'from': int(src_idx), 'to': int(dst_idx)})
                     break
 
         try:
             if int(H_work[10].item()) % 2 != 0 and int(H_work[10].item()) > 0:
                 H_work[10] -= 1
-                moves.append({'op': 'final_even_10', 'from': 10, 'to': -1})
+                H_work[11] += 1
+                moves.append({'op': 'final_even_10', 'from': 10, 'to': 11})
         except Exception:
             pass
 
@@ -274,17 +193,19 @@ class Layer4Adjuster:
     def _window_stats(ppm_arr: np.ndarray, diff_arr: np.ndarray, lo: float, hi: float) -> Dict[str, float]:
         mask = (ppm_arr >= float(lo)) & (ppm_arr <= float(hi))
         if not bool(mask.any()):
-            return {'pos': 0.0, 'neg': 0.0, 'net': 0.0, 'abs': 0.0}
+            return {'pos': 0.0, 'neg': 0.0, 'net': 0.0, 'abs': 0.0, 'dom': 0.0}
         seg = diff_arr[mask]
         if int(seg.size) <= 0:
-            return {'pos': 0.0, 'neg': 0.0, 'net': 0.0, 'abs': 0.0}
+            return {'pos': 0.0, 'neg': 0.0, 'net': 0.0, 'abs': 0.0, 'dom': 0.0}
         pos = float(np.sum(seg[seg > 0])) if np.any(seg > 0) else 0.0
         neg = float(-np.sum(seg[seg < 0])) if np.any(seg < 0) else 0.0
+        dom = float(pos) if float(pos) >= float(neg) else -float(neg)
         return {
             'pos': float(pos),
             'neg': float(neg),
             'net': float(pos - neg),
             'abs': float(np.sum(np.abs(seg))),
+            'dom': float(dom),
         }
 
     def _get_su_common_stats(self) -> Dict[int, Dict[str, float]]:
@@ -473,6 +394,8 @@ class Layer4Adjuster:
         H_work = torch.clamp(H, min=0).long().clone()
         all_moves: List[Dict[str, Any]] = []
         meta: Dict[str, Any] = {}
+        max_moves = min(int(max_moves), 3)
+        carbonyl_max_moves = min(int(carbonyl_max_moves), 3)
 
         # 先做少量羰基中心类型修正，再做 9/11 与 22/23/24/25 的联合迁移
         if int(max_moves) > 0 and int(carbonyl_max_moves) > 0:
@@ -526,7 +449,7 @@ class Layer4Adjuster:
         }
         meta['joint_threshold'] = float(thr)
 
-        remain_moves = max(0, int(max_moves) - len(center_moves) if 'center_moves' in locals() else int(max_moves))
+        remain_moves = min(3, max(0, int(max_moves) - len(center_moves) if 'center_moves' in locals() else int(max_moves)))
         if direction is None or int(remain_moves) <= 0:
             return H_work, all_moves, meta
 
@@ -574,11 +497,14 @@ class Layer4Adjuster:
                                      ppm: Optional[np.ndarray],
                                      diff: Optional[np.ndarray],
                                      max_moves_each: int = 3,
-                                     peak_rel_threshold: float = 0.01) -> Tuple[torch.Tensor, List[Dict], Dict]:
+                                     peak_rel_threshold: float = 0.01,
+                                     substage: Optional[str] = None) -> Tuple[torch.Tensor, List[Dict], Dict]:
         print("\n[Block B] 异原子锚点联合调整")
         H_work = torch.clamp(H, min=0).long().clone()
         all_moves: List[Dict[str, Any]] = []
         meta: Dict[str, Any] = {}
+        max_moves_each = min(int(max_moves_each), 3)
+        substage_name = str(substage).strip().lower() if substage is not None else None
 
         subcalls = [
             ('ether', self.adjust_ether_519_by_difference, {
@@ -592,6 +518,8 @@ class Layer4Adjuster:
             ('halogen', self.adjust_halogen_821_by_difference, {'max_moves': int(max_moves_each), 'peak_rel_threshold': float(peak_rel_threshold), 'min_keep': 0}),
         ]
         for name, fn, kwargs in subcalls:
+            if substage_name is not None and str(name) != str(substage_name):
+                continue
             H_work, moves, submeta = fn(H_work, ppm, diff, **kwargs)
             meta[name] = submeta
             for mv in moves:
@@ -613,8 +541,10 @@ class Layer4Adjuster:
                                       min_keep_24: int = 0,
                                       min_keep_25: int = 0,
                                       carbonyl_couple: bool = True,
-                                      h_tolerance: float = 0.04) -> Tuple[torch.Tensor, List[Dict], Dict]:
+                                      h_tolerance: float = 0.04,
+                                      enable_aro23_coupling: bool = False) -> Tuple[torch.Tensor, List[Dict], Dict]:
         print("\n[Block C] 脂肪尾部 22/23/24/25 联合调整")
+        max_moves = min(int(max_moves), 3)
 
         if ppm is None or diff is None:
             return H, [], {'reason': 'missing_diff'}
@@ -645,29 +575,28 @@ class Layer4Adjuster:
         thr = float(peak_rel_threshold) * max(1e-8, tail_abs)
 
         move_order: List[Tuple[str, Dict[int, int]]] = []
-        # 新策略：以23为中峰，优先把23分流到22/24两侧，而不是做22→23→24→25链式迁移。
-        if float(s23['neg']) > float(thr) and float(s22['pos']) > float(thr) and float(s24['pos']) > float(thr):
-            move_order.append(('C_2x23_to_22_24', {23: -2, 22: +1, 24: +1}))
-        if float(s23['neg']) > float(thr) and float(s22['pos']) > float(thr):
-            move_order.append(('C_23to22', {23: -1, 22: +1}))
-        if float(s23['neg']) > float(thr) and float(s24['pos']) > float(thr):
-            move_order.append(('C_23to24', {23: -1, 24: +1}))
-
-        # 两侧峰之间的直接平衡：22 ↔ 24
+        # 两侧峰之间的直接平衡：22 ↔ 24，优先级高于 23 的中峰分流。
         if float(s22['neg']) > float(thr) and float(s24['pos']) > float(thr):
             move_order.append(('C_22to24', {22: -1, 24: +1}))
         if float(s24['neg']) > float(thr) and float(s22['pos']) > float(thr):
             move_order.append(('C_24to22', {24: -1, 22: +1}))
+        # 其次再考虑 23 为中峰时向 22/24 分流。
+        if float(s23['neg']) > float(thr) and float(s24['pos']) > float(thr):
+            move_order.append(('C_23to24', {23: -1, 24: +1}))
+        if float(s23['neg']) > float(thr) and float(s22['pos']) > float(thr):
+            move_order.append(('C_23to22', {23: -1, 22: +1}))
+        if float(s23['neg']) > float(thr) and float(s22['pos']) > float(thr) and float(s24['pos']) > float(thr):
+            move_order.append(('C_2x23_to_22_24', {23: -2, 22: +1, 24: +1}))
 
         # 当羰基区提示低场端偏弱、高场端偏强时，优先推动 23 -> 24 / 22 -> 24 的组合
         if bool(carbonyl_couple) and float(mid['pos']) > float(thr) and float(low['neg']) > float(thr):
             coupled = []
-            if float(s23['neg']) > float(thr) and float(s24['pos']) > float(thr):
-                coupled.append(('C_couple_23to24', {23: -1, 24: +1}))
             if float(s22['neg']) > float(thr) and float(s24['pos']) > float(thr):
                 coupled.append(('C_couple_22to24', {22: -1, 24: +1}))
+            if float(s23['neg']) > float(thr) and float(s24['pos']) > float(thr):
+                coupled.append(('C_couple_23to24', {23: -1, 24: +1}))
             if float(s23['neg']) > float(thr) and float(s22['pos']) > float(thr) and float(s24['pos']) > float(thr):
-                coupled.insert(0, ('C_couple_2x23_to_22_24', {23: -2, 22: +1, 24: +1}))
+                coupled.append(('C_couple_2x23_to_22_24', {23: -2, 22: +1, 24: +1}))
             move_order = coupled + move_order
 
         H_work = torch.clamp(H, min=0).long().clone()
@@ -694,16 +623,30 @@ class Layer4Adjuster:
             before_rel = abs(before - target_h) / target_h
             return bool(after_rel <= tol or after_rel <= before_rel + 1e-9)
 
+        def _try_balance_h(base_h: torch.Tensor, cand_h: torch.Tensor) -> Tuple[Optional[torch.Tensor], List[Dict[str, Any]]]:
+            if E_target is None:
+                return cand_h, []
+            if _h_within_tolerance(base_h, cand_h):
+                return cand_h, []
+            H_bal, h_moves, _h_meta = self._apply_h_rotation_to_counts(cand_h, E_target, max_ops=None)
+            if _h_within_tolerance(base_h, H_bal):
+                return H_bal.detach().clone().cpu(), list(h_moves)
+            return None, []
+
         def _apply_aro23_transfer(hh: torch.Tensor, src: int, dst: int) -> Optional[Dict[str, Any]]:
             H_try = hh.clone()
             if int(H_try[src].item()) <= 0:
                 return None
             H_try[src] -= 1
             H_try[dst] += 1
-            if not _h_within_tolerance(hh, H_try):
+            H_bal, h_moves = _try_balance_h(hh, H_try)
+            if H_bal is None:
                 return None
-            hh.copy_(H_try)
-            return {'block': 'C', 'op': f'C_{src}to{dst}', 'delta': {int(src): -1, int(dst): +1}}
+            hh.copy_(H_bal)
+            move = {'block': 'C', 'op': f'C_{src}to{dst}', 'delta': {int(src): -1, int(dst): +1}}
+            if h_moves:
+                move['h_moves'] = [str(mv.get('op', '')) for mv in h_moves]
+            return move
 
         def _maybe_apply_aro23_coupling(hh: torch.Tensor) -> Optional[Dict[str, Any]]:
             nonlocal aro23_rotation
@@ -744,9 +687,11 @@ class Layer4Adjuster:
             return None
 
         for _ in range(max(0, int(max_moves))):
-            special_move = _maybe_apply_aro23_coupling(H_work)
-            if special_move is None:
-                special_move = _maybe_apply_23aro_reverse(H_work)
+            special_move = None
+            if bool(enable_aro23_coupling):
+                special_move = _maybe_apply_aro23_coupling(H_work)
+                if special_move is None:
+                    special_move = _maybe_apply_23aro_reverse(H_work)
             if special_move is not None:
                 all_moves.append(special_move)
                 continue
@@ -756,8 +701,14 @@ class Layer4Adjuster:
                 H_try = self._apply_count_delta(H_work, delta, min_keep=keep)
                 if H_try is None:
                     continue
-                H_work = H_try
-                all_moves.append({'block': 'C', 'op': name, 'delta': dict(delta)})
+                H_bal, h_moves = _try_balance_h(H_work, H_try)
+                if H_bal is None:
+                    continue
+                H_work = H_bal
+                move_rec = {'block': 'C', 'op': name, 'delta': dict(delta)}
+                if h_moves:
+                    move_rec['h_moves'] = [str(mv.get('op', '')) for mv in h_moves]
+                all_moves.append(move_rec)
                 applied = True
                 break
             if not applied:
@@ -775,6 +726,7 @@ class Layer4Adjuster:
             },
             'move_order': [name for name, _ in move_order],
             'h_tolerance': float(h_tolerance),
+            'enable_aro23_coupling': bool(enable_aro23_coupling),
         }
         return H_work, all_moves, meta
 
@@ -1775,11 +1727,22 @@ class Layer4Adjuster:
         return int(n12_new) <= int(max(n13_new, 0))
 
     @staticmethod
-    def _h_rotation_adjust(tmp_nodes, H_work, h_ratio_fn, rot_idx):
+    def _h_rotation_adjust(tmp_nodes,
+                           H_work,
+                           h_ratio_fn,
+                           rot_idx,
+                           max_ops: Optional[int] = None,
+                           max_aliphatic_total: Optional[int] = None):
         ops = []
         failed_steps = 0
+        max_ops_i = None if max_ops is None else max(0, int(max_ops))
+
+        def _aliphatic_total() -> int:
+            return int(sum(int(H_work[i].item()) for i in SU_ALIPHATIC))
         
         while abs(h_ratio_fn(H_work)) > 0.04:
+            if max_ops_i is not None and len(ops) >= int(max_ops_i):
+                break
             ratio = h_ratio_fn(H_work)
             step_type = rot_idx % 5
             success = False
@@ -1847,25 +1810,67 @@ class Layer4Adjuster:
                             success = True
                             break
                 elif step_type in [1, 3]:
-                    for n in tmp_nodes:
-                        if n.su_type == 13:
-                            n.su_type = 23
-                            H_work[13] -= 1; H_work[23] += 1
-                            ops.append('H:13->23')
+                    can_grow_aliphatic = True
+                    if max_aliphatic_total is not None:
+                        can_grow_aliphatic = bool(int(_aliphatic_total()) < int(max_aliphatic_total))
+                    if can_grow_aliphatic:
+                        for n in tmp_nodes:
+                            if n.su_type == 13:
+                                n.su_type = 23
+                                H_work[13] -= 1; H_work[23] += 1
+                                ops.append('H:13->23')
+                                success = True
+                                break
+                elif step_type == 4:
+                    n12 = int(H_work[12].item())
+                    n13 = int(H_work[13].item())
+                    n14 = int(H_work[14].item())
+                    n15 = int(H_work[15].item())
+                    n16 = int(H_work[16].item())
+                    aro_5_13 = int(sum(int(H_work[i].item()) for i in range(5, 14)))
+                    next_aro_5_13 = max(0, int(aro_5_13 - 2))
+                    unsat_cap = max(0, int(math.floor(0.07 * float(max(next_aro_5_13, 1)))))
+
+                    def _pair_allowed(add14: int, add15: int, add16: int) -> bool:
+                        new14 = int(n14 + add14)
+                        new15 = int(n15 + add15)
+                        new16 = int(n16 + add16)
+                        new_total = int(new14 + new15 + new16)
+                        if int(new_total) > int(unsat_cap):
+                            return False
+                        if int(new14) > int(new15):
+                            return False
+                        if int(new16) > int(new14 + new15):
+                            return False
+                        return True
+
+                    if int(n12) >= 1 and int(n13) >= 1:
+                        pairs = []
+                        if _pair_allowed(0, 2, 0):
+                            pairs.append(((15, 15), 'H:12+13->15+15'))
+                        if _pair_allowed(0, 1, 1):
+                            pairs.append(((15, 16), 'H:12+13->15+16'))
+                        if _pair_allowed(1, 1, 0):
+                            pairs.append(((14, 15), 'H:12+13->14+15'))
+
+                        for (dst_a, dst_b), op_name in pairs:
+                            n_12, n_13 = None, None
+                            for n in tmp_nodes:
+                                if n.su_type == 12 and n_12 is None:
+                                    n_12 = n
+                                elif n.su_type == 13 and n_13 is None:
+                                    n_13 = n
+                                if n_12 is not None and n_13 is not None:
+                                    break
+                            if n_12 is None or n_13 is None:
+                                break
+                            n_12.su_type = int(dst_a)
+                            n_13.su_type = int(dst_b)
+                            H_work[12] -= 1; H_work[int(dst_a)] += 1
+                            H_work[13] -= 1; H_work[int(dst_b)] += 1
+                            ops.append(str(op_name))
                             success = True
                             break
-                elif step_type == 4:
-                    n_12, n_13 = None, None
-                    for n in tmp_nodes:
-                        if n.su_type == 12 and n_12 is None: n_12 = n
-                        elif n.su_type == 13 and n_13 is None: n_13 = n
-                    if n_12 and n_13:
-                        n_12.su_type = 15
-                        n_13.su_type = 15
-                        H_work[12] -= 1; H_work[15] += 1
-                        H_work[13] -= 1; H_work[15] += 1
-                        ops.append('H:12+13->15+15')
-                        success = True
                     
             rot_idx += 1
             if success:
@@ -1879,7 +1884,8 @@ class Layer4Adjuster:
 
     def _apply_h_rotation_to_counts(self,
                                     H: torch.Tensor,
-                                    E_target: Optional[torch.Tensor]) -> Tuple[torch.Tensor, List[Dict[str, Any]], Dict[str, Any]]:
+                                    E_target: Optional[torch.Tensor],
+                                    max_ops: Optional[int] = None) -> Tuple[torch.Tensor, List[Dict[str, Any]], Dict[str, Any]]:
         H_work = torch.clamp(H, min=0).long().clone().cpu()
         if E_target is None:
             return H_work.to(H.device), [], {'applied': False, 'reason': 'missing_E_target'}
@@ -1895,7 +1901,14 @@ class Layer4Adjuster:
 
         _, h_ratio_fn, _, _ = self._make_h_helpers()
         before_ratio = float(h_ratio_fn(H_work))
-        rot_ops, rot_idx = self._h_rotation_adjust(tmp_nodes, H_work, h_ratio_fn, int(self._h_rotation_state))
+        rot_ops, rot_idx = self._h_rotation_adjust(
+            tmp_nodes,
+            H_work,
+            h_ratio_fn,
+            int(self._h_rotation_state),
+            max_ops=max_ops,
+            max_aliphatic_total=getattr(self, '_h_rotation_aliphatic_cap', None),
+        )
         self._h_rotation_state = int(rot_idx)
         after_ratio = float(h_ratio_fn(H_work))
 
@@ -1906,6 +1919,7 @@ class Layer4Adjuster:
             'before_ratio': float(before_ratio),
             'after_ratio': float(after_ratio),
             'rotation_state': int(self._h_rotation_state),
+            'max_ops': (None if max_ops is None else int(max_ops)),
         }
         return H_work.to(H.device), moves, meta
 
@@ -1955,10 +1969,26 @@ class Layer4Adjuster:
             'cluster_kind_counts': {str(k): int(v) for k, v in sorted(kind_counts.items())},
         }
 
+    def _estimate_aliphatic_upper_bound(self,
+                                        S_target: Optional[torch.Tensor],
+                                        E_target: Optional[torch.Tensor]) -> Optional[int]:
+        if S_target is None or E_target is None:
+            return None
+        try:
+            spec = S_target.detach().cpu().flatten().numpy()
+            total_area = float(np.sum(spec) * 0.1)
+            ali_area = float(np.sum(spec[:900]) * 0.1)
+            x = float(ali_area / total_area) if total_area > 1e-9 else 0.33
+            target_c = float(E_target.detach().cpu().flatten()[0].item())
+            policy = get_aliphatic_carbon_policy(E_target)
+            upper_scale = float(policy.get('layer4_aliphatic_upper_scale', 0.90))
+            return max(0, int(math.floor(float(upper_scale) * float(x) * float(target_c))))
+        except Exception:
+            return None
+
     def _evaluate_required_hist_constraints(self,
                                             H: torch.Tensor,
                                             E_target: Optional[torch.Tensor],
-                                            su22_ratio: float = 0.1,
                                             su22_h_tol: float = 0.03) -> Dict[str, Any]:
         H_cpu = torch.clamp(H, min=0).long().detach().cpu()
         if E_target is None:
@@ -1990,8 +2020,8 @@ class Layer4Adjuster:
 
         n22 = int(H_cpu[22].item()) if int(H_cpu.numel()) > 22 else 0
         n23 = int(H_cpu[23].item()) if int(H_cpu.numel()) > 23 else 0
-        req22 = max(1, int(math.ceil(float(max(0.0, su22_ratio)) * float(n23)))) if int(n23) > 0 else 0
-        su22_ok = True if int(n23) <= 0 else bool(int(n22) >= int(req22))
+        req22 = 0
+        su22_ok = True
 
         even10_ok = True
         if int(H_cpu.numel()) > 10:
@@ -2005,7 +2035,7 @@ class Layer4Adjuster:
             unsat_even_ok = True
 
         return {
-            'ok': bool(h_ok and su22_ok and even10_ok and unsat_even_ok),
+            'ok': bool(h_ok and even10_ok and unsat_even_ok),
             'h_ok': bool(h_ok),
             'h_rel': float(h_rel),
             'h_tol': float(h_tol),
@@ -2289,7 +2319,10 @@ class Layer4Adjuster:
                 return False
             return {int(comp[0]), int(comp[-1])} == {11, 22}
 
-        flexible_bridge_count = sum(1 for ch in getattr(alloc_res, 'bridge_chains', []) if _is_flexible_bridge(ch))
+        flexible_bridge_chains = [ch for ch in getattr(alloc_res, 'bridge_chains', []) if _is_flexible_bridge(ch)]
+        flexible_bridge_count = int(len(flexible_bridge_chains))
+        extra_flexible_bridge_count = int(sum(1 for ch in flexible_bridge_chains if str(getattr(ch, 'origin_type', '')) == 'extra'))
+        fixed_flexible_bridge_count = int(max(0, flexible_bridge_count - extra_flexible_bridge_count))
         side_to_22_count = sum(1 for ch in getattr(alloc_res, 'side_chains', []) if _is_aliphatic_side_to_22(ch))
         aliphatic_total = int(sum(1 for n in nodes if 19 <= int(getattr(n, 'su_type', -1)) <= 25))
         effective_cluster_count = max(1, int(cluster_count))
@@ -2307,8 +2340,10 @@ class Layer4Adjuster:
                 x = float(ali_area / total_area) if total_area > 1e-9 else 0.33
                 x_pct = float(x) * 100.0
                 target_c = float(E_target.detach().cpu().flatten()[0].item())
+                policy = get_aliphatic_carbon_policy(E_target)
+                upper_scale = float(policy.get('layer4_aliphatic_upper_scale', 0.90))
                 aliphatic_min = int(math.ceil(((4.425 + 0.123 * x_pct + 0.00754 * x_pct * x_pct) / 100.0) * target_c))
-                aliphatic_max = int(math.floor(0.90 * float(x) * float(target_c)))
+                aliphatic_max = int(math.floor(float(upper_scale) * float(x) * float(target_c)))
             except Exception:
                 aliphatic_min = 0
                 aliphatic_max = 10**9
@@ -2369,6 +2404,8 @@ class Layer4Adjuster:
             'flex_ratio': float(flex_ratio),
             'flex_lower_extra': int(flex_lower_extra),
             'flexible_bridge_count': int(flexible_bridge_count),
+            'fixed_flexible_bridge_count': int(fixed_flexible_bridge_count),
+            'extra_flexible_bridge_count': int(extra_flexible_bridge_count),
             'flexible_bridge_limit': int(flex_upper),
             'side_to_22_count': int(side_to_22_count),
             'aliphatic_total': int(aliphatic_total),
@@ -2597,7 +2634,14 @@ class Layer4Adjuster:
                 'req_11': int(res_25.get('req_11', 0)),
                 'req_23': int(res_25.get('req_23', 0)),
             }
-            h_ops, rot_idx = self._h_rotation_adjust(tmp_nodes, H_work, _h_ratio, rot_idx)
+            h_ops, rot_idx = self._h_rotation_adjust(
+                tmp_nodes,
+                H_work,
+                _h_ratio,
+                rot_idx,
+                max_ops=None,
+                max_aliphatic_total=getattr(self, '_h_rotation_aliphatic_cap', None),
+            )
             if h_ops:
                 print(f"      H调整: {' + '.join(h_ops)}")
                 moves[-1]['h_ops'] = list(h_ops)
@@ -2697,7 +2741,14 @@ class Layer4Adjuster:
                 'req_11': int(res_24.get('req_11', 0)),
                 'req_23': int(res_24.get('req_23', 0)),
             }
-            h_ops, rot_idx = self._h_rotation_adjust(tmp_nodes, H_work, _h_ratio, rot_idx)
+            h_ops, rot_idx = self._h_rotation_adjust(
+                tmp_nodes,
+                H_work,
+                _h_ratio,
+                rot_idx,
+                max_ops=None,
+                max_aliphatic_total=getattr(self, '_h_rotation_aliphatic_cap', None),
+            )
             if h_ops:
                 print(f"      H调整: {' + '.join(h_ops)}")
                 moves[-1]['h_ops'] = list(h_ops)
@@ -2886,6 +2937,7 @@ class Layer4Adjuster:
         res_extra = _evaluate_balance(relaxed=bool(eval_relaxed_mode))
         cycle_idx = 0
         fallback_11_cycle = 0
+        flex12_cycle = 0
         max_reentry_rounds = max(0, int(kwargs.get('extra_refill_reentry_rounds', 3)))
         reentry_round = 0
         step2_initial_dumped = False
@@ -2901,6 +2953,18 @@ class Layer4Adjuster:
             delta_h = float(_h_delta(src_type, dst_type))
             if delta_h <= 0.0:
                 return True
+            curr_h = float(_current_h(H_work))
+            h_cap = float(target_H) * (1.0 + float(max_ratio))
+            return float(curr_h + delta_h) <= float(h_cap) + 1e-9
+
+        def _has_h_headroom_multi(src_type: int, dst_type: int, count: int, max_ratio: float = 0.04) -> bool:
+            try:
+                target_H = float(self.E_target[1].item()) if self.E_target is not None else 0.0
+            except Exception:
+                target_H = 0.0
+            if target_H <= 0.0:
+                return True
+            delta_h = float(_h_delta(src_type, dst_type)) * float(count)
             curr_h = float(_current_h(H_work))
             h_cap = float(target_H) * (1.0 + float(max_ratio))
             return float(curr_h + delta_h) <= float(h_cap) + 1e-9
@@ -2954,6 +3018,10 @@ class Layer4Adjuster:
                 req22 = int(res_extra.get('required_extra_22', 0))
                 req23 = int(res_extra.get('required_extra_23', 0))
                 branch_short = bool(int(res_extra.get('unallocated_branch', 0)) > 0 or int(req11) > 0 or int(req22) > 0 or int(req23) > 0)
+                extra_flex_count = int(res_extra.get('extra_flexible_bridge_count', 0))
+                fixed_flex_count = int(res_extra.get('fixed_flexible_bridge_count', 0))
+                flex_limit = int(res_extra.get('flexible_bridge_limit', 0))
+                flexcap_12_fallback = bool(flex_excess and int(extra_flex_count) <= 0 and int(fixed_flex_count) > int(flex_limit))
 
                 if not op and branch_short and int(req11) > 0:
                     if _apply_bulk_convert(12, [11]):
@@ -2974,6 +3042,20 @@ class Layer4Adjuster:
                 rigid_op = _apply_rigid10_rebalance() if (not op and rigid_excess) else None
                 if rigid_op:
                     op = str(rigid_op)
+                elif flexcap_12_fallback and int(H_work[12].item()) >= 2:
+                    mode = int(flex12_cycle) % 2
+                    if mode == 0:
+                        if _has_h_headroom_multi(12, 13, 2, max_ratio=0.04) and _apply_bulk_convert(12, [13, 13]):
+                            op = 'S2_flexcap_2x12->2x13'
+                    else:
+                        if _apply_bulk_convert(12, [11, 11]):
+                            op = 'S2_flexcap_2x12->2x11'
+                    if not op and mode == 0 and _apply_bulk_convert(12, [11, 11]):
+                        op = 'S2_flexcap_2x12->2x11'
+                    elif not op and mode == 1 and _has_h_headroom_multi(12, 13, 2, max_ratio=0.04) and _apply_bulk_convert(12, [13, 13]):
+                        op = 'S2_flexcap_2x12->2x13'
+                    if op:
+                        flex12_cycle += 1
                 elif aliphatic_excess and int(H_work[23].item()) > 0:
                     _apply_bulk_convert(23, [13])
                     op = 'S2_23->13_cap'
@@ -3032,66 +3114,6 @@ class Layer4Adjuster:
 
             if not bool(res_extra.get('ok', False)):
                 break
-
-            target_H = 0.0
-            try:
-                if self.E_target is not None:
-                    target_H = float(self.E_target[1].item())
-            except Exception:
-                target_H = 0.0
-
-            current_h_ratio = float(_h_ratio(H_work))
-            if target_H > 0.0 and current_h_ratio <= 0.04:
-                # Refill may increase H by at most +2% relative to the current ratio,
-                # but the absolute final cap must not exceed +4%.
-                # Alternate 13->23 (+1H) and 12->23 (+2H) so the refill order is
-                # deterministic and matches the desired gradual H increase pattern.
-                refill_cap_ratio = min(current_h_ratio + 0.02, 0.04)
-                if refill_cap_ratio > current_h_ratio + 1e-9:
-                    h_cap = float(target_H) * (1.0 + refill_cap_ratio)
-                    refill_order = [
-                        (13, 23, 'S2_hcap_13->23'),
-                        (12, 23, 'S2_hcap_12->23'),
-                    ]
-                    refill_idx = 0
-                    stalled = 0
-                    while stalled < len(refill_order):
-                        src_type, dst_type, op = refill_order[refill_idx % len(refill_order)]
-                        refill_idx += 1
-                        curr_h = float(_current_h(H_work))
-                        delta_h = float(_h_delta(src_type, dst_type))
-                        if delta_h <= 0.0:
-                            stalled += 1
-                            continue
-                        if curr_h + delta_h > h_cap + 1e-9:
-                            stalled += 1
-                            continue
-                        if not _can_increase_aliphatic(1, res_extra):
-                            stalled += 1
-                            continue
-                        if not _apply_bulk_convert(src_type, [dst_type]):
-                            stalled += 1
-                            continue
-                        _log_extra_move(op, res_extra)
-                        moves[-1]['h_ratio_after_h_adjust'] = float(_h_ratio(H_work))
-                        self._refresh_node_counters(tmp_nodes)
-                        stalled = 0
-
-                    self._refresh_node_counters(tmp_nodes)
-                    res_extra = _evaluate_balance(relaxed=bool(eval_relaxed_mode))
-
-            refill_reason = str(res_extra.get('reason', 'ok'))
-            if (
-                not bool(res_extra.get('ok', False))
-                and ('flex_excess' in refill_reason or 'rigid_excess' in refill_reason or 'flex_shortage' in refill_reason)
-                and int(reentry_round) < int(max_reentry_rounds)
-            ):
-                reentry_round += 1
-                print(
-                    f"    [Step 2] H回填后退化为 {refill_reason}，"
-                    f"重新进入extra压缩循环 ({reentry_round}/{max_reentry_rounds})"
-                )
-                continue
             break
 
         self._refresh_node_counters(tmp_nodes)
@@ -3132,18 +3154,34 @@ class Layer4Adjuster:
         diff: Optional[np.ndarray] = None,
         max_steps: int = 15,
         nodes: Optional[List[_NodeV3]] = None,
+        phase: str = 'full',
         **kwargs,
     ) -> Tuple[torch.Tensor, List[Dict], Dict]:
+        phase_name = str(phase or 'full').strip().lower()
         H_input = torch.clamp(H, min=0).long().clone().cpu()
-        H_work, branch_moves, branch_meta = self._adjust_skeleton_branch_allocation(
-            H=H,
-            E_target=E_target,
-            ppm=ppm,
-            diff=diff,
-            max_steps=max_steps,
-            nodes=nodes,
-            **kwargs,
-        )
+        H_work = H_input.detach().clone()
+        branch_moves: List[Dict[str, Any]] = []
+        branch_meta: Dict[str, Any] = {
+            'n_moves': 0,
+            'ok': True if phase_name == 'extra' else False,
+            'records': [],
+            'phase': 'branch',
+            'skipped': bool(phase_name == 'extra'),
+            'reason': 'phase_extra_only' if phase_name == 'extra' else 'not_run',
+            'final_diag': {},
+            'final_scenario': 'phase_extra_only' if phase_name == 'extra' else 'not_run',
+        }
+
+        if phase_name in ('full', 'branch'):
+            H_work, branch_moves, branch_meta = self._adjust_skeleton_branch_allocation(
+                H=H,
+                E_target=E_target,
+                ppm=ppm,
+                diff=diff,
+                max_steps=max_steps,
+                nodes=nodes,
+                **kwargs,
+            )
 
         all_moves = list(branch_moves)
         phase_moves: Dict[str, List[Dict[str, Any]]] = {
@@ -3153,6 +3191,40 @@ class Layer4Adjuster:
             'post': [],
         }
         H_after_branch = H_work.detach().clone().cpu()
+        final_h_ratio = float(branch_meta.get('final_h_ratio', 0.0))
+
+        if phase_name == 'branch':
+            return H_work, all_moves, {
+                'n_moves': len(all_moves),
+                'ok': bool(branch_meta.get('ok', False)),
+                'branch_ok': bool(branch_meta.get('ok', False)),
+                'extra_ok': True,
+                'final_h_ratio': float(final_h_ratio),
+                'records': all_moves,
+                'branch_meta': branch_meta,
+                'extra_meta': {
+                    'n_moves': 0,
+                    'ok': True,
+                    'records': [],
+                    'phase': 'extra',
+                    'skipped': True,
+                    'reason': 'phase_branch_only',
+                },
+                'align_meta': {'applied': False, 'reason': 'phase_branch_only'},
+                'final_diag': dict((branch_meta or {}).get('final_diag', {}) or {}),
+                'final_allocation': {},
+                'post_meta': {'post_changed': False, 'recheck_completed': False},
+                'phase_hists': {
+                    'input': H_input,
+                    'after_branch': H_after_branch,
+                },
+                'phase_moves': phase_moves,
+                'recheck_required': False,
+                'post_changed': False,
+                'phase': 'branch',
+                'final_scenario': str(branch_meta.get('final_scenario', 'branch')),
+            }
+
         extra_meta: Dict[str, Any] = {
             'n_moves': 0,
             'ok': False,
@@ -3162,7 +3234,8 @@ class Layer4Adjuster:
             'reason': 'branch_not_ok',
         }
 
-        if bool(branch_meta.get('ok', False)):
+        can_run_extra = bool(phase_name == 'extra' or bool(branch_meta.get('ok', False)))
+        if can_run_extra:
             extra_max_steps = int(kwargs.get('extra_max_steps', max(12, int(max_steps) * 3)))
             H_work, extra_moves, extra_meta = self._adjust_skeleton_extra_allocation(
                 H=H_work,
@@ -3210,64 +3283,21 @@ class Layer4Adjuster:
             }
         H_after_align = H_work.detach().clone().cpu()
 
-        final_h_ratio = float(branch_meta.get('final_h_ratio', 0.0))
         if 'final_h_ratio' in extra_meta:
             final_h_ratio = float(extra_meta['final_h_ratio'])
 
-        overall_ok = bool(branch_meta.get('ok', False)) and bool(extra_meta.get('ok', False))
-        final_diag = extra_meta.get('final_diag') if bool(branch_meta.get('ok', False)) else branch_meta.get('final_diag')
+        branch_ok_for_phase = True if phase_name == 'extra' else bool(branch_meta.get('ok', False))
+        overall_ok = bool(branch_ok_for_phase) and bool(extra_meta.get('ok', False))
+        final_diag = extra_meta.get('final_diag') if bool(can_run_extra) else branch_meta.get('final_diag')
         post_meta: Dict[str, Any] = {}
-        recheck_required = False
+        post_changed = False
+        recheck_completed = False
         post_moves: List[Dict[str, Any]] = []
-
-        try:
-            H_post, su22_moves, su22_meta = self._enforce_su22_ratio_and_h(
-                H_work,
-                E_target,
-                enable=bool(kwargs.get('enable_su22_adjust', True)),
-                ratio=float(kwargs.get('su22_ratio', 0.1)),
-                h_tol=float(kwargs.get('su22_h_tol', 0.03)),
-            )
-            if su22_moves:
-                recheck_required = True
-                H_work = H_post
-                for mv in su22_moves:
-                    tagged = dict(mv)
-                    tagged['stage'] = 'skeleton_post'
-                    all_moves.append(tagged)
-                    post_moves.append(dict(tagged))
-            post_meta['su22_meta'] = su22_meta
-        except Exception:
-            pass
-
-        try:
-            if nodes is not None and E_target is not None:
-                import copy
-                tmp_nodes = copy.deepcopy(nodes)
-                self._refresh_node_counters(tmp_nodes)
-                self.E_target = E_target
-                _, h_ratio_fn, _, _ = self._make_h_helpers()
-                rot_ops, rot_idx = self._h_rotation_adjust(tmp_nodes, H_work, h_ratio_fn, int(self._h_rotation_state))
-                self._h_rotation_state = int(rot_idx)
-                if rot_ops:
-                    recheck_required = True
-                    for op in rot_ops:
-                        tagged = {'stage': 'skeleton_h_rotation', 'op': str(op)}
-                        all_moves.append(tagged)
-                        post_moves.append(dict(tagged))
-                    self._refresh_node_counters(tmp_nodes)
-                    for i, tn in enumerate(tmp_nodes):
-                        nodes[i].su_type = tn.su_type
-                        nodes[i].hop1_su = Counter(tn.hop1_su)
-                        nodes[i].hop2_su = Counter(tn.hop2_su)
-                post_meta['h_rotation_ops'] = list(rot_ops)
-        except Exception:
-            pass
 
         try:
             H_post, final_moves, final_meta = self._apply_final_structure_constraints(H_work)
             if final_moves:
-                recheck_required = True
+                post_changed = True
                 H_work = H_post
                 for mv in final_moves:
                     tagged = dict(mv)
@@ -3275,18 +3305,6 @@ class Layer4Adjuster:
                     all_moves.append(tagged)
                     post_moves.append(dict(tagged))
             post_meta['final_structure_constraints'] = final_meta
-        except Exception:
-            pass
-
-        try:
-            H_post, hrot_moves, hrot_meta = self._apply_h_rotation_to_counts(H_work, E_target)
-            if hrot_moves:
-                recheck_required = True
-                H_work = H_post
-                all_moves.extend(hrot_moves)
-                for mv in hrot_moves:
-                    post_moves.append(dict(mv))
-            post_meta['post_constraint_h_rotation'] = hrot_meta
         except Exception:
             pass
 
@@ -3351,6 +3369,7 @@ class Layer4Adjuster:
                 'allocation_details': dict(balance_diag.get('allocation_details', {}) or {}),
                 'cluster_meta': dict(balance_diag.get('cluster_meta', {}) or {}),
             }
+            recheck_completed = True
         except Exception as e:
             print(f"  [Skeleton-Alloc] 最终完整资源分配输出失败: {e}")
 
@@ -3362,11 +3381,15 @@ class Layer4Adjuster:
         except Exception:
             pass
 
-        overall_ok = bool(overall_ok) and (not bool(recheck_required)) and bool(final_alloc_diag.get('ok', True))
+        recheck_required = bool(post_changed and not recheck_completed)
+        final_alloc_ok = bool(final_alloc_diag.get('ok', not bool(post_changed)))
+        post_meta['post_changed'] = bool(post_changed)
+        post_meta['recheck_completed'] = bool(recheck_completed)
+        overall_ok = bool(overall_ok) and (not bool(recheck_required)) and bool(final_alloc_ok)
         return H_work, all_moves, {
             'n_moves': len(all_moves),
             'ok': overall_ok,
-            'branch_ok': bool(branch_meta.get('ok', False)),
+            'branch_ok': bool(branch_ok_for_phase),
             'extra_ok': bool(extra_meta.get('ok', False)),
             'final_h_ratio': final_h_ratio,
             'records': all_moves,
@@ -3385,11 +3408,13 @@ class Layer4Adjuster:
             },
             'phase_moves': phase_moves,
             'recheck_required': bool(recheck_required),
+            'post_changed': bool(post_changed),
+            'phase': str(phase_name),
             'final_scenario': (
                 'ok'
                 if overall_ok else (
                     'branch_not_ok'
-                    if not bool(branch_meta.get('ok', False))
+                    if not bool(branch_ok_for_phase)
                     else str(final_alloc_diag.get('reason', extra_meta.get('reason', 'extra_not_ok')))
                 )
             ),
@@ -3428,6 +3453,7 @@ class Layer4Adjuster:
         H_work = H.clone()
         moves = []
         meta = {}
+        self._h_rotation_aliphatic_cap = self._estimate_aliphatic_upper_bound(S_target, E_target)
         
         # 1. 执行对应阶段的调整
         if stage == 'block_a':
@@ -3444,6 +3470,7 @@ class Layer4Adjuster:
                 H_work, ppm, diff,
                 max_moves_each=kwargs.get('max_moves_each', 3),
                 peak_rel_threshold=kwargs.get('peak_rel_threshold', 0.01),
+                substage=kwargs.get('block_b_substage'),
             )
         elif stage == 'block_c':
             H_work, moves, meta = self.adjust_block_c_aliphatic_tail(
@@ -3457,6 +3484,7 @@ class Layer4Adjuster:
                 min_keep_25=kwargs.get('min_keep_25', 0),
                 carbonyl_couple=kwargs.get('carbonyl_couple', True),
                 h_tolerance=kwargs.get('h_tolerance', kwargs.get('su22_h_tol', 0.04)),
+                enable_aro23_coupling=kwargs.get('enable_aro23_coupling', False),
             )
         elif stage == 'carbonyl':
             H_work, moves, meta = self.adjust_carbonyl_by_difference(
@@ -3516,6 +3544,7 @@ class Layer4Adjuster:
             skeleton_kwargs = dict(kwargs)
             skeleton_max_steps = skeleton_kwargs.pop('max_steps', 40)
             skeleton_nodes = skeleton_kwargs.pop('nodes', None)
+            skeleton_phase = str(skeleton_kwargs.pop('skeleton_phase', 'full') or 'full').strip().lower()
             H_work, moves, meta = self._adjust_skeleton_by_allocation(
                 H_work,
                 E_target=E_target,
@@ -3524,6 +3553,7 @@ class Layer4Adjuster:
                 diff=diff,
                 max_steps=skeleton_max_steps,
                 nodes=skeleton_nodes,
+                phase=skeleton_phase,
                 **skeleton_kwargs,
             )
             if meta.get('ok'):
@@ -3532,8 +3562,9 @@ class Layer4Adjuster:
                 status = '分支通过但柔性/侧链阶段未通过'
             else:
                 status = '分支阶段未通过'
-            self._print_hist_change_summary(stage.upper(), H_input, torch.clamp(H_work, min=0).long().cpu())
-            self._print_move_summary(stage.upper(), moves)
+            summary_label = f"{stage.upper()}-{str(skeleton_phase).upper()}"
+            self._print_hist_change_summary(summary_label, H_input, torch.clamp(H_work, min=0).long().cpu())
+            self._print_move_summary(summary_label, moves)
             phase_hists = meta.get('phase_hists', {}) or {}
             phase_moves = meta.get('phase_moves', {}) or {}
             if phase_hists:
@@ -3555,7 +3586,7 @@ class Layer4Adjuster:
                 ('SKELETON-POST', 'post'),
             ):
                 self._print_move_summary(str(label), list(phase_moves.get(key, []) or []))
-            print(f"\n{stage.upper()}候选调整完成: 共{len(moves)}次变更, {status}")
+            print(f"\n{summary_label}候选调整完成: 共{len(moves)}次变更, {status}")
             return H_work, moves, meta
 
         else:
@@ -3563,7 +3594,7 @@ class Layer4Adjuster:
             return H_work, moves, meta
 
         try:
-            H_work, hrot_moves, hrot_meta = self._apply_h_rotation_to_counts(H_work, E_target)
+            H_work, hrot_moves, hrot_meta = self._apply_h_rotation_to_counts(H_work, E_target, max_ops=None)
             if hrot_moves:
                 moves.extend(hrot_moves)
             meta['h_rotation_meta'] = hrot_meta

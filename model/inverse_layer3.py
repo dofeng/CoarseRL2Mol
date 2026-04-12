@@ -86,19 +86,6 @@ class Layer3Estimator:
             return float('inf')
         return float(torch.sum(torch.abs(diff[mask])))
 
-    def _max_negative_ppm(self, diff: torch.Tensor, ppm_axis: torch.Tensor, mask: torch.Tensor) -> Optional[float]:
-        if not bool(mask.any()):
-            return None
-        idxs = torch.nonzero(mask, as_tuple=False).view(-1)
-        seg = diff[idxs]
-        if seg.numel() <= 0:
-            return None
-        min_val, min_idx = torch.min(seg, dim=0)
-        if float(min_val) >= 0.0:
-            return None
-        i = int(idxs[min_idx])
-        return float(ppm_axis[i])
-
     def _top_negative_ppms(self,
                            diff: torch.Tensor,
                            ppm_axis: torch.Tensor,

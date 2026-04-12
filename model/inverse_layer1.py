@@ -1,9 +1,10 @@
+import copy
 import torch
 import numpy as np
 import pandas as pd
 import random
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Set
 from collections import Counter, defaultdict
 
 from .coarse_graph import SU_DEFS, E_SU, NUM_SU_TYPES, PPM_AXIS
@@ -54,7 +55,8 @@ class Layer1Assigner:
                  vae_model=None,
                  E_SU_tensor: torch.Tensor = None,
                  layer0_estimator=None,
-                 intensity_scale: float = 1.0):
+                 intensity_scale: float = 1.0,
+                 deterministic: bool = True):
         """
         初始化Layer1分配器
         """
@@ -63,6 +65,25 @@ class Layer1Assigner:
         self.E_SU = E_SU_tensor.to(device) if E_SU_tensor is not None else E_SU.to(device)
         self.layer0 = layer0_estimator
         self.intensity_scale = float(intensity_scale)
+        self.deterministic = bool(deterministic)
+        self._build_variant = 0
+
+    def _stable_node_order(self, nodes: List[_NodeV3]) -> List[_NodeV3]:
+        ordered = list(nodes)
+        ordered.sort(key=lambda n: (int(getattr(n, 'global_id', -1)), int(getattr(n, 'su_type', -1))))
+        return ordered
+
+    def _maybe_shuffle_nodes(self, nodes: List[_NodeV3], salt: int = 0) -> List[_NodeV3]:
+        ordered = list(nodes)
+        if bool(self.deterministic):
+            ordered = self._stable_node_order(ordered)
+            if ordered:
+                offset = int(self._build_variant + int(salt)) % len(ordered)
+                if offset > 0:
+                    ordered = ordered[offset:] + ordered[:offset]
+            return ordered
+        random.shuffle(ordered)
+        return ordered
     
     def _histogram_from_nodes(self, nodes: List[_NodeV3]) -> torch.Tensor:
         """从节点列表构建SU直方图"""
@@ -262,6 +283,98 @@ class Layer1Assigner:
                 global_id += 1
         
         return nodes
+
+    def _restore_seed_topology(self, nodes: List[_NodeV3], seed_nodes: Optional[List[_NodeV3]]) -> None:
+        """Best-effort warm start from a previous node list with a nearby histogram.
+
+        Mapping is done within each SU type in stable order; edges are restored only
+        when both endpoints still exist after remapping and the edge still satisfies
+        the incremental per-port validation on both sides.
+        """
+        if not seed_nodes:
+            return
+
+        new_by_su: Dict[int, List[_NodeV3]] = defaultdict(list)
+        for node in nodes:
+            new_by_su[int(node.su_type)].append(node)
+        for su_type in list(new_by_su.keys()):
+            new_by_su[su_type].sort(key=lambda n: int(n.global_id))
+
+        seed_by_su: Dict[int, List[_NodeV3]] = defaultdict(list)
+        seed_lookup: Dict[int, _NodeV3] = {}
+        for node in seed_nodes:
+            try:
+                su_type = int(node.su_type)
+                seed_by_su[su_type].append(node)
+                seed_lookup[int(node.global_id)] = node
+            except Exception:
+                continue
+        for su_type in list(seed_by_su.keys()):
+            seed_by_su[su_type].sort(key=lambda n: int(n.global_id))
+
+        old_to_new: Dict[int, _NodeV3] = {}
+        for su_type, new_group in new_by_su.items():
+            old_group = seed_by_su.get(int(su_type), [])
+            for old_node, new_node in zip(old_group, new_group):
+                try:
+                    old_to_new[int(old_node.global_id)] = new_node
+                except Exception:
+                    continue
+                try:
+                    new_node.mu = float(getattr(old_node, 'mu', 0.0))
+                    new_node.pi = float(getattr(old_node, 'pi', 1.0))
+                except Exception:
+                    pass
+                try:
+                    old_z = getattr(old_node, 'z_vec', None)
+                    if isinstance(old_z, torch.Tensor):
+                        new_node.z_vec = old_z.detach().clone()
+                except Exception:
+                    pass
+                try:
+                    old_hist = getattr(old_node, 'z_history', None)
+                    if isinstance(old_hist, list):
+                        new_node.z_history = [
+                            z.detach().clone() if isinstance(z, torch.Tensor) else z
+                            for z in old_hist
+                        ]
+                except Exception:
+                    pass
+                try:
+                    old_sc = getattr(old_node, 'score_components', None)
+                    if isinstance(old_sc, dict):
+                        new_node.score_components = dict(old_sc)
+                except Exception:
+                    pass
+                try:
+                    new_node.template_key = getattr(old_node, 'template_key', None)
+                except Exception:
+                    pass
+
+        seen_edges: Set[Tuple[int, int]] = set()
+        for old_id, new_u in old_to_new.items():
+            old_u = seed_lookup.get(int(old_id))
+            if old_u is None:
+                continue
+            for old_v_id in list(getattr(old_u, 'hop1_ids', []) or []):
+                try:
+                    old_v_id_i = int(old_v_id)
+                except Exception:
+                    continue
+                new_v = old_to_new.get(old_v_id_i)
+                if new_v is None:
+                    continue
+                edge = tuple(sorted((int(new_u.global_id), int(new_v.global_id))))
+                if edge in seen_edges:
+                    continue
+                seen_edges.add(edge)
+                if int(new_v.global_id) in new_u.hop1_ids:
+                    continue
+                if int(new_u.remaining_hop1_slots()) <= 0 or int(new_v.remaining_hop1_slots()) <= 0:
+                    continue
+                if not self._can_add_hop1_connection(nodes, new_u, new_v):
+                    continue
+                self._add_bidirectional_hop1(nodes, int(new_u.global_id), int(new_v.global_id))
     
     def _add_bidirectional_hop1(self, nodes: List[_NodeV3], id1: int, id2: int):
         """添加双向1-hop连接
@@ -367,14 +480,6 @@ class Layer1Assigner:
 
         def _is_locked(n: _NodeV3) -> bool:
             return n.su_type in {27, 28, 29, 31, 32}
-
-        def _check_port_valid_after(node: _NodeV3) -> bool:
-            """检查节点当前的邻居是否满足 per-port 规则"""
-            ps = HOP1_PORT_COMBINATIONS.get(int(node.su_type))
-            if not ps:
-                return True
-            cur = [int(nodes[nid].su_type) for nid in node.hop1_ids]
-            return _can_partial_match_ports(cur, ps)
 
         while iters < max_iters:
             iters += 1
@@ -576,6 +681,26 @@ class Layer1Assigner:
             w *= self._bridge_candidate_bias(int(center.su_type), current_neighbors, int(n.su_type))
             weights.append(w)
 
+        if bool(self.deterministic):
+            ranked = sorted(
+                range(len(filtered)),
+                key=lambda i: (
+                    float(weights[i]),
+                    int(filtered[i].remaining_hop1_slots()),
+                    -int(filtered[i].global_id),
+                ),
+                reverse=True,
+            )
+            if not ranked:
+                return None
+            top_weight = float(weights[int(ranked[0])])
+            if top_weight > 0.0:
+                window = [idx for idx in ranked if float(weights[int(idx)]) >= 0.85 * float(top_weight)]
+            else:
+                window = list(ranked)
+            window = window[: max(1, min(4, len(window)))]
+            choose_pos = int(self._build_variant + int(center.global_id)) % len(window)
+            return filtered[int(window[int(choose_pos)])]
         return random.choices(filtered, weights=weights, k=1)[0]
     
     # ========================================================================
@@ -601,7 +726,7 @@ class Layer1Assigner:
         su7_nodes = self._get_nodes_by_su_type(nodes, 7)
         su19_nodes = self._get_nodes_by_su_type(nodes, 19)
         
-        random.shuffle(s_nodes)
+        s_nodes = self._maybe_shuffle_nodes(s_nodes, salt=101)
 
         # 第一轮：每个31尽量先分一个7
         for s_node in s_nodes:
@@ -609,18 +734,20 @@ class Layer1Assigner:
             if target is not None:
                 self._add_bidirectional_hop1(nodes, s_node.global_id, target.global_id)
 
-        # 第二轮：如果7仍有剩余，再继续给31分第二个7
+        # 第二轮：优先补一个19，鼓励形成 7-31-19 的混合配对
         for s_node in s_nodes:
             if s_node.remaining_hop1_slots() <= 0:
                 continue
-            target = self._pick_fixed_target(nodes, s_node, su7_nodes, [7])
+            target = self._pick_fixed_target(nodes, s_node, su19_nodes, [19])
             if target is not None:
                 self._add_bidirectional_hop1(nodes, s_node.global_id, target.global_id)
 
-        # 最后用19补足剩余端口
+        # 最后如果19不足，再允许第二个7兜底
         for s_node in s_nodes:
             while s_node.remaining_hop1_slots() > 0:
-                target = self._pick_fixed_target(nodes, s_node, su19_nodes, [19])
+                target = self._pick_fixed_target(nodes, s_node, su7_nodes, [7])
+                if target is None:
+                    target = self._pick_fixed_target(nodes, s_node, su19_nodes, [19])
                 if target is None:
                     break
                 self._add_bidirectional_hop1(nodes, s_node.global_id, target.global_id)
@@ -632,7 +759,7 @@ class Layer1Assigner:
         su6_nodes = self._get_nodes_by_su_type(nodes, 6)
         su20_nodes = self._get_nodes_by_su_type(nodes, 20)
         
-        random.shuffle(su27_nodes)
+        su27_nodes = self._maybe_shuffle_nodes(su27_nodes, salt=211)
 
         # 先给每个27分一个6
         for n27 in su27_nodes:
@@ -640,18 +767,20 @@ class Layer1Assigner:
             if target is not None:
                 self._add_bidirectional_hop1(nodes, n27.global_id, target.global_id)
 
-        # 如果6还有剩余，再继续给27分第二个6
+        # 第二轮：优先补一个20，鼓励形成 6-27-20 的混合配对
         for n27 in su27_nodes:
             if n27.remaining_hop1_slots() <= 0:
                 continue
-            target = self._pick_fixed_target(nodes, n27, su6_nodes, [6])
+            target = self._pick_fixed_target(nodes, n27, su20_nodes, [20])
             if target is not None:
                 self._add_bidirectional_hop1(nodes, n27.global_id, target.global_id)
 
-        # 剩余端口用20补足
+        # 最后如果20不足，再允许第二个6兜底
         for n27 in su27_nodes:
             while n27.remaining_hop1_slots() > 0:
-                target = self._pick_fixed_target(nodes, n27, su20_nodes, [20])
+                target = self._pick_fixed_target(nodes, n27, su6_nodes, [6])
+                if target is None:
+                    target = self._pick_fixed_target(nodes, n27, su20_nodes, [20])
                 if target is None:
                     break
                 self._add_bidirectional_hop1(nodes, n27.global_id, target.global_id)
@@ -687,8 +816,7 @@ class Layer1Assigner:
         W_available = len(su5_nodes) + len(su19_nodes_o)
         
         # 第一轮：29/28/2 都尽量先分一个5
-        first_round_nodes = list(su29_nodes) + list(su28_nodes) + list(su2_nodes)
-        random.shuffle(first_round_nodes)
+        first_round_nodes = self._maybe_shuffle_nodes(list(su29_nodes) + list(su28_nodes) + list(su2_nodes), salt=307)
         for node in first_round_nodes:
             if node.remaining_hop1_slots() <= 0:
                 continue
@@ -696,20 +824,12 @@ class Layer1Assigner:
             if t is not None:
                 self._add_bidirectional_hop1(nodes, node.global_id, t.global_id)
 
-        # 第二轮：29如果还有空位且5还有剩余，再继续给29分第二个5
+        # 第二轮：优先给29/28/2补19，鼓励形成 5-29-19 的混合配对
         for n29 in su29_nodes:
             if n29.remaining_hop1_slots() <= 0:
                 continue
-            t = self._pick_fixed_target(nodes, n29, su5_nodes, [5])
+            t = self._pick_fixed_target(nodes, n29, su19_nodes_o, [19])
             if t is not None:
-                self._add_bidirectional_hop1(nodes, n29.global_id, t.global_id)
-        
-        # 最后用19补足剩余端口
-        for n29 in su29_nodes:
-            while n29.remaining_hop1_slots() > 0:
-                t = self._pick_fixed_target(nodes, n29, su19_nodes_o, [19])
-                if t is None:
-                    break
                 self._add_bidirectional_hop1(nodes, n29.global_id, t.global_id)
 
         for n28 in su28_nodes:
@@ -718,14 +838,29 @@ class Layer1Assigner:
             t = self._pick_fixed_target(nodes, n28, su19_nodes_o, [19])
             if t is not None:
                 self._add_bidirectional_hop1(nodes, n28.global_id, t.global_id)
-        
-        # 最后分配2号醚端（需要1个邻居，羰基端后续补充）
+
         for n2 in su2_nodes:
             if n2.remaining_hop1_slots() <= 0:
                 continue
             t = self._pick_fixed_target(nodes, n2, su19_nodes_o, [19])
             if t is not None:
                 self._add_bidirectional_hop1(nodes, n2.global_id, t.global_id)
+
+        # 第三轮：29如果还有空位且5还有剩余，再继续给29分第二个5
+        for n29 in su29_nodes:
+            if n29.remaining_hop1_slots() <= 0:
+                continue
+            t = self._pick_fixed_target(nodes, n29, su5_nodes, [5])
+            if t is not None:
+                self._add_bidirectional_hop1(nodes, n29.global_id, t.global_id)
+        
+        # 最后再用19补足剩余端口
+        for n29 in su29_nodes:
+            while n29.remaining_hop1_slots() > 0:
+                t = self._pick_fixed_target(nodes, n29, su19_nodes_o, [19])
+                if t is None:
+                    break
+                self._add_bidirectional_hop1(nodes, n29.global_id, t.global_id)
     
     def _assign_fixed_carbonyl(self, nodes: List[_NodeV3]):
         """e) 0/1/2/3羰基端 -> 必须先消耗所有9号，再分配其他类型
@@ -768,8 +903,7 @@ class Layer1Assigner:
             return out
 
         # ---- 阶段1：先给每个0/1/2/3尽量分一个9号 ----
-        first_round = list(su0_nodes) + list(su1_nodes) + list(su2_nodes) + list(su3_nodes)
-        random.shuffle(first_round)
+        first_round = self._maybe_shuffle_nodes(list(su0_nodes) + list(su1_nodes) + list(su2_nodes) + list(su3_nodes), salt=401)
         for carb in first_round:
             if carb.remaining_hop1_slots() <= 0:
                 continue
@@ -853,8 +987,7 @@ class Layer1Assigner:
         su16_nodes = self._get_nodes_by_su_type(nodes, 16)
         
         # 按优先级15>16>14构建池，并随机打乱
-        double_bond_pool = list(su15_nodes) + list(su16_nodes) + list(su14_nodes)
-        random.shuffle(double_bond_pool)
+        double_bond_pool = self._maybe_shuffle_nodes(list(su15_nodes) + list(su16_nodes) + list(su14_nodes), salt=503)
         
         # 两两配对：每个节点的不饱和端连接度=1，只能配对一次
         paired = set()
@@ -986,7 +1119,7 @@ class Layer1Assigner:
                           if n.remaining_hop1_slots() > 0
                           and 4 not in n.hop1_su and 10 not in n.hop1_su]
         
-        random.shuffle(su10_need_port3)
+        su10_need_port3 = self._maybe_shuffle_nodes(su10_need_port3, salt=601)
         while len(su10_need_port3) >= 2:
             n1 = su10_need_port3.pop(0)
             n2 = su10_need_port3.pop(0)
@@ -1262,6 +1395,8 @@ class Layer1Assigner:
                       eval_lib_path: Optional[str] = None,
                       eval_hwhm: float = 1.0,
                       eval_allow_approx: bool = True,
+                      build_variant: int = 0,
+                      seed_nodes: Optional[List[_NodeV3]] = None,
                       enable_carbonyl_joint_adjust: bool = True,
                       carbonyl_joint_iterations: int = 3,
                       carbonyl_joint_max_adjustments: int = 3,
@@ -1306,6 +1441,7 @@ class Layer1Assigner:
         H_init = H_init.to(device)
         S_target = S_target.to(device)
         E_target = E_target.to(device)
+        self._build_variant = int(build_variant)
     
         print("\n" + "="*60)
         print(f"Layer1: 1-hop分配 ({len(self._initialize_node_pool(H_init))}个节点)")
@@ -1313,6 +1449,7 @@ class Layer1Assigner:
     
         # 初始化全局节点池
         nodes = self._initialize_node_pool(H_init)
+        self._restore_seed_topology(nodes, seed_nodes)
     
         # a) 32号X -> 8号/21号
         self._assign_fixed_halogen_X(nodes)
@@ -1416,6 +1553,7 @@ class Layer1Assigner:
                     lib_path=eval_lib_path,
                     output_dir=eval_output_dir,
                     hwhm=eval_hwhm,
+                    allow_approx=eval_allow_approx,
                     neg_threshold=hop1_neg_threshold,
                     pos_threshold=hop1_pos_threshold,
                     max_iterations=hop1_adjust_iterations,
@@ -2208,6 +2346,7 @@ class Layer1Assigner:
                                        lib_path: Optional[str] = None,
                                        output_dir: str = 'inverse_result',
                                        hwhm: float = 1.0,
+                                       allow_approx: bool = True,
                                        neg_threshold: float = -0.5,
                                        pos_threshold: float = 0.5,
                                        max_iterations: int = 3,
@@ -2265,7 +2404,8 @@ class Layer1Assigner:
         
         total_adjustments = 0
         iteration_summaries = []
-        best_r2 = 0.0
+        best_r2 = -1e9
+        best_nodes = copy.deepcopy(nodes)
         
         for iteration in range(max_iterations):
             print(f"\n--- 调整迭代 {iteration + 1}/{max_iterations} ---")
@@ -2278,7 +2418,7 @@ class Layer1Assigner:
                     continue
                 
                 hop1_ms = self._hop1_to_multiset(n.hop1_su)
-                mu, pi, meta = self._lookup_mu_pi_by_hop1(center_su, hop1_ms, lib_index, allow_approx=True)
+                mu, pi, meta = self._lookup_mu_pi_by_hop1(center_su, hop1_ms, lib_index, allow_approx=bool(allow_approx))
                 
                 if mu is not None and pi is not None:
                     mus.append(float(mu))
@@ -2321,8 +2461,9 @@ class Layer1Assigner:
             
             print(f"  当前R² = {r2:.4f}")
             
-            if r2 > best_r2:
-                best_r2 = r2
+            if float(r2) > float(best_r2):
+                best_r2 = float(r2)
+                best_nodes = copy.deepcopy(nodes)
             
             # 保存当前node_peaks用于调整
             node_peaks_df = pd.DataFrame(rows)
@@ -2357,16 +2498,39 @@ class Layer1Assigner:
         print("\n--- 调整完成，最终评估 ---")
         final_metrics = self.evaluate_layer1_nmr_with_library(
             nodes=nodes, S_target=S_target, lib_path=lib_path,
-            output_dir=output_dir, hwhm=hwhm, allow_approx=True
+            output_dir=output_dir, hwhm=hwhm, allow_approx=bool(allow_approx)
         )
+        final_attempt_r2 = float(final_metrics.get('r2', 0.0))
+        selected_nodes = nodes
+        selected_metrics = final_metrics
+        best_source = 'final_attempt'
+
+        if float(final_attempt_r2) >= float(best_r2):
+            best_r2 = float(final_attempt_r2)
+            best_nodes = copy.deepcopy(nodes)
+        else:
+            print(f"  恢复最佳Hop1状态: best_r2={best_r2:.4f}, final_attempt_r2={final_attempt_r2:.4f}")
+            selected_nodes = copy.deepcopy(best_nodes)
+            selected_metrics = self.evaluate_layer1_nmr_with_library(
+                nodes=selected_nodes,
+                S_target=S_target,
+                lib_path=lib_path,
+                output_dir=output_dir,
+                hwhm=hwhm,
+                allow_approx=bool(allow_approx),
+            )
+            best_r2 = float(selected_metrics.get('r2', best_r2))
+            best_source = 'best_iteration'
         
         summary = {
             'total_adjustments': total_adjustments,
             'iterations': len(iteration_summaries),
             'iteration_details': iteration_summaries,
-            'best_r2': best_r2,
-            'final_r2': final_metrics.get('r2', 0.0),
+            'best_r2': float(best_r2),
+            'final_r2': float(selected_metrics.get('r2', 0.0)),
+            'final_attempt_r2': float(final_attempt_r2),
+            'selected_source': str(best_source),
             'adjuster_stats': adjuster.stats,
         }
         
-        return nodes, summary
+        return selected_nodes, summary

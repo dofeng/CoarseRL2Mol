@@ -27,6 +27,7 @@ from model.inverse_common import (
     PPM_AXIS, visualize_spectrum_comparison, visualize_su_distribution,
     SU_CONNECTION_DEGREE, normalize_spectrum_to_carbon_count
 )
+from RL_MTCS.RL_allocator import FlexAllocator
 
 SU_NAMES = [name for name, _ in SU_DEFS]
 AB_STAGE_ORDER = ['block_a', 'block_b']
@@ -62,6 +63,7 @@ DEFAULT_CONFIG = {
     'block_a_cycles': 4,
     'block_b_cycles': 2,
     'cd_inner_max_loops': 3,
+    'cd_inner_patience': 3,
     'skeleton_max_steps': 40,
     'extra_max_steps': 100,
     'extra_flexible_ratio': 0.80,
@@ -91,6 +93,12 @@ DEFAULT_CONFIG = {
     'outer_max_cycles': 3,
     'outer_patience': 2,
     'outer_improve_eps': 1e-4,
+    'h_accept_tol': 0.04,
+    'soft_accept_r2_drop': 0.08,
+    'soft_accept_overall_drop': 2500.0,
+    'soft_accept_r2_gain_eps': 1e-4,
+    'block_b_soft_r2_drop': 0.02,
+    'block_b_soft_overall_drop': 300.0,
     # Final smoothing
     'final_smooth_sigma_ppm': None,
     'final_smooth_passes': 1,
@@ -143,6 +151,14 @@ def _window_abs_from_diff(diff_info: Dict[str, Any], lo: float, hi: float) -> fl
     if not np.any(mask):
         return 1e12
     return float(np.sum(np.abs(diff[mask])))
+
+
+def _get_layer1_r2(diff_info: Dict[str, Any]) -> float:
+    metrics = diff_info.get('layer1_metrics', {}) or {}
+    try:
+        return float(metrics.get('r2', diff_info.get('r2', 0.0)))
+    except Exception:
+        return float(diff_info.get('r2', 0.0))
 
 
 def _compute_stage_score(diff_info: Dict[str, Any], stage: str) -> Dict[str, float]:
@@ -214,6 +230,17 @@ def _compute_overall_score(diff_info: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
+def _h_rel_from_hist(H: torch.Tensor, E_target: torch.Tensor) -> float:
+    H_cpu = torch.clamp(H.detach().cpu().long(), min=0)
+    E_target_cpu = E_target.detach().cpu().float()
+    E_pred = torch.matmul(H_cpu.float(), E_SU.cpu())
+    target_h = float(E_target_cpu[1].item()) if int(E_target_cpu.numel()) > 1 else 0.0
+    current_h = float(E_pred[1].item()) if int(E_pred.numel()) > 1 else 0.0
+    if target_h <= 1e-8:
+        return 0.0
+    return float(abs(current_h - target_h) / target_h)
+
+
 def _evaluate_required_hist_constraints(H, E_target, cfg) -> Dict[str, Any]:
     H_cpu = H.detach().cpu().long()
     E_target_cpu = E_target.detach().cpu().float()
@@ -231,9 +258,8 @@ def _evaluate_required_hist_constraints(H, E_target, cfg) -> Dict[str, Any]:
 
     n22 = int(H_cpu[22].item()) if int(H_cpu.numel()) > 22 else 0
     n23 = int(H_cpu[23].item()) if int(H_cpu.numel()) > 23 else 0
-    su22_ratio = max(0.0, float(cfg.get('su22_ratio', 0.1)))
-    req22 = max(1, int(np.ceil(float(su22_ratio) * float(n23)))) if n23 > 0 else 0
-    su22_ok = True if n23 <= 0 else bool(n22 >= req22)
+    req22 = 0
+    su22_ok = True
 
     even10_ok = True
     if int(H_cpu.numel()) > 10:
@@ -247,7 +273,7 @@ def _evaluate_required_hist_constraints(H, E_target, cfg) -> Dict[str, Any]:
         unsat_total = 0
 
     return {
-        'ok': bool(h_ok and su22_ok and even10_ok and unsat_even_ok),
+        'ok': bool(h_ok and even10_ok and unsat_even_ok),
         'h_ok': bool(h_ok),
         'h_rel': float(h_rel),
         'h_tol': float(h_tol),
@@ -363,11 +389,22 @@ def _print_element_comparison(H, E_target, device):
     return E_final
 
 
-def _run_layer12(pipeline, H, S_target, E_target, cfg, out_dir, enable_layer2):
+def _run_layer12(pipeline, H, S_target, E_target, cfg, out_dir, enable_layer2, seed_nodes=None):
     """Run Layer1 → Layer2 (optional) → compute diff."""
     eval_lib = cfg.get('_resolved_eval_lib', cfg['eval_lib'])
     hwhm = float(cfg['eval_hwhm'])
     Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    def _stable_variant(text: str) -> int:
+        acc = 0
+        for i, ch in enumerate(str(text)):
+            acc = (acc * 131 + (i + 1) * ord(ch)) % 1000003
+        return int(acc)
+
+    H_cpu = torch.clamp(H.detach().cpu().long(), min=0)
+    hist_sig = ",".join(str(int(x)) for x in H_cpu.tolist())
+    context_sig = str(Path(out_dir).resolve())
+    build_variant = _stable_variant(f"{hist_sig}|{context_sig}")
 
     layer1_buf = io.StringIO()
     with redirect_stdout(layer1_buf):
@@ -377,6 +414,8 @@ def _run_layer12(pipeline, H, S_target, E_target, cfg, out_dir, enable_layer2):
             eval_output_dir=str(Path(out_dir) / 'layer1_eval'),
             eval_lib_path=eval_lib, eval_hwhm=hwhm,
             eval_allow_approx=bool(cfg['eval_allow_approx']),
+            build_variant=int(build_variant),
+            seed_nodes=seed_nodes,
             enable_carbonyl_joint_adjust=bool(cfg['enable_carbonyl_joint_adjust']),
             carbonyl_joint_iterations=int(cfg['carbonyl_joint_iterations']),
             carbonyl_joint_max_adjustments=int(cfg['carbonyl_joint_max_adjustments']),
@@ -390,6 +429,22 @@ def _run_layer12(pipeline, H, S_target, E_target, cfg, out_dir, enable_layer2):
     for line in layer1_buf.getvalue().splitlines():
         if line.startswith("[Layer1-NMR-Eval] carbon_nodes=") or line.startswith("[Layer1-NMR-Eval] R2="):
             print(line)
+
+    layer1_metrics = {}
+    try:
+        layer1_eval_buf = io.StringIO()
+        with redirect_stdout(layer1_eval_buf):
+            layer1_metrics = pipeline.evaluate_layer1_nmr_with_library(
+                nodes=nodes,
+                S_target=S_target,
+                lib_path=eval_lib,
+                output_dir=str(Path(out_dir) / 'layer1_eval'),
+                hwhm=hwhm,
+                allow_approx=bool(cfg['eval_allow_approx']),
+            )
+    except Exception as e:
+        print(f"  [Layer1 eval metrics fallback] 失败: {e}")
+        layer1_metrics = {}
 
     if enable_layer2:
         try:
@@ -412,6 +467,7 @@ def _run_layer12(pipeline, H, S_target, E_target, cfg, out_dir, enable_layer2):
             hwhm=hwhm,
             allow_approx=bool(cfg['eval_allow_approx']),
         )
+    diff_info['layer1_metrics'] = dict(layer1_metrics)
     return nodes, diff_info
 
 
@@ -467,6 +523,8 @@ def _run_single_stage_cycle(pipeline, stage, H_curr, nodes, diff_info, S_target,
     prev_nodes = copy.deepcopy(nodes)
     prev_diff_info = copy.deepcopy(diff_info)
     prev_r2 = float(diff_info.get('r2', 0.0))
+    prev_layer1_r2 = _get_layer1_r2(diff_info)
+    prev_h_rel = _h_rel_from_hist(prev_H, E_target)
     prev_stage_score_info = _compute_stage_score(diff_info, stage)
     prev_stage_score = float(prev_stage_score_info['score'])
     prev_overall_score_info = _compute_overall_score(diff_info)
@@ -475,9 +533,6 @@ def _run_single_stage_cycle(pipeline, stage, H_curr, nodes, diff_info, S_target,
     prev_block_c_rotation = int(getattr(pipeline.layer4_adjuster, '_block_c_aro23_rotation', 0))
 
     kwargs = dict(stage_params.get(stage, {}))
-    kwargs['enable_su22_adjust'] = False if stage == 'block_c' else True
-    kwargs['su22_ratio'] = cfg['su22_ratio']
-    kwargs['su22_h_tol'] = cfg['su22_h_tol']
 
     try:
         with redirect_stdout(io.StringIO()):
@@ -522,31 +577,123 @@ def _run_single_stage_cycle(pipeline, stage, H_curr, nodes, diff_info, S_target,
 
     H_work = H_next.detach().clone()
     new_nodes, new_diff_info = _run_layer12(
-        pipeline, H_work, S_target, E_target, cfg, str(cycle_dir), enable_layer2)
+        pipeline, H_work, S_target, E_target, cfg, str(cycle_dir), enable_layer2, seed_nodes=nodes)
     new_r2 = float(new_diff_info.get('r2', 0.0))
+    new_layer1_r2 = _get_layer1_r2(new_diff_info)
+    new_h_rel = _h_rel_from_hist(H_work, E_target)
     new_stage_score_info = _compute_stage_score(new_diff_info, stage)
     new_stage_score = float(new_stage_score_info['score'])
     new_overall_score_info = _compute_overall_score(new_diff_info)
     new_overall_score = float(new_overall_score_info['score'])
 
+    soft_accept_r2_drop = float(cfg.get('soft_accept_r2_drop', 0.08))
+    soft_accept_overall_drop = float(cfg.get('soft_accept_overall_drop', 2500.0))
+    h_accept_tol = float(cfg.get('h_accept_tol', 0.04))
+    accept_kind = 'reject'
+    accept_reason = 'reject'
+
     if stage == 'skeleton':
         accept = True
-    else:
+        accept_kind = 'hard'
+        accept_reason = 'skeleton_force_accept'
+    elif stage == 'block_c':
+        r2_gain_eps = max(1e-4, float(cfg.get('soft_accept_r2_gain_eps', cfg.get('soft_accept_layer1_gain_eps', 1e-4))))
+        prev_tail_loss = float(prev_stage_score_info.get('tail_loss', 0.0))
+        new_tail_loss = float(new_stage_score_info.get('tail_loss', 0.0))
+        tail_improved = bool(new_tail_loss < prev_tail_loss - max(1e-4, 0.01 * max(1.0, prev_tail_loss)))
+        h_ok = bool(new_h_rel <= float(h_accept_tol) + 1e-9)
+        r2_improved = bool(new_r2 > prev_r2 + r2_gain_eps)
+        r2_nonregress = bool(new_r2 >= prev_r2 - 0.005)
+        overall_hard_ok = bool(new_overall_score >= prev_overall_score - 0.5)
+        overall_soft_ok = bool(new_overall_score >= prev_overall_score - 150.0)
+        hard_accept = bool(
+            r2_improved
+            and h_ok
+            and overall_hard_ok
+        )
+        soft_accept = bool(
+            r2_nonregress
+            and h_ok
+            and tail_improved
+            and overall_soft_ok
+        )
         accept = bool(
+            hard_accept or
+            (
+                soft_accept
+            )
+        )
+        if hard_accept:
+            accept_kind = 'hard'
+            accept_reason = 'layer2_r2_hard'
+        elif soft_accept:
+            accept_kind = 'soft'
+            accept_reason = 'layer2_r2_nonregress_tail_soft'
+        else:
+            reasons = []
+            if not r2_improved:
+                reasons.append('layer2_r2_not_improved')
+            if not r2_nonregress:
+                reasons.append('layer2_r2_regress')
+            if not h_ok:
+                reasons.append(f'h_rel={new_h_rel:.4f}>tol={float(h_accept_tol):.4f}')
+            if not overall_hard_ok:
+                reasons.append('overall_guard_fail')
+            if not tail_improved:
+                reasons.append('tail_not_improved')
+            if not overall_soft_ok:
+                reasons.append('overall_soft_guard_fail')
+            accept_reason = '+'.join(reasons) if reasons else 'tail_reject'
+    else:
+        soft_gain_eps = max(1e-4, float(cfg.get('soft_accept_r2_gain_eps', cfg.get('soft_accept_layer1_gain_eps', 1e-4))))
+        hard_accept = bool(
             new_stage_score > prev_stage_score + max(float(cfg['outer_improve_eps']), 1e-4)
             and new_overall_score >= prev_overall_score - 0.5
+            and new_h_rel <= float(h_accept_tol) + 1e-9
         )
+        soft_accept = bool(
+            new_r2 > prev_r2 + soft_gain_eps
+            and new_r2 >= prev_r2 - float(cfg.get('block_b_soft_r2_drop', 0.02))
+            and new_overall_score >= prev_overall_score - float(cfg.get('block_b_soft_overall_drop', 300.0))
+            and new_h_rel <= float(h_accept_tol) + 1e-9
+        )
+        accept = bool(hard_accept or soft_accept)
+        if hard_accept:
+            accept_kind = 'hard'
+            accept_reason = 'layer2_stage_hard'
+        elif soft_accept:
+            accept_kind = 'soft'
+            accept_reason = 'layer2_r2_soft'
+        else:
+            reasons = []
+            if not (new_stage_score > prev_stage_score + max(float(cfg['outer_improve_eps']), 1e-4)):
+                reasons.append('stage_score_not_improved')
+            if not (new_overall_score >= prev_overall_score - 0.5):
+                reasons.append('overall_guard_fail')
+            if not (new_h_rel <= float(h_accept_tol) + 1e-9):
+                reasons.append(f'h_rel={new_h_rel:.4f}>tol={float(h_accept_tol):.4f}')
+            if not (new_r2 > prev_r2 + soft_gain_eps):
+                reasons.append('layer2_r2_soft_gain_fail')
+            if not (new_r2 >= prev_r2 - float(cfg.get('block_b_soft_r2_drop', 0.02))):
+                reasons.append('layer2_r2_drop_guard_fail')
+            if not (new_overall_score >= prev_overall_score - float(cfg.get('block_b_soft_overall_drop', 300.0))):
+                reasons.append('overall_soft_guard_fail')
+            accept_reason = '+'.join(reasons) if reasons else 'stage_reject'
+
+    meta['accept_reason'] = str(accept_reason)
 
     if accept:
         if stage == 'skeleton':
             print("\n[Skeleton Candidate Summary] ACCEPTED")
             _print_skeleton_meta_summary(meta)
         print(
-            f"  [{stage} 第{stage_cycle_idx+1}轮] 调整={n_moves}次, 接受, "
-            f"R²={new_r2:.4f}, stage_score={new_stage_score:.4f}, overall={new_overall_score:.4f}"
+            f"  [{stage} 第{stage_cycle_idx+1}轮] 调整={n_moves}次, "
+            f"{'软接受' if accept_kind == 'soft' else '接受'}, "
+            f"R²={new_r2:.4f}, layer1_r2(diag)={new_layer1_r2:.4f}, stage_score={new_stage_score:.4f}, overall={new_overall_score:.4f}, reason={accept_reason}"
         )
         return {
             'accepted': True,
+            'accepted_kind': str(accept_kind),
             'changed': True,
             'H_curr': H_work,
             'nodes': new_nodes,
@@ -563,12 +710,13 @@ def _run_single_stage_cycle(pipeline, stage, H_curr, nodes, diff_info, S_target,
     print(
         f"  [{stage} 第{stage_cycle_idx+1}轮] 调整={n_moves}次, 拒绝, "
         f"R²={new_r2:.4f}, stage_score={new_stage_score:.4f} (prev={prev_stage_score:.4f}), "
-        f"overall={new_overall_score:.4f} (prev={prev_overall_score:.4f})"
+        f"overall={new_overall_score:.4f} (prev={prev_overall_score:.4f}), reason={accept_reason}"
     )
     pipeline.layer4_adjuster._h_rotation_state = int(prev_h_rotation_state)
     pipeline.layer4_adjuster._block_c_aro23_rotation = int(prev_block_c_rotation)
     return {
         'accepted': False,
+        'accepted_kind': 'reject',
         'changed': True,
         'H_curr': prev_H,
         'nodes': prev_nodes,
@@ -577,6 +725,183 @@ def _run_single_stage_cycle(pipeline, stage, H_curr, nodes, diff_info, S_target,
         'overall_score_info': prev_overall_score_info,
         'meta': meta,
         'n_moves': n_moves,
+    }
+
+
+def _run_block_b_cycle(pipeline, H_curr, nodes, diff_info, S_target, E_target,
+                       cfg, stage_params, work_dir, enable_layer2, outer_cycle, stage_cycle_idx):
+    substage_order = ['ether', 'amine', 'thioether', 'halogen']
+    current_H = H_curr.detach().clone()
+    current_nodes = copy.deepcopy(nodes)
+    current_diff = copy.deepcopy(diff_info)
+    current_r2 = float(current_diff.get('r2', 0.0))
+    current_overall = _compute_overall_score(current_diff)
+    accepted_any = False
+    accepted_kind_overall = 'reject'
+    changed_any = False
+    total_moves = 0
+    meta = {'substage_results': {}}
+
+    for substage in substage_order:
+        prev_H = current_H.detach().clone()
+        prev_nodes = copy.deepcopy(current_nodes)
+        prev_diff_info = copy.deepcopy(current_diff)
+        prev_r2 = float(current_diff.get('r2', 0.0))
+        prev_layer1_r2 = _get_layer1_r2(current_diff)
+        prev_stage_score_info = _compute_stage_score(current_diff, 'block_b')
+        prev_stage_score = float(prev_stage_score_info['score'])
+        prev_overall_score_info = _compute_overall_score(current_diff)
+        prev_overall_score = float(prev_overall_score_info['score'])
+        prev_alloc_diag = _evaluate_allocation_balance(pipeline, current_nodes, S_target, E_target, cfg)
+        prev_alloc_penalty = _allocation_penalty(prev_alloc_diag)
+        prev_h_rotation_state = int(getattr(pipeline.layer4_adjuster, '_h_rotation_state', 0))
+        prev_block_c_rotation = int(getattr(pipeline.layer4_adjuster, '_block_c_aro23_rotation', 0))
+
+        cycle_dir = Path(work_dir) / "block_b" / f"outer_{outer_cycle + 1}" / f"cycle_{stage_cycle_idx + 1}" / substage
+        cycle_dir.mkdir(parents=True, exist_ok=True)
+        H_base = pipeline._histogram_from_nodes(current_nodes)
+        kwargs = dict(stage_params.get('block_b', {}))
+        kwargs['block_b_substage'] = substage
+
+        try:
+            with redirect_stdout(io.StringIO()):
+                H_next, moves, submeta = pipeline.layer4_adjuster.adjust_by_stage(
+                    H=H_base,
+                    ppm=current_diff.get('ppm'),
+                    diff=current_diff.get('diff'),
+                    E_target=E_target,
+                    S_target=S_target,
+                    stage='block_b',
+                    nodes=current_nodes,
+                    **kwargs,
+                )
+            n_moves = len(moves)
+            label = f'BLOCK_B-{substage.upper()}'
+            _print_stage_h_changes(label, H_base, H_next)
+            _print_stage_move_summary(label, moves)
+        except Exception as e:
+            print(f"  [BLOCK_B-{substage.upper()}] 失败: {e}")
+            meta['substage_results'][substage] = {'accepted': False, 'changed': False, 'error': str(e)}
+            continue
+
+        if n_moves == 0:
+            print(f"  [BLOCK_B-{substage.upper()}] 无调整，跳过")
+            meta['substage_results'][substage] = {'accepted': False, 'changed': False, 'meta': submeta}
+            continue
+
+        changed_any = True
+        total_moves += int(n_moves)
+        H_work = H_next.detach().clone()
+        new_nodes, new_diff_info = _run_layer12(
+            pipeline, H_work, S_target, E_target, cfg, str(cycle_dir), enable_layer2, seed_nodes=current_nodes)
+        new_r2 = float(new_diff_info.get('r2', 0.0))
+        new_layer1_r2 = _get_layer1_r2(new_diff_info)
+        new_stage_score_info = _compute_stage_score(new_diff_info, 'block_b')
+        new_stage_score = float(new_stage_score_info['score'])
+        new_overall_score_info = _compute_overall_score(new_diff_info)
+        new_overall_score = float(new_overall_score_info['score'])
+        new_alloc_diag = _evaluate_allocation_balance(pipeline, new_nodes, S_target, E_target, cfg)
+        new_alloc_penalty = _allocation_penalty(new_alloc_diag)
+
+        soft_accept_r2_drop = float(cfg.get('soft_accept_r2_drop', 0.08))
+        soft_accept_overall_drop = float(cfg.get('soft_accept_overall_drop', 2500.0))
+        soft_gain_eps = max(1e-4, float(cfg.get('soft_accept_r2_gain_eps', cfg.get('soft_accept_layer1_gain_eps', 1e-4))))
+        r2_improved = bool(new_r2 > prev_r2 + soft_gain_eps)
+        overall_hard_ok = bool(new_overall_score >= prev_overall_score - 0.5)
+        overall_soft_ok = bool(new_overall_score >= prev_overall_score - float(soft_accept_overall_drop))
+        stage_improved = bool(new_stage_score > prev_stage_score + max(float(cfg['outer_improve_eps']), 1e-4))
+        alloc_not_worse = bool(new_alloc_penalty <= prev_alloc_penalty)
+        hard_accept = bool(
+            r2_improved
+            and stage_improved
+            and overall_hard_ok
+        )
+        soft_accept = bool(
+            r2_improved
+            and overall_soft_ok
+        )
+        accept = bool(hard_accept or soft_accept)
+        if hard_accept:
+            if alloc_not_worse:
+                accept_reason = 'layer2_r2_hard+alloc_ok'
+            else:
+                accept_reason = 'layer2_r2_hard+alloc_regress_note'
+            accept_kind = 'hard'
+        elif soft_accept:
+            if alloc_not_worse:
+                accept_reason = 'layer2_r2_soft+alloc_ok'
+            else:
+                accept_reason = 'layer2_r2_soft+alloc_regress_note'
+            accept_kind = 'soft'
+        else:
+            reasons = []
+            if not r2_improved:
+                reasons.append('layer2_r2_soft_gain_fail')
+            if not stage_improved:
+                reasons.append('stage_score_not_improved')
+            if not overall_hard_ok:
+                reasons.append('overall_guard_fail')
+            if not (new_r2 >= prev_r2 - float(soft_accept_r2_drop)):
+                reasons.append('layer2_r2_drop_guard_fail')
+            if not overall_soft_ok:
+                reasons.append('overall_soft_guard_fail')
+            if not alloc_not_worse:
+                reasons.append('alloc_penalty_regress_note')
+            accept_reason = '+'.join(reasons) if reasons else 'score_regress'
+            accept_kind = 'reject'
+
+        if accept:
+            accepted_any = True
+            if accept_kind == 'hard':
+                accepted_kind_overall = 'hard'
+            elif accepted_kind_overall == 'reject':
+                accepted_kind_overall = 'soft'
+            current_H = H_work
+            current_nodes = new_nodes
+            current_diff = new_diff_info
+            current_r2 = new_r2
+            current_overall = new_overall_score_info
+            print(
+                f"  [BLOCK_B-{substage.upper()}] 调整={n_moves}次, "
+                f"{'软接受' if accept_kind == 'soft' else '接受'}, "
+                f"R²={new_r2:.4f}, layer1_r2(diag)={new_layer1_r2:.4f}, stage_score={new_stage_score:.4f}, overall={new_overall_score:.4f}"
+            )
+        else:
+            print(
+                f"  [BLOCK_B-{substage.upper()}] 调整={n_moves}次, 拒绝, "
+                f"R²={new_r2:.4f}, stage_score={new_stage_score:.4f} (prev={prev_stage_score:.4f}), "
+                f"overall={new_overall_score:.4f} (prev={prev_overall_score:.4f}), reason={accept_reason}"
+            )
+            pipeline.layer4_adjuster._h_rotation_state = int(prev_h_rotation_state)
+            pipeline.layer4_adjuster._block_c_aro23_rotation = int(prev_block_c_rotation)
+            current_H = prev_H
+            current_nodes = prev_nodes
+            current_diff = prev_diff_info
+            current_r2 = prev_r2
+            current_overall = prev_overall_score_info
+
+        meta['substage_results'][substage] = {
+            'accepted': bool(accept),
+            'changed': True,
+            'meta': submeta,
+            'n_moves': int(n_moves),
+            'accept_reason': str(accept_reason),
+            'accepted_kind': str(accept_kind),
+            'allocation_before': prev_alloc_diag,
+            'allocation_after': new_alloc_diag,
+        }
+
+    return {
+        'accepted': bool(accepted_any),
+        'accepted_kind': str(accepted_kind_overall),
+        'changed': bool(changed_any),
+        'H_curr': current_H,
+        'nodes': current_nodes,
+        'diff_info': current_diff,
+        'r2': current_r2,
+        'overall_score_info': current_overall,
+        'meta': meta,
+        'n_moves': total_moves,
     }
 
 
@@ -611,83 +936,106 @@ def _evaluate_allocation_balance(pipeline, nodes, S_target, E_target, cfg):
     return selected
 
 
-def _run_cd_coupled_cycle(pipeline, H_curr, nodes, diff_info, S_target, E_target, cfg,
-                          stage_params, work_dir, enable_layer2, outer_cycle, inner_idx):
-    cycle_dir = Path(work_dir) / "cd_coupled" / f"outer_{outer_cycle + 1}" / f"round_{inner_idx + 1}"
-    cycle_dir.mkdir(parents=True, exist_ok=True)
+def _evaluate_branch_distribution(nodes):
+    allocator = FlexAllocator(nodes=nodes)
+    return allocator.evaluate_su24_branches(nodes)
+
+
+def _branch_hard_key(diag: Dict[str, Any]) -> tuple:
+    req11 = int(diag.get('req_11', 0))
+    req22 = int(diag.get('req_22', 0))
+    req23 = int(diag.get('req_23', 0))
+    return (
+        int(diag.get('unallocated_branch', 0)),
+        int(req11 + req22 + req23),
+        int(req11),
+        int(req22),
+        int(req23),
+    )
+
+
+def _allocation_penalty(diag: Dict[str, Any]) -> tuple:
+    flex_count = int(diag.get('flexible_bridge_count', 0))
+    flex_lo = int(diag.get('flexible_bridge_min', 0))
+    flex_hi = int(diag.get('flexible_bridge_limit', 0))
+    ali_total = int(diag.get('aliphatic_total', 0))
+    ali_lo = int(diag.get('aliphatic_min_total', 0))
+    ali_hi = int(diag.get('aliphatic_max_total', 0))
+    return (
+        int(diag.get('unallocated_bridge', 0)),
+        int(diag.get('unallocated_branch', 0)),
+        int(diag.get('required_extra_11', 0)) + int(diag.get('required_extra_22', 0)) + int(diag.get('required_extra_23', 0)),
+        int(diag.get('required_extra_11', 0)),
+        int(diag.get('required_extra_22', 0)),
+        int(diag.get('required_extra_23', 0)),
+        max(0, int(flex_count - flex_hi)),
+        max(0, int(flex_lo - flex_count)),
+        max(0, int(ali_lo - ali_total)),
+        max(0, int(ali_total - ali_hi)),
+    )
+
+
+def _run_skeleton_phase_cycle(pipeline, phase, H_curr, nodes, diff_info, S_target, E_target,
+                              cfg, stage_params, cycle_dir, enable_layer2):
+    phase_name = str(phase).strip().lower()
+    label = f"skeleton_{phase_name}"
+    phase_dir = Path(cycle_dir) / label
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\n  [CD Coupled] 进入 SKELETON-{phase_name.upper()} 阶段")
 
     prev_H = H_curr.detach().clone()
     prev_nodes = copy.deepcopy(nodes)
     prev_diff_info = copy.deepcopy(diff_info)
     prev_r2 = float(diff_info.get('r2', 0.0))
-    prev_stage_score_info = _compute_stage_score(diff_info, 'block_c')
-    prev_stage_score = float(prev_stage_score_info['score'])
+    prev_layer1_r2 = _get_layer1_r2(diff_info)
     prev_overall_score_info = _compute_overall_score(diff_info)
     prev_overall_score = float(prev_overall_score_info['score'])
     prev_h_rotation_state = int(getattr(pipeline.layer4_adjuster, '_h_rotation_state', 0))
     prev_block_c_rotation = int(getattr(pipeline.layer4_adjuster, '_block_c_aro23_rotation', 0))
+    prev_branch_diag = _evaluate_branch_distribution(nodes)
     prev_alloc_diag = _evaluate_allocation_balance(pipeline, nodes, S_target, E_target, cfg)
-    prev_req_diag = _evaluate_required_hist_constraints(prev_H, E_target, cfg)
 
-    H_stage = pipeline._histogram_from_nodes(nodes)
-    tmp_nodes = copy.deepcopy(nodes)
-    tmp_diff = copy.deepcopy(diff_info)
-    total_moves = 0
-    skeleton_moves_total = 0
-    meta = {'block_c': [], 'skeleton': []}
-
-    kwargs = dict(stage_params.get('block_c', {}))
-    kwargs['su22_ratio'] = cfg['su22_ratio']
-    kwargs['su22_h_tol'] = cfg['su22_h_tol']
-    H_before = H_stage.detach().clone()
-    block_c_buf = io.StringIO()
-    with redirect_stdout(block_c_buf):
-        H_next, moves, submeta = pipeline.layer4_adjuster.adjust_by_stage(
-            H=H_stage,
-            ppm=tmp_diff.get('ppm'),
-            diff=tmp_diff.get('diff'),
-            E_target=E_target,
-            S_target=S_target,
-            stage='block_c',
-            nodes=tmp_nodes,
-            **kwargs,
-        )
-    meta['block_c'].append(submeta)
-    if moves:
-        total_moves += len(moves)
-        H_stage = H_next.detach().clone()
-        tmp_nodes, tmp_diff = _run_layer12(
-            pipeline, H_stage, S_target, E_target, cfg,
-            str(cycle_dir / 'block_c'), enable_layer2)
-
+    H_base = pipeline._histogram_from_nodes(nodes)
     kwargs = dict(stage_params.get('skeleton', {}))
-    kwargs['su22_ratio'] = cfg['su22_ratio']
-    kwargs['su22_h_tol'] = cfg['su22_h_tol']
-    H_base = pipeline._histogram_from_nodes(tmp_nodes)
-    skeleton_buf = io.StringIO()
-    with redirect_stdout(skeleton_buf):
-        H_next, moves, submeta = pipeline.layer4_adjuster.adjust_by_stage(
-            H=H_base,
-            ppm=tmp_diff.get('ppm'),
-            diff=tmp_diff.get('diff'),
-            E_target=E_target,
-            S_target=S_target,
-            stage='skeleton',
-            nodes=tmp_nodes,
-            **kwargs,
-        )
-    meta['skeleton'].append(submeta)
-    _print_stage_h_changes('SKELETON', H_base, H_next)
-    if moves:
-        total_moves += len(moves)
-        skeleton_moves_total += len(moves)
-        H_stage = H_next.detach().clone()
-        tmp_nodes, tmp_diff = _run_layer12(
-            pipeline, H_stage, S_target, E_target, cfg,
-            str(cycle_dir / 'skeleton'), enable_layer2)
+    kwargs['skeleton_phase'] = phase_name
+    if phase_name == 'extra':
+        kwargs['extra_max_steps'] = 1
+    elif phase_name == 'branch':
+        kwargs['max_steps'] = min(int(kwargs.get('max_steps', 12)), 12)
 
-    if total_moves == 0:
-        print("  [CD Coupled] 无调整，提前结束")
+    try:
+        with redirect_stdout(io.StringIO()):
+            H_next, moves, meta = pipeline.layer4_adjuster.adjust_by_stage(
+                H=H_base,
+                ppm=diff_info.get('ppm'),
+                diff=diff_info.get('diff'),
+                E_target=E_target,
+                S_target=S_target,
+                stage='skeleton',
+                nodes=nodes,
+                **kwargs,
+            )
+        n_moves = len(moves)
+        phase_label = f'SKELETON-{phase_name.upper()}'
+        _print_stage_h_changes(phase_label, H_base, H_next)
+        _print_stage_move_summary(phase_label, moves)
+    except Exception as e:
+        print(f"  [Layer4-SKELETON-{phase_name.upper()}] 失败: {e}")
+        import traceback; traceback.print_exc()
+        return {
+            'accepted': False,
+            'changed': False,
+            'H_curr': prev_H,
+            'nodes': prev_nodes,
+            'diff_info': prev_diff_info,
+            'r2': prev_r2,
+            'overall_score_info': prev_overall_score_info,
+            'meta': {'ok': False, 'error': str(e), 'phase': phase_name},
+            'n_moves': 0,
+        }
+
+    if n_moves == 0:
+        print(f"  [SKELETON-{phase_name.upper()}] 无调整，提前结束")
         return {
             'accepted': False,
             'changed': False,
@@ -700,77 +1048,178 @@ def _run_cd_coupled_cycle(pipeline, H_curr, nodes, diff_info, S_target, E_target
             'n_moves': 0,
         }
 
-    alloc_diag = _evaluate_allocation_balance(pipeline, tmp_nodes, S_target, E_target, cfg)
-    new_req_diag = _evaluate_required_hist_constraints(H_stage, E_target, cfg)
-    new_r2 = float(tmp_diff.get('r2', 0.0))
-    new_stage_score_info = _compute_stage_score(tmp_diff, 'block_c')
-    new_stage_score = float(new_stage_score_info['score'])
-    new_overall_score_info = _compute_overall_score(tmp_diff)
+    H_work = H_next.detach().clone()
+    new_nodes, new_diff_info = _run_layer12(
+        pipeline, H_work, S_target, E_target, cfg, str(phase_dir), enable_layer2, seed_nodes=nodes)
+    new_r2 = float(new_diff_info.get('r2', 0.0))
+    new_layer1_r2 = _get_layer1_r2(new_diff_info)
+    new_overall_score_info = _compute_overall_score(new_diff_info)
     new_overall_score = float(new_overall_score_info['score'])
-    mandatory_alloc_fix = bool((not prev_alloc_diag.get('ok', False)) and alloc_diag.get('ok', False))
-    mandatory_hist_fix = bool((not prev_req_diag.get('ok', False)) and new_req_diag.get('ok', False))
-    mandatory_accept = bool(mandatory_alloc_fix or mandatory_hist_fix)
-    mandatory_failed = bool((not alloc_diag.get('ok', False)) or (not new_req_diag.get('ok', False)))
-    score_improved = bool(
-        new_stage_score > prev_stage_score + max(float(cfg['outer_improve_eps']), 1e-4)
-        and new_overall_score >= prev_overall_score - 0.5
-    )
-    if mandatory_failed:
-        accept = False
-        accept_reason = 'constraint_fail'
-    elif mandatory_accept:
-        accept = True
-        reasons = []
-        if mandatory_alloc_fix:
-            reasons.append('alloc_fix')
-        if mandatory_hist_fix:
-            reasons.append('hist_fix')
-        accept_reason = '+'.join(reasons) if reasons else 'mandatory'
+    new_branch_diag = _evaluate_branch_distribution(new_nodes)
+    new_alloc_diag = _evaluate_allocation_balance(pipeline, new_nodes, S_target, E_target, cfg)
+
+    meta['branch_diag_before'] = prev_branch_diag
+    meta['branch_diag_after'] = new_branch_diag
+    meta['allocation_before'] = prev_alloc_diag
+    meta['allocation_after'] = new_alloc_diag
+
+    if phase_name == 'branch':
+        prev_key = _branch_hard_key(prev_branch_diag)
+        new_key = _branch_hard_key(new_branch_diag)
+        branch_ok = bool(new_branch_diag.get('ok', False))
+        accept = bool(branch_ok or new_key < prev_key)
+        accept_reason = 'branch_ok' if branch_ok else ('branch_hard_improve' if new_key < prev_key else 'branch_not_improved')
+        accept_kind = 'hard' if bool(accept) else 'reject'
     else:
-        accept = bool(score_improved)
-        accept_reason = 'score_improve' if accept else 'score_regress'
-    meta['allocation_check'] = alloc_diag
-    meta['required_hist_before'] = prev_req_diag
-    meta['required_hist_after'] = new_req_diag
+        prev_penalty = _allocation_penalty(prev_alloc_diag)
+        new_penalty = _allocation_penalty(new_alloc_diag)
+        balance_improved = bool(new_penalty < prev_penalty)
+        soft_accept_r2_drop = float(cfg.get('soft_accept_r2_drop', 0.08))
+        hard_spectrum_ok = bool(
+            new_overall_score >= prev_overall_score - 0.5
+            and new_r2 >= prev_r2 - 0.03
+        )
+        soft_spectrum_ok = bool(
+            new_r2 >= prev_r2 - float(soft_accept_r2_drop)
+        )
+        alloc_fixed = bool((not prev_alloc_diag.get('ok', False)) and new_alloc_diag.get('ok', False))
+        hard_accept = bool((alloc_fixed or balance_improved) and hard_spectrum_ok)
+        soft_accept = bool((alloc_fixed or balance_improved) and soft_spectrum_ok)
+        accept = bool(hard_accept or soft_accept)
+        if hard_accept:
+            accept_reason = 'alloc_fix'
+            accept_kind = 'hard'
+        elif soft_accept:
+            accept_reason = 'balance_improve_soft'
+            accept_kind = 'soft'
+        elif not soft_spectrum_ok:
+            accept_reason = 'spectrum_regress'
+            accept_kind = 'reject'
+        else:
+            accept_reason = 'balance_not_improved'
+            accept_kind = 'reject'
+
     meta['accept_reason'] = str(accept_reason)
 
     if accept:
         print(
-            f"  [CD Coupled 第{inner_idx + 1}轮] 调整={total_moves}次, 接受, "
-            f"R²={new_r2:.4f}, stage_score={new_stage_score:.4f}, overall={new_overall_score:.4f}, "
-            f"alloc={alloc_diag.get('selected_mode', 'strict')}/{alloc_diag.get('reason', 'ok')}, "
-            f"reason={accept_reason}"
+            f"  [SKELETON-{phase_name.upper()}] 调整={n_moves}次, "
+            f"{'软接受' if accept_kind == 'soft' else '接受'}, "
+                f"R²={new_r2:.4f}, layer1_r2(diag)={new_layer1_r2:.4f}, overall={new_overall_score:.4f}, reason={accept_reason}"
         )
         return {
             'accepted': True,
+            'accepted_kind': str(accept_kind),
             'changed': True,
-            'H_curr': H_stage,
-            'nodes': tmp_nodes,
-            'diff_info': tmp_diff,
+            'H_curr': H_work,
+            'nodes': new_nodes,
+            'diff_info': new_diff_info,
             'r2': new_r2,
             'overall_score_info': new_overall_score_info,
             'meta': meta,
-            'n_moves': total_moves,
+            'n_moves': n_moves,
         }
 
     print(
-        f"  [CD Coupled 第{inner_idx + 1}轮] 调整={total_moves}次, 拒绝, "
-        f"R²={new_r2:.4f}, stage_score={new_stage_score:.4f} (prev={prev_stage_score:.4f}), "
-        f"overall={new_overall_score:.4f} (prev={prev_overall_score:.4f}), "
-        f"alloc={alloc_diag.get('selected_mode', 'strict')}/{alloc_diag.get('reason', 'unknown')}, "
+        f"  [SKELETON-{phase_name.upper()}] 调整={n_moves}次, 拒绝, "
+        f"R²={new_r2:.4f}, overall={new_overall_score:.4f} (prev={prev_overall_score:.4f}), "
         f"reason={accept_reason}"
     )
-    print("  [CD Coupled] 候选已回滚，以上 Skeleton 资源分配结果不代表最终采用结果")
     pipeline.layer4_adjuster._h_rotation_state = int(prev_h_rotation_state)
     pipeline.layer4_adjuster._block_c_aro23_rotation = int(prev_block_c_rotation)
     return {
         'accepted': False,
+        'accepted_kind': 'reject',
         'changed': True,
         'H_curr': prev_H,
         'nodes': prev_nodes,
         'diff_info': prev_diff_info,
         'r2': prev_r2,
         'overall_score_info': prev_overall_score_info,
+        'meta': meta,
+        'n_moves': n_moves,
+    }
+
+
+def _run_cd_coupled_cycle(pipeline, H_curr, nodes, diff_info, S_target, E_target, cfg,
+                          stage_params, work_dir, enable_layer2, outer_cycle, inner_idx):
+    cycle_dir = Path(work_dir) / "cd_coupled" / f"outer_{outer_cycle + 1}" / f"round_{inner_idx + 1}"
+    cycle_dir.mkdir(parents=True, exist_ok=True)
+
+    current_H = H_curr.detach().clone()
+    current_nodes = copy.deepcopy(nodes)
+    current_diff = copy.deepcopy(diff_info)
+    current_r2 = float(current_diff.get('r2', 0.0))
+    current_overall = _compute_overall_score(current_diff)
+    accepted_any = False
+    changed_any = False
+    total_moves = 0
+    meta = {'block_c': None, 'branch': None, 'extra': None}
+
+    print("\n  [CD Coupled] Phase 1/3: BLOCK_C")
+    block_c_res = _run_single_stage_cycle(
+        pipeline, 'block_c', current_H, current_nodes, current_diff, S_target, E_target,
+        cfg, stage_params, work_dir, enable_layer2, False, outer_cycle, inner_idx)
+    meta['block_c'] = block_c_res.get('meta')
+    total_moves += int(block_c_res.get('n_moves', 0))
+    changed_any = bool(changed_any or block_c_res.get('changed', False))
+    if block_c_res.get('accepted', False):
+        accepted_any = True
+        print("  [CD Coupled] BLOCK_C 已接受，继续在该状态上尝试 BRANCH")
+    else:
+        print("  [CD Coupled] BLOCK_C 未接受，保留当前已接受状态，继续尝试 BRANCH")
+    current_H = block_c_res['H_curr']
+    current_nodes = block_c_res['nodes']
+    current_diff = block_c_res['diff_info']
+    current_r2 = block_c_res['r2']
+    current_overall = block_c_res['overall_score_info']
+
+    print("\n  [CD Coupled] Phase 2/3: SKELETON-BRANCH")
+    branch_res = _run_skeleton_phase_cycle(
+        pipeline, 'branch', current_H, current_nodes, current_diff, S_target, E_target,
+        cfg, stage_params, cycle_dir, enable_layer2)
+    meta['branch'] = branch_res.get('meta')
+    total_moves += int(branch_res.get('n_moves', 0))
+    changed_any = bool(changed_any or branch_res.get('changed', False))
+    if branch_res.get('accepted', False):
+        accepted_any = True
+        print("  [CD Coupled] SKELETON-BRANCH 已接受，继续在该状态上尝试 EXTRA")
+    else:
+        print("  [CD Coupled] SKELETON-BRANCH 未接受，保留当前已接受状态，继续尝试 EXTRA")
+    current_H = branch_res['H_curr']
+    current_nodes = branch_res['nodes']
+    current_diff = branch_res['diff_info']
+    current_r2 = branch_res['r2']
+    current_overall = branch_res['overall_score_info']
+
+    print("\n  [CD Coupled] Phase 3/3: SKELETON-EXTRA")
+    extra_res = _run_skeleton_phase_cycle(
+        pipeline, 'extra', current_H, current_nodes, current_diff, S_target, E_target,
+        cfg, stage_params, cycle_dir, enable_layer2)
+    meta['extra'] = extra_res.get('meta')
+    total_moves += int(extra_res.get('n_moves', 0))
+    changed_any = bool(changed_any or extra_res.get('changed', False))
+    if extra_res.get('accepted', False):
+        accepted_any = True
+    current_H = extra_res['H_curr']
+    current_nodes = extra_res['nodes']
+    current_diff = extra_res['diff_info']
+    current_r2 = extra_res['r2']
+    current_overall = extra_res['overall_score_info']
+
+    if bool(extra_res.get('accepted', False)):
+        print("  [CD Coupled] SKELETON-EXTRA 已接受")
+    else:
+        print("  [CD Coupled] SKELETON-EXTRA 未接受，保留当前已接受状态")
+
+    return {
+        'accepted': bool(accepted_any),
+        'changed': bool(changed_any),
+        'H_curr': current_H,
+        'nodes': current_nodes,
+        'diff_info': current_diff,
+        'r2': current_r2,
+        'overall_score_info': current_overall,
         'meta': meta,
         'n_moves': total_moves,
     }
@@ -779,12 +1228,14 @@ def _run_cd_coupled_cycle(pipeline, H_curr, nodes, diff_info, S_target, E_target
 def _run_cd_inner_loop(pipeline, H_curr, nodes, diff_info, S_target, E_target, cfg,
                        stage_params, work_dir, enable_layer2, enable_layer3, outer_cycle):
     cd_loops = max(1, int(cfg['cd_inner_max_loops']))
+    cd_patience = max(1, int(cfg.get('cd_inner_patience', 2)))
     improved = False
     current_H = H_curr
     current_nodes = nodes
     current_diff = diff_info
     current_r2 = float(diff_info.get('r2', 0.0))
     current_overall = _compute_overall_score(diff_info)
+    stalled = 0
 
     for inner_idx in range(cd_loops):
         print(f"\n{'-'*60}")
@@ -802,11 +1253,16 @@ def _run_cd_inner_loop(pipeline, H_curr, nodes, diff_info, S_target, E_target, c
 
         if res['accepted']:
             improved = True
+            stalled = 0
         elif not res['changed']:
-            print("[CD内循环] 无进一步改善，停止")
-            break
+            stalled += 1
+            print(f"[CD内循环] 无进一步改善, stalled={stalled}/{cd_patience}")
         else:
-            print("[CD内循环] 候选被拒绝，停止")
+            stalled += 1
+            print(f"[CD内循环] 候选被拒绝, stalled={stalled}/{cd_patience}")
+
+        if stalled >= cd_patience:
+            print("[CD内循环] 连续无效轮次达到上限，停止")
             break
 
     return current_H, current_nodes, current_diff, current_r2, current_overall, improved
@@ -1458,6 +1914,13 @@ def run_inverse_pipeline(
     last_r2 = float(diff_info.get('r2', 0.0))
     current_score = _compute_overall_score(diff_info)
     print(f"\n初始结构评估完成 (Layer1-2): R²={last_r2:.4f}")
+
+    # 搜索过程中的 incumbent 始终保持在 Layer1-2 空间，
+    # Layer3 只作为每轮结束后的诊断/最终候选，不回写到下一轮搜索基线。
+    final_nodes = copy.deepcopy(nodes)
+    final_diff_info = copy.deepcopy(diff_info)
+    final_r2 = float(last_r2)
+    final_source = 'layer12_initial'
     
     # ---- 5. Multistage optimization ----
     stage_params = _get_stage_params(cfg)
@@ -1494,9 +1957,14 @@ def run_inverse_pipeline(
             print(f"{'='*60}")
 
             for cycle in range(n_cycles):
-                res = _run_single_stage_cycle(
-                    pipeline, stage, H_curr, nodes, diff_info, S_target, E_target,
-                    cfg, stage_params, work_dir, enable_layer2, enable_layer3, outer_cycle, cycle)
+                if stage == 'block_b':
+                    res = _run_block_b_cycle(
+                        pipeline, H_curr, nodes, diff_info, S_target, E_target,
+                        cfg, stage_params, work_dir, enable_layer2, outer_cycle, cycle)
+                else:
+                    res = _run_single_stage_cycle(
+                        pipeline, stage, H_curr, nodes, diff_info, S_target, E_target,
+                        cfg, stage_params, work_dir, enable_layer2, enable_layer3, outer_cycle, cycle)
                 H_curr = res['H_curr']
                 nodes = res['nodes']
                 diff_info = res['diff_info']
@@ -1514,14 +1982,25 @@ def run_inverse_pipeline(
             stage_params, work_dir, enable_layer2, enable_layer3, outer_cycle)
         outer_improved = outer_improved or bool(cd_improved)
 
+        # 先记录当前 Layer1-2 incumbent，作为下一轮唯一比较基线。
+        if float(last_r2) >= float(final_r2):
+            final_nodes = copy.deepcopy(nodes)
+            final_diff_info = copy.deepcopy(diff_info)
+            final_r2 = float(last_r2)
+            final_source = 'layer12_incumbent'
+
         if enable_layer3 and enable_layer2:
-            nodes, diff_info = _run_layer3_refine(
-                pipeline, nodes, S_target, E_target, cfg,
+            layer3_nodes, layer3_diff_info = _run_layer3_refine(
+                pipeline, copy.deepcopy(nodes), S_target, E_target, cfg,
                 str(work_dir / f"outer_{outer_cycle + 1}" / "layer3_refine"),
                 enable_layer2, enable_layer3)
-            last_r2 = float(diff_info.get('r2', 0.0))
-            current_score = _compute_overall_score(diff_info)
-            print(f"[宏循环] Layer3末尾精修完成: R²={last_r2:.4f}")
+            layer3_r2 = float(layer3_diff_info.get('r2', 0.0))
+            print(f"[宏循环] Layer3末尾精修完成: R²={layer3_r2:.4f} (仅作最终候选，不回写搜索基线)")
+            if float(layer3_r2) > float(final_r2):
+                final_nodes = copy.deepcopy(layer3_nodes)
+                final_diff_info = copy.deepcopy(layer3_diff_info)
+                final_r2 = float(layer3_r2)
+                final_source = 'layer3_refine'
 
         print(f"\n[宏循环 {outer_cycle + 1}] 资源分配结果")
         outer_alloc_diag = _evaluate_allocation_balance(pipeline, nodes, S_target, E_target, cfg)
@@ -1536,13 +2015,15 @@ def run_inverse_pipeline(
                 print("[宏循环] 提前停止")
                 break
 
-    H_final = H_curr.to(device)
+    nodes = copy.deepcopy(final_nodes)
+    diff_info = copy.deepcopy(final_diff_info)
+    last_r2 = float(final_r2)
     H_final = pipeline._histogram_from_nodes(nodes).to(device)
     E_final = torch.matmul(H_final.float(), E_SU.to(device))
     final_alloc_diag = _evaluate_allocation_balance(pipeline, nodes, S_target, E_target, cfg)
 
     print("\n" + "=" * 80)
-    print(f"多阶段优化完成 - 最终R²={last_r2:.4f}")
+    print(f"多阶段优化完成 - 最终R²={last_r2:.4f} (source={final_source})")
     print("=" * 80)
     _print_element_comparison(H_final, E_target, device)
 

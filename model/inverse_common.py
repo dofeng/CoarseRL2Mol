@@ -62,6 +62,41 @@ CONSTRAINT_PRIORITY = {
     'unsat_ratio': 75,     
 }
 
+
+def get_aliphatic_carbon_policy(E_target: torch.Tensor) -> Dict[str, float]:
+    """
+    根据 H/C 比例决定脂肪碳初始化和 Layer4 上限策略。
+
+    规则:
+      - H/C < 0.9:  初始化保持 0.82 * xN, Layer4 上限 0.9 * xN
+      - 0.9 <= H/C < 1.1: 初始化提高到 0.9 * xN, Layer4 上限 1.0 * xN
+      - H/C >= 1.1: 初始化提高到 1.0 * xN, Layer4 上限 1.1 * xN
+    """
+    try:
+        e = E_target.detach().cpu().flatten().float() if hasattr(E_target, 'detach') else torch.tensor(E_target, dtype=torch.float).flatten()
+        c_count = float(e[0].item()) if int(e.numel()) > 0 else 0.0
+        h_count = float(e[1].item()) if int(e.numel()) > 1 else 0.0
+    except Exception:
+        c_count = 0.0
+        h_count = 0.0
+
+    hc_ratio = float(h_count / max(c_count, 1e-8)) if c_count > 0.0 else 0.0
+    if float(hc_ratio) < 0.9:
+        init_scale = 0.82
+        upper_scale = 0.90
+    elif float(hc_ratio) < 1.1:
+        init_scale = 0.90
+        upper_scale = 1.00
+    else:
+        init_scale = 1.00
+        upper_scale = 1.10
+
+    return {
+        'hc_ratio': float(hc_ratio),
+        'init_aliphatic_scale': float(init_scale),
+        'layer4_aliphatic_upper_scale': float(upper_scale),
+    }
+
 # ============================================================================
 # 结构单元连接规则（基于化学语义）
 # ============================================================================
@@ -242,74 +277,6 @@ def check_external_connection_requirement(center_su: int, hop1_counter: Counter)
     return True, ""
 
 
-def validate_hop1_counter(center_su: int, hop1_counter: Counter, E_target: torch.Tensor) -> Tuple[bool, List[str]]:
-    """
-    验证hop1 Counter的完整语义合法性
-    """
-    violations = []
-    total_degree = sum(hop1_counter.values())
-    max_degree = SU_CONNECTION_DEGREE.get(center_su, 4)
-    if isinstance(max_degree, tuple):
-        max_degree = max_degree[1]  
-    if total_degree > max_degree:
-        violations.append(f"Degree {total_degree} > max {max_degree}")
-    
-    for neighbor_su, count in hop1_counter.items():
-        if not validate_connection(center_su, neighbor_su, E_target):
-            violations.append(f"Invalid connection: {center_su} -> {neighbor_su}")
-    
-    valid_ext, ext_msg = check_external_connection_requirement(center_su, hop1_counter)
-    if not valid_ext:
-        violations.append(ext_msg)
-    
-    if center_su in FORBIDDEN_CONNECTIONS['double_terminal_bridge']:
-        hop1_types = list(hop1_counter.keys())
-        if all(su in TERMINAL_SU for su in hop1_types):
-            violations.append(f"Bridge unit {center_su} cannot connect only terminals")
-    
-    return len(violations) == 0, violations
-
-
-def get_connection_candidates(center_su: int, E_target: torch.Tensor, 
-                               priority_order: str = 'default',
-                               端类型: str = 'default') -> List[int]:
-    """
-    获取某个SU的合法连接候选，按优先级排序
-    """
-    if center_su in SU_FIXED_CONNECTIONS:
-        allowed = SU_FIXED_CONNECTIONS[center_su]
-        if isinstance(allowed, dict):
-            candidates = set()
-            for side_list in allowed.values():
-                candidates.update(side_list)
-            candidates = list(candidates)
-        else:
-            candidates = list(allowed)
-    else:
-        candidates = list(range(NUM_SU_TYPES))
-        candidates.remove(center_su)
-    
-    candidates = [su for su in candidates if validate_connection(center_su, su, E_target)]
-    
-    if priority_order == 'carbonyl' and 'carbonyl_priority' in SU_CONNECTION_PRIORITY:
-        priority_list = SU_CONNECTION_PRIORITY['carbonyl_priority']
-        candidates.sort(key=lambda x: priority_list.index(x) if x in priority_list else 999)
-    elif priority_order == 'aromatic' and 'aromatic_ring_priority' in SU_CONNECTION_PRIORITY:
-        priority_list = SU_CONNECTION_PRIORITY['aromatic_ring_priority']
-        candidates.sort(key=lambda x: priority_list.index(x) if x in priority_list else 999)
-    elif priority_order == 'aliphatic' and 'aliphatic_priority' in SU_CONNECTION_PRIORITY:
-        priority_list = SU_CONNECTION_PRIORITY['aliphatic_priority']
-        candidates.sort(key=lambda x: priority_list.index(x) if x in priority_list else 999)
-    elif priority_order == 'unsaturated':
-        if 端类型 == 'unsaturated' and center_su in UNSATURATED_PAIRS:
-            priority_list = UNSATURATED_PAIRS[center_su]
-            candidates.sort(key=lambda x: priority_list.index(x) if x in priority_list else 999)
-        elif 端类型 == 'saturated' and 'unsaturated_saturated_priority' in SU_CONNECTION_PRIORITY:
-            priority_list = SU_CONNECTION_PRIORITY['unsaturated_saturated_priority']
-            candidates.sort(key=lambda x: priority_list.index(x) if x in priority_list else 999)
-    
-    return candidates
-
 # ============================================================================
 # NMR工具函数
 # ============================================================================
@@ -482,12 +449,6 @@ def evaluate_spectrum_reconstruction(
         out['r2_aliphatic'] = float(compute_segment_r2(y_true_t, y_fit_t, ppm_eval, 'aliphatic'))
 
     return out
-
-
-def compute_element_diff(E_pred: torch.Tensor, E_target: torch.Tensor) -> torch.Tensor:
-    """计算元素相对误差向量"""
-    return torch.abs(E_pred - E_target) / (E_target + 1e-6)
-
 
 def visualize_su_distribution(su_hist: torch.Tensor, layer_name: str, 
                                save_dir: str = 'inverse_result'):

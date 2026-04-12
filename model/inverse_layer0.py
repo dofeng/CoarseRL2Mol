@@ -5,6 +5,8 @@ import math
 import torch
 from typing import Tuple, Dict
 
+from .inverse_common import get_aliphatic_carbon_policy
+
 class Layer0Estimator:
     """Layer0直方图估计器"""
     def __init__(self, s2n_model, E_SU_tensor: torch.Tensor, device: str = 'cpu'):
@@ -120,7 +122,7 @@ class Layer0Estimator:
           z: 160-240 ppm 羰基区面积占比
 
         碳预算:
-          aliphatic_C = 0.82 * x * N
+          aliphatic_C = scale(H/C) * x * N
           carbonyl_C = 1.35 * z * N
           aromatic_C = N - aliphatic_C - carbonyl_C
         """
@@ -130,7 +132,9 @@ class Layer0Estimator:
         yN = float(y) * float(total_C)
         zN = float(z) * float(total_C)
 
-        aliphatic_C = max(0.0, 0.82 * float(xN))
+        policy = get_aliphatic_carbon_policy(E_target)
+        aliphatic_scale = float(policy.get('init_aliphatic_scale', 0.82))
+        aliphatic_C = max(0.0, float(aliphatic_scale) * float(xN))
         carbonyl_C = max(0.0, 1.35 * float(zN))
         aromatic_C = max(0.0, float(total_C) - float(aliphatic_C) - float(carbonyl_C))
 
@@ -145,6 +149,9 @@ class Layer0Estimator:
             'aliphatic_C': float(aliphatic_C),
             'aromatic_C': float(aromatic_C),
             'carbonyl_C': float(carbonyl_C),
+            'hc_ratio': float(policy.get('hc_ratio', 0.0)),
+            'init_aliphatic_scale': float(aliphatic_scale),
+            'layer4_aliphatic_upper_scale': float(policy.get('layer4_aliphatic_upper_scale', 0.90)),
         }
 
     def estimate_su_histogram(self, S_target: torch.Tensor, 
@@ -218,7 +225,7 @@ class Layer0Estimator:
         
         # 3.3 修正-S-连接（7号），传入O基准
         o_base_19 = ether_meta.get('o_base_19', 0)
-        H_corrected, thioether_meta = self._correct_thioether_connection(H_corrected, o_base_19)
+        H_corrected, _ = self._correct_thioether_connection(H_corrected, o_base_19)
         
         # 3.4 修正-NH-连接（6号、20号）
         H_corrected = self._correct_amine_connection(H_corrected)

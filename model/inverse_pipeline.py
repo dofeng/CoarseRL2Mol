@@ -42,7 +42,7 @@ class InversePipelineV3:
                  vae_model: NMR_VAE,
                  templates: Optional[Any],
                  device: str = 'cuda',
-                 nmr_intensity_scale: float = 0.95):
+                 nmr_intensity_scale: float = 1.0):
         """
         初始化推理管道
         
@@ -330,6 +330,7 @@ class InversePipelineV3:
                     eval_lib_path=eval_lib_path,
                     eval_hwhm=eval_hwhm,
                     eval_allow_approx=eval_allow_approx,
+                    seed_nodes=best_nodes if best_nodes is not None else None,
                     enable_hop1_adjust=enable_hop1_adjust,
                     hop1_adjust_iterations=hop1_adjust_iterations,
                     hop1_neg_threshold=hop1_neg_threshold,
@@ -362,6 +363,10 @@ class InversePipelineV3:
                 
                 # Layer4: 当前阶段的SU调整
                 H_base = self._histogram_from_nodes(nodes)
+                if best_nodes is None or float(r2_before) > float(best_r2):
+                    best_r2 = float(r2_before)
+                    best_nodes = copy.deepcopy(nodes)
+                    best_H = H_base.detach().clone()
                 prev_H = H_curr.detach().clone()
                 prev_nodes = copy.deepcopy(nodes)
                 moves = []
@@ -416,6 +421,7 @@ class InversePipelineV3:
                                 eval_lib_path=eval_lib_path,
                                 eval_hwhm=eval_hwhm,
                                 eval_allow_approx=eval_allow_approx,
+                                seed_nodes=nodes,
                                 enable_hop1_adjust=enable_hop1_adjust,
                                 hop1_adjust_iterations=hop1_adjust_iterations,
                                 hop1_neg_threshold=hop1_neg_threshold,
@@ -478,7 +484,6 @@ class InversePipelineV3:
                         prev_req_diag = self.layer4_adjuster._evaluate_required_hist_constraints(
                             H_base,
                             E_target,
-                            su22_ratio=float(stage_cfg.get('su22_ratio', 0.1)),
                             su22_h_tol=float(stage_cfg.get('su22_h_tol', 0.03)),
                         )
                         prev_req_ok = bool(prev_req_diag.get('ok', True))
@@ -488,7 +493,6 @@ class InversePipelineV3:
                         candidate_req_diag = self.layer4_adjuster._evaluate_required_hist_constraints(
                             candidate_H,
                             E_target,
-                            su22_ratio=float(stage_cfg.get('su22_ratio', 0.1)),
                             su22_h_tol=float(stage_cfg.get('su22_h_tol', 0.03)),
                         )
                         candidate_req_ok = bool(candidate_req_diag.get('ok', True))
@@ -510,10 +514,10 @@ class InversePipelineV3:
                 if is_accepted:
                     H_curr = candidate_H.detach().clone()
                     nodes = candidate_nodes
-                    if candidate_r2 > best_r2:
-                        best_r2 = candidate_r2
-                    best_nodes = copy.deepcopy(candidate_nodes)
-                    best_H = candidate_H.detach().clone()
+                    if best_nodes is None or float(candidate_r2) > float(best_r2):
+                        best_r2 = float(candidate_r2)
+                        best_nodes = copy.deepcopy(candidate_nodes)
+                        best_H = candidate_H.detach().clone()
                     stage_no_improve = 0
                     print(f"  ✓ 接受 ({stage} 策略): r2={candidate_r2:.4f}, 历史 best_r2={best_r2:.4f}")
                 else:
@@ -538,11 +542,13 @@ class InversePipelineV3:
         print(f"最终 best_r2={best_r2:.4f}")
         print("=" * 80)
         
-        out_nodes = best_nodes if best_nodes is not None else nodes
-        out_H = best_H if best_H is not None else H_curr
+        out_nodes = copy.deepcopy(best_nodes) if best_nodes is not None else copy.deepcopy(nodes)
+        out_H = best_H.detach().clone() if best_H is not None else H_curr.detach().clone()
+        selected_source = 'best_stage'
+        final_attempt_r2: Optional[float] = None
         try:
             final_nodes = self.layer1_assign(
-                H_init=out_H,
+                H_init=H_curr.detach().clone(),
                 S_target=S_target,
                 E_target=E_target,
                 eval_nmr=False,
@@ -550,6 +556,7 @@ class InversePipelineV3:
                 eval_lib_path=eval_lib_path,
                 eval_hwhm=eval_hwhm,
                 eval_allow_approx=eval_allow_approx,
+                seed_nodes=best_nodes if best_nodes is not None else None,
                 enable_hop1_adjust=enable_hop1_adjust,
                 hop1_adjust_iterations=hop1_adjust_iterations,
                 hop1_neg_threshold=hop1_neg_threshold,
@@ -573,13 +580,21 @@ class InversePipelineV3:
                 output_dir=str(Path(output_dir) / 'final_layer3'),
                 hwhm=float(eval_hwhm),
             )
-            out_nodes = final_nodes
-            out_H = self._histogram_from_nodes(final_nodes).detach().clone()
-            best_r2 = max(float(best_r2), float(final_r2))
+            final_attempt_r2 = float(final_r2)
+            if best_nodes is None or float(final_r2) > float(best_r2) + float(outer_improve_eps):
+                out_nodes = final_nodes
+                out_H = self._histogram_from_nodes(final_nodes).detach().clone()
+                best_r2 = float(final_r2)
+                selected_source = 'final_layer3'
+            else:
+                print(f"[Final Layer3] 保留历史最佳状态: best_r2={best_r2:.4f}, final_attempt_r2={float(final_r2):.4f}")
         except Exception as e:
             print(f"[Final Layer3] 失败: {e}")
         summary = {
             'best_r2': float(best_r2),
+            'final_r2': float(best_r2),
+            'final_attempt_r2': (float(final_attempt_r2) if final_attempt_r2 is not None else None),
+            'selected_source': str(selected_source),
             'total_stages': len(stages),
             'history': global_history,
         }
@@ -602,6 +617,8 @@ class InversePipelineV3:
                       eval_nmr: bool = True, eval_output_dir: str = 'inverse_result',
                       eval_lib_path: Optional[str] = None, eval_hwhm: float = 1.0,
                       eval_allow_approx: bool = True,
+                      build_variant: int = 0,
+                      seed_nodes: Optional[List[_NodeV3]] = None,
                       enable_carbonyl_joint_adjust: bool = True,
                       carbonyl_joint_iterations: int = 3,
                       carbonyl_joint_max_adjustments: int = 3,
@@ -618,6 +635,8 @@ class InversePipelineV3:
             eval_nmr=eval_nmr, eval_output_dir=eval_output_dir,
             eval_lib_path=eval_lib_path, eval_hwhm=eval_hwhm,
             eval_allow_approx=eval_allow_approx,
+            build_variant=int(build_variant),
+            seed_nodes=seed_nodes,
             enable_carbonyl_joint_adjust=enable_carbonyl_joint_adjust,
             carbonyl_joint_iterations=carbonyl_joint_iterations,
             carbonyl_joint_max_adjustments=carbonyl_joint_max_adjustments,

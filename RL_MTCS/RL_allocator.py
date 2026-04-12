@@ -117,6 +117,25 @@ class FlexAllocator:
         self._su_counts = su_counts.copy() if su_counts is not None else {}
         self._input_nodes = nodes
 
+    def _reset_runtime_state(self):
+        self._nodes = []
+        self._node_lookup = {}
+        self._type_lists = {}
+        self._result = AllocationResult()
+
+    @staticmethod
+    def _has_resources(avail_11: int,
+                       avail_23: int,
+                       avail_22: int,
+                       need_11: int = 0,
+                       need_23: int = 0,
+                       need_22: int = 0) -> bool:
+        return (
+            int(avail_11) >= int(need_11) and
+            int(avail_23) >= int(need_23) and
+            int(avail_22) >= int(need_22)
+        )
+
     @staticmethod
     def _refresh_chain_counts(chain: ChainSpec):
         chain.n_11 = _resource_count(chain.composition, TO_11)
@@ -1326,13 +1345,13 @@ class FlexAllocator:
 
         # ----- Type B: 11-23-... -----
         for n in remaining_B:
-            if remaining_E and avail_23 >= 2:
+            if remaining_E and self._has_resources(avail_11, avail_23, avail_22, need_11=1, need_23=3, need_22=1):
                 e = remaining_E.pop(0)
                 # B(11-23-...) + E(22-23-23-...) = 11-23-23-23-22
                 comp = [11, 23, 23, 23, 22]
                 chains.append(ChainSpec('side', comp, 'B+E', [n.global_id, e.global_id]))
                 avail_11 -= 1; avail_23 -= 3; avail_22 -= 1
-            elif remaining_G and avail_23 >= 1:
+            elif remaining_G and self._has_resources(avail_11, avail_23, avail_22, need_11=1, need_23=2, need_22=1):
                 g = remaining_G.pop(0)
                 # B(11-23-...) + G(22-23-...) = 11-23-23-22
                 comp = [11, 23, 23, 22]
@@ -1355,12 +1374,12 @@ class FlexAllocator:
 
         # ----- Type D: ...-23-23-23-... -----
         for n in remaining_D:
-            if remaining_E and avail_11 >= 1 and avail_23 >= 2:
+            if remaining_E and self._has_resources(avail_11, avail_23, avail_22, need_11=1, need_23=5, need_22=1):
                 e = remaining_E.pop(0)
                 comp = [11, 23, 23, 23, 23, 23, 22]
                 chains.append(ChainSpec('side', comp, 'D+E', [n.global_id, e.global_id]))
                 avail_11 -= 1; avail_23 -= 5; avail_22 -= 1
-            elif remaining_G and avail_11 >= 1 and avail_23 >= 1:
+            elif remaining_G and self._has_resources(avail_11, avail_23, avail_22, need_11=1, need_23=4, need_22=1):
                 g = remaining_G.pop(0)
                 # 11 + D(23-23-23) + G(23-22) = 11-23-23-23-23-22
                 comp = [11, 23, 23, 23, 23, 22]
@@ -1380,6 +1399,11 @@ class FlexAllocator:
                 print(f"  [WARN] Cannot close Type D node {n.global_id}")
                 self._result.unallocated_bridge += 1
                 self._result.required_extra_11 += 2
+
+        if min(int(avail_11), int(avail_23), int(avail_22)) < 0:
+            raise RuntimeError(
+                f"Open-chain allocation underflow: 11={avail_11}, 23={avail_23}, 22={avail_22}"
+            )
 
         # Remaining Type E/G are reserved for branch terminal sealing in Phase 4.5.
         return chains, avail_11, avail_23, avail_22, remaining_E, remaining_G
@@ -1423,6 +1447,7 @@ class FlexAllocator:
         return chains, avail_23
 
     def _prepare_branch_phase_resources(self) -> Dict[str, Any]:
+        self._reset_runtime_state()
         self._parse_input()
         self._convert_and_count()
         self._classify_all()
@@ -1810,6 +1835,8 @@ class FlexAllocator:
         print("=" * 60)
         print("[FlexAllocator] Starting resource allocation")
         print("=" * 60)
+
+        self._reset_runtime_state()
 
         # Phase 1
         self._parse_input()

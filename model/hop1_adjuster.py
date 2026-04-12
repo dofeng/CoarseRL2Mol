@@ -875,26 +875,27 @@ class Hop1Adjuster:
                 if not alternatives:
                     continue
                 
-                # 尝试第一个候选
-                best_alt = alternatives[0]
-                result = self.execute_hop1_replacement(
-                    nodes, node_info['global_id'], 
-                    best_alt['hop1_tuple'],
-                    E_target=E_target,
-                    dry_run=False
-                )
-                
-                if result['success']:
-                    adjustments.append({
-                        'node_id': node_info['global_id'],
-                        'center_su': node_info['center_su'],
-                        'old_hop1': node_info['hop1_ms'],
-                        'new_hop1': best_alt['hop1_tuple'],
-                        'old_mu': node_info['mu'],
-                        'new_mu': best_alt['mu_median'],
-                        'from_region': (neg_peak.ppm_min, neg_peak.ppm_max),
-                        'to_region': (target_pos_peak.ppm_min, target_pos_peak.ppm_max),
-                    })
+                # 依次尝试前几个候选，避免首个候选因严格swap失败而直接放弃该节点
+                for best_alt in alternatives[: min(6, len(alternatives))]:
+                    result = self.execute_hop1_replacement(
+                        nodes, node_info['global_id'], 
+                        best_alt['hop1_tuple'],
+                        E_target=E_target,
+                        dry_run=False
+                    )
+                    
+                    if result['success']:
+                        adjustments.append({
+                            'node_id': node_info['global_id'],
+                            'center_su': node_info['center_su'],
+                            'old_hop1': node_info['hop1_ms'],
+                            'new_hop1': best_alt['hop1_tuple'],
+                            'old_mu': node_info['mu'],
+                            'new_mu': best_alt['mu_median'],
+                            'from_region': (neg_peak.ppm_min, neg_peak.ppm_max),
+                            'to_region': (target_pos_peak.ppm_min, target_pos_peak.ppm_max),
+                        })
+                        break
         
         return adjustments
     
