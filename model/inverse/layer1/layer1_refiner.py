@@ -298,7 +298,8 @@ class Layer1Refiner:
             for slot_idx in list(best_opts):
                 owner_id = int(owner_slots[int(slot_idx)]['owner_id'])
                 owner = work_nodes[int(owner_id)]
-                assigner._add_bidirectional_hop1(work_nodes, int(owner_id), int(target_id), lock=False)
+                if not assigner._add_bidirectional_hop1(work_nodes, int(owner_id), int(target_id), lock=False):
+                    continue
                 used_slots[int(slot_idx)] = True
                 inc_d1 = (
                     int(getattr(owner, 'su_type', -1)) == 29 and
@@ -329,12 +330,13 @@ class Layer1Refiner:
             for owner_id, target_id, lock_flag in list(chosen_edges):
                 if int(owner_id) in set(getattr(nodes[int(target_id)], 'hop1_ids', []) or []):
                     continue
-                assigner._add_bidirectional_hop1(
+                if not assigner._add_bidirectional_hop1(
                     nodes,
                     int(owner_id),
                     int(target_id),
                     lock=bool(lock_flag),
-                )
+                ):
+                    continue
                 matched += 1
             return int(matched)
         return 0
@@ -387,12 +389,13 @@ class Layer1Refiner:
 
             center_choices.sort(key=lambda x: (int(x[0]), int(x[1]), int(x[2])))
             _, _, _, center, candidate = center_choices[0]
-            assigner._add_bidirectional_hop1(
+            if not assigner._add_bidirectional_hop1(
                 nodes,
                 int(getattr(center, 'global_id', -1)),
                 int(getattr(candidate, 'global_id', -1)),
                 lock=bool(self._should_lock_required_external_edge(center)),
-            )
+            ):
+                continue
             applied += 1
         return int(applied)
 
@@ -539,12 +542,13 @@ class Layer1Refiner:
                     allow_pending_special=bool(allow_pending_special),
                 )
                 if target is not None:
-                    assigner._add_bidirectional_hop1(
+                    if not assigner._add_bidirectional_hop1(
                         nodes,
                         int(center.global_id),
                         int(target.global_id),
                         lock=bool(self._should_lock_required_external_edge(center)),
-                    )
+                    ):
+                        continue
                     return True
 
             if int(getattr(center, 'su_type', -1)) != 11:
@@ -591,7 +595,8 @@ class Layer1Refiner:
                         owner_w = work_nodes[int(owner_id)]
                         if not assigner._can_add_hop1_connection(work_nodes, owner_w, center_w):
                             continue
-                        assigner._add_bidirectional_hop1(work_nodes, int(owner_id), int(center.global_id), lock=False)
+                        if not assigner._add_bidirectional_hop1(work_nodes, int(owner_id), int(center.global_id), lock=False):
+                            continue
                         after_score = _score_nodes(work_nodes, affected_ids)
                         gain = int(before_score - after_score)
                         if int(gain) <= 0:
@@ -608,12 +613,14 @@ class Layer1Refiner:
             owner_id, old_nb_id, center_id = best_move
             if not assigner._remove_bidirectional_hop1(nodes, int(owner_id), int(old_nb_id)):
                 return False
-            assigner._add_bidirectional_hop1(
+            if not assigner._add_bidirectional_hop1(
                 nodes,
                 int(owner_id),
                 int(center_id),
                 lock=False,
-            )
+            ):
+                assigner._add_bidirectional_hop1(nodes, int(owner_id), int(old_nb_id), lock=False)
+                return False
             return True
 
         while iters < max_iters:
@@ -640,14 +647,16 @@ class Layer1Refiner:
                         affected_ids = [int(u.global_id), int(v.global_id)]
                         before_score = _score_nodes(nodes, affected_ids)
                         work_nodes = _make_local_work_nodes(nodes, affected_ids)
-                        assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(v.global_id), lock=False)
+                        if not assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(v.global_id), lock=False):
+                            continue
                         after_score = _score_nodes(work_nodes, affected_ids)
                         gain = int(before_score - after_score)
                         if best_gain is None or int(gain) > int(best_gain):
                             best_gain = int(gain)
                             best_direct = (int(u.global_id), int(v.global_id))
                     if best_direct is not None and int(best_gain or 0) >= 0:
-                        assigner._add_bidirectional_hop1(nodes, int(best_direct[0]), int(best_direct[1]))
+                        if not assigner._add_bidirectional_hop1(nodes, int(best_direct[0]), int(best_direct[1])):
+                            continue
                         progressed = True
                         break
 
@@ -686,11 +695,13 @@ class Layer1Refiner:
                             b_w = work_nodes[int(b.global_id)]
                             if not assigner._can_add_hop1_connection(work_nodes, u_w, a_w):
                                 continue
-                            assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(a.global_id))
+                            if not assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(a.global_id)):
+                                continue
                             u_w = work_nodes[int(u.global_id)]
                             if not assigner._can_add_hop1_connection(work_nodes, u_w, b_w):
                                 continue
-                            assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(b.global_id), lock=False)
+                            if not assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(b.global_id), lock=False):
+                                continue
                             after_score = _score_nodes(work_nodes, [int(u.global_id), int(a.global_id), int(b.global_id)])
                             if int(after_score) >= int(before_score):
                                 continue
@@ -698,8 +709,13 @@ class Layer1Refiner:
                             ok = assigner._remove_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
                             if not ok:
                                 continue
-                            assigner._add_bidirectional_hop1(nodes, int(u.global_id), int(a.global_id))
-                            assigner._add_bidirectional_hop1(nodes, int(u.global_id), int(b.global_id))
+                            if not assigner._add_bidirectional_hop1(nodes, int(u.global_id), int(a.global_id)):
+                                assigner._add_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
+                                continue
+                            if not assigner._add_bidirectional_hop1(nodes, int(u.global_id), int(b.global_id)):
+                                assigner._remove_bidirectional_hop1_with_force(nodes, int(u.global_id), int(a.global_id), force=True)
+                                assigner._add_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
+                                continue
                             found_split = True
                             progressed = True
                             break
@@ -747,10 +763,12 @@ class Layer1Refiner:
                             b_w = work_nodes[int(b.global_id)]
                             if not assigner._can_add_hop1_connection(work_nodes, u_w, a_w):
                                 continue
-                            assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(a.global_id))
+                            if not assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(a.global_id)):
+                                continue
                             if not assigner._can_add_hop1_connection(work_nodes, v_w, b_w):
                                 continue
-                            assigner._add_bidirectional_hop1(work_nodes, int(v.global_id), int(b.global_id), lock=False)
+                            if not assigner._add_bidirectional_hop1(work_nodes, int(v.global_id), int(b.global_id), lock=False):
+                                continue
                             after_score = _score_nodes(work_nodes, [int(u.global_id), int(v.global_id), int(a.global_id), int(b.global_id)])
                             if int(after_score) >= int(before_score):
                                 continue
@@ -758,8 +776,13 @@ class Layer1Refiner:
                             ok = assigner._remove_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
                             if not ok:
                                 continue
-                            assigner._add_bidirectional_hop1(nodes, int(u.global_id), int(a.global_id))
-                            assigner._add_bidirectional_hop1(nodes, int(v.global_id), int(b.global_id))
+                            if not assigner._add_bidirectional_hop1(nodes, int(u.global_id), int(a.global_id)):
+                                assigner._add_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
+                                continue
+                            if not assigner._add_bidirectional_hop1(nodes, int(v.global_id), int(b.global_id)):
+                                assigner._remove_bidirectional_hop1_with_force(nodes, int(u.global_id), int(a.global_id), force=True)
+                                assigner._add_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
+                                continue
                             found_swap = True
                             progressed = True
                             break
@@ -1000,8 +1023,15 @@ class Layer1Refiner:
                     continue
                 swap_helper._remove_hop1_edge(nodes, int(center_id), int(old_anchor_id))
                 swap_helper._remove_hop1_edge(nodes, int(target.global_id), int(swap_tail_id))
-                swap_helper._add_hop1_edge(nodes, int(center_id), int(target.global_id))
-                swap_helper._add_hop1_edge(nodes, int(old_anchor_id), int(swap_tail_id))
+                if not swap_helper._add_hop1_edge(nodes, int(center_id), int(target.global_id)):
+                    swap_helper._add_hop1_edge(nodes, int(center_id), int(old_anchor_id))
+                    swap_helper._add_hop1_edge(nodes, int(target.global_id), int(swap_tail_id))
+                    continue
+                if not swap_helper._add_hop1_edge(nodes, int(old_anchor_id), int(swap_tail_id)):
+                    swap_helper._remove_hop1_edge(nodes, int(center_id), int(target.global_id))
+                    swap_helper._add_hop1_edge(nodes, int(center_id), int(old_anchor_id))
+                    swap_helper._add_hop1_edge(nodes, int(target.global_id), int(swap_tail_id))
+                    continue
                 return {
                     'center_id': int(center_id),
                     'center_su': int(center_node.su_type),

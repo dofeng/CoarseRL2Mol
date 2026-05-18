@@ -50,14 +50,15 @@ def violates_special_d3_terminal_limit(su_type: int,
     """Special 19/20/21 d3 nodes may contain at most one terminal-like neighbor."""
     if int(su_type) not in {19, 20, 21}:
         return False
+    neighbors = [int(nb) for nb in list(neighbor_types or [])]
     try:
-        degree_i = int(target_degree) if target_degree is not None else int(len(list(neighbor_types or [])))
+        is_d3 = bool(int(target_degree) == 3) if target_degree is not None else bool(len(neighbors) >= 3)
     except Exception:
-        degree_i = 0
-    if int(degree_i) != 3:
+        is_d3 = False
+    if not bool(is_d3):
         return False
     terminal_count = int(sum(
-        1 for nb in list(neighbor_types or [])
+        1 for nb in neighbors
         if int(nb) in SPECIAL_D3_TERMINAL_NEIGHBORS
     ))
     return bool(int(terminal_count) > int(SPECIAL_D3_TERMINAL_LIMIT))

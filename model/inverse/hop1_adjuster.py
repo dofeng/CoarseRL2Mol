@@ -14,6 +14,7 @@ try:
         iter_port_signatures,
         multiset_from_counter as _common_multiset_from_counter,
         multiset_l1_distance as _common_multiset_l1_distance,
+        violates_special_d3_terminal_limit,
     )
 except ImportError:
     from model.paths import Z_LIBRARY_DIR
@@ -22,6 +23,7 @@ except ImportError:
         iter_port_signatures,
         multiset_from_counter as _common_multiset_from_counter,
         multiset_l1_distance as _common_multiset_l1_distance,
+        violates_special_d3_terminal_limit,
     )
 
 def _normalize_hop1_tuple(values: Sequence[int]) -> Tuple[int, ...]:
@@ -297,12 +299,38 @@ class Hop1Adjuster:
     def _get_neighbor_types(self, nodes: List, node) -> List[int]:
         return [int(nodes[int(nid)].su_type) for nid in list(node.hop1_ids)]
 
+    @staticmethod
+    def _node_target_degree(node) -> Optional[int]:
+        try:
+            val = getattr(node, 'target_hop1_degree', None)
+            return int(val) if val is not None else None
+        except Exception:
+            return None
+
+    def _would_violate_special_d3_terminal_rule(self,
+                                                nodes: List,
+                                                node,
+                                                proposed_neighbor_su: Optional[int] = None) -> bool:
+        neighbor_types = [int(x) for x in self._get_neighbor_types(nodes, node)]
+        if proposed_neighbor_su is not None:
+            neighbor_types.append(int(proposed_neighbor_su))
+        return bool(
+            violates_special_d3_terminal_limit(
+                int(getattr(node, 'su_type', -1)),
+                self._node_target_degree(node),
+                neighbor_types,
+            )
+        )
+
     def _is_hop1_valid_types(self,
                              center_su: int,
                              neighbor_types: List[int],
                              E_target: Optional[torch.Tensor],
                              center_node: Optional[Any] = None) -> bool:
         center_su = int(center_su)
+        target_degree = self._node_target_degree(center_node) if center_node is not None else None
+        if violates_special_d3_terminal_limit(int(center_su), target_degree, list(neighbor_types)):
+            return False
         if isinstance(self.port_combinations, dict):
             port_sets = self.port_combinations.get(center_su)
             if not port_sets:
@@ -748,8 +776,10 @@ class Hop1Adjuster:
                 affected_all.update(set(aff))
                 self._remove_hop1_edge(work_nodes, t, u)
                 self._remove_hop1_edge(work_nodes, v, w)
-                self._add_hop1_edge(work_nodes, t, v)
-                self._add_hop1_edge(work_nodes, u, w)
+                if not self._add_hop1_edge(work_nodes, t, v):
+                    return False, []
+                if not self._add_hop1_edge(work_nodes, u, w):
+                    return False, []
                 cascade_updates += int(len(set(aff)))
                 break
 
@@ -871,24 +901,31 @@ class Hop1Adjuster:
         except Exception:
             pass
     
-    def _add_hop1_edge(self, nodes: List, id1: int, id2: int):
+    def _add_hop1_edge(self, nodes: List, id1: int, id2: int) -> bool:
         """添加一条双向1-hop边"""
         node1 = nodes[id1] if id1 < len(nodes) else None
         node2 = nodes[id2] if id2 < len(nodes) else None
         
         if node1 is None or node2 is None:
-            return
+            return False
         
         if id1 == id2:
-            return
+            return False
         
         # 检查是否已存在
         if id2 in node1.hop1_ids:
-            return
+            return False
+        if id1 in node2.hop1_ids:
+            return False
+        if self._would_violate_special_d3_terminal_rule(nodes, node1, int(node2.su_type)):
+            return False
+        if self._would_violate_special_d3_terminal_rule(nodes, node2, int(node1.su_type)):
+            return False
         
         # 添加连接
         node1.hop1_su[node2.su_type] += 1
         node2.hop1_su[node1.su_type] += 1
         node1.hop1_ids.append(id2)
         node2.hop1_ids.append(id1)
+        return True
     

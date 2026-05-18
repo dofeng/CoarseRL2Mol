@@ -1134,15 +1134,19 @@ def adjust_block_c_extra_phase_impl(
         if any(int(src) == 25 or int(dst) == 25 for src, dst, _ in list(conversions or [])):
             return
         h13_now = max(0, int(H_work[13].item())) if int(H_work.numel()) > 13 else 0
-        su13_min_now = int(_block_c_eval(adjuster, tmp_nodes, S_target, E_target).get('su13_min', 0))
+        arom_now = adjuster._evaluate_aromatic_balance_constraints(H_work, S_target=S_target, E_target=E_target)
+        su13_min_now = int(arom_now.get('su13_min', 0))
         consumes_13 = sum(int(mult) for src, _dst, mult in list(conversions or []) if int(src) == 13)
         if int(consumes_13) > 0 and int(h13_now - int(consumes_13) * desired_i) < int(su13_min_now):
             desired_i = max(0, (int(h13_now) - int(su13_min_now)) // max(1, int(consumes_13)))
             if int(desired_i) <= 0:
                 return
-        diag_now = _block_c_eval(adjuster, tmp_nodes, S_target, E_target)
-        ordinary_total = int(diag_now.get('ordinary_aliphatic_total', 0))
-        ordinary_max = int(diag_now.get('ordinary_aliphatic_max_total', 10**9))
+        ordinary_total = int(sum(
+            int(H_work[int(su)].item())
+            for su in [22, 23, 24, 25]
+            if int(su) < int(H_work.numel())
+        ))
+        ordinary_max = int(adjuster._estimate_aliphatic_region_bounds(S_target, E_target).get('ordinary_max', 10**9))
         if int(ordinary_total) >= int(ordinary_max) and int(_ordinary_delta(conversions, 1)) > 0:
             return
         cands.append((str(op), str(stage), int(desired_i), list(conversions)))

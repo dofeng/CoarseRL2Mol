@@ -1694,21 +1694,21 @@ class Layer1Assigner:
                                 nodes: List[_NodeV3],
                                 id1: int,
                                 id2: int,
-                                lock: bool = False):
+                                lock: bool = False) -> bool:
         """添加双向1-hop连接
         """
         node1 = nodes[id1]
         node2 = nodes[id2]
         
         if id1 == id2:
-            return
+            return False
         
         if id2 in node1.hop1_ids or id1 in node2.hop1_ids:
-            return
+            return False
         if self._violates_special_d3_terminal_rule(nodes, node1, int(node2.su_type)):
-            return
+            return False
         if self._violates_special_d3_terminal_rule(nodes, node2, int(node1.su_type)):
-            return
+            return False
         
         # 添加互为1-hop（SU类型计数）
         node1.hop1_su[node2.su_type] += 1
@@ -1722,6 +1722,8 @@ class Layer1Assigner:
             node2.fixed_hop1_ids.add(int(id1))
         self._refresh_runtime_node_entry(nodes, int(id1))
         self._refresh_runtime_node_entry(nodes, int(id2))
+        self._can_add_hop1_cache.clear()
+        return True
 
     def _remove_bidirectional_hop1(self, nodes: List[_NodeV3], id1: int, id2: int) -> bool:
         """移除一条双向1-hop连接（仅移除一条，多重边会移除一次）"""
