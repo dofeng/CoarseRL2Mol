@@ -1389,14 +1389,25 @@ class Layer0Estimator:
             int((ether_meta or {}).get('o_base_19', 0)),
             S_target=S_hint,
         )
+        # SU20/SU21 mode metadata is expressed in fixed-anchor edge counts,
+        # not node counts.  Recompute the demand after carbonyl/O rebalance so
+        # Block A candidates keep the N/X fixed pools balanced.
+        amine_fixed_edges_20 = int(max(
+            0,
+            int(H_work[0].item()) + 2 * int(H_work[27].item()) - int(H_work[6].item()),
+        ))
+        halogen_fixed_edges_21 = int(max(
+            0,
+            int(H_work[32].item()) - int(H_work[8].item()),
+        )) if int(H_work.numel()) > 32 else 0
         special_degree_meta = self._allocate_special_degree_meta(
             H_work,
             o_base_19=int((ether_meta or {}).get('o_base_19', 0)),
             s_reserved_19=int((thio_meta or {}).get('s_reserved_19', 0)),
             o_fixed_edges_19=int((ether_meta or {}).get('o_fixed_edges_19', (ether_meta or {}).get('o_base_19', 0))),
             s_fixed_edges_19=int((thio_meta or {}).get('s_fixed_edges_19', (thio_meta or {}).get('s_reserved_19', 0))),
-            n_fixed_edges_20=int(H_work[20].item()) if int(H_work.numel()) > 20 else 0,
-            x_fixed_edges_21=int(H_work[21].item()) if int(H_work.numel()) > 21 else 0,
+            n_fixed_edges_20=int(amine_fixed_edges_20),
+            x_fixed_edges_21=int(halogen_fixed_edges_21),
             S_target=S_hint,
         )
         fixed_partition_meta = self._record_fixed_partition_meta(

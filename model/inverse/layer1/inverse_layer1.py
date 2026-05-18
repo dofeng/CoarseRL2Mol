@@ -276,7 +276,10 @@ class Layer1Assigner:
         total_20 = int(H_cpu[20].item()) if int(H_cpu.numel()) > 20 else 0
         if int(total_20) > 0:
             raw_20 = dict(raw_mode_meta.get(20, raw_mode_meta.get('20', {})) or {})
-            total_counts_20 = dict(degree_meta.get(20, {}) or {})
+            total_counts_20 = {
+                int(deg): max(0, int(dict(degree_meta.get(20, {}) or {}).get(int(deg), 0)))
+                for deg in [1, 2, 3]
+            }
             double_src = dict(raw_20.get('double', {}) or {})
             double_counts = {
                 int(deg): max(0, int(double_src.get(int(deg), double_src.get(str(int(deg)), 0)) or 0))
@@ -284,6 +287,38 @@ class Layer1Assigner:
             }
             for deg in [2, 3]:
                 double_counts[int(deg)] = min(int(double_counts[int(deg)]), int(total_counts_20.get(int(deg), 0)))
+            required_20_edges = int(max(
+                0,
+                int(H_cpu[0].item()) + 2 * int(H_cpu[27].item()) - int(H_cpu[6].item()),
+            )) if int(H_cpu.numel()) > 27 else int(total_20)
+            total_nodes_20 = int(sum(int(v) for v in total_counts_20.values()))
+            if int(total_nodes_20) <= 0:
+                total_nodes_20 = int(total_20)
+            target_double_total = int(max(0, int(required_20_edges) - int(total_nodes_20)))
+            target_double_total = min(
+                int(target_double_total),
+                int(total_counts_20.get(2, 0)) + int(total_counts_20.get(3, 0)),
+            )
+            current_double_total = int(sum(int(v) for v in double_counts.values()))
+            if int(current_double_total) < int(target_double_total):
+                deficit = int(target_double_total) - int(current_double_total)
+                for deg in [3, 2]:
+                    room = max(0, int(total_counts_20.get(int(deg), 0)) - int(double_counts.get(int(deg), 0)))
+                    take = min(int(deficit), int(room))
+                    if int(take) > 0:
+                        double_counts[int(deg)] = int(double_counts.get(int(deg), 0)) + int(take)
+                        deficit -= int(take)
+                    if int(deficit) <= 0:
+                        break
+            elif int(current_double_total) > int(target_double_total):
+                excess = int(current_double_total) - int(target_double_total)
+                for deg in [2, 3]:
+                    take = min(int(excess), int(double_counts.get(int(deg), 0)))
+                    if int(take) > 0:
+                        double_counts[int(deg)] = int(double_counts.get(int(deg), 0)) - int(take)
+                        excess -= int(take)
+                    if int(excess) <= 0:
+                        break
             single_counts = {
                 int(deg): max(0, int(total_counts_20.get(int(deg), 0)) - int(double_counts.get(int(deg), 0)))
                 for deg in [1, 2, 3]
@@ -1293,6 +1328,12 @@ class Layer1Assigner:
     def _is_soft_consistency_error(msg: str) -> bool:
         text = str(msg)
         if ('实际连接度' in text and '目标连接度' in text):
+            # 19/20/21 encode mode-specific anchor degrees.  A missing edge
+            # changes d1/d2/d3 semantics, so it must not be accepted as a soft
+            # tail-gap.
+            for special_su in (19, 20, 21):
+                if f"(SU{int(special_su)})" in text:
+                    return False
             return True
         if '未优先连接SU9' in text:
             return True
@@ -1722,7 +1763,10 @@ class Layer1Assigner:
             node2.fixed_hop1_ids.add(int(id1))
         self._refresh_runtime_node_entry(nodes, int(id1))
         self._refresh_runtime_node_entry(nodes, int(id2))
-        self._can_add_hop1_cache.clear()
+        # Cache keys include each endpoint's neighbor ids/types and remaining
+        # slots, so successful edge edits naturally produce new signatures.
+        # Avoid clearing the whole cache on every add; Layer1 calls this path
+        # many thousands of times on large graphs.
         return True
 
     def _remove_bidirectional_hop1(self, nodes: List[_NodeV3], id1: int, id2: int) -> bool:

@@ -173,6 +173,58 @@ def _sort_nodes(nodes: Sequence[Any]) -> List[Any]:
     return sorted(list(nodes or []), key=lambda n: (int(node_id(n)), int(node_su(n))))
 
 
+def _unique_node_ids(nodes: Sequence[Any]) -> List[int]:
+    out: List[int] = []
+    seen: Set[int] = set()
+    for node in list(nodes or []):
+        gid = int(node_id(node))
+        if int(gid) < 0 or int(gid) in seen:
+            continue
+        seen.add(int(gid))
+        out.append(int(gid))
+    return out
+
+
+def _resource_override_for_composition(comp: Sequence[int]) -> Dict[str, int]:
+    vals = [int(x) for x in list(comp or [])]
+    return {
+        '11': int(sum(1 for x in vals if int(x) == 11)),
+        '22': int(sum(1 for x in vals if int(x) == 22)),
+        '23': int(sum(1 for x in vals if int(x) == 23)),
+        '24': int(sum(1 for x in vals if int(x) == 24)),
+        '25': int(sum(1 for x in vals if int(x) == 25)),
+    }
+
+
+def _endpoint_resource_su(endpoint: Any, profile: SpecialCarbonProfile) -> int:
+    sig = _endpoint_signature(endpoint, profile)
+    if str(sig) == 'aromatic':
+        return 11
+    if str(sig) in {'terminal', 'special_single'}:
+        return 22
+    return 23
+
+
+def _sort_resolved_endpoints(endpoints: Sequence[Any],
+                             profile: SpecialCarbonProfile) -> List[Any]:
+    order = {
+        'aromatic': 0,
+        'terminal': 1,
+        'special_single': 1,
+        'special_double': 2,
+        'aliphatic': 3,
+        'special_other': 4,
+        'none': 5,
+    }
+    return sorted(
+        list(endpoints or []),
+        key=lambda ep: (
+            int(order.get(_endpoint_signature(ep, profile), 99)),
+            int(node_id(ep)),
+        ),
+    )
+
+
 def _connector_records(node: Any,
                        profile: SpecialCarbonProfile,
                        lookup: Dict[int, Any]) -> List[Dict[str, Any]]:
@@ -275,49 +327,55 @@ def _build_single_d1_connector_pattern(node: Any,
         return None
     nbs = neighbor_nodes(node, lookup)
     connectors = [nb for nb in nbs if int(node_su(nb)) in set(int(x) for x in profile.connector_su)]
-    fixeds = [nb for nb in nbs if int(node_su(nb)) in set(int(x) for x in profile.terminal_anchor_su)]
-    aro = [nb for nb in nbs if endpoint_class_for_node(nb) == 'aromatic']
-    ali = [nb for nb in nbs if endpoint_class_for_node(nb) == 'aliphatic']
+    connector_ids = {int(node_id(x)) for x in connectors}
+    direct_endpoints = [nb for nb in nbs if int(node_id(nb)) not in connector_ids]
+    connector_endpoints: List[Any] = []
+    for conn in connectors:
+        endpoint = _pick_primary_endpoint(
+            other_endpoints_for_connector(conn, int(node_id(node)), lookup),
+            profile,
+        )
+        if endpoint is not None:
+            connector_endpoints.append(endpoint)
+    fixeds = [nb for nb in direct_endpoints if int(node_su(nb)) in set(int(x) for x in profile.terminal_anchor_su)]
+    resolved_endpoints = _sort_resolved_endpoints(direct_endpoints + connector_endpoints, profile)
+    aro = [nb for nb in resolved_endpoints if endpoint_class_for_node(nb) == 'aromatic']
+    ali = [nb for nb in resolved_endpoints if endpoint_class_for_node(nb) == 'aliphatic']
     consumed = {int(node_id(node))} | {int(node_id(x)) for x in connectors + fixeds}
     meta_base = {
         'connector_ids': [int(node_id(x)) for x in connectors],
         'connector_types': [int(node_su(x)) for x in connectors],
+        'connector_endpoint_ids': [int(node_id(x)) for x in connector_endpoints],
+        'connector_endpoint_su': [int(node_su(x)) for x in connector_endpoints],
+        'connector_endpoint_signatures': [_endpoint_signature(x, profile) for x in connector_endpoints],
         'fixed_ids': [int(node_id(x)) for x in fixeds],
         'fixed_types': [int(node_su(x)) for x in fixeds],
         'neighbor_su': [int(node_su(x)) for x in nbs],
     }
+    connector_23_count = max(0, int(len(connectors)))
     if aro:
+        comp = [11] + [23] * int(connector_23_count) + [22]
         return SpecialChainPattern(
             chain_type='side',
-            composition=[11, 23, 22],
+            composition=list(comp),
             origin_type=f'C{int(profile.su_type)}d1',
             phase='closed',
-            source_ids=[int(node_id(node))] + [int(node_id(x)) for x in connectors + fixeds + aro[:1]],
+            source_ids=_unique_node_ids([node] + connectors + fixeds + aro[:1]),
             consumed_ids=set(consumed) | {int(node_id(x)) for x in aro[:1]},
             metadata=_pattern_metadata(
                 f'connector_d1_{profile.name}_aromatic',
                 node,
                 profile,
-                extra={**meta_base, 'resource_requirements_override': {'11': 1, '22': 1, '23': 1, '24': 0, '25': 0}},
+                extra={**meta_base, 'resource_requirements_override': _resource_override_for_composition(comp)},
             ),
             priority=30,
         )
     if ali:
-        return SpecialChainPattern(
-            chain_type='side',
-            composition=[11, 23, 23, 22],
-            origin_type=f'E{int(profile.su_type)}d1',
-            phase='closed',
-            source_ids=[int(node_id(node))] + [int(node_id(x)) for x in connectors + fixeds + ali[:1]],
-            consumed_ids=set(consumed) | {int(node_id(x)) for x in ali[:1]},
-            metadata=_pattern_metadata(
-                f'connector_d1_{profile.name}_aliphatic',
-                node,
-                profile,
-                extra={**meta_base, 'resource_requirements_override': {'11': 1, '22': 1, '23': 2, '24': 0, '25': 0}},
-            ),
-            priority=32,
-        )
+        # Do not close aliphatic-connector d1 fragments here.  A topology such
+        # as 23-29-19d1 is the allocator's Type E tail (22-23-23-...), which
+        # must remain in remaining_E for branch sealing before any leftover E
+        # tails are converted into side chains by _allocate_reserved_terminal_sides.
+        return None
     return None
 
 
@@ -327,23 +385,112 @@ def _build_single_d2_bridge_pattern(node: Any,
     if int(node_degree(node) or 0) != 2 or bool(is_double_special(node)):
         return None
     nbs = neighbor_nodes(node, lookup)
-    aro = [nb for nb in nbs if endpoint_class_for_node(nb) == 'aromatic']
-    term = [nb for nb in nbs if endpoint_class_for_node(nb) == 'terminal']
-    ali = [nb for nb in nbs if endpoint_class_for_node(nb) == 'aliphatic']
     connectors = [nb for nb in nbs if int(node_su(nb)) in set(int(x) for x in profile.connector_su)]
+    connector_ids = {int(node_id(x)) for x in connectors}
+    direct_endpoints = [nb for nb in nbs if int(node_id(nb)) not in connector_ids]
+    connector_endpoints: List[Any] = []
+    for conn in connectors:
+        endpoint = _pick_primary_endpoint(
+            other_endpoints_for_connector(conn, int(node_id(node)), lookup),
+            profile,
+        )
+        if endpoint is not None:
+            connector_endpoints.append(endpoint)
+    resolved_endpoints = _sort_resolved_endpoints(direct_endpoints + connector_endpoints, profile)
+    aro = [nb for nb in resolved_endpoints if endpoint_class_for_node(nb) == 'aromatic']
+    term = [nb for nb in resolved_endpoints if endpoint_class_for_node(nb) == 'terminal']
+    ali = [nb for nb in resolved_endpoints if endpoint_class_for_node(nb) == 'aliphatic']
     consumed = {int(node_id(node))} | {int(node_id(x)) for x in connectors}
     meta_base = {
         'connector_ids': [int(node_id(x)) for x in connectors],
         'connector_types': [int(node_su(x)) for x in connectors],
+        'connector_endpoint_ids': [int(node_id(x)) for x in connector_endpoints],
+        'connector_endpoint_su': [int(node_su(x)) for x in connector_endpoints],
+        'connector_endpoint_signatures': [_endpoint_signature(x, profile) for x in connector_endpoints],
         'neighbor_su': [int(node_su(x)) for x in nbs],
     }
+
+    def _make_pattern(endpoints: Sequence[Any],
+                      chain_type: str,
+                      composition: Sequence[int],
+                      origin_prefix: str,
+                      pattern_name: str,
+                      priority: int) -> SpecialChainPattern:
+        comp = [int(x) for x in list(composition)]
+        return SpecialChainPattern(
+            chain_type=str(chain_type),
+            composition=list(comp),
+            origin_type=f'{origin_prefix}{int(profile.su_type)}d2',
+            phase='closed',
+            source_ids=_unique_node_ids([node] + connectors + list(endpoints or [])),
+            consumed_ids=set(consumed) | {int(node_id(x)) for x in list(endpoints or [])},
+            metadata=_pattern_metadata(
+                pattern_name,
+                node,
+                profile,
+                extra={**meta_base, 'resource_requirements_override': _resource_override_for_composition(comp)},
+            ),
+            priority=int(priority),
+        )
+
+    if len(resolved_endpoints) >= 2:
+        primary = _sort_resolved_endpoints(resolved_endpoints, profile)[:2]
+        endpoint_sus = [_endpoint_resource_su(ep, profile) for ep in primary]
+        body_23_count = max(1, int(len(connectors)) + 1)
+        def _comp_between(left_su: int, right_su: int) -> List[int]:
+            return [int(left_su)] + [23] * int(body_23_count) + [int(right_su)]
+
+        if endpoint_sus.count(11) == 1 and endpoint_sus.count(22) == 1:
+            comp = _comp_between(int(endpoint_sus[0]), int(endpoint_sus[1]))
+            return _make_pattern(
+                primary,
+                'side',
+                comp,
+                'C',
+                f'single_d2_{profile.name}_aromatic_terminal',
+                38,
+            )
+        if endpoint_sus.count(11) == 2:
+            return _make_pattern(
+                primary,
+                'bridge',
+                _comp_between(11, 11),
+                'B',
+                f'single_d2_{profile.name}_bridge',
+                40,
+            )
+        if endpoint_sus.count(11) == 1 and endpoint_sus.count(23) == 1:
+            return _make_pattern(
+                primary,
+                'bridge',
+                _comp_between(11, 23) + [11],
+                'D',
+                f'single_d2_{profile.name}_aliphatic',
+                42,
+            )
+        if endpoint_sus.count(22) == 1 and endpoint_sus.count(23) == 1:
+            return _make_pattern(
+                primary,
+                'side',
+                _comp_between(22, 23) + [11],
+                'E',
+                f'single_d2_{profile.name}_terminal_aliphatic',
+                43,
+            )
+        if endpoint_sus.count(22) == 2:
+            # A closed 22...22 side would cap both ends with terminals (e.g.
+            # 22-23-22), which is chemically invalid for these special
+            # connector fragments.  Leave it unclosed so the allocator reports
+            # or resolves the topology explicitly instead of hiding it as G.
+            return None
+
     if aro:
         return SpecialChainPattern(
             chain_type='bridge',
             composition=[11, 23, 23, 11],
             origin_type=f'B{int(profile.su_type)}d2',
             phase='closed',
-            source_ids=[int(node_id(node))] + [int(node_id(x)) for x in connectors + aro[:1]],
+            source_ids=_unique_node_ids([node] + connectors + aro[:1]),
             consumed_ids=set(consumed) | {int(node_id(x)) for x in aro[:1]},
             metadata=_pattern_metadata(
                 f'single_d2_{profile.name}_bridge',
@@ -359,7 +506,7 @@ def _build_single_d2_bridge_pattern(node: Any,
             composition=[22, 23, 23, 11],
             origin_type=f'E{int(profile.su_type)}d2',
             phase='closed',
-            source_ids=[int(node_id(node))] + [int(node_id(x)) for x in connectors + term[:1]],
+            source_ids=_unique_node_ids([node] + connectors + term[:1]),
             consumed_ids=set(consumed) | {int(node_id(x)) for x in term[:1]},
             metadata=_pattern_metadata(
                 f'single_d2_{profile.name}_terminal',
@@ -375,7 +522,7 @@ def _build_single_d2_bridge_pattern(node: Any,
             composition=[11, 23, 23, 23, 11],
             origin_type=f'D{int(profile.su_type)}d2',
             phase='closed',
-            source_ids=[int(node_id(node))] + [int(node_id(x)) for x in connectors + ali[:1]],
+            source_ids=_unique_node_ids([node] + connectors + ali[:1]),
             consumed_ids=set(consumed) | {int(node_id(x)) for x in ali[:1]},
             metadata=_pattern_metadata(
                 f'single_d2_{profile.name}_aliphatic',
@@ -408,82 +555,76 @@ def _build_double_d2_bridge_pattern(node: Any,
     meta_base = {
         'connector_ids': [int(node_id(x)) for x in connectors],
         'connector_types': [int(node_su(x)) for x in connectors],
+        'connector_endpoint_ids': [int(node_id(x)) for x in connector_endpoints],
         'connector_endpoint_su': [int(node_su(x)) for x in connector_endpoints],
         'connector_endpoint_signatures': [_endpoint_signature(x, profile) for x in connector_endpoints],
     }
     consumed = {int(node_id(node))} | {int(node_id(x)) for x in connectors + direct_term + connector_endpoints}
+    body_23_count = max(1, int(len(connectors)) + 1)
+
+    def _double_comp(left_su: int, right_su: int) -> List[int]:
+        return [int(left_su)] + [23] * int(body_23_count) + [int(right_su)]
+
     if direct_term and aro_eps:
+        comp = _double_comp(11, 22)
         return SpecialChainPattern(
             chain_type='side',
-            composition=[11, 23, 23, 22],
+            composition=list(comp),
             origin_type=f'C+{int(profile.su_type)}',
             phase='closed',
-            source_ids=[int(node_id(node))] + [int(node_id(x)) for x in connectors + direct_term + aro_eps[:1]],
+            source_ids=_unique_node_ids([node] + connectors + direct_term + aro_eps[:1]),
             consumed_ids=set(consumed),
             metadata=_pattern_metadata(
                 f'double_d2_{profile.name}_to_11232322',
                 node,
                 profile,
-                extra={**meta_base, 'resource_requirements_override': {'11': 1, '22': 1, '23': 2, '24': 0, '25': 0}},
+                extra={**meta_base, 'resource_requirements_override': _resource_override_for_composition(comp)},
             ),
             priority=20,
         )
     if len(aro_eps) >= 2:
+        comp = _double_comp(11, 11)
         return SpecialChainPattern(
             chain_type='bridge',
-            composition=[11, 23, 23, 23, 11],
+            composition=list(comp),
             origin_type=f'B{int(profile.su_type)}+',
             phase='closed',
-            source_ids=[int(node_id(node))] + [int(node_id(x)) for x in connectors + aro_eps[:2]],
+            source_ids=_unique_node_ids([node] + connectors + aro_eps[:2]),
             consumed_ids=set(consumed),
             metadata=_pattern_metadata(
                 f'double_d2_{profile.name}_to_1123232311',
                 node,
                 profile,
-                extra={**meta_base, 'resource_requirements_override': {'11': 2, '22': 0, '23': 3, '24': 0, '25': 0}},
+                extra={**meta_base, 'resource_requirements_override': _resource_override_for_composition(comp)},
             ),
             priority=21,
         )
     if len(aro_eps) >= 1 and single_eps:
+        comp = _double_comp(11, 22)
         return SpecialChainPattern(
-            chain_type='bridge',
-            composition=[11, 23, 23, 23, 23, 11],
-            origin_type=f'B{int(profile.su_type)}++',
+            chain_type='side',
+            composition=list(comp),
+            origin_type=f'C{int(profile.su_type)}++',
             phase='closed',
-            source_ids=[int(node_id(node))] + [int(node_id(x)) for x in connectors + single_eps],
+            source_ids=_unique_node_ids([node] + connectors + aro_eps[:1] + single_eps[:1]),
             consumed_ids=set(consumed),
             metadata=_pattern_metadata(
-                f'double_d2_{profile.name}_to_112323232311',
+                f'double_d2_{profile.name}_to_1123232322',
                 node,
                 profile,
                 extra={
                     **meta_base,
-                    'resource_requirements_override': {'11': 2, '22': 0, '23': 4, '24': 0, '25': 0},
+                    'resource_requirements_override': _resource_override_for_composition(comp),
                     'partner_special_ids': [int(node_id(x)) for x in single_eps[:1]],
                 },
             ),
             priority=22,
         )
     if len(single_eps) >= 2:
-        return SpecialChainPattern(
-            chain_type='bridge',
-            composition=[11, 23, 23, 23, 23, 23, 11],
-            origin_type=f'D{int(profile.su_type)}+',
-            phase='closed',
-            source_ids=[int(node_id(node))] + [int(node_id(x)) for x in connectors + single_eps],
-            consumed_ids=set(consumed),
-            metadata=_pattern_metadata(
-                f'double_d2_{profile.name}_to_11232323232311',
-                node,
-                profile,
-                extra={
-                    **meta_base,
-                    'resource_requirements_override': {'11': 2, '22': 0, '23': 5, '24': 0, '25': 0},
-                    'partner_special_ids': [int(node_id(x)) for x in single_eps[:2]],
-                },
-            ),
-            priority=23,
-        )
+        # Do not synthesize terminal-to-terminal closed sides for paired
+        # special fragments.  They would become 22...22 chains, which are
+        # forbidden and should remain visible to the allocator diagnostics.
+        return None
     return None
 
 

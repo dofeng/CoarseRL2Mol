@@ -121,6 +121,78 @@ def _allow_reduce_24_from_tail_stats(tail_stats: Dict[str, Any], thr: float) -> 
     return bool(float(need_24) < -float(thr) and float(neg_24) > float(pos_24) + 0.35 * float(thr))
 
 
+def _dominant_shortage_from_reqs(req11: Any, req22: Any, req23: Any) -> Optional[str]:
+    reqs = {
+        '11_shortage': max(0, int(req11 or 0)),
+        '22_shortage': max(0, int(req22 or 0)),
+        '23_shortage': max(0, int(req23 or 0)),
+    }
+    ranked = sorted(
+        reqs.items(),
+        key=lambda kv: (-int(kv[1]), {'23_shortage': 0, '22_shortage': 1, '11_shortage': 2}[str(kv[0])]),
+    )
+    if not ranked or int(ranked[0][1]) <= 0:
+        return None
+    return str(ranked[0][0])
+
+
+def _sanitize_branch_shortage_diag(diag: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(diag or {})
+    req11 = max(0, int(out.get('req_11', 0)))
+    req22 = max(0, int(out.get('req_22', 0)))
+    req23 = max(0, int(out.get('req_23', 0)))
+    shortage = str(out.get('shortage_type', 'none') or 'none')
+    dominant = _dominant_shortage_from_reqs(req11, req22, req23)
+    warnings = list(out.get('sanity_warnings', []) or [])
+    if shortage == 'unsupported_special_topology' and dominant is not None:
+        warnings.append(
+            f"unsupported_special_topology masked resource shortage: using {dominant} from req11={req11}, req22={req22}, req23={req23}"
+        )
+        out['resource_shortage_hint'] = str(dominant)
+    elif shortage in {'11_shortage', '22_shortage', '23_shortage'} and dominant is not None and str(shortage) != str(dominant):
+        warnings.append(
+            f"shortage_type={shortage} inconsistent with req11={req11}, req22={req22}, req23={req23}; overriding to {dominant}"
+        )
+        shortage = str(dominant)
+    elif shortage in {'none', 'general_shortage', 'error'} and dominant is not None:
+        warnings.append(
+            f"shortage_type={shortage} lacked resource direction; using {dominant} from req11={req11}, req22={req22}, req23={req23}"
+        )
+        shortage = str(dominant)
+    out['req_11'] = int(req11)
+    out['req_22'] = int(req22)
+    out['req_23'] = int(req23)
+    out['shortage_type'] = str(shortage)
+    out['sanity_warnings'] = list(warnings)
+    return out
+
+
+def _sanitize_extra_diag(diag: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(diag or {})
+    req11 = max(0, int(out.get('required_extra_11', 0)))
+    req22 = max(0, int(out.get('required_extra_22', 0)))
+    req23 = max(0, int(out.get('required_extra_23', 0)))
+    warnings = list(out.get('sanity_warnings', []) or [])
+    reason = str(out.get('reason', '') or '')
+    if reason.startswith('final_allocation_error:') or reason.startswith('alloc_eval_error:') or 'underflow' in reason:
+        parsed = FlexAllocator._parse_underflow_requirements(reason)
+        req11 = max(int(req11), int(parsed.get('req_11', 0)))
+        req22 = max(int(req22), int(parsed.get('req_22', 0)))
+        req23 = max(int(req23), int(parsed.get('req_23', 0)))
+        if any(int(parsed.get(k, 0)) > 0 for k in ('req_11', 'req_22', 'req_23')):
+            warnings.append(
+                f"parsed underflow from allocation error: req11={parsed.get('req_11', 0)} req22={parsed.get('req_22', 0)} req23={parsed.get('req_23', 0)}"
+            )
+    if reason.startswith('alloc_eval_error:'):
+        out['alloc_eval_failed'] = True
+        out['flex_count_unknown'] = True
+    out['required_extra_11'] = int(req11)
+    out['required_extra_22'] = int(req22)
+    out['required_extra_23'] = int(req23)
+    out['sanity_warnings'] = list(warnings)
+    return out
+
+
 def adjust_block_c_aliphatic_tail_impl(
     adjuster: Any,
     H: torch.Tensor,
@@ -308,7 +380,8 @@ def adjust_block_c_branch_phase_impl(
         return H, [], {'n_moves': 0, 'ok': False}
 
     import copy
-    H_work = H.cpu().clone()
+    H_base = H.cpu().clone()
+    H_work = H_base.clone()
     adjuster.E_target = E_target
     tmp_nodes = copy.deepcopy(nodes)
     adjuster._refresh_node_counters(tmp_nodes)
@@ -464,8 +537,10 @@ def adjust_block_c_branch_phase_impl(
     while s1_iter < max_steps:
         s1_iter += 1
         print(f"    [Step 0] 评估轮次 {s1_iter}/{max_steps}")
-        res_24 = allocator.evaluate_su24_branches(tmp_nodes, quiet=True)
+        res_24 = _sanitize_branch_shortage_diag(allocator.evaluate_su24_branches(tmp_nodes, quiet=True))
         proxy_diag_24 = _block_c_eval(adjuster, tmp_nodes, S_target, E_target)
+        for warn in list(res_24.get('sanity_warnings', []) or []):
+            print(f"    [Step 0诊断修正] {warn}")
         print(
             f"    [Step 0诊断] shortage={res_24.get('shortage_type', 'none')} "
             f"req22={res_24.get('req_22', 0)} req11={res_24.get('req_11', 0)} req23={res_24.get('req_23', 0)} "
@@ -478,11 +553,18 @@ def adjust_block_c_branch_phase_impl(
             print("    [Step 0] 分支调度通过")
             break
 
-        shortage = res_24['shortage_type']
-        req_22 = res_24.get('req_22', 0)
-        req_11 = res_24.get('req_11', 0)
-        req_23 = res_24.get('req_23', 0)
+        shortage = str(res_24.get('shortage_type', 'none'))
+        req_22 = max(0, int(res_24.get('req_22', 0)))
+        req_11 = max(0, int(res_24.get('req_11', 0)))
+        req_23 = max(0, int(res_24.get('req_23', 0)))
         op = ''
+
+        if shortage == 'unsupported_special_topology' and req_23 > 0:
+            shortage = '23_shortage'
+        elif shortage == 'unsupported_special_topology' and req_22 > 0:
+            shortage = '22_shortage'
+        elif shortage == 'unsupported_special_topology' and req_11 > 0:
+            shortage = '11_shortage'
 
         if shortage == '22_shortage':
             if _can_convert_25_to_24(min_ratio=0.01):
@@ -623,7 +705,7 @@ def adjust_block_c_branch_phase_impl(
     final_scenario = 'ok' if bool(branch_ok) else 'branch_not_ok'
     if not bool(branch_ok) and branch_fail_parts:
         final_scenario = f"{final_scenario}: {'; '.join(branch_fail_parts)}"
-    return H_work, moves, {
+    result_meta = {
         'n_moves': len(moves),
         'ok': bool(branch_ok),
         'final_h_ratio': float(_h_ratio(H_work)),
@@ -634,6 +716,16 @@ def adjust_block_c_branch_phase_impl(
         'block_c_phase': 'branch_topology',
         'final_scenario': str(final_scenario),
     }
+    if not bool(branch_ok):
+        # A failed branch candidate has only changed the temporary seed H; the
+        # seed topology/fixed special metadata were deliberately not committed.
+        # Returning that H would desynchronize Layer1's fixed-owner demand from
+        # the actual node metadata and can trigger Ether Fixed Assign failures.
+        result_meta['rejected_records'] = list(moves)
+        result_meta['n_rejected_moves'] = int(len(moves))
+        result_meta['returned_original_h'] = True
+        return H_base, [], result_meta
+    return H_work, moves, result_meta
 
 
 def _count_su(nodes: List[_NodeV3], su_type: int) -> int:
@@ -666,6 +758,18 @@ def _block_c_eval(adjuster: Any,
                   nodes: List[_NodeV3],
                   S_target: Optional[torch.Tensor],
                   E_target: Optional[torch.Tensor]) -> Dict[str, Any]:
+    def _safe_bounds() -> Dict[str, int]:
+        try:
+            return _block_c_bounds(adjuster, nodes)
+        except Exception:
+            return {
+                'X': 0,
+                'Y': 0,
+                'Z': 0,
+                'flex_lower_raw': 0,
+                'flex_upper_raw': 0,
+            }
+
     try:
         diag = adjuster._evaluate_full_allocation_balance(
             nodes,
@@ -675,26 +779,43 @@ def _block_c_eval(adjuster: Any,
             E_target=E_target,
         )
     except Exception as e:
+        bounds_fallback = _safe_bounds()
+        try:
+            aliphatic_bounds = adjuster._estimate_aliphatic_region_bounds(S_target, E_target)
+        except Exception:
+            aliphatic_bounds = {}
+        aliphatic_total = int(sum(1 for n in list(nodes or []) if 19 <= int(getattr(n, 'su_type', -1)) <= 25))
+        oxygenated_aliphatic_total = int(sum(1 for n in list(nodes or []) if int(getattr(n, 'su_type', -1)) in {19, 20, 21}))
+        ordinary_aliphatic_total = int(sum(1 for n in list(nodes or []) if int(getattr(n, 'su_type', -1)) in {22, 23, 24, 25}))
+        underflow_req = FlexAllocator._parse_underflow_requirements(str(e))
         diag = {
             'ok': False,
             'reason': f'alloc_eval_error:{e}',
-            'warnings': [],
-            'cluster_count': 0,
-            'effective_cluster_count': 0,
+            'warnings': ['allocation_eval_failed'],
+            'cluster_count': int(bounds_fallback.get('X', 0)),
+            'effective_cluster_count': max(1, int(bounds_fallback.get('X', 0))),
             'rigid_pairs': 0,
-            'rigid_cluster_count': 0,
-            'flexible_bridge_count': 0,
-            'flexible_bridge_min': 0,
-            'flexible_bridge_limit': 0,
+            'rigid_cluster_count': int(bounds_fallback.get('Z', 0)),
+            'flexible_bridge_count': int(bounds_fallback.get('flex_lower_raw', 0)),
+            'flexible_bridge_min': int(bounds_fallback.get('flex_lower_raw', 0)),
+            'flexible_bridge_limit': int(bounds_fallback.get('flex_upper_raw', 0)),
+            'fixed_flexible_bridge_count': 0,
+            'extra_flexible_bridge_count': 0,
             'side_to_22_count': 0,
-            'aliphatic_total': 0,
-            'aliphatic_min_total': 0,
-            'aliphatic_max_total': 10**9,
+            'aliphatic_total': int(aliphatic_total),
+            'aliphatic_min_total': int(aliphatic_bounds.get('total_min', 0)),
+            'aliphatic_max_total': int(aliphatic_bounds.get('total_max', 10**9)),
+            'ordinary_aliphatic_total': int(ordinary_aliphatic_total),
+            'ordinary_aliphatic_min_total': int(aliphatic_bounds.get('ordinary_min', 0)),
+            'ordinary_aliphatic_max_total': int(aliphatic_bounds.get('ordinary_max', 10**9)),
+            'oxygenated_aliphatic_total': int(oxygenated_aliphatic_total),
+            'oxygenated_aliphatic_min_total': int(aliphatic_bounds.get('oxygenated_min', 0)),
+            'oxygenated_aliphatic_max_total': int(aliphatic_bounds.get('oxygenated_max', 10**9)),
             'unallocated_bridge': 0,
             'unallocated_branch': 0,
-            'required_extra_11': 0,
-            'required_extra_22': 0,
-            'required_extra_23': 0,
+            'required_extra_11': int(underflow_req.get('req_11', 0)),
+            'required_extra_22': int(underflow_req.get('req_22', 0)),
+            'required_extra_23': int(underflow_req.get('req_23', 0)),
             'remaining': {'11': 0, '22': 0, '23': 0, '24': 0, '25': 0},
             'native_remaining': {'11': 0, '22': 0, '23': 0, '24': 0, '25': 0},
             'proxy_remaining': {'11': 0, '22': 0, '23': 0, '24': 0, '25': 0},
@@ -703,8 +824,10 @@ def _block_c_eval(adjuster: Any,
             'native_consumed': {'11': 0, '22': 0, '23': 0, '24': 0, '25': 0},
             'proxy_consumed': {'11': 0, '22': 0, '23': 0, '24': 0, '25': 0},
             'alloc_eval_error': str(e),
+            'alloc_eval_failed': True,
+            'flex_count_unknown': True,
         }
-    bounds = _block_c_bounds(adjuster, nodes)
+    bounds = _safe_bounds()
     diag = dict(diag)
     diag.update(bounds)
     diag['flex_count'] = int(diag.get('flexible_bridge_count', 0))
@@ -768,6 +891,7 @@ def _block_c_penalty(diag: Dict[str, Any]) -> Tuple[int, ...]:
     flex_count = int(diag.get('flex_count', 0))
     flex_lo = int(diag.get('flex_lower', 0))
     flex_hi = int(diag.get('flex_upper', 0))
+    alloc_failed = bool(diag.get('alloc_eval_failed', False))
     req11 = max(0, int(diag.get('required_extra_11', 0)))
     req22 = max(0, int(diag.get('required_extra_22', 0)))
     req23 = max(0, int(diag.get('required_extra_23', 0)))
@@ -783,6 +907,7 @@ def _block_c_penalty(diag: Dict[str, Any]) -> Tuple[int, ...]:
     )
     unexpected_tail_residual = int(remaining_22 + remaining_24 + remaining_25)
     return (
+        1 if bool(alloc_failed) else 0,
         max(0, int(diag.get('unallocated_branch', 0))),
         max(0, int(diag.get('unallocated_bridge', 0))),
         0 if bool(diag.get('hist_proxy_ok', True)) else 1,
@@ -1091,7 +1216,10 @@ def adjust_block_c_extra_phase_impl(
                     continue
 
             adjuster._refresh_node_counters(new_nodes)
-            new_diag = _block_c_eval(adjuster, new_nodes, S_target, E_target)
+            new_diag = _sanitize_extra_diag(_block_c_eval(adjuster, new_nodes, S_target, E_target))
+            if bool(new_diag.get('alloc_eval_failed', False)):
+                adjuster._h_rotation_state = int(prev_rot_state)
+                continue
             if not bool(new_diag.get('aromatic_balance_ok', True)):
                 adjuster._h_rotation_state = int(prev_rot_state)
                 continue
@@ -1151,6 +1279,29 @@ def adjust_block_c_extra_phase_impl(
             return
         cands.append((str(op), str(stage), int(desired_i), list(conversions)))
 
+    def _resource_delta(conversions: List[Tuple[int, int, int]]) -> Dict[int, int]:
+        out: Dict[int, int] = {11: 0, 22: 0, 23: 0, 24: 0, 25: 0}
+        for src, dst, mult in list(conversions or []):
+            amount = int(mult)
+            if int(src) in out:
+                out[int(src)] = int(out.get(int(src), 0)) - int(amount)
+            if int(dst) in out:
+                out[int(dst)] = int(out.get(int(dst), 0)) + int(amount)
+        return out
+
+    def _candidate_allowed_by_shortage(conversions: List[Tuple[int, int, int]],
+                                       req11: int,
+                                       req22: int,
+                                       req23: int) -> bool:
+        delta = _resource_delta(conversions)
+        if int(req11) > 0 and int(delta.get(11, 0)) < 0:
+            return False
+        if int(req22) > 0 and int(delta.get(22, 0)) < 0:
+            return False
+        if int(req23) > 0 and int(delta.get(23, 0)) < 0:
+            return False
+        return True
+
     def _run_guided_extra_step(diag: Dict[str, Any]) -> bool:
         req11 = max(0, int(diag.get('required_extra_11', 0)))
         req22 = max(0, int(diag.get('required_extra_22', 0)))
@@ -1185,16 +1336,18 @@ def adjust_block_c_extra_phase_impl(
         cands: List[Tuple[str, str, int, List[Tuple[int, int, int]]]] = []
 
         if unallocated_branch > 0:
-            _add_guided_candidate(
-                cands, 'S2_C3_branch_23+11->24+13', 'S2_guided_C3',
-                min(unallocated_branch, h23, h11, 6),
-                [(23, 24, 1), (11, 13, 1)],
-            )
-            _add_guided_candidate(
-                cands, 'S2_C3_branch_2x23->24+22', 'S2_guided_C3',
-                min(unallocated_branch, h23 // 2, 6),
-                [(23, 24, 1), (23, 22, 1)],
-            )
+            if int(req11) <= 0 and int(req23) <= 0:
+                _add_guided_candidate(
+                    cands, 'S2_C3_branch_23+11->24+13', 'S2_guided_C3',
+                    min(unallocated_branch, h23, h11, 6),
+                    [(23, 24, 1), (11, 13, 1)],
+                )
+            if int(req23) <= 0:
+                _add_guided_candidate(
+                    cands, 'S2_C3_branch_2x23->24+22', 'S2_guided_C3',
+                    min(unallocated_branch, h23 // 2, 6),
+                    [(23, 24, 1), (23, 22, 1)],
+                )
             _add_guided_candidate(
                 cands, 'S2_C3_req23_22+12->23+13', 'S2_guided_C3',
                 min(max(req23, 0), h22, h12, 6),
@@ -1334,11 +1487,13 @@ def adjust_block_c_extra_phase_impl(
             )
 
         for op, stage, desired, conversions in cands:
+            if not _candidate_allowed_by_shortage(conversions, req11, req22, req23):
+                continue
             if _try_guided_bundle(op, stage, int(desired), conversions, diag):
                 return True
         return False
 
-    diag = _block_c_eval(adjuster, tmp_nodes, S_target, E_target)
+    diag = _sanitize_extra_diag(_block_c_eval(adjuster, tmp_nodes, S_target, E_target))
     initial_extra_diag = dict(diag)
     max_total_steps = max(1, int(guided_max_steps))
 
@@ -1376,12 +1531,18 @@ def adjust_block_c_extra_phase_impl(
 
     step = 0
     while step < int(max_total_steps):
-        diag = _block_c_eval(adjuster, tmp_nodes, S_target, E_target)
+        diag = _sanitize_extra_diag(_block_c_eval(adjuster, tmp_nodes, S_target, E_target))
         fixed_flex_count = int(diag.get('fixed_flexible_bridge_count', 0))
+        flex_display = '?' if bool(diag.get('flex_count_unknown', False)) else str(diag.get('flex_count', 0))
+        fixed_flex_display = '?' if bool(diag.get('flex_count_unknown', False)) else str(fixed_flex_count)
+        for warn in list(diag.get('sanity_warnings', []) or []):
+            print(f"    [Step 2诊断修正] {warn}")
+        if bool(diag.get('alloc_eval_failed', False)):
+            print(f"    [Step 2诊断修正] allocation balance failed: {diag.get('alloc_eval_error', diag.get('reason', 'unknown'))}")
         print(
             f"    [Step 2评估] X={diag.get('X', 0)} Y={diag.get('Y', 0)} Z={diag.get('Z', 0)} "
-            f"flex={diag.get('flex_count', 0)}/[{diag.get('flex_lower', 0)},{diag.get('flex_upper', 0)}] "
-            f"fixed_flex={fixed_flex_count} "
+            f"flex={flex_display}/[{diag.get('flex_lower', 0)},{diag.get('flex_upper', 0)}] "
+            f"fixed_flex={fixed_flex_display} "
             f"native11={diag.get('native_remaining_11', 0)} proxy11={diag.get('proxy_remaining_11', 0)} "
             f"native22={diag.get('native_remaining_22', 0)} proxy22={diag.get('proxy_remaining_22', 0)} "
             f"native23={diag.get('native_remaining_23', 0)} proxy23={diag.get('proxy_remaining_23', 0)} "
@@ -1410,7 +1571,7 @@ def adjust_block_c_extra_phase_impl(
             break
         step += 1
 
-    extra_meta = _block_c_eval(adjuster, tmp_nodes, S_target, E_target)
+    extra_meta = _sanitize_extra_diag(_block_c_eval(adjuster, tmp_nodes, S_target, E_target))
     H_after_extra = H_work.detach().clone().cpu()
 
     align_meta: Dict[str, Any] = {

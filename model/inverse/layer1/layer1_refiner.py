@@ -623,6 +623,86 @@ class Layer1Refiner:
                 return False
             return True
 
+        def _try_rewire_for_special_degree_gap(center: _NodeV3) -> bool:
+            """Borrow one ordinary non-fixed edge to close a special-anchor degree gap."""
+            if int(getattr(center, 'su_type', -1)) not in {19, 20, 21}:
+                return False
+            if int(center.remaining_hop1_slots()) <= 0:
+                return False
+            if _has_pending_external(center, nodes):
+                return False
+            if int(_node_degree_gap(center, nodes)) <= 0:
+                return False
+
+            protected_su = {5, 6, 7, 8, 9, 19, 20, 21, 27, 28, 29, 31, 32}
+            terminal_su = {1, 4, 16, 18, 22, 28, 32}
+            best_move: Optional[Tuple[int, int, int]] = None
+            best_gain: Optional[int] = None
+
+            for owner in list(nodes or []):
+                owner_id = int(getattr(owner, 'global_id', -1))
+                if int(owner_id) == int(center.global_id):
+                    continue
+                if int(owner_id) in set(getattr(center, 'hop1_ids', []) or []):
+                    continue
+                if int(getattr(owner, 'su_type', -1)) in protected_su:
+                    continue
+                if int(owner.remaining_hop1_slots()) > 0:
+                    continue
+                if _has_pending_external(owner, nodes):
+                    continue
+
+                for old_nb_id in list(getattr(owner, 'hop1_ids', []) or []):
+                    old_nb_i = int(old_nb_id)
+                    if old_nb_i < 0 or old_nb_i >= len(nodes):
+                        continue
+                    old_nb = nodes[int(old_nb_i)]
+                    if int(getattr(old_nb, 'su_type', -1)) in protected_su:
+                        continue
+                    if int(getattr(old_nb, 'su_type', -1)) in terminal_su:
+                        continue
+                    if _has_pending_external(old_nb, nodes):
+                        continue
+                    if assigner._edge_is_fixed(owner, old_nb):
+                        continue
+
+                    affected_ids = [int(center.global_id), int(owner_id), int(old_nb_i)]
+                    before_score = _score_nodes(nodes, affected_ids)
+                    work_nodes = _make_local_work_nodes(nodes, affected_ids)
+                    if not assigner._remove_bidirectional_hop1(work_nodes, int(owner_id), int(old_nb_i)):
+                        continue
+                    owner_w = work_nodes[int(owner_id)]
+                    center_w = work_nodes[int(center.global_id)]
+                    old_nb_w = work_nodes[int(old_nb_i)]
+                    if not assigner._can_add_hop1_connection(work_nodes, owner_w, center_w):
+                        continue
+                    if not assigner._add_bidirectional_hop1(work_nodes, int(owner_id), int(center.global_id), lock=False):
+                        continue
+                    if int(_node_degree_gap(center_w, work_nodes)) >= int(_node_degree_gap(center, nodes)):
+                        continue
+                    after_score = _score_nodes(work_nodes, affected_ids)
+                    # Do not trade a special-anchor hard gap for another special
+                    # or fixed-anchor gap; owner/old_nb are filtered above, so a
+                    # positive local score gain is enough to make this safe.
+                    gain = int(before_score - after_score)
+                    if int(gain) <= 0:
+                        continue
+                    if best_gain is None or int(gain) > int(best_gain):
+                        _ = old_nb_w
+                        best_move = (int(owner_id), int(old_nb_i), int(center.global_id))
+                        best_gain = int(gain)
+
+            if best_move is None:
+                return False
+
+            owner_id, old_nb_id, center_id = best_move
+            if not assigner._remove_bidirectional_hop1(nodes, int(owner_id), int(old_nb_id)):
+                return False
+            if not assigner._add_bidirectional_hop1(nodes, int(owner_id), int(center_id), lock=False):
+                assigner._add_bidirectional_hop1(nodes, int(owner_id), int(old_nb_id), lock=False)
+                return False
+            return True
+
         while iters < max_iters:
             iters += 1
             self.complete_required_external_anchors(assigner, nodes, [11, 19, 20, 21, 5, 6, 7, 8, 9], max_rounds=1)
@@ -635,6 +715,9 @@ class Layer1Refiner:
 
             for u in remaining:
                 if _try_fill_pending_external(u):
+                    progressed = True
+                    break
+                if _try_rewire_for_special_degree_gap(u):
                     progressed = True
                     break
 

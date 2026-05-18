@@ -505,15 +505,55 @@ class Layer4Adjuster:
         if int(total_20) > 0:
             deg_20 = dict(self._get_special_degree_meta(H).get(20, {}) or {})
             raw_20 = dict(raw_mode.get(20, raw_mode.get('20', {})) or {})
+            total_counts_20 = {
+                int(deg): max(0, int(deg_20.get(int(deg), 0)))
+                for deg in [1, 2, 3]
+            }
             double_counts = {
                 int(deg): min(
-                    int(deg_20.get(int(deg), 0)),
+                    int(total_counts_20.get(int(deg), 0)),
                     max(0, int(dict(raw_20.get('double', {}) or {}).get(int(deg), 0)))
                 )
                 for deg in [2, 3]
             }
+            required_20_edges = 0
+            try:
+                required_20_edges = int(max(
+                    0,
+                    int(H_cpu[0].item()) + 2 * int(H_cpu[27].item()) - int(H_cpu[6].item()),
+                ))
+            except Exception:
+                required_20_edges = int(total_20)
+            total_nodes_20 = int(sum(int(v) for v in total_counts_20.values()))
+            if int(total_nodes_20) <= 0:
+                total_nodes_20 = int(total_20)
+            target_double_total = int(max(0, int(required_20_edges) - int(total_nodes_20)))
+            target_double_total = min(
+                int(target_double_total),
+                int(total_counts_20.get(2, 0)) + int(total_counts_20.get(3, 0)),
+            )
+            current_double_total = int(sum(int(v) for v in double_counts.values()))
+            if int(current_double_total) < int(target_double_total):
+                deficit = int(target_double_total) - int(current_double_total)
+                for deg in [3, 2]:
+                    room = max(0, int(total_counts_20.get(int(deg), 0)) - int(double_counts.get(int(deg), 0)))
+                    take = min(int(deficit), int(room))
+                    if int(take) > 0:
+                        double_counts[int(deg)] = int(double_counts.get(int(deg), 0)) + int(take)
+                        deficit -= int(take)
+                    if int(deficit) <= 0:
+                        break
+            elif int(current_double_total) > int(target_double_total):
+                excess = int(current_double_total) - int(target_double_total)
+                for deg in [2, 3]:
+                    take = min(int(excess), int(double_counts.get(int(deg), 0)))
+                    if int(take) > 0:
+                        double_counts[int(deg)] = int(double_counts.get(int(deg), 0)) - int(take)
+                        excess -= int(take)
+                    if int(excess) <= 0:
+                        break
             single_counts = {
-                int(deg): max(0, int(deg_20.get(int(deg), 0)) - int(double_counts.get(int(deg), 0)))
+                int(deg): max(0, int(total_counts_20.get(int(deg), 0)) - int(double_counts.get(int(deg), 0)))
                 for deg in [1, 2, 3]
             }
             out[20] = {

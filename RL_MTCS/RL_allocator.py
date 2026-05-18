@@ -1618,24 +1618,142 @@ class FlexAllocator:
         prefer_long = self._is_long_tail_preferred(btype)
         if prefer_long:
             if remaining_E:
-                remaining_E.pop(0)
-                return 2, 1, 'E'
+                tail_node = remaining_E.pop(0)
+                return 2, 1, f"E@{int(tail_node.global_id)}"
             if remaining_G:
-                remaining_G.pop(0)
-                return 1, 1, 'G'
+                tail_node = remaining_G.pop(0)
+                return 1, 1, f"G@{int(tail_node.global_id)}"
         else:
             if remaining_G:
-                remaining_G.pop(0)
-                return 1, 1, 'G'
+                tail_node = remaining_G.pop(0)
+                return 1, 1, f"G@{int(tail_node.global_id)}"
             if remaining_E:
-                remaining_E.pop(0)
-                return 2, 1, 'E'
+                tail_node = remaining_E.pop(0)
+                return 2, 1, f"E@{int(tail_node.global_id)}"
         costs = self._tail_cost_options(btype)
         if costs:
             b23, b22, tag = costs[0]
             return int(b23), int(b22), str(tag)
         b23, b22 = self._branch_cost(btype)
         return int(b23), int(b22), 'raw'
+
+    @staticmethod
+    def _tail_source_ids(*tail_sources: Any) -> List[int]:
+        ids: List[int] = []
+        for source in list(tail_sources or []):
+            if source is None:
+                continue
+            text = str(source)
+            for match in re.findall(r'@(-?\d+)', text):
+                try:
+                    gid = int(match)
+                except Exception:
+                    continue
+                if int(gid) >= 0 and int(gid) not in ids:
+                    ids.append(int(gid))
+        return ids
+
+    def _special_tail_metadata_for_node(self, node: Optional[SUNode]) -> Dict[str, Any]:
+        if node is None:
+            return {}
+        su_i = int(getattr(node, 'su_type', -1))
+        connector_su_values = {
+            int(x)
+            for vals in SPECIAL_CONNECTOR_SU.values()
+            for x in set(vals or set())
+        }
+        if su_i not in connector_su_values and su_i not in {19, 20, 21}:
+            return {}
+        node_id_i = int(getattr(node, 'global_id', -1))
+        nbs = self._neighbor_nodes(node)
+        if su_i in connector_su_values:
+            connectors = [node]
+            endpoints = list(nbs or [])
+            special_centers = [
+                ep for ep in endpoints
+                if int(getattr(ep, 'su_type', -1)) in {19, 20, 21}
+            ]
+            center_node = special_centers[0] if special_centers else node
+        else:
+            connectors = [
+                nb for nb in list(nbs or [])
+                if int(getattr(nb, 'su_type', -1)) in connector_su_values
+            ]
+            endpoints = []
+            for conn in list(connectors or []):
+                endpoints.extend(self._other_connector_endpoints(conn, node_id_i))
+            center_node = node
+        if not connectors and su_i not in {19, 20, 21}:
+            return {}
+        endpoint_ids = [int(getattr(ep, 'global_id', -1)) for ep in list(endpoints or [])]
+        endpoint_su = [int(getattr(ep, 'su_type', -1)) for ep in list(endpoints or [])]
+        endpoint_classes = [
+            str(getattr(ep, 'endpoint_class', _endpoint_class_for_node(ep)))
+            for ep in list(endpoints or [])
+        ]
+        return {
+            'special_tail': True,
+            'special_tail_center_id': int(getattr(center_node, 'global_id', node_id_i)),
+            'special_tail_center_su': int(getattr(center_node, 'su_type', su_i)),
+            'special_tail_center_degree': (
+                int(getattr(center_node, 'target_degree'))
+                if getattr(center_node, 'target_degree', None) is not None else None
+            ),
+            'special_tail_connector_ids': sorted(set(int(getattr(c, 'global_id', -1)) for c in connectors if int(getattr(c, 'global_id', -1)) >= 0)),
+            'special_tail_connector_su': [int(getattr(c, 'su_type', -1)) for c in connectors],
+            'special_tail_endpoint_ids': sorted(set(int(x) for x in endpoint_ids if int(x) >= 0)),
+            'special_tail_endpoint_su': list(endpoint_su),
+            'special_tail_endpoint_classes': list(endpoint_classes),
+        }
+
+    def _tail_source_trace_ids(self, *tail_sources: Any) -> List[int]:
+        out: List[int] = []
+        for gid in self._tail_source_ids(*tail_sources):
+            node = self._node_lookup.get(int(gid))
+            ids = [int(gid)]
+            if node is not None:
+                meta = self._special_tail_metadata_for_node(node)
+                ids.extend(int(x) for x in list(meta.get('special_tail_connector_ids', []) or []))
+                ids.extend(int(x) for x in list(meta.get('special_tail_endpoint_ids', []) or []))
+                center_id = meta.get('special_tail_center_id', None)
+                if center_id is not None:
+                    ids.append(int(center_id))
+            for item in ids:
+                item_i = int(item)
+                if item_i >= 0 and item_i not in out:
+                    out.append(item_i)
+        return out
+
+    def _tail_sources_metadata(self, *tail_sources: Any) -> Dict[str, Any]:
+        direct_ids = self._tail_source_ids(*tail_sources)
+        trace_ids = self._tail_source_trace_ids(*tail_sources)
+        special_tails = []
+        for gid in direct_ids:
+            node = self._node_lookup.get(int(gid))
+            meta = self._special_tail_metadata_for_node(node)
+            if meta:
+                special_tails.append(dict(meta))
+        meta = {
+            'tail_source_ids': list(direct_ids),
+            'tail_source_trace_ids': list(trace_ids),
+        }
+        if special_tails:
+            meta['special_tail_sources'] = list(special_tails)
+        return meta
+
+    def _reserved_tail_chain_metadata(self,
+                                      tail_node: Optional[SUNode],
+                                      tail_source: str,
+                                      extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        meta = {
+            'tail_source': str(tail_source),
+        }
+        special = self._special_tail_metadata_for_node(tail_node)
+        if special:
+            meta.update(special)
+        if extra:
+            meta.update(dict(extra))
+        return meta
 
     def _consume_branch_tail_for_node(self,
                                       node: SUNode,
@@ -1657,8 +1775,8 @@ class FlexAllocator:
                 return 0, 1, 'terminal'
             if fixed_usage == 'ring' and ({'H_long', 'H_short'} & modes):
                 if remaining_G:
-                    remaining_G.pop(0)
-                    return 1, 1, 'G'
+                    tail_node = remaining_G.pop(0)
+                    return 1, 1, f"G@{int(tail_node.global_id)}"
                 return 1, 1, 'raw_short'
         return self._consume_reserved_branch_tail(btype, remaining_E, remaining_G)
 
@@ -1679,8 +1797,8 @@ class FlexAllocator:
                     tail_su = int(getattr(tail_node, 'su_type', -1))
                     tail_deg = getattr(tail_node, 'target_degree', None)
                     if tail_su in {19, 21} and tail_deg is not None and int(tail_deg) == 2:
-                        remaining_G.pop(idx)
-                        return 1, 1, 'special_d2_terminal_tail'
+                        tail_node = remaining_G.pop(idx)
+                        return 1, 1, f"special_d2_terminal_tail@{int(tail_node.global_id)}"
         return self._consume_branch_tail_for_node(node, btype, remaining_E, remaining_G)
 
     @staticmethod
@@ -1956,30 +2074,70 @@ class FlexAllocator:
         for e in remaining_E:
             if avail_11 >= 1 and avail_23 >= 3 and avail_22 >= 1:
                 comp = [22, 23, 23, 23, 11]
-                chains.append(ChainSpec('side', comp, 'E', [e.global_id]))
+                chains.append(ChainSpec(
+                    'side',
+                    comp,
+                    'E',
+                    [e.global_id],
+                    metadata=self._reserved_tail_chain_metadata(e, 'E', {'reserved_tail_closure': 'long'}),
+                ))
                 avail_11 -= 1; avail_23 -= 3; avail_22 -= 1
             elif avail_11 >= 1 and avail_23 >= 2 and avail_22 >= 1:
                 comp = [22, 23, 23, 11]
-                chains.append(ChainSpec('side', comp, 'E', [e.global_id]))
+                chains.append(ChainSpec(
+                    'side',
+                    comp,
+                    'E',
+                    [e.global_id],
+                    metadata=self._reserved_tail_chain_metadata(e, 'E', {'reserved_tail_closure': 'short'}),
+                ))
                 avail_11 -= 1; avail_23 -= 2; avail_22 -= 1
             else:
                 print(f"  [WARN] Cannot close remaining Type E node {e.global_id}")
                 self._result.unallocated_bridge += 1
-                self._result.required_extra_11 += 1
+                self._accumulate_best_shortage(
+                    avail_11,
+                    avail_23,
+                    avail_22,
+                    [
+                        (1, 3, 1),
+                        (1, 2, 1),
+                    ],
+                )
 
         for g in remaining_G:
             if avail_11 >= 1 and avail_23 >= 2 and avail_22 >= 1:
                 comp = [22, 23, 23, 11]
-                chains.append(ChainSpec('side', comp, 'G', [g.global_id]))
+                chains.append(ChainSpec(
+                    'side',
+                    comp,
+                    'G',
+                    [g.global_id],
+                    metadata=self._reserved_tail_chain_metadata(g, 'G', {'reserved_tail_closure': 'long'}),
+                ))
                 avail_11 -= 1; avail_23 -= 2; avail_22 -= 1
             elif avail_11 >= 1 and avail_23 >= 1 and avail_22 >= 1:
                 comp = [22, 23, 11]
-                chains.append(ChainSpec('side', comp, 'G', [g.global_id]))
+                chains.append(ChainSpec(
+                    'side',
+                    comp,
+                    'G',
+                    [g.global_id],
+                    metadata=self._reserved_tail_chain_metadata(g, 'G', {'reserved_tail_closure': 'short'}),
+                ))
                 avail_11 -= 1; avail_23 -= 1; avail_22 -= 1
             else:
                 print(f"  [WARN] Cannot close remaining Type G node {g.global_id}")
                 self._result.unallocated_bridge += 1
-                self._result.required_extra_11 += 1
+                self._accumulate_best_shortage(
+                    avail_11,
+                    avail_23,
+                    avail_22,
+                    [
+                        (1, 2, 1),
+                        (1, 1, 1),
+                    ],
+                )
 
         return chains, avail_11, avail_23, avail_22
 
@@ -1998,6 +2156,80 @@ class FlexAllocator:
         self._result.required_extra_11 += max(0, int(need_11))
         self._result.required_extra_23 += max(0, int(need_23))
         self._result.required_extra_22 += max(0, int(need_22))
+
+    @staticmethod
+    def _shortage_gap(avail_11: int,
+                      avail_23: int,
+                      avail_22: int,
+                      need_11: int = 0,
+                      need_23: int = 0,
+                      need_22: int = 0) -> Tuple[int, int, int]:
+        return (
+            max(0, int(need_11) - int(avail_11)),
+            max(0, int(need_23) - int(avail_23)),
+            max(0, int(need_22) - int(avail_22)),
+        )
+
+    def _accumulate_best_shortage(self,
+                                  avail_11: int,
+                                  avail_23: int,
+                                  avail_22: int,
+                                  need_options: Sequence[Tuple[int, int, int]]) -> None:
+        best_gap: Optional[Tuple[int, int, int]] = None
+        best_key: Optional[Tuple[int, int]] = None
+        for idx, needs in enumerate(list(need_options or [])):
+            try:
+                need_11, need_23, need_22 = [int(x) for x in list(needs)]
+            except Exception:
+                continue
+            gap = self._shortage_gap(
+                avail_11,
+                avail_23,
+                avail_22,
+                need_11=need_11,
+                need_23=need_23,
+                need_22=need_22,
+            )
+            key = (int(sum(gap)), int(idx))
+            if best_key is None or key < best_key:
+                best_key = key
+                best_gap = gap
+        if best_gap is not None:
+            self._accumulate_shortage(
+                need_11=int(best_gap[0]),
+                need_23=int(best_gap[1]),
+                need_22=int(best_gap[2]),
+            )
+
+    @staticmethod
+    def _dominant_resource_shortage(req_11: int,
+                                    req_22: int,
+                                    req_23: int) -> Optional[str]:
+        reqs = {
+            '11_shortage': max(0, int(req_11)),
+            '22_shortage': max(0, int(req_22)),
+            '23_shortage': max(0, int(req_23)),
+        }
+        ranked = sorted(
+            reqs.items(),
+            key=lambda kv: (-int(kv[1]), {'23_shortage': 0, '22_shortage': 1, '11_shortage': 2}[str(kv[0])]),
+        )
+        if not ranked or int(ranked[0][1]) <= 0:
+            return None
+        return str(ranked[0][0])
+
+    @staticmethod
+    def _parse_underflow_requirements(message: Any) -> Dict[str, int]:
+        req = {'req_11': 0, 'req_22': 0, 'req_23': 0}
+        text = str(message or '')
+        for kind, value_text in re.findall(r'(?<!\d)(11|22|23)\s*=\s*(-?\d+)', text):
+            try:
+                value_i = int(value_text)
+            except Exception:
+                continue
+            if int(value_i) < 0:
+                req[f'req_{kind}'] = max(int(req.get(f'req_{kind}', 0)), -int(value_i))
+        return req
 
     def _allocate_su25_only(self,
                             avail_11: int,
@@ -2027,6 +2259,7 @@ class FlexAllocator:
                     'branch_22_count': int(tail22),
                     'extra_22_count': int(extra_22_count),
                     'tail_source': str(tail_src),
+                    **self._tail_sources_metadata(tail_src),
                 }
 
                 if avail_11 >= 1 and avail_23 >= total_23_needed:
@@ -2044,7 +2277,8 @@ class FlexAllocator:
                         comp += [23]
                         comp += list(terms[1:])
                         desc = f"Br-25({'aro' if is_aro else 'ali'})"
-                        chains.append(ChainSpec('branch_side', comp, desc, [n.global_id], metadata=branch_meta.copy()))
+                        ids = sorted(set([int(n.global_id)] + self._tail_source_trace_ids(tail_src)))
+                        chains.append(ChainSpec('branch_side', comp, desc, ids, metadata=branch_meta.copy()))
                         avail_11 = temp_11
                         avail_22 = temp_22
                         avail_23 -= total_23_needed
@@ -2066,7 +2300,8 @@ class FlexAllocator:
                         comp += [23, 11]
                         comp += list(terms)
                         desc = f"Br-25({'aro' if is_aro else 'ali'})"
-                        chains.append(ChainSpec('branch_bridge', comp, desc, [n.global_id], metadata=branch_meta.copy()))
+                        ids = sorted(set([int(n.global_id)] + self._tail_source_trace_ids(tail_src)))
+                        chains.append(ChainSpec('branch_bridge', comp, desc, ids, metadata=branch_meta.copy()))
                         avail_11 = temp_11
                         avail_22 = temp_22
                         avail_23 -= total_23_needed
@@ -2129,7 +2364,9 @@ class FlexAllocator:
         # ===== Step 1: C-dominant fused side rings (脂肪并环, 最高优先级) =====
         # 优先消耗 2 个固定 C 类 + 2 个 AB/CD 外层位，构建最完整的并环。
         c_pool = [n for n in C if self._profile_allows_slot(n[0], 'fused_fixed_c_bridgehead')]
-        mixed_cd_pool = [n for n in (C + D) if n not in c_pool[:2]]
+        # Keep fixed-C bridgeheads and mixed outer CD candidates disjoint so the
+        # same 24_C node cannot be picked once as fixed_c and again as node1/2.
+        mixed_cd_pool = [n for n in (C + D) if n not in c_pool]
         while len(c_pool) >= 2 and len(mixed_cd_pool) >= 2 and len(AB) >= 2:
             fixed_c1 = c_pool.pop(0)
             fixed_c2 = c_pool.pop(0)
@@ -2214,7 +2451,9 @@ class FlexAllocator:
                     fixed_c1[0].global_id, fixed_c2[0].global_id,
                     node1[0].global_id, node2[0].global_id,
                 ]
-                ids = sorted(set(int(x) for x in ids + list(substitute_ids)))
+                tail_meta = self._tail_sources_metadata(base_src1, base_src2, src1, src2)
+                tail_source_trace_ids = list(tail_meta.get('tail_source_trace_ids', []) or [])
+                ids = sorted(set(int(x) for x in ids + list(substitute_ids) + list(tail_source_trace_ids)))
                 desc = f"Fused-S-ring(Base:{base1[1][-1]}{base2[1][-1]}+Br:CC)+Out:{node1[1][-1]}{node2[1][-1]}"
                 fused_meta = {
                     'fused_priority_path': True,
@@ -2233,6 +2472,7 @@ class FlexAllocator:
                         self._branch_role_for_type(base2[1]),
                     ],
                     'tail_sources': [base_src1, base_src2, src1, src2],
+                    **tail_meta,
                     'branch24_profiles': self._branch24_profiles_for_items([
                         (base1[0], 'fused_base'),
                         (base2[0], 'fused_base'),
@@ -2396,7 +2636,9 @@ class FlexAllocator:
                     break
                 comp = ring_comp[:-1] + [23] * branch_23 + [22] * branch_22 + [ring_comp[-1]]
                 ids = [bridge1[0].global_id, bridge2[0].global_id] + [n[0].global_id for n in base_nodes + outer_nodes]
-                ids = sorted(set(int(x) for x in ids + list(substitute_ids)))
+                tail_meta = self._tail_sources_metadata(*tail_sources)
+                tail_source_trace_ids = list(tail_meta.get('tail_source_trace_ids', []) or [])
+                ids = sorted(set(int(x) for x in ids + list(substitute_ids) + list(tail_source_trace_ids)))
                 desc = f"Fused-S-ring(Base:{base_str}+Br:CC)+Out:{out_str}"
 
                 base_upper_len = sum(self._branch_cost(base_upper_type)) if base_upper_type else 0
@@ -2415,6 +2657,7 @@ class FlexAllocator:
                         self._branch24_profile(bridge2[0]).get('fixed_path_kind'),
                     ],
                     'tail_sources': tail_sources,
+                    **tail_meta,
                     'base_ring_roles': [self._branch_role_for_type(x[1]) for x in base_nodes],
                     'outer_ring_roles': [self._branch_role_for_type(x[1]) for x in outer_nodes],
                     'branch24_profiles': self._branch24_profiles_for_items(
@@ -2511,10 +2754,13 @@ class FlexAllocator:
                         comp = list(ring_comp)
                         comp += [23] * (b23_1 + b23_2) + terms
                         ids = [a_node[0].global_id, cd1[0].global_id, cd2[0].global_id]
-                        ids = sorted(set(int(x) for x in ids + list(substitute_ids)))
+                        tail_meta = self._tail_sources_metadata(src1, src2)
+                        tail_source_trace_ids = list(tail_meta.get('tail_source_trace_ids', []) or [])
+                        ids = sorted(set(int(x) for x in ids + list(substitute_ids) + list(tail_source_trace_ids)))
                         desc = f"V-ring(A+{cd1[1][-1]}+{cd2[1][-1]})"
                         vr_meta = {
                             'tail_sources': [src1, src2],
+                            **tail_meta,
                             'vertical_inter_types': [cd1[1], cd2[1]],
                             'vertical_inter_roles': [
                                 self._branch_role_for_type(cd1[1]),
@@ -2585,10 +2831,13 @@ class FlexAllocator:
                         comp = list(ring_comp)
                         comp += [23] * b23 + terms
                         ids = [a_node[0].global_id, cd1[0].global_id]
-                        ids = sorted(set(int(x) for x in ids + list(substitute_ids)))
+                        tail_meta = self._tail_sources_metadata(src1)
+                        tail_source_trace_ids = list(tail_meta.get('tail_source_trace_ids', []) or [])
+                        ids = sorted(set(int(x) for x in ids + list(substitute_ids) + list(tail_source_trace_ids)))
                         desc = f"V-ring(A+{cd1[1][-1]})"
                         vr_meta = {
                             'tail_sources': [src1],
+                            **tail_meta,
                             'vertical_inter_types': [cd1[1], None],
                             'vertical_inter_roles': [self._branch_role_for_type(cd1[1]), None],
                             'vertical_ring_su': list(ring_comp[1:]),
@@ -2695,11 +2944,14 @@ class FlexAllocator:
                 comp = list(ring_comp)
                 comp += [23] * int(branch_23) + [22] * int(ring_22)
                 ids = [int(slot[0].global_id) for slot in slot_items]
-                ids = sorted(set(int(x) for x in ids + list(substitute_ids)))
+                tail_meta = self._tail_sources_metadata(*tail_sources)
+                tail_source_trace_ids = list(tail_meta.get('tail_source_trace_ids', []) or [])
+                ids = sorted(set(int(x) for x in ids + list(substitute_ids) + list(tail_source_trace_ids)))
                 type_desc = ''.join(str(slot[1][-1]) if slot is not None else 'X' for slot in slots)
                 desc = f"S-ring({type_desc})"
                 sr_meta = {
                     'tail_sources': list(tail_sources),
+                    **tail_meta,
                     'side_ring_node_types': [slot[1] if slot is not None else None for slot in slots],
                     'side_ring_node_roles': [
                         self._branch_role_for_type(slot[1]) if slot is not None else None
@@ -2759,9 +3011,11 @@ class FlexAllocator:
                     'branch_22_count': b22,
                     'extra_22_count': 0,
                     'tail_source': tail_src,
+                    **self._tail_sources_metadata(tail_src),
                     'branch24_profiles': self._branch24_profiles_for_items([(n[0], 'branch_single')]),
                 }
-                chains.append(ChainSpec('branch_side', comp, f"Br-chain({n[1][-1]})", [n[0].global_id], metadata=branch_meta.copy()))
+                ids = sorted(set([int(n[0].global_id)] + self._tail_source_trace_ids(tail_src)))
+                chains.append(ChainSpec('branch_side', comp, f"Br-chain({n[1][-1]})", ids, metadata=branch_meta.copy()))
                 avail_11 -= 1; avail_23 -= total_23_needed; avail_22 -= (b22 + 1); avail_24 -= 1
             elif avail_11 >= 2 and avail_23 >= total_23_needed and avail_22 >= b22:
                 if is_ab: comp = [11, 24, 23, 23, 11]
@@ -2774,9 +3028,11 @@ class FlexAllocator:
                     'branch_22_count': b22,
                     'extra_22_count': 0,
                     'tail_source': tail_src,
+                    **self._tail_sources_metadata(tail_src),
                     'branch24_profiles': self._branch24_profiles_for_items([(n[0], 'branch_single')]),
                 }
-                chains.append(ChainSpec('branch_bridge', comp, f"Br-chain({n[1][-1]})", [n[0].global_id], metadata=branch_meta.copy()))
+                ids = sorted(set([int(n[0].global_id)] + self._tail_source_trace_ids(tail_src)))
+                chains.append(ChainSpec('branch_bridge', comp, f"Br-chain({n[1][-1]})", ids, metadata=branch_meta.copy()))
                 avail_11 -= 2; avail_23 -= total_23_needed; avail_22 -= b22; avail_24 -= 1
             else:
                 print(f"  [WARN] Cannot allocate branch for 24 node {n[0].global_id} ({n[1]})")
@@ -2894,13 +3150,25 @@ class FlexAllocator:
                 e = remaining_E.pop(0)
                 # B(11-23-...) + E(22-23-23-...) = 11-23-23-23-22
                 comp = [11, 23, 23, 23, 22]
-                chains.append(ChainSpec('side', comp, 'B+E', [n.global_id, e.global_id]))
+                chains.append(ChainSpec(
+                    'side',
+                    comp,
+                    'B+E',
+                    [n.global_id, e.global_id],
+                    metadata=self._reserved_tail_chain_metadata(e, 'E', {'open_chain_head_id': int(n.global_id)}),
+                ))
                 avail_11 -= 1; avail_23 -= 3; avail_22 -= 1
             elif remaining_G and self._has_resources(avail_11, avail_23, avail_22, need_11=1, need_23=2, need_22=1):
                 g = remaining_G.pop(0)
                 # B(11-23-...) + G(22-23-...) = 11-23-23-22
                 comp = [11, 23, 23, 22]
-                chains.append(ChainSpec('side', comp, 'B+G', [n.global_id, g.global_id]))
+                chains.append(ChainSpec(
+                    'side',
+                    comp,
+                    'B+G',
+                    [n.global_id, g.global_id],
+                    metadata=self._reserved_tail_chain_metadata(g, 'G', {'open_chain_head_id': int(n.global_id)}),
+                ))
                 avail_11 -= 1; avail_23 -= 2; avail_22 -= 1
             elif avail_11 >= 2 and avail_23 >= 2:
                 # Prefer the shorter bridge closure first to preserve 23 for
@@ -2911,20 +3179,41 @@ class FlexAllocator:
             else:
                 print(f"  [WARN] Cannot close Type B node {n.global_id}, insufficient resources")
                 self._result.unallocated_bridge += 1
-                self._result.required_extra_11 += 1
+                self._accumulate_best_shortage(
+                    avail_11,
+                    avail_23,
+                    avail_22,
+                    [
+                        (1, 3, 1),
+                        (1, 2, 1),
+                        (2, 2, 0),
+                    ],
+                )
 
         # ----- Type D: ...-23-23-23-... -----
         for n in remaining_D:
             if remaining_E and self._has_resources(avail_11, avail_23, avail_22, need_11=1, need_23=5, need_22=1):
                 e = remaining_E.pop(0)
                 comp = [11, 23, 23, 23, 23, 23, 22]
-                chains.append(ChainSpec('side', comp, 'D+E', [n.global_id, e.global_id]))
+                chains.append(ChainSpec(
+                    'side',
+                    comp,
+                    'D+E',
+                    [n.global_id, e.global_id],
+                    metadata=self._reserved_tail_chain_metadata(e, 'E', {'open_chain_head_id': int(n.global_id)}),
+                ))
                 avail_11 -= 1; avail_23 -= 5; avail_22 -= 1
             elif remaining_G and self._has_resources(avail_11, avail_23, avail_22, need_11=1, need_23=4, need_22=1):
                 g = remaining_G.pop(0)
                 # 11 + D(23-23-23) + G(23-22) = 11-23-23-23-23-22
                 comp = [11, 23, 23, 23, 23, 22]
-                chains.append(ChainSpec('side', comp, 'D+G', [n.global_id, g.global_id]))
+                chains.append(ChainSpec(
+                    'side',
+                    comp,
+                    'D+G',
+                    [n.global_id, g.global_id],
+                    metadata=self._reserved_tail_chain_metadata(g, 'G', {'open_chain_head_id': int(n.global_id)}),
+                ))
                 avail_11 -= 1; avail_23 -= 4; avail_22 -= 1
             elif avail_11 >= 2 and avail_23 >= 3:
                 # Prefer the shorter D bridge closure first to preserve 23 for
@@ -2935,7 +3224,16 @@ class FlexAllocator:
             else:
                 print(f"  [WARN] Cannot close Type D node {n.global_id}")
                 self._result.unallocated_bridge += 1
-                self._result.required_extra_11 += 2
+                self._accumulate_best_shortage(
+                    avail_11,
+                    avail_23,
+                    avail_22,
+                    [
+                        (1, 5, 1),
+                        (1, 4, 1),
+                        (2, 3, 0),
+                    ],
+                )
 
         if min(int(avail_11), int(avail_23), int(avail_22)) < 0:
             raise RuntimeError(
@@ -3153,6 +3451,7 @@ class FlexAllocator:
             'ok': True,
             'unallocated_25': 0,
             'shortage_type': 'none',
+            'resource_shortage_hint': None,
             'avail_after_25': {'11': 0, '22': 0, '23': 0},
             'pre_branch_available': {'11': 0, '22': 0, '23': 0},
             'closed_consumed': {'11': 0, '22': 0, '23': 0},
@@ -3198,6 +3497,11 @@ class FlexAllocator:
         result['req_22'] = int(res.required_extra_22)
         result['req_11'] = int(res.required_extra_11)
         result['req_23'] = int(res.required_extra_23)
+        result['resource_shortage_hint'] = self._dominant_resource_shortage(
+            result['req_11'],
+            result['req_22'],
+            result['req_23'],
+        )
 
         if result['unallocated_25'] > 0:
             result['ok'] = False
@@ -3245,6 +3549,7 @@ class FlexAllocator:
             'unallocated_branch': 0,
             'unallocated_bridge': 0,
             'shortage_type': 'none',
+            'resource_shortage_hint': None,
             'req_22': 0,
             'req_11': 0,
             'req_23': 0,
@@ -3311,6 +3616,11 @@ class FlexAllocator:
             result['req_22'] = res.required_extra_22
             result['req_11'] = res.required_extra_11
             result['req_23'] = res.required_extra_23
+            result['resource_shortage_hint'] = self._dominant_resource_shortage(
+                result['req_11'],
+                result['req_22'],
+                result['req_23'],
+            )
             result['remaining'] = {
                 '11': rem_11,
                 '22': rem_22,
@@ -3348,15 +3658,21 @@ class FlexAllocator:
             import traceback
             traceback.print_exc()
             result['ok'] = False
-            result['shortage_type'] = '11_shortage' if 'underflow: 11=' in str(e) else 'error'
             result['error'] = str(e)
-            if 'underflow: 11=' in str(e):
-                result['req_11'] = max(int(result.get('req_11', 0)), 1)
-            if 'underflow: 23=' in str(e):
-                result['req_23'] = max(int(result.get('req_23', 0)), 1)
-            if 'underflow: 22=' in str(e):
-                result['req_22'] = max(int(result.get('req_22', 0)), 1)
-        
+            underflow_req = self._parse_underflow_requirements(str(e))
+            result['req_11'] = max(int(result.get('req_11', 0)), int(underflow_req.get('req_11', 0)))
+            result['req_22'] = max(int(result.get('req_22', 0)), int(underflow_req.get('req_22', 0)))
+            result['req_23'] = max(int(result.get('req_23', 0)), int(underflow_req.get('req_23', 0)))
+            result['resource_shortage_hint'] = self._dominant_resource_shortage(
+                result['req_11'],
+                result['req_22'],
+                result['req_23'],
+            )
+            if isinstance(result.get('resource_shortage_hint'), str):
+                result['shortage_type'] = str(result['resource_shortage_hint'])
+            else:
+                result['shortage_type'] = '11_shortage' if 'underflow: 11=' in str(e) else 'error'
+
         return result
 
     def evaluate_extra_allocation(

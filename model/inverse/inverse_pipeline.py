@@ -1163,11 +1163,17 @@ class InversePipelineV3:
                     )
                     if branch_changed:
                         block_c_group_attempted = True
-                    if not bool((_meta_branch or {}).get('ok', False)):
+                    if not bool((_meta_branch or {}).get('ok', False)) and bool(branch_changed):
                         reason = str((_meta_branch or {}).get('final_scenario', 'branch_not_ok'))
                         print(
                             f"[Block C:branch #{block_c_iter + 1}] 强制继续: "
                             f"branch meta pending ({reason})，转入 Layer1-2 重建"
+                        )
+                    elif not bool((_meta_branch or {}).get('ok', False)):
+                        reason = str((_meta_branch or {}).get('final_scenario', 'branch_not_ok'))
+                        print(
+                            f"[Block C:branch #{block_c_iter + 1}] 跳过重建: "
+                            f"branch候选未产生可采纳H ({reason})"
                         )
                     if branch_changed:
                         layer1_branch_cfg = dict(layer1_runtime_cfg)
