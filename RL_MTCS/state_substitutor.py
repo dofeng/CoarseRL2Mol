@@ -2,8 +2,7 @@ import copy
 import random
 import ast
 import pandas as pd
-from collections import Counter
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Dict, List, Tuple, Any, Optional, Callable, Set
 from .RL_state import MCTSState, ConnectionGraph, compute_su_delta, compute_su_l1_delta
 from .RL_allocator import STRUCTURAL_PLACEHOLDER_TO_23
@@ -1094,6 +1093,27 @@ class StateSubstitutor:
             return branch_type
         return None
 
+    def _is_allocator_special_node(self, uid: str, nodes) -> bool:
+        """Return True for placed nodes whose allocator identity must be preserved."""
+        node = nodes.get(uid)
+        if node is None:
+            return False
+        meta = getattr(node, 'meta', {}) or {}
+        profile = meta.get('branch24_profile')
+        if isinstance(profile, dict):
+            source_kind = str(profile.get('source_kind') or meta.get('source_kind') or '')
+            fixed_usage = str(profile.get('fixed_usage') or meta.get('fixed_usage') or '')
+            fixed_path = str(profile.get('fixed_path_kind') or meta.get('fixed_path_kind') or '')
+            if source_kind.startswith(('su19d3', 'su20d3', 'su21d3')):
+                return True
+            if fixed_usage == 'ring':
+                return True
+            if fixed_path in {'connector_anchor_edge', 'connector_ring_pair'}:
+                return True
+        if meta.get('ring_substitute') or meta.get('connector_pair'):
+            return True
+        return False
+
     def _is_aliphatic_ring_main_chain(self, uid_24: str, uid_23: str, nodes, pair_roles) -> bool:
         node_24 = nodes.get(uid_24)
         node_23 = nodes.get(uid_23)
@@ -1188,6 +1208,8 @@ class StateSubstitutor:
         for uid, node in nodes.items():
             if node.su_type != 24:
                 continue
+            if self._is_allocator_special_node(uid, nodes):
+                continue
             node_branch_type = self._get_branch_type_from_meta(uid, nodes)
             if node_branch_type is None:
                 node_branch_type = self._classify_current_24(uid, nodes, adj, cluster_uids)
@@ -1203,6 +1225,8 @@ class StateSubstitutor:
                 if nbr not in nodes:
                     continue
                 if nodes[nbr].su_type != 24:
+                    continue
+                if self._is_allocator_special_node(nbr, nodes):
                     continue
                 nbr_branch_type = self._get_branch_type_from_meta(nbr, nodes)
                 if nbr_branch_type is None:
@@ -1298,6 +1322,8 @@ class StateSubstitutor:
         candidates = []
         for uid, node in nodes.items():
             if node.su_type != 24:
+                continue
+            if self._is_allocator_special_node(uid, nodes):
                 continue
             node_branch_type = self._get_branch_type_from_meta(uid, nodes)
             if node_branch_type is None:
@@ -1400,6 +1426,8 @@ class StateSubstitutor:
                 continue
             if int(nodes[uid_24].su_type) != 24 or int(nodes[uid_23].su_type) != 23:
                 continue
+            if self._is_allocator_special_node(uid_24, nodes) or self._is_allocator_special_node(uid_23, nodes):
+                continue
             nodes[uid_24].su_type = 14
             nodes[uid_23].su_type = 15
             applied += 1
@@ -1424,6 +1452,8 @@ class StateSubstitutor:
             return False
         if int(nodes[uid_24].su_type) != 24 or int(nodes[uid_23].su_type) != 23:
             return False
+        if self._is_allocator_special_node(uid_24, nodes) or self._is_allocator_special_node(uid_23, nodes):
+            return False
         nodes[uid_24].su_type = 14
         nodes[uid_23].su_type = 15
         return True
@@ -1432,6 +1462,8 @@ class StateSubstitutor:
         candidates = []
         for uid, node in nodes.items():
             if node.su_type != 24:
+                continue
+            if self._is_allocator_special_node(uid, nodes):
                 continue
             node_branch_type = self._get_branch_type_from_meta(uid, nodes)
             if node_branch_type is None:
@@ -1471,6 +1503,8 @@ class StateSubstitutor:
         candidates.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
         chosen = random.choice(candidates[:min(5, len(candidates))]) if self.randomize else candidates[0]
         _, uid_24, uid_22 = chosen
+        if self._is_allocator_special_node(uid_24, nodes) or self._is_allocator_special_node(uid_22, nodes):
+            return False
         nodes[uid_24].su_type = 14
         nodes[uid_22].su_type = 16
         return True
@@ -1494,6 +1528,8 @@ class StateSubstitutor:
             return False
         if int(nodes[uid_24].su_type) != 24 or int(nodes[uid_22].su_type) != 22:
             return False
+        if self._is_allocator_special_node(uid_24, nodes) or self._is_allocator_special_node(uid_22, nodes):
+            return False
         nodes[uid_24].su_type = 14
         nodes[uid_22].su_type = 16
         return True
@@ -1513,6 +1549,8 @@ class StateSubstitutor:
                 continue
             for nbr in adj.get(uid, ()):
                 if nbr not in nodes or int(nodes[nbr].su_type) != 23:
+                    continue
+                if self._is_allocator_special_node(uid, nodes) or self._is_allocator_special_node(nbr, nodes):
                     continue
                 if uid >= nbr:  # Avoid duplicates
                     continue
@@ -1588,6 +1626,8 @@ class StateSubstitutor:
                 if nbr not in nodes:
                     continue
                 if int(nodes[nbr].su_type) != int(find_pair[1]):
+                    continue
+                if self._is_allocator_special_node(uid, nodes) or self._is_allocator_special_node(nbr, nodes):
                     continue
                 if pair_kind == '15_15' and uid >= nbr:
                     continue

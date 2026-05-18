@@ -9,7 +9,10 @@ from .RL_state import (
 )
 from .RL_allocator import FlexAllocator, ChainSpec, chain_spec_counts_match
 from .stage_branch import (
-    horizontal_branch_coords, su25_extra_branch_coord, get_branch_info_from_chain_spec
+    build_chain_node_meta,
+    horizontal_branch_coords,
+    su25_extra_branch_coord,
+    get_branch_info_from_chain_spec,
 )
 
 # ---------------------------------------------------------------
@@ -53,7 +56,7 @@ def mcts_state_to_raw_mol(
     """
     try:
         import torch
-        from model.coarse_graph import NUM_SU_TYPES, PPM_AXIS
+        from model.shared.coarse_graph import NUM_SU_TYPES, PPM_AXIS
     except ImportError:
         return {}
 
@@ -583,11 +586,20 @@ class SideStage:
             node_meta = {
                 'stage': 'side',
                 'origin_type': getattr(chain_spec, 'origin_type', None),
+                'chain_type': getattr(chain_spec, 'chain_type', None),
                 'position_idx': int(idx),
             }
             if branch_info and int(idx) == int(branch_info.get('position_idx', -1)) and int(su) in (24, 25):
-                node_meta['branch_type'] = branch_info.get('branch_type')
-                node_meta['branch_kind'] = 'main'
+                node_meta = build_chain_node_meta(
+                    chain_spec,
+                    stage='side',
+                    branch_type=branch_info.get('branch_type'),
+                    branch_kind='main',
+                    position_idx=idx,
+                    profile_role='branch_single',
+                    tail_source=branch_info.get('tail_source'),
+                    su_type=su,
+                )
             node = ChainNode(
                 uid=f"Side-{cluster.id}-{site_idx}-{idx}",
                 su_type=su,
@@ -621,13 +633,16 @@ class SideStage:
                     su_type=su,
                     axial=bc,
                     pos2d=pos2d,
-                    meta={
-                        'stage': 'side_branch',
-                        'origin_type': getattr(chain_spec, 'origin_type', None),
-                        'branch_type': branch_info.get('branch_type'),
-                        'branch_kind': 'tail',
-                        'position_idx': int(bi),
-                    },
+                    meta=build_chain_node_meta(
+                        chain_spec,
+                        stage='side_branch',
+                        branch_type=branch_info.get('branch_type'),
+                        branch_kind='tail',
+                        position_idx=bi,
+                        profile_role='branch_single',
+                        tail_source=branch_info.get('tail_source'),
+                        su_type=su,
+                    ),
                 )
                 branch_nodes.append(bn)
             
@@ -645,12 +660,15 @@ class SideStage:
                 su_type=22,
                 axial=extra_22_coord,
                 pos2d=pos2d,
-                meta={
-                    'stage': 'side_branch',
-                    'origin_type': getattr(chain_spec, 'origin_type', None),
-                    'branch_type': branch_info.get('branch_type'),
-                    'branch_kind': 'extra_22',
-                },
+                meta=build_chain_node_meta(
+                    chain_spec,
+                    stage='side_branch',
+                    branch_type=branch_info.get('branch_type'),
+                    branch_kind='extra_22',
+                    profile_role='branch_single',
+                    tail_source=branch_info.get('tail_source'),
+                    su_type=22,
+                ),
             )
             extra_edge = EdgeBranch(base=branch_base_node.uid, chain=[extra_node])
             self.state.graph.branch.append(extra_edge)

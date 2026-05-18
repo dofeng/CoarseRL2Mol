@@ -142,12 +142,35 @@ def _normalize_stage_action(obj: Any) -> Any:
             items.append((str(k), _normalize_stage_action(v)))
         return tuple(items)
     if hasattr(obj, 'chain_type') and hasattr(obj, 'composition'):
+        meta = dict(getattr(obj, 'metadata', {}) or {})
+        semantic_keys = (
+            'branch24_profiles',
+            'fixed_c_source_kinds',
+            'fixed_c_path_kinds',
+            'connector_pair',
+            'ring_substitute_types',
+            'tail_sources',
+            'tail_source',
+            'branch_tail_lengths',
+            'side_ring_su',
+            'side_ring_node_types',
+            'side_ring_slot_names',
+            'vertical_ring_su',
+            'base_ring_su',
+            'outer_ring_su',
+        )
+        semantic_fp = tuple(
+            (key, _normalize_stage_action(meta.get(key)))
+            for key in semantic_keys
+            if key in meta
+        )
         return (
             'ChainSpec',
             str(getattr(obj, 'chain_type', '')),
             tuple(int(x) for x in list(getattr(obj, 'composition', []) or [])),
             str(getattr(obj, 'origin_type', '')),
             tuple(int(x) for x in list(getattr(obj, 'source_ids', []) or [])),
+            semantic_fp,
         )
     if hasattr(obj, 'id') and hasattr(obj, 'kind'):
         return ('Cluster', int(getattr(obj, 'id', -1)), str(getattr(obj, 'kind', '')))
@@ -1084,7 +1107,6 @@ class MCTSRunner:
     
     def _visualize_beam_results(self, candidates: List[BeamCandidate], summaries: List[Dict], output_dir: str):
         """Visualize all beam candidates."""
-        import os
         os.makedirs(output_dir, exist_ok=True)
         
         try:
@@ -1097,7 +1119,6 @@ class MCTSRunner:
     
     def _visualize_flex_results(self, candidates: List[BeamCandidate], summaries: List[Dict], output_dir: str):
         """Visualize flex stage beam candidates."""
-        import os
         os.makedirs(output_dir, exist_ok=True)
         
         try:
@@ -1110,7 +1131,6 @@ class MCTSRunner:
 
     def _visualize_side_results(self, candidates: List[BeamCandidate], summaries: List[Dict], output_dir: str):
         """Visualize side stage beam candidates."""
-        import os
         os.makedirs(output_dir, exist_ok=True)
         
         try:
@@ -1455,7 +1475,6 @@ class MCTSRunner:
             output_dir: Base directory for outputs. Subdirectories (rigid, flex, branch, side, subst) 
                        will be created automatically.
         """
-        import os
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
             rigid_dir = os.path.join(output_dir, 'rigid')
@@ -1531,7 +1550,6 @@ class MCTSRunner:
         }
 
         if output_dir:
-            import os
             os.makedirs(output_dir, exist_ok=True)
             try:
                 from .visualization import save_subst_beam_results
@@ -1672,7 +1690,6 @@ class MCTSRunner:
 
     def _visualize_branch_results(self, candidates: List[BeamCandidate], summaries: List[Dict], output_dir: str):
         """Visualize branch stage beam candidates."""
-        import os
         os.makedirs(output_dir, exist_ok=True)
 
         try:

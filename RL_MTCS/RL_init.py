@@ -5,6 +5,7 @@ import pandas as pd
 from typing import Dict, List, Optional, Tuple
 from collections import Counter
 from .RL_state import HexGrid, Site, AromaticCluster, ConnectionGraph, SU_NAMES, HEX_VERTEX_OFFSETS
+from model.shared.coarse_graph import PPM_AXIS
 
 MAIN_PPM_STEP = 0.1
 
@@ -91,9 +92,13 @@ def analyze_bridgehead_from_csv(csv_path: str) -> Tuple[int, int, int, int, int,
 def _build_rl_ppm_axis(ppm_range: Tuple[float, float], num_points: int) -> np.ndarray:
     lo = float(ppm_range[0])
     hi = float(ppm_range[1])
-    if abs(lo - 0.0) <= 1e-9 and abs(hi - 240.0) <= 1e-9 and int(num_points) == 2400:
-        # Align the default RL path with the project's main PPM axis: 0..240 inclusive, step=0.1.
-        return np.arange(lo, hi + MAIN_PPM_STEP, MAIN_PPM_STEP, dtype=np.float64)
+    ppm_axis_np = PPM_AXIS.detach().cpu().numpy().astype(np.float64).reshape(-1)
+    if int(num_points) == 2400:
+        # Align the default RL path with the project's main PPM axis exactly.
+        if abs(lo - 0.0) <= 1e-9 and abs(hi - 240.0) <= 1e-9:
+            return ppm_axis_np
+        if abs(lo - float(ppm_axis_np[0])) <= 1e-9 and abs(hi - float(ppm_axis_np[-1])) <= 1e-9:
+            return ppm_axis_np
     return np.linspace(lo, hi, int(num_points), dtype=np.float64)
 
 

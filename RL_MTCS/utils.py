@@ -9,8 +9,9 @@ import numpy as np
 from torch_geometric.loader import DataLoader
 from typing import Dict, Tuple, Optional
 
-from model.g2s_model import NMR_VAE, LocalNMRDataset
-from model.coarse_graph import NUM_SU_TYPES, PPM_AXIS
+from model.forward.g2s.g2s_model import NMR_VAE, LocalNMRDataset
+from model.shared.coarse_graph import NUM_SU_TYPES, PPM_AXIS
+from model.shared.inverse_common import resample_spectrum_to_ppm_axis
 
 
 class NMRPredictor:
@@ -191,12 +192,18 @@ def load_target_spectrum_from_csv(
             spectrum = df.iloc[:, 0].values
             
         elif len(df.columns) >= 2:
-            # 两列或多列：尝试识别PPM和强度列
+            # 两列或多列：按真实 ppm 坐标重采样到统一 PPM_AXIS
             if has_header and ppm_column in df.columns and intensity_column in df.columns:
-                spectrum = df[intensity_column].values
+                ppm_values = pd.to_numeric(df[ppm_column], errors='coerce').values
+                intensity_values = pd.to_numeric(df[intensity_column], errors='coerce').values
             else:
-                # 没有匹配的列名或无表头，使用第二列作为强度
-                spectrum = df.iloc[:, 1].values
+                ppm_values = pd.to_numeric(df.iloc[:, 0], errors='coerce').values
+                intensity_values = pd.to_numeric(df.iloc[:, 1], errors='coerce').values
+            spectrum = resample_spectrum_to_ppm_axis(
+                ppm_values,
+                intensity_values,
+                ppm_axis=PPM_AXIS,
+            ).numpy()
         else:
             raise ValueError("CSV文件格式错误")
             

@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional, Tuple, Set
+from typing import Any, List, Dict, Optional, Tuple, Set
 import copy
 import math
 import random
@@ -9,12 +9,6 @@ from .RL_state import (
     qr_shape_score_from_points, spatial_uniformity_score_from_points,
 )
 from .RL_allocator import FlexAllocator, ChainSpec, chain_spec_counts_match
-
-
-def _branch_type_from_letter(letter: str) -> Optional[str]:
-    if letter in ('A', 'B', 'C', 'D'):
-        return '24_' + letter
-    return None
 
 
 def _build_alternating_path(start_q, start_r,
@@ -293,6 +287,7 @@ def get_branch_info_from_chain_spec(chain_spec: ChainSpec):
             branch_23 = int(meta.get('branch_23_count', 2))
             branch_22 = int(meta.get('branch_22_count', 1))
             extra_22 = int(meta.get('extra_22_count', 1))
+            profile = _branch24_profile_for_role(chain_spec, 'branch_single', 0)
             return {
                 'position_idx': i,
                 'su_type': 25,
@@ -300,6 +295,8 @@ def get_branch_info_from_chain_spec(chain_spec: ChainSpec):
                 'branch_23_count': branch_23,
                 'branch_22_count': branch_22,
                 'extra_22_count': extra_22,
+                'tail_source': meta.get('tail_source'),
+                'branch24_profile': profile,
             }
         else:
             if 'branch_23_count' in meta or 'branch_22_count' in meta:
@@ -309,6 +306,7 @@ def get_branch_info_from_chain_spec(chain_spec: ChainSpec):
                 b23, b22 = 2, 1
             else:
                 b23, b22 = 0, 1
+            profile = _branch24_profile_for_role(chain_spec, 'branch_single', 0)
             return {
                 'position_idx': i,
                 'su_type': 24,
@@ -316,8 +314,188 @@ def get_branch_info_from_chain_spec(chain_spec: ChainSpec):
                 'branch_23_count': b23,
                 'branch_22_count': b22,
                 'extra_22_count': 0,
+                'tail_source': meta.get('tail_source'),
+                'branch24_profile': profile,
             }
     return None
+
+
+_SEMANTIC_METADATA_KEYS = (
+    'base_ring_su',
+    'outer_ring_su',
+    'side_ring_su',
+    'vertical_ring_su',
+    'ring_substitute_ids',
+    'ring_substitute_types',
+    'connector_pair',
+    'tail_sources',
+    'tail_source',
+    'branch_tail_lengths',
+    'fixed_c_ids',
+    'fixed_c_source_kinds',
+    'fixed_c_path_kinds',
+)
+
+
+def _chain_spec_semantic_summary(chain_spec: ChainSpec) -> Dict[str, Any]:
+    """Small immutable-ish summary copied into ChainNode.meta.
+
+    The allocator now carries topology semantics in ChainSpec.metadata.  Stages
+    should preserve those semantics on the placed nodes so later substitution
+    logic does not have to rediscover special 19/20/21d3 context from geometry.
+    """
+    meta = dict(getattr(chain_spec, 'metadata', {}) or {})
+    out: Dict[str, Any] = {
+        'chain_type': getattr(chain_spec, 'chain_type', None),
+        'origin_type': getattr(chain_spec, 'origin_type', None),
+        'source_ids': [int(x) for x in list(getattr(chain_spec, 'source_ids', []) or [])],
+    }
+    for key in _SEMANTIC_METADATA_KEYS:
+        if key in meta:
+            out[key] = copy.deepcopy(meta.get(key))
+    return out
+
+
+def _branch24_profiles(chain_spec: ChainSpec) -> List[Dict[str, Any]]:
+    meta = getattr(chain_spec, 'metadata', {}) or {}
+    profiles = meta.get('branch24_profiles', []) or []
+    return [dict(p) for p in profiles if isinstance(p, dict)]
+
+
+def _branch24_profile_for_role(chain_spec: ChainSpec,
+                               role: str,
+                               occurrence: int = 0) -> Optional[Dict[str, Any]]:
+    matches = [
+        p for p in _branch24_profiles(chain_spec)
+        if str(p.get('allocator_role')) == str(role)
+    ]
+    idx = int(max(0, occurrence))
+    if idx >= len(matches):
+        return None
+    return dict(matches[idx])
+
+
+def _branch_type_from_profile(profile: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(profile, dict):
+        return None
+    btype = profile.get('abcd_type')
+    if isinstance(btype, str) and btype in ('24_A', '24_B', '24_C', '24_D'):
+        return btype
+    return None
+
+
+def _branch_types_for_role(chain_spec: ChainSpec,
+                           role: str,
+                           count: int) -> List[Optional[str]]:
+    out: List[Optional[str]] = []
+    for idx in range(int(count)):
+        out.append(_branch_type_from_profile(
+            _branch24_profile_for_role(chain_spec, role, idx)
+        ))
+    return out
+
+
+def _tail_source_for_index(chain_spec: ChainSpec, index: int) -> Optional[str]:
+    meta = getattr(chain_spec, 'metadata', {}) or {}
+    sources = list(meta.get('tail_sources', []) or [])
+    if not sources and meta.get('tail_source') is not None:
+        sources = [meta.get('tail_source')]
+    idx = int(index)
+    if idx < 0 or idx >= len(sources):
+        return None
+    return str(sources[idx])
+
+
+def _tail_source_for_side_slot(chain_spec: ChainSpec, slot_name: str) -> Optional[str]:
+    meta = getattr(chain_spec, 'metadata', {}) or {}
+    slot_names = [str(x) for x in list(meta.get('side_ring_slot_names', []) or [])]
+    sources = list(meta.get('tail_sources', []) or [])
+    try:
+        idx = slot_names.index(str(slot_name))
+    except ValueError:
+        return None
+    if idx < 0 or idx >= len(sources) or sources[idx] is None:
+        return None
+    return str(sources[idx])
+
+
+def _side_profile_index_by_slot(chain_spec: ChainSpec) -> Dict[str, int]:
+    meta = getattr(chain_spec, 'metadata', {}) or {}
+    slot_names = list(meta.get('side_ring_slot_names', []) or [])
+    out: Dict[str, int] = {}
+    profile_idx = 0
+    for idx, slot_name in enumerate(slot_names):
+        if slot_name is None:
+            continue
+        btype = None
+        node_types = list(meta.get('side_ring_node_types', []) or [])
+        if idx < len(node_types):
+            btype = node_types[idx]
+        if btype is None:
+            continue
+        out[str(slot_name)] = int(profile_idx)
+        profile_idx += 1
+    return out
+
+
+def build_chain_node_meta(chain_spec: ChainSpec,
+                          *,
+                          stage: str,
+                          ring_role: Optional[str] = None,
+                          branch_type: Optional[str] = None,
+                          branch_kind: Optional[str] = None,
+                          position_idx: Optional[int] = None,
+                          profile_role: Optional[str] = None,
+                          profile_index: int = 0,
+                          tail_source: Optional[str] = None,
+                          su_type: Optional[int] = None) -> Dict[str, Any]:
+    """Build metadata for a placed ChainNode, preserving allocator semantics."""
+    meta: Dict[str, Any] = {
+        'stage': str(stage),
+        'origin_type': getattr(chain_spec, 'origin_type', None),
+        'chain_type': getattr(chain_spec, 'chain_type', None),
+        'chain_spec_semantics': _chain_spec_semantic_summary(chain_spec),
+    }
+    if ring_role is not None:
+        meta['ring_role'] = str(ring_role)
+    if branch_type is not None:
+        meta['branch_type'] = branch_type
+    if branch_kind is not None:
+        meta['branch_kind'] = str(branch_kind)
+    if position_idx is not None:
+        meta['position_idx'] = int(position_idx)
+    if tail_source is not None:
+        meta['tail_source'] = str(tail_source)
+
+    profile = _branch24_profile_for_role(chain_spec, profile_role, profile_index) if profile_role else None
+    if isinstance(profile, dict):
+        meta['branch24_profile'] = dict(profile)
+        meta['source_node_id'] = int(profile.get('node_id')) if profile.get('node_id') is not None else None
+        meta['source_su_type'] = int(profile.get('su_type')) if profile.get('su_type') is not None else None
+        meta['source_kind'] = profile.get('source_kind')
+        meta['fixed_usage'] = profile.get('fixed_usage')
+        meta['fixed_label'] = profile.get('fixed_label')
+        meta['fixed_path_kind'] = profile.get('fixed_path_kind')
+        meta['fixed_connector_ids'] = list(profile.get('fixed_connector_ids', []) or [])
+        meta['fixed_connector_types'] = list(profile.get('fixed_connector_types', []) or [])
+        meta['partner_special_ids'] = list(profile.get('partner_special_ids', []) or [])
+        meta['partner_special_degrees'] = list(profile.get('partner_special_degrees', []) or [])
+        meta['is_double_special'] = bool(profile.get('is_double_special', False))
+        meta['allowed_tail_modes'] = list(profile.get('allowed_tail_modes', []) or [])
+        meta['allowed_slots'] = list(profile.get('allowed_slots', []) or [])
+        if branch_type is None and profile.get('abcd_type') is not None:
+            meta['branch_type'] = str(profile.get('abcd_type'))
+
+    spec_meta = getattr(chain_spec, 'metadata', {}) or {}
+    substitute_types = [int(x) for x in list(spec_meta.get('ring_substitute_types', []) or [])]
+    if su_type is not None and int(su_type) in substitute_types:
+        meta['ring_substitute'] = True
+        meta['ring_substitute_types'] = substitute_types
+        meta['ring_substitute_ids'] = [int(x) for x in list(spec_meta.get('ring_substitute_ids', []) or [])]
+        if spec_meta.get('connector_pair') is not None:
+            meta['connector_pair'] = copy.deepcopy(spec_meta.get('connector_pair'))
+
+    return meta
 
 
 def horizontal_branch_coords(chain_coords, position_idx, outward_dir, branch_type, branch_len=None):
@@ -528,6 +706,20 @@ class BranchStage:
             if int(v) > 0
         }
 
+    @staticmethod
+    def _metadata_su_list(spec: ChainSpec, key: str, expected_len: int) -> List[int]:
+        meta = getattr(spec, 'metadata', {}) or {}
+        raw = list(meta.get(str(key), []) or [])
+        out: List[int] = []
+        for value in raw[:int(expected_len)]:
+            try:
+                out.append(int(value))
+            except Exception:
+                return []
+        if len(out) != int(expected_len):
+            return []
+        return out
+
     def _preview_qr_shape_score(self, coords: List[Tuple[int, int]]) -> float:
         points = set((int(q), int(r)) for q, r in self._placed)
         points.update((int(q), int(r)) for q, r in coords)
@@ -540,9 +732,11 @@ class BranchStage:
 
     @staticmethod
     def _vertical_action_sus(action: Dict) -> List[int]:
-        ir_is_24 = bool(action.get('ir_is_24', False))
-        il_is_24 = bool(action.get('il_is_24', False))
-        out: List[int] = [24, 23, 24 if ir_is_24 else 23, 23, 24 if il_is_24 else 23, 23]
+        out = list(int(x) for x in list(action.get('ring_su', []) or []))
+        if not out:
+            ir_is_24 = bool(action.get('ir_is_24', False))
+            il_is_24 = bool(action.get('il_is_24', False))
+            out = [24, 23, 24 if ir_is_24 else 23, 23, 24 if il_is_24 else 23, 23]
         right_branch = list(action.get('right_branch_coords', []) or [])
         left_branch = list(action.get('left_branch_coords', []) or [])
         out += [23] * max(0, len(right_branch) - 1)
@@ -556,6 +750,10 @@ class BranchStage:
     @staticmethod
     def _side_action_sus(action: Dict) -> List[int]:
         out = list(int(x) for x in list(action.get('ring_su', []) or []))
+        if action.get('side_branches') is not None:
+            for br in list(action.get('side_branches', []) or []):
+                out += list(int(x) for x in list(br.get('branch_su', []) or []))
+            return out
         out += list(int(x) for x in list(action.get('upper_branch_su', []) or []))
         out += list(int(x) for x in list(action.get('lower_branch_su', []) or []))
         return out
@@ -578,32 +776,20 @@ class BranchStage:
         candidates = []
         pairs = self._find_side_edge_pairs()
         
-        desc = spec.origin_type
-        import re
-        m_base = re.search(r'Base:([ABCDX]+)\+Br:([ABCDX]+)', desc)
-        if not m_base:
+        upper_base_type, lower_base_type = _branch_types_for_role(spec, 'fused_base', 2)
+        upper_bridge_type, lower_bridge_type = _branch_types_for_role(spec, 'fused_fixed_c', 2)
+        outer_upper_type, outer_lower_type = _branch_types_for_role(spec, 'fused_outer', 2)
+        planned_base_su = self._metadata_su_list(spec, 'base_ring_su', 4)
+        planned_outer_su = self._metadata_su_list(spec, 'outer_ring_su', 4)
+
+        if not planned_base_su or not any((upper_bridge_type, lower_bridge_type)):
+            # Allocator-produced fused rings must carry a complete slot plan.
+            # Silently parsing origin_type would discard connector/tail metadata.
             return []
-            
-        base_str = m_base.group(1)
-        bridge_str = m_base.group(2)
-        
-        m_out = re.search(r'\+Out:([ABCDX]+)', desc)
-        out_str = m_out.group(1) if m_out else ""
-        
-        upper_base_type = _branch_type_from_letter(base_str[0]) if len(base_str) > 0 else None
-        lower_base_type = _branch_type_from_letter(base_str[1]) if len(base_str) > 1 else None
-        upper_bridge_type = _branch_type_from_letter(bridge_str[0]) if len(bridge_str) > 0 else '24_C'
-        lower_bridge_type = _branch_type_from_letter(bridge_str[1]) if len(bridge_str) > 1 else '24_C'
+
         is_upper_ab = upper_base_type in ('24_A', '24_B')
         is_lower_ab = lower_base_type in ('24_A', '24_B')
-        
-        has_outer = len(out_str) > 0
-        if has_outer:
-            outer_upper_type = _branch_type_from_letter(out_str[0]) if len(out_str) > 0 else None
-            outer_lower_type = _branch_type_from_letter(out_str[1]) if len(out_str) > 1 else None
-        else:
-            outer_upper_type = None
-            outer_lower_type = None
+        has_outer = bool(planned_outer_su)
             
         for pair in pairs:
             uq, ur = pair['upper_site'].axial
@@ -623,12 +809,9 @@ class BranchStage:
             
             ring_coords = [pos1, pos2, pos3, pos4]
             
-            # Determine SU types for base ring
-            pos1_su = 24 if is_upper_ab else 23
-            pos2_su = 24 if is_lower_ab else 23
-            
-            pos3_su = 24 
-            pos4_su = 24
+            # Determine SU types for base ring. Prefer allocator slot-plan
+            # metadata so connector/SU3 substitutions survive the stage boundary.
+            pos1_su, pos3_su, pos4_su, pos2_su = planned_base_su
 
             branch_tail_lengths = self._branch_tail_lengths(spec)
             default_upper_len = sum(FlexAllocator._branch_cost(upper_base_type)) if (upper_base_type and is_upper_ab) else 0
@@ -662,11 +845,7 @@ class BranchStage:
                 outer_coords = [opos_iu, opos_ou, opos_ol, opos_il]
                 all_coords += outer_coords
 
-                opos_iu_su = 23
-                opos_ou_su = 24 if outer_upper_type else 23
-                opos_ol_su = 24 if outer_lower_type else 23
-                opos_il_su = 23
-                outer_ring_su = [opos_iu_su, opos_ou_su, opos_ol_su, opos_il_su]
+                outer_ring_su = list(planned_outer_su)
                 
                 default_outer_upper = sum(FlexAllocator._branch_cost(outer_upper_type)) if outer_upper_type else 0
                 default_outer_lower = sum(FlexAllocator._branch_cost(outer_lower_type)) if outer_lower_type else 0
@@ -687,7 +866,7 @@ class BranchStage:
             if self._check_collision(all_coords):
                 continue
 
-            candidate_sus = [pos1_su, pos2_su, pos3_su, pos4_su]
+            candidate_sus = [pos1_su, pos3_su, pos4_su, pos2_su]
             candidate_sus += list(upper_branch_su) + list(lower_branch_su)
             candidate_sus += list(outer_ring_su) + list(outer_upper_branch_su) + list(outer_lower_branch_su)
             if not chain_spec_counts_match(spec, candidate_sus):
@@ -738,14 +917,20 @@ class BranchStage:
         candidates = []
         v_sites = self._find_vertical_sites()
 
-        # Parse inter types from description like "V-ring(A+C+D)" or "V-ring(A+C)" or "V-ring(A)"
-        # First type = first_24 (always 24, no branch needed — all 3 neighbours are ring nodes)
-        # Subsequent types = inter_right, inter_left
-        desc = spec.origin_type
-        inter_types = self._parse_inter_types(desc)
+        inter_profiles = [
+            _branch24_profile_for_role(spec, 'vertical_inter', 0),
+            _branch24_profile_for_role(spec, 'vertical_inter', 1),
+        ]
+        inter_types = [
+            _branch_type_from_profile(inter_profiles[0]),
+            _branch_type_from_profile(inter_profiles[1]),
+        ]
+        planned_vertical_su = self._metadata_su_list(spec, 'vertical_ring_su', 6)
+        if not planned_vertical_su:
+            # Vertical rings are allocator slot-plan driven.  Do not fall back
+            # to origin_type parsing because it loses special 24-like metadata.
+            return []
         branch_tail_lengths = self._branch_tail_lengths(spec)
-        # inter_types[0] → inter_right type (or None if 23)
-        # inter_types[1] → inter_left type (or None if 23)
 
         for vs in v_sites:
             site = vs['site']
@@ -760,9 +945,11 @@ class BranchStage:
                 ring['closing_23'], ring['inter_left'], ring['left_23'],
             ]
 
-            # Determine SU types for inter positions
-            ir_is_24 = inter_types[0] is not None
-            il_is_24 = inter_types[1] is not None
+            # Determine SU types for inter positions. Metadata keeps allocator
+            # slot constraints authoritative across candidate generation.
+            ring_su = list(planned_vertical_su)
+            ir_is_24 = int(ring_su[2]) == 24
+            il_is_24 = int(ring_su[4]) == 24
 
             # Compute branch coords for 24-type inter positions
             right_branch_coords = []
@@ -784,7 +971,7 @@ class BranchStage:
             if self._check_collision(all_coords):
                 continue
 
-            candidate_sus = [24, 23, 24 if ir_is_24 else 23, 23, 24 if il_is_24 else 23, 23]
+            candidate_sus = list(ring_su)
             candidate_sus += [23] * max(0, len(right_branch_coords) - 1)
             if right_branch_coords:
                 candidate_sus += [22]
@@ -810,6 +997,7 @@ class BranchStage:
                 'ring': ring,
                 'ir_is_24': ir_is_24,
                 'il_is_24': il_is_24,
+                'ring_su': list(ring_su),
                 'inter_types': inter_types,
                 'right_branch_coords': right_branch_coords,
                 'left_branch_coords': left_branch_coords,
@@ -831,12 +1019,17 @@ class BranchStage:
         candidates = []
         pairs = self._find_side_edge_pairs()
 
-        desc = spec.origin_type
-        node_types = self._parse_side_ring_types(desc)
+        meta = getattr(spec, 'metadata', {}) or {}
+        node_types = list(meta.get('side_ring_node_types', []) or [])
+        planned_ring_su = self._metadata_su_list(spec, 'side_ring_su', 4)
+        if not node_types or not planned_ring_su:
+            # Side rings now require allocator slot metadata. Origin string
+            # fallback cannot represent 4-slot rings or special connector state.
+            return []
+        node_types = list(node_types[:4])
+        while len(node_types) < 4:
+            node_types.append(None)
         branch_tail_lengths = self._branch_tail_lengths(spec)
-
-        is_upper_ab = node_types[0] in ('24_A', '24_B')
-        is_lower_ab = node_types[1] in ('24_A', '24_B')
 
         for pair in pairs:
             uq, ur = pair['upper_site'].axial
@@ -856,45 +1049,45 @@ class BranchStage:
 
             ring_coords = [pos1, pos2, pos3, pos4]
 
-            # Determine SU types for ring positions
-            pos1_su = 24 if is_upper_ab else 23
-            pos3_su = 23 if is_upper_ab else 24
-            pos4_su = 23 if is_lower_ab else 24
-            pos2_su = 24 if is_lower_ab else 23
+            # Determine SU types for ring positions. Prefer allocator
+            # slot-plan metadata so AB/CD order and substitutions stay intact.
+            pos1_su, pos3_su, pos4_su, pos2_su = planned_ring_su
 
-            # Determine which positions are 24 (for branches)
-            # Upper 24: pos1 if AB, pos3 if CD
-            if is_upper_ab:
-                u24_pos = pos1
-            else:
-                u24_pos = pos3
-
-            # Lower 24: pos2 if AB, pos4 if CD
-            if is_lower_ab:
-                l24_pos = pos2
-            else:
-                l24_pos = pos4
-
-            # Compute branch paths from each 24 node based on user rules
-            upper_len = int(branch_tail_lengths.get('upper', sum(FlexAllocator._branch_cost(node_types[0]))))
-            lower_len = int(branch_tail_lengths.get('lower', sum(FlexAllocator._branch_cost(node_types[1]))))
-
-            upper_branch = _side_ring_branch_coords(
-                u24_pos[0], u24_pos[1], side, True, node_types[0], branch_len=upper_len
-            ) if upper_len > 0 else []
-            lower_branch = _side_ring_branch_coords(
-                l24_pos[0], l24_pos[1], side, False, node_types[1], branch_len=lower_len
-            ) if lower_len > 0 else []
-
-            upper_branch_su = ([23] * max(0, upper_len - 1) + [22]) if upper_len > 0 else []
-            lower_branch_su = ([23] * max(0, lower_len - 1) + [22]) if lower_len > 0 else []
-
-            all_coords = ring_coords + upper_branch + lower_branch
+            slot_defs = [
+                ('pos1', pos1, True),
+                ('pos3', pos3, True),
+                ('pos4', pos4, False),
+                ('pos2', pos2, False),
+            ]
+            side_branches = []
+            all_coords = list(ring_coords)
+            for idx, (slot_name, slot_pos, is_upper) in enumerate(slot_defs):
+                btype = node_types[idx] if idx < len(node_types) else None
+                if btype is None or int([pos1_su, pos3_su, pos4_su, pos2_su][idx]) != 24:
+                    continue
+                default_len = sum(FlexAllocator._branch_cost(btype))
+                branch_len = int(branch_tail_lengths.get(slot_name, default_len))
+                branch_coords = _side_ring_branch_coords(
+                    slot_pos[0], slot_pos[1], side, bool(is_upper), btype, branch_len=branch_len
+                ) if branch_len > 0 else []
+                branch_su = ([23] * max(0, branch_len - 1) + [22]) if branch_len > 0 else []
+                if branch_coords:
+                    side_branches.append({
+                        'slot_name': slot_name,
+                        'slot_index': idx,
+                        'branch_type': btype,
+                        'is_upper': bool(is_upper),
+                        'base_pos': slot_pos,
+                        'branch_coords': branch_coords,
+                        'branch_su': branch_su,
+                    })
+                    all_coords += branch_coords
             if self._check_collision(all_coords):
                 continue
 
-            candidate_sus = [pos1_su, pos2_su, pos3_su, pos4_su]
-            candidate_sus += list(upper_branch_su) + list(lower_branch_su)
+            candidate_sus = [pos1_su, pos3_su, pos4_su, pos2_su]
+            for br in side_branches:
+                candidate_sus += list(br.get('branch_su', []) or [])
             if not chain_spec_counts_match(spec, candidate_sus):
                 continue
 
@@ -914,10 +1107,11 @@ class BranchStage:
                 'ring': ring,
                 'node_types': node_types,
                 'ring_su': [pos1_su, pos3_su, pos4_su, pos2_su],
-                'upper_branch': upper_branch,
-                'lower_branch': lower_branch,
-                'upper_branch_su': upper_branch_su,
-                'lower_branch_su': lower_branch_su,
+                'side_branches': side_branches,
+                'upper_branch': side_branches[0]['branch_coords'] if len(side_branches) > 0 else [],
+                'lower_branch': side_branches[1]['branch_coords'] if len(side_branches) > 1 else [],
+                'upper_branch_su': side_branches[0]['branch_su'] if len(side_branches) > 0 else [],
+                'lower_branch_su': side_branches[1]['branch_su'] if len(side_branches) > 1 else [],
                 'all_coords': all_coords,
                 'spec': spec,
                 'score': -(score + random.uniform(0, 0.2)),
@@ -958,6 +1152,9 @@ class BranchStage:
         ir_is_24 = action['ir_is_24']
         il_is_24 = action['il_is_24']
         inter_types = action['inter_types']
+        ring_su = list(int(x) for x in list(action.get('ring_su', []) or []))
+        if len(ring_su) != 6:
+            ring_su = [24, 23, 24 if ir_is_24 else 23, 23, 24 if il_is_24 else 23, 23]
 
         # Mark anchor SU13 → SU11
         site.occupied = True
@@ -967,41 +1164,79 @@ class BranchStage:
 
         # --- Create all 6 ring body nodes ---
         fq, fr = ring['first_24']
-        n_first = ChainNode(uid=f"{uid_prefix}-24a", su_type=24, axial=(fq, fr),
+        n_first = ChainNode(uid=f"{uid_prefix}-24a", su_type=ring_su[0], axial=(fq, fr),
                            pos2d=HexGrid.axial_to_cart(fq, fr),
-                           meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'branch_type': '24_A', 'ring_role': 'first_24'})
+                           meta=build_chain_node_meta(
+                               spec,
+                               stage='branch',
+                               branch_type='24_A',
+                               ring_role='first_24',
+                               profile_role='vertical_fixed_a',
+                               su_type=ring_su[0],
+                           ))
         self._placed.add((fq, fr))
 
         rq, rr = ring['right_23']
-        n_right = ChainNode(uid=f"{uid_prefix}-23R", su_type=23, axial=(rq, rr),
+        n_right = ChainNode(uid=f"{uid_prefix}-23R", su_type=ring_su[1], axial=(rq, rr),
                            pos2d=HexGrid.axial_to_cart(rq, rr),
-                           meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'ring_role': 'right_23'})
+                           meta=build_chain_node_meta(
+                               spec,
+                               stage='branch',
+                               ring_role='right_23',
+                               su_type=ring_su[1],
+                           ))
         self._placed.add((rq, rr))
 
         iq_r, ir_r = ring['inter_right']
-        ir_su = 24 if ir_is_24 else 23
+        ir_su = int(ring_su[2])
         n_ir = ChainNode(uid=f"{uid_prefix}-ir", su_type=ir_su, axial=(iq_r, ir_r),
                         pos2d=HexGrid.axial_to_cart(iq_r, ir_r),
-                        meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'branch_type': inter_types[0], 'ring_role': 'inter_right'})
+                        meta=build_chain_node_meta(
+                            spec,
+                            stage='branch',
+                            branch_type=inter_types[0],
+                            ring_role='inter_right',
+                            profile_role='vertical_inter' if ir_is_24 else None,
+                            profile_index=0,
+                            su_type=ir_su,
+                        ))
         self._placed.add((iq_r, ir_r))
 
         cq, cr = ring['closing_23']
-        n_close = ChainNode(uid=f"{uid_prefix}-23C", su_type=23, axial=(cq, cr),
+        n_close = ChainNode(uid=f"{uid_prefix}-23C", su_type=ring_su[3], axial=(cq, cr),
                            pos2d=HexGrid.axial_to_cart(cq, cr),
-                           meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'ring_role': 'closing_23'})
+                           meta=build_chain_node_meta(
+                               spec,
+                               stage='branch',
+                               ring_role='closing_23',
+                               su_type=ring_su[3],
+                           ))
         self._placed.add((cq, cr))
 
         iq_l, ir_l = ring['inter_left']
-        il_su = 24 if il_is_24 else 23
+        il_su = int(ring_su[4])
         n_il = ChainNode(uid=f"{uid_prefix}-il", su_type=il_su, axial=(iq_l, ir_l),
                         pos2d=HexGrid.axial_to_cart(iq_l, ir_l),
-                        meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'branch_type': inter_types[1], 'ring_role': 'inter_left'})
+                        meta=build_chain_node_meta(
+                            spec,
+                            stage='branch',
+                            branch_type=inter_types[1],
+                            ring_role='inter_left',
+                            profile_role='vertical_inter' if il_is_24 else None,
+                            profile_index=1 if ir_is_24 else 0,
+                            su_type=il_su,
+                        ))
         self._placed.add((iq_l, ir_l))
 
         lq, lr = ring['left_23']
-        n_left = ChainNode(uid=f"{uid_prefix}-23L", su_type=23, axial=(lq, lr),
+        n_left = ChainNode(uid=f"{uid_prefix}-23L", su_type=ring_su[5], axial=(lq, lr),
                           pos2d=HexGrid.axial_to_cart(lq, lr),
-                          meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'ring_role': 'left_23'})
+                          meta=build_chain_node_meta(
+                              spec,
+                              stage='branch',
+                              ring_role='left_23',
+                              su_type=ring_su[5],
+                          ))
         self._placed.add((lq, lr))
 
         # --- Ring body: all 6 nodes in hex-adjacent traversal order ---
@@ -1018,7 +1253,17 @@ class BranchStage:
                 su = 22 if bi == len(right_branch_coords) - 1 else 23
                 bn = ChainNode(uid=f"{uid_prefix}-br-ir-{bi}", su_type=su,
                               axial=(bq, br), pos2d=HexGrid.axial_to_cart(bq, br),
-                              meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'branch_type': inter_types[0], 'branch_kind': 'tail', 'position_idx': int(bi)})
+                              meta=build_chain_node_meta(
+                                  spec,
+                                  stage='branch',
+                                  branch_type=inter_types[0],
+                                  branch_kind='tail',
+                                  position_idx=bi,
+                                  profile_role='vertical_inter',
+                                  profile_index=0,
+                                  tail_source=_tail_source_for_index(spec, 0),
+                                  su_type=su,
+                              ))
                 br_nodes.append(bn)
                 self._placed.add((bq, br))
             edge_br = EdgeBranch(base=n_ir.uid, chain=br_nodes)
@@ -1032,7 +1277,17 @@ class BranchStage:
                 su = 22 if bi == len(left_branch_coords) - 1 else 23
                 bn = ChainNode(uid=f"{uid_prefix}-br-il-{bi}", su_type=su,
                               axial=(bq, br), pos2d=HexGrid.axial_to_cart(bq, br),
-                              meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'branch_type': inter_types[1], 'branch_kind': 'tail', 'position_idx': int(bi)})
+                              meta=build_chain_node_meta(
+                                  spec,
+                                  stage='branch',
+                                  branch_type=inter_types[1],
+                                  branch_kind='tail',
+                                  position_idx=bi,
+                                  profile_role='vertical_inter',
+                                  profile_index=1 if ir_is_24 else 0,
+                                  tail_source=_tail_source_for_index(spec, 1 if ir_is_24 else 0),
+                                  su_type=su,
+                              ))
                 br_nodes.append(bn)
                 self._placed.add((bq, br))
             edge_br = EdgeBranch(base=n_il.uid, chain=br_nodes)
@@ -1058,7 +1313,10 @@ class BranchStage:
         if not chain_spec_counts_match(spec, self._side_action_sus(action)):
             return False
         ring_su = action['ring_su']  # [pos1_su, pos3_su, pos4_su, pos2_su]
-        node_types = action['node_types']
+        node_types = list(action['node_types'])
+        while len(node_types) < 4:
+            node_types.append(None)
+        profile_index_by_slot = _side_profile_index_by_slot(spec)
 
         # Mark both sites as occupied, convert to 11
         upper_site.occupied = True
@@ -1068,33 +1326,61 @@ class BranchStage:
 
         uid_prefix = f"SR-{cluster.id}-{action['upper_idx']}-{action['lower_idx']}"
 
-        # --- Identify 24 role types before creating nodes ---
-        is_upper_ab = node_types[0] in ('24_A', '24_B')
-        is_lower_ab = node_types[1] in ('24_A', '24_B')
-
         # --- Ring body (4 positions in correct traversal order) ---
         p1q, p1r = ring['upper_24']
         n_pos1 = ChainNode(uid=f"{uid_prefix}-p1", su_type=ring_su[0],
                            axial=(p1q, p1r), pos2d=HexGrid.axial_to_cart(p1q, p1r),
-                           meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'branch_type': node_types[0], 'ring_role': 'upper_outer'})
+                           meta=build_chain_node_meta(
+                               spec,
+                               stage='branch',
+                               branch_type=node_types[0],
+                               ring_role='upper_outer',
+                               profile_role='side_slot' if node_types[0] is not None else None,
+                               profile_index=profile_index_by_slot.get('pos1', 0),
+                               su_type=ring_su[0],
+                           ))
         self._placed.add((p1q, p1r))
 
         p3q, p3r = ring['upper_bridge_23']
         n_pos3 = ChainNode(uid=f"{uid_prefix}-p3", su_type=ring_su[1],
                            axial=(p3q, p3r), pos2d=HexGrid.axial_to_cart(p3q, p3r),
-                           meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'branch_type': node_types[0] if not is_upper_ab else None, 'ring_role': 'upper_bridge'})
+                           meta=build_chain_node_meta(
+                               spec,
+                               stage='branch',
+                               branch_type=node_types[1],
+                               ring_role='upper_bridge',
+                               profile_role='side_slot' if node_types[1] is not None else None,
+                               profile_index=profile_index_by_slot.get('pos3', 0),
+                               su_type=ring_su[1],
+                           ))
         self._placed.add((p3q, p3r))
 
         p4q, p4r = ring['lower_bridge_23']
         n_pos4 = ChainNode(uid=f"{uid_prefix}-p4", su_type=ring_su[2],
                            axial=(p4q, p4r), pos2d=HexGrid.axial_to_cart(p4q, p4r),
-                           meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'branch_type': node_types[1] if not is_lower_ab else None, 'ring_role': 'lower_bridge'})
+                           meta=build_chain_node_meta(
+                               spec,
+                               stage='branch',
+                               branch_type=node_types[2],
+                               ring_role='lower_bridge',
+                               profile_role='side_slot' if node_types[2] is not None else None,
+                               profile_index=profile_index_by_slot.get('pos4', 0),
+                               su_type=ring_su[2],
+                           ))
         self._placed.add((p4q, p4r))
 
         p2q, p2r = ring['lower_24']
         n_pos2 = ChainNode(uid=f"{uid_prefix}-p2", su_type=ring_su[3],
                            axial=(p2q, p2r), pos2d=HexGrid.axial_to_cart(p2q, p2r),
-                           meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'branch_type': node_types[1], 'ring_role': 'lower_outer'})
+                           meta=build_chain_node_meta(
+                               spec,
+                               stage='branch',
+                               branch_type=node_types[3],
+                               ring_role='lower_outer',
+                               profile_role='side_slot' if node_types[3] is not None else None,
+                               profile_index=profile_index_by_slot.get('pos2', 0),
+                               su_type=ring_su[3],
+                           ))
         self._placed.add((p2q, p2r))
 
         ring_body = [n_pos1, n_pos3, n_pos4, n_pos2]
@@ -1102,41 +1388,46 @@ class BranchStage:
         self.state.graph.branch.append(edge_ring)
         self.state.graph.chains.extend(ring_body)
 
-        # --- Identify 24 nodes for branch attachment ---
-        upper_24_node = n_pos1 if is_upper_ab else n_pos3
-        lower_24_node = n_pos2 if is_lower_ab else n_pos4
+        ring_nodes_by_slot = {
+            'pos1': n_pos1,
+            'pos3': n_pos3,
+            'pos4': n_pos4,
+            'pos2': n_pos2,
+        }
 
-        # --- Upper branch (separate edge) ---
-        upper_branch = action.get('upper_branch', [])
-        upper_branch_su = action.get('upper_branch_su', [])
-        if upper_branch:
-            ub_nodes = []
-            for bi, (bq, br) in enumerate(upper_branch):
-                su = upper_branch_su[bi] if bi < len(upper_branch_su) else 22
-                bn = ChainNode(uid=f"{uid_prefix}-br-u-{bi}", su_type=su,
+        # --- Branches from every 24-like ring position (separate edges) ---
+        for br_action in list(action.get('side_branches', []) or []):
+            slot_name = str(br_action.get('slot_name'))
+            base_node = ring_nodes_by_slot.get(slot_name)
+            if base_node is None:
+                continue
+            branch_coords = list(br_action.get('branch_coords', []) or [])
+            branch_su = list(br_action.get('branch_su', []) or [])
+            if not branch_coords:
+                continue
+            btype = br_action.get('branch_type')
+            profile_idx = profile_index_by_slot.get(slot_name, 0)
+            br_nodes = []
+            for bi, (bq, br) in enumerate(branch_coords):
+                su = branch_su[bi] if bi < len(branch_su) else 22
+                bn = ChainNode(uid=f"{uid_prefix}-br-{slot_name}-{bi}", su_type=su,
                               axial=(bq, br), pos2d=HexGrid.axial_to_cart(bq, br),
-                              meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'branch_type': node_types[0], 'branch_kind': 'tail', 'position_idx': int(bi)})
-                ub_nodes.append(bn)
+                              meta=build_chain_node_meta(
+                                  spec,
+                                  stage='branch',
+                                  branch_type=btype,
+                                  branch_kind='tail',
+                                  position_idx=bi,
+                                  profile_role='side_slot',
+                                  profile_index=profile_idx,
+                                  tail_source=_tail_source_for_side_slot(spec, slot_name),
+                                  su_type=su,
+                              ))
+                br_nodes.append(bn)
                 self._placed.add((bq, br))
-            edge_ub = EdgeBranch(base=upper_24_node.uid, chain=ub_nodes)
-            self.state.graph.branch.append(edge_ub)
-            self.state.graph.chains.extend(ub_nodes)
-
-        # --- Lower branch (separate edge) ---
-        lower_branch = action.get('lower_branch', [])
-        lower_branch_su = action.get('lower_branch_su', [])
-        if lower_branch:
-            lb_nodes = []
-            for bi, (bq, br) in enumerate(lower_branch):
-                su = lower_branch_su[bi] if bi < len(lower_branch_su) else 22
-                bn = ChainNode(uid=f"{uid_prefix}-br-l-{bi}", su_type=su,
-                              axial=(bq, br), pos2d=HexGrid.axial_to_cart(bq, br),
-                              meta={'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'branch_type': node_types[1], 'branch_kind': 'tail', 'position_idx': int(bi)})
-                lb_nodes.append(bn)
-                self._placed.add((bq, br))
-            edge_lb = EdgeBranch(base=lower_24_node.uid, chain=lb_nodes)
-            self.state.graph.branch.append(edge_lb)
-            self.state.graph.chains.extend(lb_nodes)
+            edge_br = EdgeBranch(base=base_node.uid, chain=br_nodes)
+            self.state.graph.branch.append(edge_br)
+            self.state.graph.chains.extend(br_nodes)
 
         self._done += 1
         self.state.stage_step += 1
@@ -1156,49 +1447,6 @@ class BranchStage:
             xs += cn.pos2d[0]; ys += cn.pos2d[1]; n += 1
         if n == 0: return (0.0, 0.0)
         return (xs / n, ys / n)
-
-    def _parse_inter_types(self, desc: str) -> List[Optional[str]]:
-        """Parse inter types from description like 'V-ring(A+C+D)'.
-
-        Returns [inter_right_type, inter_left_type].
-        Each is '24_X' string if the position is SU24, or None if SU23.
-
-        Examples:
-          'V-ring(A+C+D)' → ['24_C', '24_D']  (both inter are 24)
-          'V-ring(A+C)'   → ['24_C', None]     (right=24, left=23)
-          'V-ring(A)'     → [None, None]        (both inter are 23)
-        """
-        types: List[Optional[str]] = [None, None]
-        if '+' in desc:
-            parts = desc.replace('V-ring(', '').replace(')', '').split('+')
-            # Skip the first part (A-type first_24 anchor)
-            inter_parts = parts[1:]
-            for i, p in enumerate(inter_parts[:2]):
-                p = p.strip()
-                if p in ('A', 'B', 'C', 'D'):
-                    types[i] = '24_' + p
-        return types
-
-    def _parse_side_ring_types(self, desc: str) -> List[str]:
-        """Parse types from description like 'S-ring(A+B)' or 'Fused-S-ring(Base:AA+Br:CC)'."""
-        types = []
-        if desc.startswith('Fused-S-ring'):
-            import re
-            m = re.search(r'Base:([ABCD]+)\+Br:([ABCD]+)', desc)
-            if m:
-                base_str = m.group(1)
-                # Just take the first two bases for standard side ring fallback geometry
-                for char in base_str:
-                    types.append('24_' + char)
-        elif '+' in desc:
-            parts = desc.replace('S-ring(', '').replace(')', '').split('+')
-            for p in parts:
-                p = p.strip()
-                if p in ('A', 'B', 'C', 'D'):
-                    types.append('24_' + p)
-        while len(types) < 2:
-            types.append('24_A')
-        return types[:2]
 
     # ------------------------------------------------------------------
     # Scoring
@@ -1240,42 +1488,54 @@ class BranchStage:
         # Base Ring
         p1q, p1r = ring['base_upper_24']
         n_pos1 = ChainNode(uid=f"{uid_prefix}-b-pu", su_type=ring_su[0], axial=(p1q, p1r), pos2d=HexGrid.axial_to_cart(p1q, p1r))
-        n_pos1.meta = {
-            'stage': 'branch',
-            'origin_type': getattr(spec, 'origin_type', None),
-            'branch_type': base_node_types[0] if int(ring_su[0]) == 24 else None,
-            'ring_role': 'base_upper',
-        }
+        n_pos1.meta = build_chain_node_meta(
+            spec,
+            stage='branch',
+            branch_type=base_node_types[0] if int(ring_su[0]) == 24 else None,
+            ring_role='base_upper',
+            profile_role='fused_base',
+            profile_index=0,
+            su_type=ring_su[0],
+        )
         self._placed.add((p1q, p1r))
 
         p3q, p3r = ring['bridge_upper_24']
         n_pos3 = ChainNode(uid=f"{uid_prefix}-b-bru", su_type=ring_su[1], axial=(p3q, p3r), pos2d=HexGrid.axial_to_cart(p3q, p3r))
-        n_pos3.meta = {
-            'stage': 'branch',
-            'origin_type': getattr(spec, 'origin_type', None),
-            'branch_type': bridge_node_types[0] if int(ring_su[1]) == 24 else None,
-            'ring_role': 'bridge_upper',
-        }
+        n_pos3.meta = build_chain_node_meta(
+            spec,
+            stage='branch',
+            branch_type=bridge_node_types[0] if int(ring_su[1]) == 24 else None,
+            ring_role='bridge_upper',
+            profile_role='fused_fixed_c',
+            profile_index=0,
+            su_type=ring_su[1],
+        )
         self._placed.add((p3q, p3r))
 
         p4q, p4r = ring['bridge_lower_24']
         n_pos4 = ChainNode(uid=f"{uid_prefix}-b-brl", su_type=ring_su[2], axial=(p4q, p4r), pos2d=HexGrid.axial_to_cart(p4q, p4r))
-        n_pos4.meta = {
-            'stage': 'branch',
-            'origin_type': getattr(spec, 'origin_type', None),
-            'branch_type': bridge_node_types[1] if int(ring_su[2]) == 24 else None,
-            'ring_role': 'bridge_lower',
-        }
+        n_pos4.meta = build_chain_node_meta(
+            spec,
+            stage='branch',
+            branch_type=bridge_node_types[1] if int(ring_su[2]) == 24 else None,
+            ring_role='bridge_lower',
+            profile_role='fused_fixed_c',
+            profile_index=1,
+            su_type=ring_su[2],
+        )
         self._placed.add((p4q, p4r))
 
         p2q, p2r = ring['base_lower_24']
         n_pos2 = ChainNode(uid=f"{uid_prefix}-b-pl", su_type=ring_su[3], axial=(p2q, p2r), pos2d=HexGrid.axial_to_cart(p2q, p2r))
-        n_pos2.meta = {
-            'stage': 'branch',
-            'origin_type': getattr(spec, 'origin_type', None),
-            'branch_type': base_node_types[1] if int(ring_su[3]) == 24 else None,
-            'ring_role': 'base_lower',
-        }
+        n_pos2.meta = build_chain_node_meta(
+            spec,
+            stage='branch',
+            branch_type=base_node_types[1] if int(ring_su[3]) == 24 else None,
+            ring_role='base_lower',
+            profile_role='fused_base',
+            profile_index=1,
+            su_type=ring_su[3],
+        )
         self._placed.add((p2q, p2r))
 
         ring_body = [n_pos1, n_pos3, n_pos4, n_pos2]
@@ -1291,13 +1551,17 @@ class BranchStage:
             for bi, (bq, br) in enumerate(upper_branch):
                 su = upper_branch_su[bi] if bi < len(upper_branch_su) else 22
                 bn = ChainNode(uid=f"{uid_prefix}-b-u-{bi}", su_type=su, axial=(bq, br), pos2d=HexGrid.axial_to_cart(bq, br))
-                bn.meta = {
-                    'stage': 'branch',
-                    'origin_type': getattr(spec, 'origin_type', None),
-                    'branch_type': base_node_types[0],
-                    'branch_kind': 'tail',
-                    'position_idx': int(bi),
-                }
+                bn.meta = build_chain_node_meta(
+                    spec,
+                    stage='branch',
+                    branch_type=base_node_types[0],
+                    branch_kind='tail',
+                    position_idx=bi,
+                    profile_role='fused_base',
+                    profile_index=0,
+                    tail_source=_tail_source_for_index(spec, 0),
+                    su_type=su,
+                )
                 ub_nodes.append(bn)
                 self._placed.add((bq, br))
             self.state.graph.branch.append(EdgeBranch(base=n_pos1.uid, chain=ub_nodes))
@@ -1310,13 +1574,17 @@ class BranchStage:
             for bi, (bq, br) in enumerate(lower_branch):
                 su = lower_branch_su[bi] if bi < len(lower_branch_su) else 22
                 bn = ChainNode(uid=f"{uid_prefix}-b-l-{bi}", su_type=su, axial=(bq, br), pos2d=HexGrid.axial_to_cart(bq, br))
-                bn.meta = {
-                    'stage': 'branch',
-                    'origin_type': getattr(spec, 'origin_type', None),
-                    'branch_type': base_node_types[1],
-                    'branch_kind': 'tail',
-                    'position_idx': int(bi),
-                }
+                bn.meta = build_chain_node_meta(
+                    spec,
+                    stage='branch',
+                    branch_type=base_node_types[1],
+                    branch_kind='tail',
+                    position_idx=bi,
+                    profile_role='fused_base',
+                    profile_index=1,
+                    tail_source=_tail_source_for_index(spec, 1),
+                    su_type=su,
+                )
                 lb_nodes.append(bn)
                 self._placed.add((bq, br))
             self.state.graph.branch.append(EdgeBranch(base=n_pos2.uid, chain=lb_nodes))
@@ -1328,32 +1596,48 @@ class BranchStage:
             
             ou23q, ou23r = ring['outer_upper_23']
             on_pos_u23 = ChainNode(uid=f"{uid_prefix}-o-u23", su_type=outer_ring_su[0], axial=(ou23q, ou23r), pos2d=HexGrid.axial_to_cart(ou23q, ou23r))
-            on_pos_u23.meta = {'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'ring_role': 'outer_upper_23'}
+            on_pos_u23.meta = build_chain_node_meta(
+                spec,
+                stage='branch',
+                ring_role='outer_upper_23',
+                su_type=outer_ring_su[0],
+            )
             self._placed.add((ou23q, ou23r))
             
             ou24q, ou24r = ring['outer_upper_24']
             on_pos_u24 = ChainNode(uid=f"{uid_prefix}-o-u24", su_type=outer_ring_su[1], axial=(ou24q, ou24r), pos2d=HexGrid.axial_to_cart(ou24q, ou24r))
-            on_pos_u24.meta = {
-                'stage': 'branch',
-                'origin_type': getattr(spec, 'origin_type', None),
-                'branch_type': outer_node_types[0] if int(outer_ring_su[1]) == 24 else None,
-                'ring_role': 'outer_upper_24',
-            }
+            on_pos_u24.meta = build_chain_node_meta(
+                spec,
+                stage='branch',
+                branch_type=outer_node_types[0] if int(outer_ring_su[1]) == 24 else None,
+                ring_role='outer_upper_24',
+                profile_role='fused_outer' if int(outer_ring_su[1]) == 24 else None,
+                profile_index=0,
+                su_type=outer_ring_su[1],
+            )
             self._placed.add((ou24q, ou24r))
             
             ol24q, ol24r = ring['outer_lower_24']
             on_pos_l24 = ChainNode(uid=f"{uid_prefix}-o-l24", su_type=outer_ring_su[2], axial=(ol24q, ol24r), pos2d=HexGrid.axial_to_cart(ol24q, ol24r))
-            on_pos_l24.meta = {
-                'stage': 'branch',
-                'origin_type': getattr(spec, 'origin_type', None),
-                'branch_type': outer_node_types[1] if int(outer_ring_su[2]) == 24 else None,
-                'ring_role': 'outer_lower_24',
-            }
+            on_pos_l24.meta = build_chain_node_meta(
+                spec,
+                stage='branch',
+                branch_type=outer_node_types[1] if int(outer_ring_su[2]) == 24 else None,
+                ring_role='outer_lower_24',
+                profile_role='fused_outer' if int(outer_ring_su[2]) == 24 else None,
+                profile_index=1,
+                su_type=outer_ring_su[2],
+            )
             self._placed.add((ol24q, ol24r))
             
             ol23q, ol23r = ring['outer_lower_23']
             on_pos_l23 = ChainNode(uid=f"{uid_prefix}-o-l23", su_type=outer_ring_su[3], axial=(ol23q, ol23r), pos2d=HexGrid.axial_to_cart(ol23q, ol23r))
-            on_pos_l23.meta = {'stage': 'branch', 'origin_type': getattr(spec, 'origin_type', None), 'ring_role': 'outer_lower_23'}
+            on_pos_l23.meta = build_chain_node_meta(
+                spec,
+                stage='branch',
+                ring_role='outer_lower_23',
+                su_type=outer_ring_su[3],
+            )
             self._placed.add((ol23q, ol23r))
             
             outer_ring_body = [on_pos_u23, on_pos_u24, on_pos_l24, on_pos_l23]
@@ -1369,13 +1653,17 @@ class BranchStage:
                 for bi, (bq, br) in enumerate(outer_upper_branch):
                     su = outer_upper_branch_su[bi] if bi < len(outer_upper_branch_su) else 22
                     bn = ChainNode(uid=f"{uid_prefix}-o-u-{bi}", su_type=su, axial=(bq, br), pos2d=HexGrid.axial_to_cart(bq, br))
-                    bn.meta = {
-                        'stage': 'branch',
-                        'origin_type': getattr(spec, 'origin_type', None),
-                        'branch_type': outer_node_types[0],
-                        'branch_kind': 'tail',
-                        'position_idx': int(bi),
-                    }
+                    bn.meta = build_chain_node_meta(
+                        spec,
+                        stage='branch',
+                        branch_type=outer_node_types[0],
+                        branch_kind='tail',
+                        position_idx=bi,
+                        profile_role='fused_outer',
+                        profile_index=0,
+                        tail_source=_tail_source_for_index(spec, 2),
+                        su_type=su,
+                    )
                     oub_nodes.append(bn)
                     self._placed.add((bq, br))
                 self.state.graph.branch.append(EdgeBranch(base=on_pos_u24.uid, chain=oub_nodes))
@@ -1388,13 +1676,17 @@ class BranchStage:
                 for bi, (bq, br) in enumerate(outer_lower_branch):
                     su = outer_lower_branch_su[bi] if bi < len(outer_lower_branch_su) else 22
                     bn = ChainNode(uid=f"{uid_prefix}-o-l-{bi}", su_type=su, axial=(bq, br), pos2d=HexGrid.axial_to_cart(bq, br))
-                    bn.meta = {
-                        'stage': 'branch',
-                        'origin_type': getattr(spec, 'origin_type', None),
-                        'branch_type': outer_node_types[1],
-                        'branch_kind': 'tail',
-                        'position_idx': int(bi),
-                    }
+                    bn.meta = build_chain_node_meta(
+                        spec,
+                        stage='branch',
+                        branch_type=outer_node_types[1],
+                        branch_kind='tail',
+                        position_idx=bi,
+                        profile_role='fused_outer',
+                        profile_index=1,
+                        tail_source=_tail_source_for_index(spec, 3),
+                        su_type=su,
+                    )
                     olb_nodes.append(bn)
                     self._placed.add((bq, br))
                 self.state.graph.branch.append(EdgeBranch(base=on_pos_l24.uid, chain=olb_nodes))
