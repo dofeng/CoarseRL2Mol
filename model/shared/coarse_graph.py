@@ -3,12 +3,13 @@ import torch.nn.functional as F
 from torch_geometric.data import Data
 from rdkit import Chem
 from rdkit.Chem import Descriptors, AllChem
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Set
 import os
 import sys
 import networkx as nx
 import numpy as np
 import re
+import math
 from collections import deque
 import itertools as _it
 from scipy.signal import find_peaks
@@ -278,120 +279,90 @@ FONT_COLOR = 'white'         # 字体颜色
 EDGE_COLOR = (0.5, 0.5, 0.5) # 统一边颜色（灰色）
 EDGE_LW = 1.5                # 统一边线宽
 EDGE_LENGTH = 1.0            # 目标边长度 (固定)
+HEX_DIRECTIONS = ((1, 1), (1, 0), (-1, 0), (-1, -1), (0, 1), (0, -1))
+HEX_VERTEX_OFFSETS = ((1, 0), (1, 1), (0, 1), (-1, 0), (-1, -1), (0, -1))
 
 def _node_color(su: int):
     """
-    根据结构单元类型返回节点颜色 (与 mcts_visualization.py 一致)
-    
+    根据结构单元类型返回节点颜色
+
     颜色方案：
-    - 芳香结构(5-13)：蓝绿色系
-    - 脂肪结构(19-25)：橙黄色系  
-    - 氧结构(28,29)：红色系
-    - 氮结构(27)：紫色系
-    - 硫结构(31)：黄色系
-    - 卤素结构(32)：灰色系
-    - 羰基结构(0-4)：深红色系
-    - 不饱和结构(14-18)：青色系
+    - A. 羰基/氰基：紫红系
+    - B. 芳香碳：蓝系
+    - C. 不饱和碳：绿系
+    - D. 脂肪碳：橙黄系
+    - E. 杂原子：冷暖对比
     """
-    # 芳香结构单元 (5-13)
-    if su == 12:  # Aromatic_Bridgehead_C
-        return (0.9, 0.2, 0.2)
-    elif su == 10:  # Aryl_Substituted_Aro_C
-        return (0.2, 0.4, 0.9)
-    elif su == 11:  # Alkyl_Substituted_Aro_C
-        return (0.2, 0.8, 0.4)
-    elif su == 13:  # Carbocyclic_Aro_CH
-        return (0.4, 0.7, 0.9)
-    elif su == 5:   # O_Substituted_Aro_C
-        return (0.8, 0.3, 0.6)
-    elif su == 6:   # N_Substituted_Aro_C
-        return (0.6, 0.2, 0.8)
-    elif su == 7:   # S_Substituted_Aro_C
-        return (0.9, 0.8, 0.1)
-    elif su == 8:   # X_Substituted_Aro_C
-        return (0.5, 0.5, 0.5)
-    elif su == 9:   # Keto_Substituted_Aro_C
-        return (0.7, 0.1, 0.1)
-    # 脂肪结构单元 (19-25)
-    elif su in (23, 24, 25):  # Alkyl_CH2, Alkyl_CH, Alkyl_Cq
-        return (0.9, 0.6, 0.2)
-    elif su == 22:  # Alkyl_CH3
-        return (0.8, 0.5, 0.1)
-    elif su == 19:  # Alcohol_Ether_C
-        return (0.9, 0.4, 0.4)
-    elif su == 20:  # Amine_C
-        return (0.7, 0.5, 0.9)
-    elif su == 21:  # Halogenated_C
-        return (0.6, 0.6, 0.6)
-    # 氧结构单元 (28, 29)
-    elif su == 28:  # Hydroxyl_O
-        return (1.0, 0.2, 0.2)
-    elif su == 29:  # Ether_O
-        return (0.8, 0.0, 0.0)
-    # 氮结构单元 (27)
-    elif su == 27:  # Amine_Nitrogen
-        return (0.5, 0.0, 0.8)
-    # 硫结构单元 (31)
-    elif su == 31:  # Thioether_S
-        return (0.9, 0.9, 0.0)
-    # 卤素结构单元 (32)
-    elif su == 32:  # Halogen_X
-        return (0.4, 0.4, 0.4)
-    # 羰基结构单元 (0-4)
-    elif su == 0:   # Amide_Group
-        return (0.6, 0.0, 0.3)
-    elif su == 1:   # Carboxylic_Acid
-        return (0.8, 0.0, 0.2)
-    elif su == 2:   # Ester_Group
-        return (0.7, 0.1, 0.4)
-    elif su == 3:   # Aldehyde_Ketone_C
-        return (0.5, 0.0, 0.2)
-    elif su == 4:   # Nitrile_C
-        return (0.4, 0.0, 0.4)
-    # 不饱和结构单元 (14-18)
-    elif su == 14:  # Vinyllic_Cq
-        return (0.0, 0.6, 0.8)
-    elif su == 15:  # Vinyllic_CH
-        return (0.0, 0.7, 0.9)
-    elif su == 16:  # Vinyllic_CH2
-        return (0.1, 0.8, 1.0)
-    elif su == 17:  # Alkynyl_Cq
-        return (0.0, 0.4, 0.6)
-    elif su == 18:  # Alkynyl_CH
-        return (0.0, 0.5, 0.7)
-    # 杂原子结构单元 (26, 30)
-    elif su == 26:  # Heterocyclic_N
-        return (0.3, 0.0, 0.9)
-    elif su == 30:  # Heterocyclic_S
-        return (0.9, 0.7, 0.0)
-    # 默认颜色
-    else:
-        return (0.6, 0.6, 0.6)
+
+    color_map = {
+        # A. 羰基/氰基 — 紫红系
+        0:  (0.70, 0.10, 0.40),  # C(=O)NH  深玫红
+        1:  (0.85, 0.10, 0.30),  # C(=O)OH  深红
+        2:  (0.75, 0.15, 0.50),  # C(=O)O   紫红
+        3:  (0.60, 0.05, 0.25),  # C(=O)    暗玫红
+        4:  (0.45, 0.05, 0.55),  # C≡N      紫
+
+        # B. 芳香碳 — 蓝系
+        5:  (0.20, 0.55, 0.90),  # (O)-Ar_C       天蓝
+        6:  (0.15, 0.35, 0.80),  # (N)-Ar_C       中蓝
+        7:  (0.25, 0.65, 0.85),  # (S)-Ar_C       浅钢蓝
+        8:  (0.55, 0.70, 0.85),  # (X)-Ar_C       灰蓝
+        9:  (0.10, 0.25, 0.65),  # (C=O)-Ar_C     深蓝
+        10: (0.20, 0.50, 1.00),  # (Ar_C)-Ar_C    亮蓝
+        11: (0.30, 0.70, 0.95),  # (CH₂)-Ar_C     浅蓝
+        12: (0.05, 0.15, 0.55),  # (Bridge)-Ar_C  深海蓝
+        13: (0.45, 0.80, 1.00),  # Ar_CH          淡蓝
+
+        # C. 不饱和碳 — 绿系
+        14: (0.10, 0.75, 0.45),  # >C=   翠绿
+        15: (0.15, 0.85, 0.55),  # =CH   亮绿
+        16: (0.20, 0.90, 0.65),  # =CH₂  薄荷绿
+        17: (0.05, 0.55, 0.35),  # ≡C    深绿
+        18: (0.10, 0.65, 0.40),  # ≡CH   中绿
+
+        # D. 脂肪碳 — 橙黄系
+        19: (0.95, 0.50, 0.20),  # (O/S)-CH₂  橙
+        20: (0.90, 0.65, 0.35),  # (N)-CH₂    浅橙
+        21: (0.80, 0.75, 0.50),  # (X)-CH₂    沙黄
+        22: (0.95, 0.75, 0.15),  # CH₃        金黄
+        23: (0.90, 0.60, 0.10),  # CH₂        深橙黄
+        24: (0.85, 0.50, 0.05),  # CH         琥珀橙
+        25: (0.75, 0.40, 0.05),  # >C<        深琥珀
+
+        # E. 杂原子 — 冷暖对比
+        26: (0.40, 0.10, 0.85),  # Ar_N  深紫
+        27: (0.60, 0.20, 0.90),  # NH    亮紫
+        28: (1.00, 0.20, 0.20),  # OH    亮红
+        29: (0.80, 0.05, 0.05),  # -O-   深红
+        30: (0.85, 0.80, 0.05),  # Ar_S  亮黄
+        31: (0.70, 0.65, 0.00),  # -S-   暗金黄
+        32: (0.55, 0.55, 0.55),  # X     中灰
+    }
+
+    return color_map.get(su, (0.6, 0.6, 0.6))
 
 
-def visualize_coarse_grained_graph(data, su_matches, mol, output_path):
-    """
-    可视化粗粒度分子图 (MCTS 风格 + RDKit 布局)
+def _hex_axial_to_cart(q: float, r: float, scale: float = 1.0) -> Tuple[float, float]:
+    """与 RL_MTCS.RL_state.HexGrid.axial_to_cart 保持一致。"""
+    sqrt3_half = math.sqrt(3.0) / 2.0
+    return scale * sqrt3_half * q, scale * (r - 0.5 * q)
 
-    设计目标：
-    - 完全使用 RDKit 计算的 2D 坐标，不再用 spring 布局或 PCA 旋转，
-      这样苯环 / 杂环的几何形状与 RDKit 原图保持一致，不会被拉直或扭曲。
-    - 仅做整体的等比例缩放 + 平移，以适配画布大小。
-    - 节点大小和文字字号固定，与分子大小无关。
-    """
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
 
-    # ---------- 1. 从 RDKit 2D 坐标计算 SU 质心 ----------
+def _hex_distance(a: Tuple[int, int], b: Tuple[int, int]) -> int:
+    aq, ar = a
+    bq, br = b
+    return int((abs(aq - bq) + abs(aq + ar - bq - br) + abs(ar - br)) / 2)
+
+
+def _compute_rdkit_su_positions(mol, su_matches) -> Dict[int, Tuple[float, float]]:
+    """用 RDKit 2D 坐标计算每个 SU 的参考质心，仅用于确定六角格方向。"""
     conf = mol.GetConformer()
 
-    # 1.1 构建原子 -> SU 的映射
     atom_to_su_idx = [-1] * mol.GetNumAtoms()
     for su_idx, su_info in enumerate(su_matches):
         for atom_idx in su_info['atoms']:
             atom_to_su_idx[atom_idx] = su_idx
 
-    # 1.2 统计每个 SU 的“边界原子”（即与其他 SU 相连的原子）
     boundary_atoms_per_su = {i: set() for i in range(len(su_matches))}
     for bond in mol.GetBonds():
         a_idx = bond.GetBeginAtomIdx()
@@ -402,7 +373,6 @@ def visualize_coarse_grained_graph(data, su_matches, mol, output_path):
             boundary_atoms_per_su[su_a].add(a_idx)
             boundary_atoms_per_su[su_b].add(b_idx)
 
-    # 1.3 以“边界原子”的几何中心作为 SU 坐标（若没有边界原子则退化为全部原子中心）
     pos = {}
     for i, su_info in enumerate(su_matches):
         atom_indices = list(boundary_atoms_per_su[i]) or list(su_info['atoms'])
@@ -410,39 +380,497 @@ def visualize_coarse_grained_graph(data, su_matches, mol, output_path):
         centroid_x = sum(c.x for c in coords) / len(coords)
         centroid_y = sum(c.y for c in coords) / len(coords)
         pos[i] = (centroid_x, centroid_y)
+    return pos
+
+
+def _rotate_positions(pos: Dict[int, Tuple[float, float]], degrees: float) -> Dict[int, Tuple[float, float]]:
+    """Rotate 2D node positions around their bounding-box center."""
+    if not pos:
+        return {}
+
+    xs = [float(x) for x, _ in pos.values()]
+    ys = [float(y) for _, y in pos.values()]
+    cx = 0.5 * (min(xs) + max(xs))
+    cy = 0.5 * (min(ys) + max(ys))
+
+    theta = math.radians(float(degrees))
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+
+    out: Dict[int, Tuple[float, float]] = {}
+    for idx, (x, y) in pos.items():
+        dx = float(x) - cx
+        dy = float(y) - cy
+        out[int(idx)] = (
+            cx + dx * cos_t - dy * sin_t,
+            cy + dx * sin_t + dy * cos_t,
+        )
+    return out
+
+
+def _direction_similarity(rdkit_vec: Tuple[float, float],
+                          hex_dir: Tuple[int, int],
+                          occupied: bool,
+                          parent_axial: Tuple[int, int],
+                          candidate_axial: Tuple[int, int]) -> float:
+    hx, hy = _hex_axial_to_cart(*hex_dir)
+    rx, ry = rdkit_vec
+    r_norm = math.hypot(rx, ry)
+    h_norm = math.hypot(hx, hy)
+    if r_norm <= 1e-8 or h_norm <= 1e-8:
+        score = 0.0
+    else:
+        score = (rx * hx + ry * hy) / (r_norm * h_norm)
+
+    # 已占用位置只作为兜底候选，优先保持一节点一格点。
+    if occupied:
+        score -= 3.0
+
+    # 稍微偏好离原点不太远的布局，避免长链无意义展开。
+    score -= 0.03 * _hex_distance((0, 0), candidate_axial)
+    score -= 0.01 * _hex_distance(parent_axial, candidate_axial)
+    return score
+
+
+def _free_hex_axials_by_radius(center: Tuple[int, int],
+                               blocked_axials: Set[Tuple[int, int]],
+                               max_radius: int = 8) -> List[Tuple[int, int]]:
+    cq, cr = center
+    candidates = []
+    for radius in range(1, max_radius + 1):
+        for dq in range(-radius, radius + 1):
+            for dr in range(-radius, radius + 1):
+                cand = (cq + dq, cr + dr)
+                if cand in blocked_axials:
+                    continue
+                if _hex_distance(center, cand) == radius:
+                    candidates.append(cand)
+        if candidates:
+            return candidates
+    return candidates
+
+
+def _candidate_hex_axials_for_node(placed_neighbors: List[int],
+                                   axial_pos: Dict[int, Tuple[int, int]],
+                                   blocked_axials: Set[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    neighbor_sets = []
+    for nb in placed_neighbors:
+        nq, nr = axial_pos[nb]
+        neighbor_sets.append({
+            (nq + dq, nr + dr)
+            for dq, dr in HEX_DIRECTIONS
+        })
+
+    if not neighbor_sets:
+        return [(0, 0)]
+
+    common = set.intersection(*neighbor_sets)
+    common_free = sorted(c for c in common if c not in blocked_axials)
+    if common_free:
+        return common_free
+
+    union = set().union(*neighbor_sets)
+    union_free = sorted(c for c in union if c not in blocked_axials)
+    if union_free:
+        return union_free
+
+    return _free_hex_axials_by_radius(axial_pos[placed_neighbors[0]], blocked_axials)
+
+
+def _score_hex_candidate(node: int,
+                         candidate: Tuple[int, int],
+                         placed_neighbors: List[int],
+                         axial_pos: Dict[int, Tuple[int, int]],
+                         rdkit_pos: Dict[int, Tuple[float, float]]) -> float:
+    score = 0.03 * _hex_distance((0, 0), candidate)
+    nx, ny = rdkit_pos.get(node, (0.0, 0.0))
+
+    for nb in placed_neighbors:
+        nb_axial = axial_pos[nb]
+        grid_dist = _hex_distance(candidate, nb_axial)
+        score += 10.0 * abs(grid_dist - 1)
+
+        bx, by = rdkit_pos.get(nb, (nx, ny))
+        hex_delta = (candidate[0] - nb_axial[0], candidate[1] - nb_axial[1])
+        direction_score = _direction_similarity(
+            (nx - bx, ny - by),
+            hex_delta,
+            False,
+            nb_axial,
+            candidate,
+        )
+        score -= direction_score
+
+    return score
+
+
+def _build_atom_to_su_idx(su_matches, num_atoms: int) -> List[int]:
+    atom_to_su_idx = [-1] * num_atoms
+    for su_idx, su_info in enumerate(su_matches):
+        for atom_idx in su_info['atoms']:
+            atom_to_su_idx[atom_idx] = su_idx
+    return atom_to_su_idx
+
+
+def _ordered_ring_atoms(mol, ring_atoms: Tuple[int, ...]) -> List[int]:
+    ring_set = set(int(a) for a in ring_atoms)
+    adj = {}
+    for atom_idx in ring_set:
+        atom = mol.GetAtomWithIdx(atom_idx)
+        adj[atom_idx] = sorted(
+            nbr.GetIdx() for nbr in atom.GetNeighbors()
+            if nbr.GetIdx() in ring_set
+        )
+
+    if not ring_set or any(len(nbs) < 2 for nbs in adj.values()):
+        return list(ring_atoms)
+
+    start = min(ring_set)
+    path = [start]
+    prev = None
+    cur = start
+    while len(path) < len(ring_set):
+        candidates = [n for n in adj[cur] if n != prev and n not in path]
+        if not candidates:
+            return list(ring_atoms)
+        nxt = candidates[0]
+        path.append(nxt)
+        prev, cur = cur, nxt
+
+    if start not in adj[cur]:
+        return list(ring_atoms)
+    return path
+
+
+def _extract_hex_ring_records(mol, su_matches, rdkit_pos: Dict[int, Tuple[float, float]]) -> List[Dict]:
+    atom_to_su_idx = _build_atom_to_su_idx(su_matches, mol.GetNumAtoms())
+    records = []
+    for ring_atoms in mol.GetRingInfo().AtomRings():
+        if len(ring_atoms) != 6:
+            continue
+
+        ordered_atoms = _ordered_ring_atoms(mol, tuple(ring_atoms))
+        nodes = [atom_to_su_idx[a] for a in ordered_atoms]
+        if any(n < 0 for n in nodes) or len(set(nodes)) != 6:
+            continue
+
+        # 这里不只限芳香环；只要是 6 元环，都按 RL 的六角顶点模板绘制。
+        centroid = (
+            sum(rdkit_pos[n][0] for n in nodes) / 6.0,
+            sum(rdkit_pos[n][1] for n in nodes) / 6.0,
+        )
+        records.append({
+            'atoms': ordered_atoms,
+            'nodes': nodes,
+            'centroid': centroid,
+        })
+    return records
+
+
+def _ring_offsets(rotation: int, reverse: bool) -> List[Tuple[int, int]]:
+    if reverse:
+        return [HEX_VERTEX_OFFSETS[(rotation - i) % 6] for i in range(6)]
+    return [HEX_VERTEX_OFFSETS[(rotation + i) % 6] for i in range(6)]
+
+
+def _score_ring_orientation(ring: Dict,
+                            offsets: List[Tuple[int, int]],
+                            center: Tuple[int, int],
+                            rdkit_pos: Dict[int, Tuple[float, float]]) -> float:
+    cx, cy = ring['centroid']
+    score = 0.0
+    for node, offset in zip(ring['nodes'], offsets):
+        rx, ry = rdkit_pos.get(node, (cx, cy))
+        hx, hy = _hex_axial_to_cart(offset[0], offset[1])
+        rv = (rx - cx, ry - cy)
+        hv = (hx, hy)
+        score += _direction_similarity(rv, hv, False, center, (center[0] + offset[0], center[1] + offset[1]))
+    return score
+
+
+def _ring_assignment_candidates(ring: Dict,
+                                axial_pos: Dict[int, Tuple[int, int]],
+                                occupied_axials: Set[Tuple[int, int]],
+                                ring_centers: Set[Tuple[int, int]],
+                                rdkit_pos: Dict[int, Tuple[float, float]],
+                                default_center: Tuple[int, int],
+                                neighbors: Optional[Dict[int, List[int]]] = None) -> List[Tuple[float, Tuple[int, int], List[Tuple[int, int]]]]:
+    candidates = []
+    nodes = ring['nodes']
+    placed = [(i, n) for i, n in enumerate(nodes) if n in axial_pos]
+    ring_node_set = set(nodes)
+
+    anchors = []
+    if not placed and neighbors:
+        for i, node in enumerate(nodes):
+            for nb in neighbors.get(node, []):
+                if nb in axial_pos and nb not in ring_node_set:
+                    anchors.append((i, node, nb))
+
+    for rotation in range(6):
+        for reverse in (False, True):
+            offsets = _ring_offsets(rotation, reverse)
+            implied_centers = set()
+            for i, node in placed:
+                aq, ar = axial_pos[node]
+                oq, or_ = offsets[i]
+                implied_centers.add((aq - oq, ar - or_))
+
+            if len(implied_centers) > 1:
+                continue
+
+            center_options = []
+            if implied_centers:
+                center_options.append((next(iter(implied_centers)), 0.0))
+            elif anchors:
+                for i, node, nb in anchors:
+                    nb_axial = axial_pos[nb]
+                    nbx, nby = rdkit_pos.get(nb, (0.0, 0.0))
+                    nx, ny = rdkit_pos.get(node, (nbx, nby))
+                    for d in HEX_DIRECTIONS:
+                        coord = (nb_axial[0] + d[0], nb_axial[1] + d[1])
+                        offset = offsets[i]
+                        center = (coord[0] - offset[0], coord[1] - offset[1])
+                        anchor_score = _direction_similarity(
+                            (nx - nbx, ny - nby),
+                            d,
+                            coord in occupied_axials,
+                            nb_axial,
+                            coord,
+                        )
+                        center_options.append((center, anchor_score))
+            else:
+                center_options.append((default_center, 0.0))
+
+            seen_centers = set()
+            for center, anchor_score in center_options:
+                if center in seen_centers:
+                    continue
+                seen_centers.add(center)
+                if center in ring_centers or center in occupied_axials:
+                    continue
+
+                conflict = False
+                for node, offset in zip(nodes, offsets):
+                    coord = (center[0] + offset[0], center[1] + offset[1])
+                    if node in axial_pos:
+                        if axial_pos[node] != coord:
+                            conflict = True
+                            break
+                    elif coord in occupied_axials or coord in ring_centers:
+                        conflict = True
+                        break
+                if conflict:
+                    continue
+
+                score = _score_ring_orientation(ring, offsets, center, rdkit_pos)
+                score += 5.0 * len(placed)
+                score += 2.0 * anchor_score
+                candidates.append((score, center, offsets))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates
+
+
+def _place_hex_rings(rings: List[Dict],
+                     edge_list: List[List[int]],
+                     rdkit_pos: Dict[int, Tuple[float, float]]) -> Tuple[Dict[int, Tuple[int, int]], Set[Tuple[int, int]]]:
+    axial_pos: Dict[int, Tuple[int, int]] = {}
+    occupied_axials: Set[Tuple[int, int]] = set()
+    ring_centers: Set[Tuple[int, int]] = set()
+    unplaced = set(range(len(rings)))
+    component_offset = 0
+    neighbors: Dict[int, List[int]] = {}
+    for u, v in edge_list:
+        neighbors.setdefault(u, []).append(v)
+        neighbors.setdefault(v, []).append(u)
+    for node in neighbors:
+        neighbors[node] = sorted(set(neighbors[node]))
+
+    while unplaced:
+        progressed = False
+        best = None
+
+        for ri in sorted(unplaced):
+            ring = rings[ri]
+            placed_count = sum(1 for n in ring['nodes'] if n in axial_pos)
+            ring_node_set = set(ring['nodes'])
+            anchor_count = sum(
+                1
+                for n in ring['nodes']
+                for nb in neighbors.get(n, [])
+                if nb in axial_pos and nb not in ring_node_set
+            )
+            if axial_pos and placed_count == 0 and anchor_count == 0:
+                continue
+
+            default_center = (component_offset, 0)
+            while default_center in ring_centers or default_center in occupied_axials:
+                component_offset += 4
+                default_center = (component_offset, 0)
+
+            candidates = _ring_assignment_candidates(
+                ring,
+                axial_pos,
+                occupied_axials,
+                ring_centers,
+                rdkit_pos,
+                default_center,
+                neighbors,
+            )
+            if not candidates:
+                continue
+
+            score, center, offsets = candidates[0]
+            choice_key = (placed_count, anchor_count, score, -ri)
+            if best is None or choice_key > best[0]:
+                best = (choice_key, ri, center, offsets)
+
+        if best is None:
+            # 剩余的是独立环组件，另起一个中心。
+            ri = min(unplaced)
+            ring = rings[ri]
+            default_center = (component_offset, 0)
+            while default_center in ring_centers or default_center in occupied_axials:
+                component_offset += 4
+                default_center = (component_offset, 0)
+            candidates = _ring_assignment_candidates(
+                ring,
+                axial_pos,
+                occupied_axials,
+                ring_centers,
+                rdkit_pos,
+                default_center,
+                neighbors,
+            )
+            if not candidates:
+                unplaced.remove(ri)
+                continue
+            _, center, offsets = candidates[0]
+        else:
+            _, ri, center, offsets = best
+
+        for node, offset in zip(rings[ri]['nodes'], offsets):
+            coord = (center[0] + offset[0], center[1] + offset[1])
+            axial_pos[node] = coord
+            occupied_axials.add(coord)
+        ring_centers.add(center)
+        unplaced.remove(ri)
+        progressed = True
+        component_offset = max([q for q, _ in occupied_axials] + [q for q, _ in ring_centers], default=0) + 4
+
+        if not progressed:
+            break
+
+    return axial_pos, ring_centers
+
+
+def _layout_remaining_nodes(edge_list: List[List[int]],
+                            rdkit_pos: Dict[int, Tuple[float, float]],
+                            num_nodes: int,
+                            axial_pos: Dict[int, Tuple[int, int]],
+                            ring_centers: Set[Tuple[int, int]]) -> Dict[int, Tuple[int, int]]:
+    neighbors: Dict[int, List[int]] = {i: [] for i in range(num_nodes)}
+    for u, v in edge_list:
+        if u == v:
+            continue
+        neighbors.setdefault(u, []).append(v)
+        neighbors.setdefault(v, []).append(u)
+
+    for node in neighbors:
+        neighbors[node] = sorted(set(neighbors[node]))
+
+    blocked_axials = set(axial_pos.values()) | set(ring_centers)
+    queue = deque(sorted(axial_pos))
+    queued = set(queue)
+
+    while len(axial_pos) < num_nodes:
+        if not queue:
+            unplaced = [n for n in range(num_nodes) if n not in axial_pos]
+            seed = max(unplaced, key=lambda n: (len(neighbors.get(n, [])), -n))
+            seed_center = (max([q for q, _ in blocked_axials], default=0) + 4, 0)
+            while seed_center in blocked_axials:
+                seed_center = (seed_center[0] + 4, 0)
+            axial_pos[seed] = seed_center
+            blocked_axials.add(seed_center)
+            queue.append(seed)
+            queued.add(seed)
+
+        u = queue.popleft()
+        ux, uy = rdkit_pos.get(u, (0.0, 0.0))
+        candidates_to_place = [v for v in neighbors.get(u, []) if v not in axial_pos]
+        candidates_to_place.sort(
+            key=lambda v: (
+                -len(neighbors.get(v, [])),
+                math.atan2(rdkit_pos.get(v, (0.0, 0.0))[1] - uy,
+                           rdkit_pos.get(v, (0.0, 0.0))[0] - ux),
+                v,
+            )
+        )
+
+        for v in candidates_to_place:
+            placed_neighbors = [nb for nb in neighbors.get(v, []) if nb in axial_pos]
+            candidates = _candidate_hex_axials_for_node(placed_neighbors, axial_pos, blocked_axials)
+            if candidates:
+                chosen = min(
+                    candidates,
+                    key=lambda cand: _score_hex_candidate(v, cand, placed_neighbors, axial_pos, rdkit_pos),
+                )
+            else:
+                chosen = (axial_pos[u][0] + 1, axial_pos[u][1] + 1)
+
+            axial_pos[v] = chosen
+            blocked_axials.add(chosen)
+            if v not in queued:
+                queue.append(v)
+                queued.add(v)
+
+    return axial_pos
+
+
+def _layout_on_hex_grid(edge_list: List[List[int]],
+                        rdkit_pos: Dict[int, Tuple[float, float]],
+                        num_nodes: int,
+                        mol=None,
+                        su_matches=None) -> Dict[int, Tuple[float, float]]:
+    """
+    将粗粒度图节点放到 RL_state 的 axial 六角坐标体系上。
+
+    6 元环严格使用 HEX_VERTEX_OFFSETS 形成正六边形；侧链再从环顶点
+    或已放置节点向外接到最近的空闲六角格点。
+    """
+    if num_nodes <= 0:
+        return {}
+
+    rings = _extract_hex_ring_records(mol, su_matches, rdkit_pos) if mol is not None and su_matches is not None else []
+    axial_pos, ring_centers = _place_hex_rings(rings, edge_list, rdkit_pos)
+    axial_pos = _layout_remaining_nodes(edge_list, rdkit_pos, num_nodes, axial_pos, ring_centers)
+
+    cart_pos = {
+        nid: _hex_axial_to_cart(q, r, scale=EDGE_LENGTH)
+        for nid, (q, r) in axial_pos.items()
+    }
+
+    cx = 0.5 * (min(x for x, _ in cart_pos.values()) + max(x for x, _ in cart_pos.values()))
+    cy = 0.5 * (min(y for _, y in cart_pos.values()) + max(y for _, y in cart_pos.values()))
+    return {nid: (x - cx, y - cy) for nid, (x, y) in cart_pos.items()}
+
+
+def visualize_coarse_grained_graph(data, su_matches, mol, output_path):
+    """
+    可视化粗粒度分子图 (MCTS 风格 + axial 六角坐标布局)
+
+    设计目标：
+    - 使用 RL_state.py 中相同的 axial -> Cartesian 公式绘制节点坐标。
+    - RDKit 2D 坐标只作为方向参考，避免同一拓扑每次绘图方向过于随意。
+    - 边尽量沿六角格的六个方向连接，节点大小和文字字号固定。
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
 
     edge_list = data.edge_index.t().tolist()
-
-    # ---------- 2. 计算当前 SU 间平均边长，用于等比例缩放 ----------
-    edge_lengths = []
-    for u, v in edge_list:
-        if u in pos and v in pos:
-            dx = pos[u][0] - pos[v][0]
-            dy = pos[u][1] - pos[v][1]
-            edge_lengths.append(np.sqrt(dx * dx + dy * dy))
-
-    if edge_lengths:
-        avg_edge_len = float(np.mean(edge_lengths))
-        scale_factor = EDGE_LENGTH / avg_edge_len if avg_edge_len > 1e-6 else 1.0
-    else:
-        scale_factor = 1.0
-
-    # 等比例缩放 + 平移到以 (0,0) 为中心
-    scaled_pos = {}
-    for nid, (x, y) in pos.items():
-        scaled_pos[nid] = (x * scale_factor, y * scale_factor)
-
-    all_x = [p[0] for p in scaled_pos.values()]
-    all_y = [p[1] for p in scaled_pos.values()]
-    min_x, max_x = min(all_x), max(all_x)
-    min_y, max_y = min(all_y), max(all_y)
-
-    cx = 0.5 * (min_x + max_x)
-    cy = 0.5 * (min_y + max_y)
-
-    for nid in scaled_pos:
-        x, y = scaled_pos[nid]
-        scaled_pos[nid] = (x - cx, y - cy)
+    rdkit_pos = _compute_rdkit_su_positions(mol, su_matches)
+    scaled_pos = _layout_on_hex_grid(edge_list, rdkit_pos, len(su_matches), mol=mol, su_matches=su_matches)
 
     # 重新计算边界
     all_x = [p[0] for p in scaled_pos.values()]

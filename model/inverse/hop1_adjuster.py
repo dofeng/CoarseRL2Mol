@@ -11,43 +11,59 @@ try:
     from ..paths import Z_LIBRARY_DIR
     from ..shared.inverse_common import (
         get_port_pattern_degrees,
-        iter_port_signatures,
+        iter_port_signature_objects,
+        has_forbidden_fixed_connector_special_combo,
         multiset_from_counter as _common_multiset_from_counter,
         multiset_l1_distance as _common_multiset_l1_distance,
-        violates_special_d3_terminal_limit,
+        port_entry_matches,
+        signature_matches_center,
+        terminal_neighbor_count,
     )
 except ImportError:
     from model.paths import Z_LIBRARY_DIR
     from model.shared.inverse_common import (
         get_port_pattern_degrees,
-        iter_port_signatures,
+        iter_port_signature_objects,
+        has_forbidden_fixed_connector_special_combo,
         multiset_from_counter as _common_multiset_from_counter,
         multiset_l1_distance as _common_multiset_l1_distance,
-        violates_special_d3_terminal_limit,
+        port_entry_matches,
+        signature_matches_center,
+        terminal_neighbor_count,
     )
 
 def _normalize_hop1_tuple(values: Sequence[int]) -> Tuple[int, ...]:
     return tuple(sorted(int(x) for x in values))
 
 
-def can_match_ports_exact(neighbors: Sequence[int], port_sets: Sequence[Set[int]]) -> bool:
-    return _can_match_ports_impl(neighbors, port_sets, require_full=True)
+def can_match_ports_exact(neighbors: Sequence[Any],
+                          port_sets: Sequence[Set[Any]],
+                          center_node: Optional[Any] = None) -> bool:
+    return _can_match_ports_impl(neighbors, port_sets, require_full=True, center_node=center_node)
 
 
-def can_match_ports_partial(neighbors: Sequence[int], port_sets: Sequence[Set[int]]) -> bool:
-    return _can_match_ports_impl(neighbors, port_sets, require_full=False)
+def can_match_ports_partial(neighbors: Sequence[Any],
+                            port_sets: Sequence[Set[Any]],
+                            center_node: Optional[Any] = None) -> bool:
+    return _can_match_ports_impl(neighbors, port_sets, require_full=False, center_node=center_node)
 
 
-def _can_match_ports_impl(neighbors: Sequence[int],
-                          port_sets: Sequence[Set[int]],
-                          require_full: bool) -> bool:
-    neighbors_i = [int(x) for x in neighbors]
-    signatures = iter_port_signatures(port_sets)
+def _can_match_ports_impl(neighbors: Sequence[Any],
+                          port_sets: Sequence[Set[Any]],
+                          require_full: bool,
+                          center_node: Optional[Any] = None) -> bool:
+    neighbors_i = list(neighbors or [])
+    if has_forbidden_fixed_connector_special_combo(center_node, neighbors_i):
+        return False
+    signatures = iter_port_signature_objects(port_sets)
 
     if not signatures:
         return False
 
-    def _match_single_signature(ports: List[Set[int]]) -> bool:
+    def _match_single_signature(signature) -> bool:
+        if not signature_matches_center(signature, center_node):
+            return False
+        ports = list(signature.ports)
         if require_full:
             if len(neighbors_i) != len(ports):
                 return False
@@ -59,7 +75,10 @@ def _can_match_ports_impl(neighbors: Sequence[int],
 
         options_by_neighbor = []
         for idx, n in enumerate(neighbors_i):
-            options = [pi for pi, allowed in enumerate(ports) if int(n) in allowed]
+            options = [
+                pi for pi, allowed in enumerate(ports)
+                if any(port_entry_matches(entry, n) for entry in allowed)
+            ]
             if not options:
                 return False
             options_by_neighbor.append((idx, options))
@@ -179,7 +198,8 @@ class Hop1Adjuster:
                  port_combinations: Optional[Dict[int, List[Set[int]]]] = None,
                  validate_connection_fn: Optional[Callable[[int, int, torch.Tensor], bool]] = None,
                  external_requirement_fn: Optional[Callable[[int, Counter], Tuple[bool, str]]] = None,
-                 external_requirement_node_fn: Optional[Callable[[Any, Counter], Tuple[bool, str]]] = None):
+                 external_requirement_node_fn: Optional[Callable[[Any, Counter], Tuple[bool, str]]] = None,
+                 enforce_external_requirements: bool = True):
         """
         初始化调整器
         
@@ -204,6 +224,7 @@ class Hop1Adjuster:
         self.validate_connection_fn = validate_connection_fn
         self.external_requirement_fn = external_requirement_fn
         self.external_requirement_node_fn = external_requirement_node_fn
+        self.enforce_external_requirements = bool(enforce_external_requirements)
         
         # 统计
         self.stats = {
@@ -299,6 +320,13 @@ class Hop1Adjuster:
     def _get_neighbor_types(self, nodes: List, node) -> List[int]:
         return [int(nodes[int(nid)].su_type) for nid in list(node.hop1_ids)]
 
+    def _get_neighbor_nodes(self, nodes: List, node) -> List[Any]:
+        return [
+            nodes[int(nid)]
+            for nid in list(getattr(node, 'hop1_ids', []) or [])
+            if 0 <= int(nid) < len(nodes)
+        ]
+
     @staticmethod
     def _node_target_degree(node) -> Optional[int]:
         try:
@@ -307,35 +335,30 @@ class Hop1Adjuster:
         except Exception:
             return None
 
-    def _would_violate_special_d3_terminal_rule(self,
-                                                nodes: List,
-                                                node,
-                                                proposed_neighbor_su: Optional[int] = None) -> bool:
-        neighbor_types = [int(x) for x in self._get_neighbor_types(nodes, node)]
-        if proposed_neighbor_su is not None:
-            neighbor_types.append(int(proposed_neighbor_su))
-        return bool(
-            violates_special_d3_terminal_limit(
-                int(getattr(node, 'su_type', -1)),
-                self._node_target_degree(node),
-                neighbor_types,
-            )
-        )
+    def _terminal_neighbor_cap_ok(self,
+                                  nodes: List,
+                                  node,
+                                  proposed_neighbor: Optional[Any] = None) -> bool:
+        neighbor_nodes = self._get_neighbor_nodes(nodes, node)
+        if proposed_neighbor is not None:
+            neighbor_nodes.append(proposed_neighbor)
+        return int(terminal_neighbor_count(neighbor_nodes)) <= 1
 
     def _is_hop1_valid_types(self,
                              center_su: int,
                              neighbor_types: List[int],
                              E_target: Optional[torch.Tensor],
-                             center_node: Optional[Any] = None) -> bool:
+                             center_node: Optional[Any] = None,
+                             neighbor_nodes: Optional[List[Any]] = None) -> bool:
         center_su = int(center_su)
-        target_degree = self._node_target_degree(center_node) if center_node is not None else None
-        if violates_special_d3_terminal_limit(int(center_su), target_degree, list(neighbor_types)):
+        match_neighbors = list(neighbor_nodes) if neighbor_nodes is not None else list(neighbor_types)
+        if int(terminal_neighbor_count(match_neighbors)) > 1:
             return False
         if isinstance(self.port_combinations, dict):
             port_sets = self.port_combinations.get(center_su)
             if not port_sets:
                 return False
-            if not can_match_ports_exact(list(neighbor_types), port_sets):
+            if not can_match_ports_exact(match_neighbors, port_sets, center_node=center_node):
                 return False
 
         if callable(self.validate_connection_fn) and E_target is not None:
@@ -343,14 +366,15 @@ class Hop1Adjuster:
                 if not bool(self.validate_connection_fn(center_su, int(nb), E_target)):
                     return False
 
-        if callable(self.external_requirement_node_fn) and center_node is not None:
-            ok, _msg = self.external_requirement_node_fn(center_node, Counter(neighbor_types))
-            if not bool(ok):
-                return False
-        elif callable(self.external_requirement_fn):
-            ok, _msg = self.external_requirement_fn(center_su, Counter(neighbor_types))
-            if not bool(ok):
-                return False
+        if bool(self.enforce_external_requirements):
+            if callable(self.external_requirement_node_fn) and center_node is not None:
+                ok, _msg = self.external_requirement_node_fn(center_node, Counter(neighbor_types))
+                if not bool(ok):
+                    return False
+            elif callable(self.external_requirement_fn):
+                ok, _msg = self.external_requirement_fn(center_su, Counter(neighbor_types))
+                if not bool(ok):
+                    return False
 
         # SU31 must prioritize consuming SU7 when available; allow 31:[7,7]
         # even if the current hop1 template table does not contain that motif.
@@ -676,6 +700,11 @@ class Hop1Adjuster:
         if req_deg is not None and int(len(old_hop1)) not in set(int(x) for x in req_deg):
             result['error'] = f"目标节点度数与端口规则不一致: node_deg={len(old_hop1)}, required={list(req_deg)}"
             return result
+        if isinstance(self.port_combinations, dict):
+            port_sets = self.port_combinations.get(int(target_node.su_type))
+            if port_sets and not can_match_ports_exact(list(new_hop1_tuple), port_sets, center_node=target_node):
+                result['error'] = f"新的1-hop组合不满足状态感知端口规则: {tuple(new_hop1_tuple)}"
+                return result
         
         nodes_by_su = defaultdict(list)
         for n in nodes:
@@ -794,6 +823,7 @@ class Hop1Adjuster:
             final_types,
             E_target,
             center_node=work_nodes[t],
+            neighbor_nodes=self._get_neighbor_nodes(work_nodes, work_nodes[t]),
         ):
             return False, []
 
@@ -856,13 +886,18 @@ class Hop1Adjuster:
             v_types = [int(nodes[i].su_type) for i in v_new_ids]
             w_types = [int(nodes[i].su_type) for i in w_new_ids]
 
-            if not self._is_hop1_valid_types(int(t_node.su_type), t_types, E_target, center_node=t_node):
+            t_neighbors = [nodes[int(i)] for i in t_new_ids]
+            u_neighbors = [nodes[int(i)] for i in u_new_ids]
+            v_neighbors = [nodes[int(i)] for i in v_new_ids]
+            w_neighbors = [nodes[int(i)] for i in w_new_ids]
+
+            if not self._is_hop1_valid_types(int(t_node.su_type), t_types, E_target, center_node=t_node, neighbor_nodes=t_neighbors):
                 continue
-            if not self._is_hop1_valid_types(int(u_node.su_type), u_types, E_target, center_node=u_node):
+            if not self._is_hop1_valid_types(int(u_node.su_type), u_types, E_target, center_node=u_node, neighbor_nodes=u_neighbors):
                 continue
-            if not self._is_hop1_valid_types(int(v_node.su_type), v_types, E_target, center_node=v_node):
+            if not self._is_hop1_valid_types(int(v_node.su_type), v_types, E_target, center_node=v_node, neighbor_nodes=v_neighbors):
                 continue
-            if not self._is_hop1_valid_types(int(w_node.su_type), w_types, E_target, center_node=w_node):
+            if not self._is_hop1_valid_types(int(w_node.su_type), w_types, E_target, center_node=w_node, neighbor_nodes=w_neighbors):
                 continue
 
             return True, int(w), [int(t), int(u), int(v), int(w)]
@@ -917,9 +952,25 @@ class Hop1Adjuster:
             return False
         if id1 in node2.hop1_ids:
             return False
-        if self._would_violate_special_d3_terminal_rule(nodes, node1, int(node2.su_type)):
+        if not self._terminal_neighbor_cap_ok(nodes, node1, node2):
             return False
-        if self._would_violate_special_d3_terminal_rule(nodes, node2, int(node1.su_type)):
+        if not self._terminal_neighbor_cap_ok(nodes, node2, node1):
+            return False
+        if not self._is_hop1_valid_types(
+            int(node1.su_type),
+            [int(nodes[int(nid)].su_type) for nid in list(node1.hop1_ids)] + [int(node2.su_type)],
+            None,
+            center_node=node1,
+            neighbor_nodes=self._get_neighbor_nodes(nodes, node1) + [node2],
+        ):
+            return False
+        if not self._is_hop1_valid_types(
+            int(node2.su_type),
+            [int(nodes[int(nid)].su_type) for nid in list(node2.hop1_ids)] + [int(node1.su_type)],
+            None,
+            center_node=node2,
+            neighbor_nodes=self._get_neighbor_nodes(nodes, node2) + [node1],
+        ):
             return False
         
         # 添加连接
@@ -927,5 +978,27 @@ class Hop1Adjuster:
         node2.hop1_su[node1.su_type] += 1
         node1.hop1_ids.append(id2)
         node2.hop1_ids.append(id1)
+        old_enforce_external = bool(self.enforce_external_requirements)
+        self.enforce_external_requirements = False
+        try:
+            ok1 = self._is_hop1_valid_types(
+                int(node1.su_type),
+                [int(nodes[int(nid)].su_type) for nid in list(node1.hop1_ids)],
+                None,
+                center_node=node1,
+                neighbor_nodes=self._get_neighbor_nodes(nodes, node1),
+            )
+            ok2 = self._is_hop1_valid_types(
+                int(node2.su_type),
+                [int(nodes[int(nid)].su_type) for nid in list(node2.hop1_ids)],
+                None,
+                center_node=node2,
+                neighbor_nodes=self._get_neighbor_nodes(nodes, node2),
+            )
+        finally:
+            self.enforce_external_requirements = old_enforce_external
+        if not (bool(ok1) and bool(ok2)):
+            self._remove_hop1_edge(nodes, id1, id2)
+            return False
         return True
     

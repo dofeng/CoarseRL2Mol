@@ -22,19 +22,21 @@ from torch_geometric.utils import k_hop_subgraph, to_undirected
 # 从inverse_common导入化学规则（统一定义，避免重复）
 try:
     from ...shared.inverse_common import (
-        SU_CONNECTION_DEGREE, TERMINAL_SU, HOP1_PORT_COMBINATIONS,
+        SU_CONNECTION_DEGREE, HOP1_PORT_COMBINATIONS,
         SPECIAL_DEGREE_PRIORS,
-        SU_EXTERNAL_CONNECTIONS, SU_FIXED_CONNECTIONS, UNSATURATED_PAIRS,
-        FORBIDDEN_CONNECTIONS, validate_connection,
-        check_external_connection_requirement, get_port_pattern_degrees
+        SU_EXTERNAL_CONNECTIONS, SU_FIXED_CONNECTIONS, TERMINAL_PORT_BASE_SU,
+        validate_connection,
+        check_external_connection_requirement, get_port_pattern_degrees,
+        terminal_neighbor_count,
     )
 except ImportError:
     from model.shared.inverse_common import (
-        SU_CONNECTION_DEGREE, TERMINAL_SU, HOP1_PORT_COMBINATIONS,
+        SU_CONNECTION_DEGREE, HOP1_PORT_COMBINATIONS,
         SPECIAL_DEGREE_PRIORS,
-        SU_EXTERNAL_CONNECTIONS, SU_FIXED_CONNECTIONS, UNSATURATED_PAIRS,
-        FORBIDDEN_CONNECTIONS, validate_connection,
-        check_external_connection_requirement, get_port_pattern_degrees
+        SU_EXTERNAL_CONNECTIONS, SU_FIXED_CONNECTIONS, TERMINAL_PORT_BASE_SU,
+        validate_connection,
+        check_external_connection_requirement, get_port_pattern_degrees,
+        terminal_neighbor_count,
     )
 try:
     from ..hop1_adjuster import can_match_ports_exact
@@ -102,10 +104,8 @@ def validate_hop1_multiset(center_su: int, hop1_multiset: tuple) -> Tuple[bool, 
             if not _can_match_ports(list(hop1_multiset), port_sets):
                 violations.append(f"Port combination mismatch for SU {center_su}")
     
-        if center_su in FORBIDDEN_CONNECTIONS['double_terminal_bridge']:
-            hop1_types = list(hop1_counter.keys())
-            if len(hop1_types) > 0 and all(su in TERMINAL_SU for su in hop1_types):
-                violations.append(f"Bridge unit {center_su} cannot connect only terminals")
+        if int(terminal_neighbor_count(hop1_multiset)) > 1:
+            violations.append(f"SU {center_su} has more than one terminal neighbor")
     else:
         max_degree = SU_CONNECTION_DEGREE.get(center_su, 4)
         if isinstance(max_degree, tuple):
@@ -121,10 +121,8 @@ def validate_hop1_multiset(center_su: int, hop1_multiset: tuple) -> Tuple[bool, 
         if not valid_ext:
             violations.append(ext_msg)
     
-        if center_su in FORBIDDEN_CONNECTIONS['double_terminal_bridge']:
-            hop1_types = list(hop1_counter.keys())
-            if len(hop1_types) > 0 and all(su in TERMINAL_SU for su in hop1_types):
-                violations.append(f"Bridge unit {center_su} cannot connect only terminals")
+        if int(terminal_neighbor_count(hop1_multiset)) > 1:
+            violations.append(f"SU {center_su} has more than one terminal neighbor")
     
     return len(violations) == 0, violations
 
@@ -639,8 +637,8 @@ def get_allowed_hop1_neighbors(center_su: int) -> Set[int]:
     if center_su not in SU_FIXED_CONNECTIONS:
         # 默认允许所有非末端互连
         allowed = set(range(NUM_SU_TYPES))
-        if center_su in TERMINAL_SU:
-            allowed -= TERMINAL_SU
+        if center_su in TERMINAL_PORT_BASE_SU:
+            allowed -= TERMINAL_PORT_BASE_SU
         return allowed
     
     allowed = SU_FIXED_CONNECTIONS[center_su]
@@ -664,7 +662,7 @@ def print_connection_rules_summary():
     for su_idx in range(NUM_SU_TYPES):
         su_name = su_names[su_idx] if su_idx < len(su_names) else f"SU{su_idx}"
         max_deg = SU_CONNECTION_DEGREE.get(su_idx, 4)
-        is_terminal = su_idx in TERMINAL_SU
+        is_terminal = su_idx in TERMINAL_PORT_BASE_SU
         
         allowed = get_allowed_hop1_neighbors(su_idx)
         allowed_str = ', '.join(str(x) for x in sorted(allowed)[:10])

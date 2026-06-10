@@ -1,17 +1,17 @@
 import math
 import random
-import copy
 from typing import List, Dict, Tuple, Optional, Set
+from dataclasses import dataclass, field
 
 from .RL_state import (
-    MCTSState, AromaticCluster, ChainNode, EdgeFlex, EdgeBranch, HexGrid,
+    MCTSState, Site, AromaticCluster, ChainNode, EdgeFlex, EdgeBranch, HexGrid,
     HEX_VERTEX_OFFSETS, OPPOSITE,
     RU, RD, LU, LD, UP, DN,
 )
-from .RL_allocator import ChainSpec, MAX_23_PER_CHAIN
 from .stage_branch import (
     horizontal_branch_coords, su25_extra_branch_coord, get_branch_info_from_chain_spec
 )
+from .RL_allocator import ChainSpec
 
 # Direction name mapping
 DIR_NAME = {
@@ -20,7 +20,7 @@ DIR_NAME = {
     UP: 'up',        DN: 'down',
 }
 
-V_MAX_23 = 4
+V_MAX_23 = 2
 
 # ==================== Chain Geometry ====================
 
@@ -31,31 +31,31 @@ def horizontal_chain(start_11: Tuple[int,int], main: Tuple[int,int], m: int = 1)
     Returns: (coords_23, end11, last_step)
     """
     assert main in (RU, RD, LU, LD), f"main must be horizontal direction, got {main}"
-    
+
     pair_map = {RU: RD, RD: RU, LU: LD, LD: LU}
     step1 = main
     step_pair = pair_map[main]
-    
+
     coords_23 = []
     cur = start_11
-    
+
     if m == 0:
         end11 = (cur[0] + step1[0], cur[1] + step1[1])
         return coords_23, end11, step1
-    
+
     # First 23 along main direction
     cur = (cur[0] + step1[0], cur[1] + step1[1])
     coords_23.append(cur)
-    
+
     # Subsequent: alternate step1 and step_pair
     for i in range(2, m + 1):
         step = step_pair if i % 2 == 0 else step1
         cur = (cur[0] + step[0], cur[1] + step[1])
         coords_23.append(cur)
-    
+
     last_step = step1 if m % 2 == 0 else step_pair
     end11 = (cur[0] + last_step[0], cur[1] + last_step[1])
-    
+
     return coords_23, end11, last_step
 
 
@@ -69,32 +69,32 @@ def vertical_chain(start_11: Tuple[int,int], vertical: Tuple[int,int],
     assert vertical in (UP, DN)
     if cap is None:
         cap = RU if vertical == UP else RD
-    
+
     coords_23 = []
     cur = start_11
-    
+
     if m == 0:
         end11 = (cur[0] + vertical[0], cur[1] + vertical[1])
         return coords_23, end11, vertical
-    
+
     # Alternate vertical and cap
     directions = []
     for i in range(m):
         directions.append(vertical if i % 2 == 0 else cap)
-    
+
     for d in directions:
         cur = (cur[0] + d[0], cur[1] + d[1])
         coords_23.append(cur)
-    
+
     # End direction: opposite type of last step
     last_dir = directions[-1]
     end_dir = cap if last_dir == vertical else vertical
     end11 = (cur[0] + end_dir[0], cur[1] + end_dir[1])
-    
+
     return coords_23, end11, end_dir
 
 
-def _build_displacement_table(max_h: int = MAX_23_PER_CHAIN, max_v: int = V_MAX_23):
+def _build_displacement_table(max_h: int = 15, max_v: int = V_MAX_23):
     """
     Pre-compute reverse lookup: displacement (dq, dr) -> [(dir_class, main_dir, m, cap), ...]
     For each chain direction and length, compute start→end displacement and index it.
@@ -131,19 +131,19 @@ def get_site_outward_direction(cluster: AromaticCluster,
     """
     site = cluster.sites[site_idx]
     sq, sr = site.axial
-    
+
     # Build ring_offsets: ring_idx -> (dq, dr) offset from that ring center
     ring_offsets = {}
     for ring_idx, (cq, cr) in enumerate(cluster.centers):
         dq, dr = sq - cq, sr - cr
         if (dq, dr) in HEX_VERTEX_OFFSETS:
             ring_offsets[ring_idx] = (dq, dr)
-    
+
     if not ring_offsets:
         return None
-    
+
     ring_indices = sorted(ring_offsets.keys())
-    
+
     if len(ring_indices) == 1:
         offset = ring_offsets[ring_indices[0]]
     else:
@@ -157,7 +157,7 @@ def get_site_outward_direction(cluster: AromaticCluster,
                 best_score = score
                 best_offset = o
         offset = best_offset
-    
+
     if offset not in HEX_VERTEX_OFFSETS:
         return None
     return offset
@@ -168,11 +168,10 @@ def get_site_outward_direction(cluster: AromaticCluster,
 class FlexStage:
     """
     Flexible connection stage: connect all rigid clusters via pre-allocated
-    bridge chains from RL_allocator. Cross-component placement is prioritized
-    until the rigid scaffold is connected; secondary/intra-component closures
-    are considered afterwards.
+    bridge chains from RL_allocator. Couples primary flex (cross-component)
+    and secondary flex (intra-component) into a unified connectivity pass.
     """
-    
+
     def __init__(self, state: MCTSState, original_su_counts: Dict[int, int],
                  allocation_result=None, skip_init: bool = False):
         """
@@ -188,29 +187,30 @@ class FlexStage:
         self._cluster_map: Dict[int, AromaticCluster] = {
             c.id: c for c in state.graph.clusters
         }
-        
+
         # Track placed vertices (sites + chain nodes)
         self._placed_vertices: Set[Tuple[int, int]] = set()
         self._placed_centers: Set[Tuple[int, int]] = set()
         self._flex_used_sites: Dict[int, Set[int]] = {}  # cluster_id -> set of used site indices
         self._seed_root: Optional[int] = None
-        
+
         # Build uid → cluster_id cache for O(1) lookup
         self._uid_to_cluster: Dict[str, int] = {}
         for c in state.graph.clusters:
             for s in c.sites:
                 self._uid_to_cluster[s.uid] = c.id
-        
+
         self._init_placed_vertices()
-        
-        # Build rigid cluster map. Clusters inside the same rigid cluster may
-        # also be connected by flex if the bridge is sufficiently long.
+
+        # Build rigid cluster map: aromatic clusters connected by rigid edges
+        # form "rigid clusters". Secondary flex must NOT connect within same rigid cluster.
         self._rigid_cluster_map: Dict[int, int] = self._build_rigid_cluster_map()
-        
+
         if skip_init:
             self._bridge_pool: List[int] = []
             self._bridge_specs: List[ChainSpec] = []
             self._n_bridges_total = 0
+            self._n_bridges_budget = 0
             self._n_connections_needed = 0
             self._11_consumed = 0
             self._23_consumed = 0
@@ -219,35 +219,39 @@ class FlexStage:
             self._connections_made = 0
             # rigid cluster map already built above
             return
-        
+
         # --- Resource initialization from allocator ---
         alloc = allocation_result
-        
+
         all_bridges = list(alloc.bridge_chains) if alloc else []
-        
-        # Preserve allocator intent: keep mandatory bridges ahead of extras.
-        self._bridge_specs: List[ChainSpec] = self._prioritize_bridge_specs(all_bridges)
+
+        # Store full ChainSpec objects (shuffled for flexible MCTS random usage)
+        import random
+        self._bridge_specs: List[ChainSpec] = list(all_bridges)
+        random.shuffle(self._bridge_specs)
         # Also keep length pool for backward compatibility
         self._bridge_pool = [ch.n_23 for ch in self._bridge_specs]
         self._n_bridges_total = len(all_bridges)
-        
+
         # Connectivity info
         all_roots = set(state._find(c.id) for c in state.graph.clusters)
         n_components = len(all_roots)
         self._n_connections_needed = max(0, n_components - 1)
-        
+        # Total bridge budget (may exceed n_components - 1 for secondary connections)
+        self._n_bridges_budget = self._n_bridges_total
+
         # Track consumed resources
         self._11_consumed = 0
         self._23_consumed = 0
         self._bridges_done = 0
         self._last_direction: Optional[str] = None
         self._connections_made = 0
-        
+
         # KEY: Unplace non-seed clusters so flex can translate them into position
         self._unplace_non_seed_clusters()
-        
+
         self._print_init_info()
-    
+
     def _print_init_info(self):
         n = len(self.state.graph.clusters)
         n_placed = sum(1 for c in self.state.graph.clusters if c.placed)
@@ -255,17 +259,6 @@ class FlexStage:
         print(f"[FlexStage] Init: {n} clusters ({n_placed} placed, {n_unplaced} unplaced), "
               f"{self._n_connections_needed+1} components, {self._n_bridges_total} bridges")
 
-    def clone(self) -> 'FlexStage':
-        """Deep-copy the current flex stage for unified MCTS expansion."""
-        return self._clone_for_action_validation()
-
-    def _prioritize_bridge_specs(self, bridge_specs: List[ChainSpec]) -> List[ChainSpec]:
-        """Keep non-extra bridges in allocator order and postpone extras."""
-        ordered = list(bridge_specs or [])
-        mandatory = [spec for spec in ordered if getattr(spec, 'origin_type', None) != 'extra']
-        extras = [spec for spec in ordered if getattr(spec, 'origin_type', None) == 'extra']
-        return mandatory + extras
-    
     def _build_rigid_cluster_map(self) -> Dict[int, int]:
         """Build a mapping: aromatic_cluster_id -> rigid_cluster_root.
         Two aromatic clusters are in the same rigid cluster iff they are
@@ -294,14 +287,6 @@ class FlexStage:
 
         return {cid: _find(cid) for cid in parent}
 
-    def _same_rigid_cluster_flex_allowed(self, cluster_a_id: int, cluster_b_id: int,
-                                         chain_len: int) -> bool:
-        if self._rigid_cluster_map.get(cluster_a_id) != self._rigid_cluster_map.get(cluster_b_id):
-            return True
-        if cluster_a_id == cluster_b_id:
-            return False
-        return chain_len >= 4
-
     def _init_placed_vertices(self):
         """Collect all currently placed vertices and centers."""
         for c in self.state.graph.clusters:
@@ -313,7 +298,7 @@ class FlexStage:
         # Chain nodes from rigid stage (if any)
         for cn in self.state.graph.chains:
             self._placed_vertices.add(cn.axial)
-    
+
     def _unplace_non_seed_clusters(self):
         """
         Remove non-seed-component clusters from placed sets.
@@ -328,12 +313,12 @@ class FlexStage:
             if c.placed:
                 root = self.state._find(c.id)
                 comp_sizes[root] = comp_sizes.get(root, 0) + c.rings
-        
+
         if not comp_sizes:
             return
-        
+
         self._seed_root = max(comp_sizes.keys(), key=lambda r: comp_sizes[r])
-        
+
         # Unplace all clusters NOT in the seed component
         unplaced_count = 0
         for c in self.state.graph.clusters:
@@ -345,15 +330,15 @@ class FlexStage:
                     self._placed_centers.discard(center)
                 c.placed = False
                 unplaced_count += 1
-        
+
         # Silently track unplaced count (no verbose print)
         self._unplaced_count = unplaced_count
-    
+
     # ==================== Component Helpers ====================
-    
+
     def _get_cluster(self, cid: int) -> Optional[AromaticCluster]:
         return self._cluster_map.get(cid)
-    
+
     def _get_component_roots(self) -> Dict[int, List[int]]:
         """Get component map: root -> [cluster_ids]"""
         comp = {}
@@ -361,7 +346,7 @@ class FlexStage:
             root = self.state._find(c.id)
             comp.setdefault(root, []).append(c.id)
         return comp
-    
+
     def _get_component_size(self, root: int) -> int:
         """Get total ring count for a component."""
         total = 0
@@ -369,7 +354,7 @@ class FlexStage:
             if self.state._find(c.id) == root:
                 total += c.rings
         return total
-    
+
     def _get_seed_root(self) -> Optional[int]:
         """Get the root of the largest (seed) component. Updated after each union."""
         if self._seed_root is not None:
@@ -380,7 +365,16 @@ class FlexStage:
             return None
         self._seed_root = max(comp.keys(), key=lambda r: self._get_component_size(r))
         return self._seed_root
-    
+
+    def _gather_component_vertices(self, root: int) -> Set[Tuple[int, int]]:
+        """Gather all vertices (sites) in a component."""
+        verts = set()
+        for c in self.state.graph.clusters:
+            if c.placed and self.state._find(c.id) == root:
+                for s in c.sites:
+                    verts.add(s.axial)
+        return verts
+
     def _is_site_available(self, cluster: AromaticCluster, site_idx: int,
                             min_gap: int = 2) -> bool:
         """Check if a site is available for flex connection.
@@ -401,9 +395,9 @@ class FlexStage:
             if dist < min_gap:
                 return False
         return True
-    
+
     # ==================== Collision Detection ====================
-    
+
     def _check_chain_collision(self, coords_23: List[Tuple[int,int]],
                                 end11: Tuple[int,int],
                                 skip_end11: bool = False) -> bool:
@@ -438,7 +432,7 @@ class FlexStage:
             if any(cn.uid == uid for cn in edge.chain):
                 return self._uid_to_root(edge.base)
         return None
-    
+
     def _component_chain_nodes(self, root: int) -> List[ChainNode]:
         """Get all chain nodes belonging to a component (from flex/side/branch edges)."""
         nodes: List[ChainNode] = []
@@ -770,11 +764,11 @@ class FlexStage:
                         return False
 
         return True
-    
+
     def _site_uid_to_cluster_id(self, uid: str) -> Optional[int]:
         """Extract cluster_id from site uid. Uses pre-built cache for O(1) lookup."""
         return self._uid_to_cluster.get(uid)
-    
+
     def _would_collide_component(self, root: int, dq: int, dr: int,
                                   allowed: Optional[Set[Tuple[int,int]]] = None) -> bool:
         """Check if translating a component would collide.
@@ -793,11 +787,11 @@ class FlexStage:
         # Include chain nodes
         for cn in self._component_chain_nodes(root):
             comp_verts.add(cn.axial)
-        
+
         # Occupied = currently placed minus this component's current positions
         occupied_verts = self._placed_vertices - comp_verts
         occupied_centers = self._placed_centers - comp_centers
-        
+
         for v in comp_verts:
             new_v = (v[0] + dq, v[1] + dr)
             if new_v in occupied_verts and new_v not in allowed:
@@ -828,7 +822,7 @@ class FlexStage:
             if new_c in occupied_centers:
                 return True
         return False
-    
+
     def _translate_component(self, root: int, dq: int, dr: int):
         """Translate all clusters AND chain nodes in a component.
         Handles both placed and unplaced clusters. After translation,
@@ -836,7 +830,7 @@ class FlexStage:
         """
         # Gather chain nodes belonging to this component
         chain_nodes = self._component_chain_nodes(root)
-        
+
         # Remove old positions of PLACED clusters
         for c in self.state.graph.clusters:
             if self.state._find(c.id) == root and c.placed:
@@ -846,7 +840,7 @@ class FlexStage:
                     self._placed_centers.discard(center)
         for cn in chain_nodes:
             self._placed_vertices.discard(cn.axial)
-        
+
         # Translate ALL clusters in the component (placed or not)
         for c in self.state.graph.clusters:
             if self.state._find(c.id) == root:
@@ -854,13 +848,13 @@ class FlexStage:
                     c.translate(dq, dr)  # This also sets c.placed = True
                 else:
                     c.placed = True
-        
+
         # Translate chain nodes
         if dq != 0 or dr != 0:
             for cn in chain_nodes:
                 cn.axial = (cn.axial[0] + dq, cn.axial[1] + dr)
                 cn.pos2d = HexGrid.axial_to_cart(*cn.axial)
-        
+
         # Re-register ALL positions (now all are placed)
         for c in self.state.graph.clusters:
             if self.state._find(c.id) == root:
@@ -886,33 +880,30 @@ class FlexStage:
             self._placed_vertices.add(s.axial)
         for center in cluster.centers:
             self._placed_centers.add(center)
-    
+
     # ==================== Target Finding ====================
-    
-    def _find_targets_for_end(self, end11: Tuple[int,int],
-                               final_vec: Tuple[int,int],
-                               src_root: int,
-                               forbidden_clusters: Optional[Set[int]] = None,
-                               allow_intra: bool = False,
-                               candidate_ok = None,
-                               max_results: int = 32,
-                               ) -> List[Tuple[AromaticCluster, int, Tuple[int,int], int]]:
+
+    def _find_target_for_end(self, end11: Tuple[int,int],
+                              final_vec: Tuple[int,int],
+                              src_root: int,
+                              forbidden_clusters: Optional[Set[int]] = None,
+                              allow_intra: bool = False,
+                              candidate_ok = None,
+                              ) -> Optional[Tuple[AromaticCluster, int, Tuple[int,int], int]]:
         """
         Find a target cluster for the chain endpoint.
         The target's component will be TRANSLATED to align its site with end11.
         Accepts both placed and unplaced clusters (unplaced = not yet on grid).
-        Returns a bounded list of feasible targets ordered by placement preference.
+        Returns: (cluster, site_idx, translation, target_root) or None
         """
         if final_vec not in DIR_NAME:
-            return []
+            return None
         opposite = OPPOSITE.get(final_vec)
         if opposite is None:
-            return []
-        
+            return None
+
         forbidden_clusters = forbidden_clusters or set()
-        results: List[Tuple[AromaticCluster, int, Tuple[int, int], int]] = []
-        seen: Set[Tuple[int, int, int, int, int]] = set()
-        
+
         # Collect cross-component and intra-component candidates
         cross_candidates = []
         intra_candidates = []
@@ -926,53 +917,42 @@ class FlexStage:
                 cross_candidates.append((c, site_indices))
             elif allow_intra:
                 intra_candidates.append((c, site_indices))
-        
+
         # Sort: prefer unplaced (easy to move), then larger clusters
         cross_candidates.sort(
             key=lambda item: (0 if not item[0].placed else 1, -item[0].rings, item[0].id)
         )
         intra_candidates.sort(key=lambda item: (-item[0].rings, item[0].id))
-        
+
         # Try cross first, then intra
         for candidates in [cross_candidates, intra_candidates]:
             for cluster, site_indices in candidates:
                 for si in site_indices:
-                    if len(results) >= max_results:
-                        return results
                     if not self._is_site_available(cluster, si):
                         continue
                     site = cluster.sites[si]
                     tq = end11[0] - site.axial[0]
                     tr = end11[1] - site.axial[1]
                     target_root = self.state._find(cluster.id)
-                    
+
                     # Intra-component handling
                     if target_root == src_root:
                         if tq == 0 and tr == 0:
                             if candidate_ok is None or candidate_ok(cluster, si, (0, 0), target_root):
-                                key = (cluster.id, si, 0, 0, target_root)
-                                if key not in seen:
-                                    seen.add(key)
-                                    results.append((cluster, si, (0, 0), target_root))
+                                return cluster, si, (0, 0), target_root
                         if not cluster.placed and not self._would_collide_single_cluster(cluster, tq, tr, {end11}):
                             if candidate_ok is None or candidate_ok(cluster, si, (tq, tr), target_root):
-                                key = (cluster.id, si, tq, tr, target_root)
-                                if key not in seen:
-                                    seen.add(key)
-                                    results.append((cluster, si, (tq, tr), target_root))
+                                return cluster, si, (tq, tr), target_root
                         continue
-                    
+
                     # Cross-component: check translation feasibility
                     allowed = {end11}
                     if not self._would_collide_component(target_root, tq, tr, allowed):
                         if candidate_ok is None or candidate_ok(cluster, si, (tq, tr), target_root):
-                            key = (cluster.id, si, tq, tr, target_root)
-                            if key not in seen:
-                                seen.add(key)
-                                results.append((cluster, si, (tq, tr), target_root))
-        
-        return results
-    
+                            return cluster, si, (tq, tr), target_root
+
+        return None
+
     def _candidate_sites_for_direction(self, cluster: AromaticCluster,
                                         direction_vec: Tuple[int,int]) -> List[int]:
         """Find site indices whose outward direction matches direction_vec."""
@@ -984,60 +964,43 @@ class FlexStage:
             if outward == direction_vec:
                 result.append(idx)
         return result
-    
-    # ==================== Bridge Selection ====================
+
+    # ==================== Next Chain Length ====================
+
+    def _get_next_chain_index(self, direction: str) -> Optional[int]:
+        if self._bridges_done >= len(self._bridge_pool):
+            return None
+        for i in range(self._bridges_done, len(self._bridge_pool)):
+            chain_len = self._bridge_pool[i]
+            if direction == 'V' and chain_len > V_MAX_23:
+                continue
+            return i
+        return None
 
     def _bridge_spec_is_extra(self, idx: int) -> bool:
         if idx < 0 or idx >= len(self._bridge_specs):
             return False
         return getattr(self._bridge_specs[idx], 'origin_type', None) == 'extra'
 
-    def _remaining_bridge_indices(self) -> List[int]:
-        return list(range(self._bridges_done, len(self._bridge_specs)))
+    def _current_bridge_is_extra(self) -> bool:
+        return self._bridge_spec_is_extra(self._bridges_done)
 
-    def _activate_bridge_index(self, bridge_idx: int) -> bool:
-        """Swap a selected remaining bridge into the active front position."""
-        if bridge_idx < self._bridges_done or bridge_idx >= len(self._bridge_pool):
-            return False
-        current_idx = self._bridges_done
-        if bridge_idx == current_idx:
-            return True
-        self._bridge_pool[current_idx], self._bridge_pool[bridge_idx] = (
-            self._bridge_pool[bridge_idx],
-            self._bridge_pool[current_idx],
-        )
-        self._bridge_specs[current_idx], self._bridge_specs[bridge_idx] = (
-            self._bridge_specs[bridge_idx],
-            self._bridge_specs[current_idx],
-        )
-        return True
+    def _get_next_chain_length(self, direction: str) -> Optional[int]:
+        """Get the next planned chain length. Direction is only used for max constraints."""
+        idx = self._get_next_chain_index(direction)
+        if idx is None:
+            return None
+        return self._bridge_pool[idx]
 
-    def _candidate_bridge_indices(self, max_bridges: int = 8) -> List[int]:
-        """Select a bounded set of remaining bridges to branch on."""
-        remaining = self._remaining_bridge_indices()
-        if len(remaining) <= max_bridges:
-            return remaining
-
-        head = remaining[:max_bridges]
-        mandatory = [idx for idx in remaining if not self._bridge_spec_is_extra(idx)]
-        selected = []
-        for idx in head + mandatory:
-            if idx not in selected:
-                selected.append(idx)
-            if len(selected) >= max_bridges:
-                break
-        return selected
-
-    def _build_fallback_lengths(self, planned_len: int,
-                                is_extra: bool = False,
-                                max_len: int = MAX_23_PER_CHAIN) -> List[int]:
+    def _build_fallback_lengths(self, planned_len: int, max_len: int = 10) -> List[int]:
         """
         Build list of chain lengths to try.
-        Used only for extra bridges during dynamic rescue search.
+        Now allows borrowing from other flex chains or side chains dynamically.
+        So we return a broader range of possible lengths.
         """
         lengths = [planned_len]
         min_len = 1
-        if is_extra and planned_len <= 2:
+        if self._current_bridge_is_extra() and planned_len <= 2:
             min_len = 2
 
         for l in range(planned_len + 1, min(planned_len + 5, max_len + 1)):
@@ -1052,39 +1015,51 @@ class FlexStage:
             lengths.append(1)
 
         return lengths
-    
+
     def _get_preferred_direction(self) -> Optional[str]:
         """
         Determine preferred direction with enhanced alternation.
         Returns 'H', 'V', or None (no preference).
         """
-        ratio = self.state.get_qr_ratio()
+        # Check q/r ratio
+        x0, y0, x1, y1 = self.state.get_bbox()
+        w, h = max(x1 - x0, 0.01), max(y1 - y0, 0.01)
+        qr = w / h
 
-        if ratio == float('inf') or ratio > 2.3:
+        if qr > 2.5:
             return 'V'  # Too wide, prefer vertical
-        if ratio < 0.9:
+        if qr < 1.0:
             return 'H'  # Too tall, prefer horizontal
-        
+
         # Enhanced alternation (80% probability)
         if self._last_direction is not None:
             if random.random() < 0.80:
                 return 'V' if self._last_direction == 'H' else 'H'
-        
+
         return None  # No preference
-    
+
     # ==================== Candidate Generation ====================
 
     def _has_remaining_chains(self) -> bool:
         """Check if there are remaining bridge chains to place."""
         return self._bridges_done < len(self._bridge_pool)
-    
-    def _get_remaining_lengths(self, exclude_idx: Optional[int] = None) -> List[int]:
+
+    def _get_remaining_lengths(self) -> List[int]:
         """Get remaining chain lengths."""
-        return [
-            self._bridge_pool[i]
-            for i in range(self._bridges_done, len(self._bridge_pool))
-            if exclude_idx is None or i != exclude_idx
-        ]
+        return self._bridge_pool[self._bridges_done:]
+
+    def _promote_remaining_length(self, target_len: int) -> bool:
+        current_idx = self._bridges_done
+        for i in range(current_idx, len(self._bridge_pool)):
+            if self._bridge_pool[i] != target_len:
+                continue
+            if i == current_idx:
+                return True
+            self._bridge_pool[current_idx], self._bridge_pool[i] = self._bridge_pool[i], self._bridge_pool[current_idx]
+            if current_idx < len(self._bridge_specs) and i < len(self._bridge_specs):
+                self._bridge_specs[current_idx], self._bridge_specs[i] = self._bridge_specs[i], self._bridge_specs[current_idx]
+            return True
+        return False
 
     def _all_clusters_placed_and_connected(self) -> bool:
         """Check if ALL clusters (not just placed ones) are placed and in one component.
@@ -1096,151 +1071,131 @@ class FlexStage:
         return self.state.is_all_connected()
 
     def get_candidates(self, k: int = 40) -> List[Dict]:
-        """Generate explicit bridge-placement actions for the remaining search tree."""
+        """Generate combined flex connection candidates (primary + secondary mixed).
+
+        Dynamic adjustment logic:
+        1. First try strict lengths (MCTS-based placement with allocated chains)
+        2. Only when NO remaining chains can be placed with strict lengths,
+           trigger dynamic adjustment within remaining flex chains
+        3. Only if internal adjustment insufficient, borrow from side chains
+        4. Ensure 23 conservation throughout
+        """
         if self.is_done():
             return []
         if not self._has_remaining_chains():
             return []
-        k = min(10, max(1, int(k)))
-        remaining = self._remaining_bridge_indices()
-        bridge_windows = []
-        connected = bool(self.state.is_all_connected())
-        window_plan = (4, 8, len(remaining)) if not connected else (3, 6, len(remaining))
-        for width in window_plan:
-            if width <= 0:
-                continue
-            window = tuple(self._candidate_bridge_indices(max_bridges=width))
-            if window and window not in bridge_windows:
-                bridge_windows.append(window)
 
-        for bridge_indices in bridge_windows:
-            strict_cands = self._generate_all_candidates(k, strict_lengths=True, bridge_indices=list(bridge_indices))
-            if strict_cands:
-                self.state.stage_mode = 'exact'
-                return strict_cands[:k]
+        current_len = self._bridge_pool[self._bridges_done]
 
-        extra_indices = [idx for idx in remaining if self._bridge_spec_is_extra(idx)]
-        if not extra_indices:
-            return []
+        # Phase 1: Try strict generation (only planned lengths from allocator)
+        strict_cands = self._generate_all_candidates(k, strict_lengths=True)
+        if strict_cands:
+            executable = [c for c in strict_cands if c.get('chain_len') == current_len]
+            if executable:
+                return executable[:k]
 
-        dynamic_windows = []
-        for width in ((4, len(extra_indices)) if not connected else (3, len(extra_indices))):
-            if width <= 0:
-                continue
-            window = tuple(extra_indices[:width])
-            if window and window not in dynamic_windows:
-                dynamic_windows.append(window)
+            promote_len = strict_cands[0].get('chain_len')
+            if promote_len is not None and self._promote_remaining_length(promote_len):
+                promoted_cands = self._generate_all_candidates(k, strict_lengths=True)
+                executable = [c for c in promoted_cands if c.get('chain_len') == promote_len]
+                if executable:
+                    return executable[:k]
 
-        for bridge_indices in dynamic_windows:
-            dynamic_cands = self._generate_all_candidates(k, strict_lengths=False, bridge_indices=list(bridge_indices))
-            if dynamic_cands:
-                self.state.stage_mode = 'adjust_length'
-                return dynamic_cands[:k]
-        return []
-
-    def _candidate_sort_key(self, cand: Dict, needs_connectivity: bool) -> Tuple:
-        is_cross = bool(cand.get('is_cross_component', False))
-        bridge_idx = int(cand.get('bridge_idx', self._bridges_done))
-        is_extra = bool(cand.get('bridge_is_extra', False))
-        return (
-            0 if (not needs_connectivity or is_cross) else 1,
-            1 if is_extra else 0,
-            bridge_idx - self._bridges_done,
-            cand.get('score', float('inf')),
-        )
-
-    def _generate_all_candidates(self, k: int, strict_lengths: bool,
-                                 bridge_indices: Optional[List[int]] = None) -> List[Dict]:
-        """Generate bounded actions over a selected subset of remaining bridges."""
-        cands: List[Dict] = []
-        has_unplaced = any(not c.placed for c in self.state.graph.clusters)
-        needs_connectivity = has_unplaced or not self.state.is_all_connected()
-
-        bridge_indices = bridge_indices or self._remaining_bridge_indices()
-        if not bridge_indices:
-            return []
-
-        per_bridge_k = max(2, min(4 if needs_connectivity else 3, k))
-        limit = max(k * 2, 20 if needs_connectivity else 12)
-        for bridge_idx in bridge_indices:
-            primary_cross = self._get_primary_candidates(
-                k=per_bridge_k,
-                bridge_idx=bridge_idx,
-                allow_intra=False,
-                strict_lengths=strict_lengths,
-            )
-            cands.extend(primary_cross)
-
-            if not needs_connectivity:
-                cands.extend(self._get_secondary_candidates(
-                    k=per_bridge_k,
-                    bridge_idx=bridge_idx,
-                    strict_lengths=strict_lengths,
-                ))
-                cands.extend(self._get_primary_candidates(
-                    k=per_bridge_k,
-                    bridge_idx=bridge_idx,
-                    allow_intra=True,
-                    strict_lengths=strict_lengths,
-                ))
-
-            if len(cands) >= limit:
+        # Phase 2: Strict generation failed - check if ANY remaining chain can work
+        # Try each remaining chain length to see if at least one has candidates
+        remaining_lengths = self._get_remaining_lengths()
+        workable_len = None
+        ordered_lengths = sorted(set(remaining_lengths), key=lambda x: (0 if x > 1 else 1, -x))
+        for try_len in ordered_lengths:
+            test_cands = self._generate_candidates_for_length(k, try_len)
+            if test_cands:
+                workable_len = try_len
                 break
+
+        if workable_len is not None and self._promote_remaining_length(workable_len):
+            promoted_cands = self._generate_all_candidates(k, strict_lengths=True)
+            promoted_cands = [c for c in promoted_cands if c.get('chain_len') == workable_len]
+            if promoted_cands:
+                return promoted_cands[:k]
+
+        # Phase 3: NO remaining chain can be placed with its allocated length
+        # Now enable dynamic adjustment (no more MCTS needed, just ensure placement)
+        if not self._current_bridge_is_extra():
+            return []
+        dynamic_cands = self._generate_all_candidates(k, strict_lengths=False)
+        return dynamic_cands[:k]
+
+    def _generate_all_candidates(self, k: int, strict_lengths: bool) -> List[Dict]:
+        """Internal helper to generate candidates with or without length strictness."""
+        cands = []
+        has_unplaced = any(not c.placed for c in self.state.graph.clusters)
+        if has_unplaced:
+            cands.extend(self._get_primary_candidates(k, allow_intra=False, strict_lengths=strict_lengths))
+            cands.extend(self._get_primary_candidates(k, allow_intra=True, strict_lengths=strict_lengths))
+            if not cands:
+                cands.extend(self._get_secondary_candidates(k, strict_lengths))
+        else:
+            cands.extend(self._get_primary_candidates(k, allow_intra=True, strict_lengths=strict_lengths))
+            cands.extend(self._get_secondary_candidates(k, strict_lengths))
 
         if not cands:
             return []
 
+        # Deduplicate candidates based on a unique hash of their action
         seen = set()
         unique_cands = []
         for cand in cands:
-            sig = (
-                cand['bridge_idx'],
-                cand['cluster_a_id'],
-                cand['site_a_idx'],
-                cand['cluster_b_id'],
-                cand['site_b_idx'],
-                cand['chain_len'],
-                tuple(cand.get('coords_23', [])),
-                cand.get('end11'),
-                tuple(cand.get('translation', (0, 0))),
-                cand.get('direction'),
-            )
+            sig = (cand['cluster_a_id'], cand['site_a_idx'], cand['cluster_b_id'], cand['site_b_idx'], cand['chain_len'])
             if sig not in seen:
                 seen.add(sig)
                 unique_cands.append(cand)
 
-        unique_cands = [cand for cand in unique_cands if self._action_resource_feasible(cand)]
-        if not unique_cands:
-            return []
+        unique_cands.sort(key=lambda x: x['score'])
+        return unique_cands
 
-        unique_cands.sort(key=lambda cand: self._candidate_sort_key(cand, needs_connectivity))
-        validation_budget = max(k, min(limit, k * 2))
-        executable: List[Dict] = []
-        for cand in unique_cands[:validation_budget]:
-            if self._action_step_feasible(cand):
-                executable.append(cand)
-            if len(executable) >= limit:
-                break
-        return executable[:limit]
+    def _generate_candidates_for_length(self, k: int, target_len: int) -> List[Dict]:
+        """Generate candidates that specifically work with a given chain length.
+        Used to check if any remaining chain length can produce valid candidates.
+        """
+        cands = []
+
+        # Check secondary candidates with this specific length
+        remaining = self._get_remaining_lengths()
+        if target_len in remaining:
+            # Temporarily check if this length produces candidates
+            sec_cands = self._get_secondary_candidates(k, strict_lengths=True)
+            for c in sec_cands:
+                if c['chain_len'] == target_len:
+                    cands.append(c)
+
+        # Check primary candidates
+        has_unplaced = any(not c.placed for c in self.state.graph.clusters)
+        if has_unplaced:
+            prim_cands = self._get_primary_candidates(k, allow_intra=False, strict_lengths=True)
+            for c in prim_cands:
+                if c['chain_len'] == target_len:
+                    cands.append(c)
+            prim_cands_intra = self._get_primary_candidates(k, allow_intra=True, strict_lengths=True)
+            for c in prim_cands_intra:
+                if c['chain_len'] == target_len:
+                    cands.append(c)
+        else:
+            prim_cands_intra = self._get_primary_candidates(k, allow_intra=True, strict_lengths=True)
+            for c in prim_cands_intra:
+                if c['chain_len'] == target_len:
+                    cands.append(c)
+
+        return cands
 
     # ---------- Phase 1: Primary (cross-component) ----------
 
-    def _get_primary_candidates(self, k: int = 40, bridge_idx: Optional[int] = None,
-                                allow_intra: bool = False,
-                                strict_lengths: bool = True) -> List[Dict]:
+    def _get_primary_candidates(self, k: int = 40, allow_intra: bool = False, strict_lengths: bool = True) -> List[Dict]:
         """Generate flex connection candidates using outward chain growth.
         When allow_intra=True, also finds targets within the same component.
         """
         prefer_dir = self._get_preferred_direction()
         seed_root = self._get_seed_root()
-        if bridge_idx is None:
-            bridge_idx = self._bridges_done
-        if bridge_idx < self._bridges_done or bridge_idx >= len(self._bridge_specs):
-            return []
-
-        current_chain_spec = self._bridge_specs[bridge_idx]
-        planned_len = self._bridge_pool[bridge_idx]
-        bridge_is_extra = self._bridge_spec_is_extra(bridge_idx)
+        current_chain_spec = self._bridge_specs[self._bridges_done] if self._bridges_done < len(self._bridge_specs) else None
 
         if seed_root is not None:
             all_sources = [c for c in self.state.graph.clusters
@@ -1283,24 +1238,31 @@ class FlexStage:
                         dir_class = 'H'
                         if pass_prefer == 'V':
                             continue
-                        if strict_lengths or not bridge_is_extra:
+                        planned_len = self._get_next_chain_length('H')
+                        if planned_len is None:
+                            planned_len = self._get_next_chain_length('V')
+                            if planned_len is None:
+                                continue
+
+                        # Generate flexible fallback lengths
+                        if strict_lengths or not self._current_bridge_is_extra():
                             try_lengths = [planned_len]
                         else:
-                            try_lengths = self._build_fallback_lengths(planned_len, is_extra=True)
+                            try_lengths = self._build_fallback_lengths(planned_len)
 
                     elif outward in (UP, DN):
                         dir_class = 'V'
                         if pass_prefer == 'H':
                             continue
-                        if planned_len > V_MAX_23 and strict_lengths:
+                        planned_len = self._get_next_chain_length('V')
+                        if planned_len is None:
                             continue
-                        if strict_lengths or not bridge_is_extra:
+
+                        # Generate flexible fallback lengths, capped at V_MAX_23
+                        if strict_lengths or not self._current_bridge_is_extra():
                             try_lengths = [planned_len]
                         else:
-                            try_lengths = [
-                                l for l in self._build_fallback_lengths(planned_len, is_extra=True)
-                                if l <= V_MAX_23
-                            ]
+                            try_lengths = [l for l in self._build_fallback_lengths(planned_len) if l <= V_MAX_23]
                     else:
                         continue
 
@@ -1319,9 +1281,9 @@ class FlexStage:
                         for v_cap in caps_to_try:
                             try:
                                 if dir_class == 'H':
-                                    coords_23, end11, _ = horizontal_chain(axy, outward, m)
+                                    coords_23, end11, last_step = horizontal_chain(axy, outward, m)
                                 else:
-                                    coords_23, end11, _ = vertical_chain(axy, outward, m, v_cap)
+                                    coords_23, end11, last_step = vertical_chain(axy, outward, m, v_cap)
                             except Exception:
                                 continue
 
@@ -1339,7 +1301,7 @@ class FlexStage:
 
                             def candidate_ok(Bcand, tgt_idx, trans, target_root):
                                 if allow_intra and target_root == src_root:
-                                    if not self._same_rigid_cluster_flex_allowed(A.id, Bcand.id, m):
+                                    if self._rigid_cluster_map.get(A.id) == self._rigid_cluster_map.get(Bcand.id):
                                         return False
                                 return self._validate_flex_proposal(
                                     A,
@@ -1354,60 +1316,49 @@ class FlexStage:
                                     current_chain_spec,
                                 )
 
-                            tgt_infos = self._find_targets_for_end(
+                            tgt_info = self._find_target_for_end(
                                 end11, final_vec, src_root,
                                 forbidden_clusters={A.id},
                                 allow_intra=allow_intra,
                                 candidate_ok=candidate_ok,
-                                max_results=min(8, max(4, k // 6 + 2)),
                             )
-                            if not tgt_infos:
+                            if tgt_info is None:
                                 continue
 
-                            for B, tgt_idx, trans, target_root in tgt_infos:
-                                remaining_lengths_after = self._get_remaining_lengths(exclude_idx=bridge_idx)
-                                score = self._score_candidate(
-                                    A, B, src_root, target_root,
-                                    dir_class, m, planned_len or m,
-                                    end11=end11,
-                                    translation=trans,
-                                    coords_23=coords_23,
-                                    chain_spec=current_chain_spec,
-                                    bridge_idx=bridge_idx,
-                                    remaining_lengths_after=remaining_lengths_after,
-                                )
+                            B, tgt_idx, trans, target_root = tgt_info
 
-                                candidates.append({
-                                    'type': 'flex',
-                                    'bridge_idx': bridge_idx,
-                                    'bridge_origin_type': getattr(current_chain_spec, 'origin_type', ''),
-                                    'bridge_is_extra': bridge_is_extra,
-                                    'bridge_n23': int(getattr(current_chain_spec, 'n_23', planned_len)),
-                                    'is_cross_component': src_root != target_root,
-                                    'cluster_a_id': A.id,
-                                    'site_a_idx': si,
-                                    'cluster_b_id': B.id,
-                                    'site_b_idx': tgt_idx,
-                                    'chain_len': m,
-                                    'coords_23': coords_23,
-                                    'end11': end11,
-                                    'translation': trans,
-                                    'direction': dir_class,
-                                    'outward_dir': outward,  # For branch coordinate generation
-                                    'score': score,
-                                })
+                            score = self._score_candidate(
+                                A, B, src_root, target_root,
+                                dir_class, m, planned_len or m,
+                                end11=end11,
+                                translation=trans,
+                                chain_spec=current_chain_spec,
+                            )
 
-                                if len(candidates) >= max(k * 2, 20):
-                                    candidates.sort(key=lambda x: x['score'])
-                                    return candidates[:max(k * 2, 20)]
+                            candidates.append({
+                                'type': 'flex',
+                                'cluster_a_id': A.id,
+                                'site_a_idx': si,
+                                'cluster_b_id': B.id,
+                                'site_b_idx': tgt_idx,
+                                'chain_len': m,
+                                'coords_23': coords_23,
+                                'end11': end11,
+                                'translation': trans,
+                                'direction': dir_class,
+                                'outward_dir': outward,  # For branch coordinate generation
+                                'score': score,
+                            })
+
+            if candidates:
+                break
 
         candidates.sort(key=lambda x: x['score'])
         return candidates[:k]
 
     # ---------- Phase 2: Secondary (intra-component) ----------
 
-    def _get_secondary_candidates(self, k: int = 40, bridge_idx: Optional[int] = None,
-                                  strict_lengths: bool = True) -> List[Dict]:
+    def _get_secondary_candidates(self, k: int = 40, strict_lengths: bool = True) -> List[Dict]:
         """Generate intra-component flex connection candidates via endpoint-pair
         displacement matching.  For every pair of placed clusters, compute
         displacement between free SU-13 sites and look up in _DISP_TABLE to
@@ -1417,27 +1368,25 @@ class FlexStage:
         When strict_lengths=False, allow dynamic length adjustment (fallback mode).
         Length=1 chains are always strict (never adjusted).
         """
-        if bridge_idx is None:
-            bridge_idx = self._bridges_done
-        if bridge_idx < self._bridges_done or bridge_idx >= len(self._bridge_specs):
+        remaining = self._get_remaining_lengths()
+        if not remaining:
             return []
 
-        planned_len = self._bridge_pool[bridge_idx]
-        bridge_is_extra = self._bridge_spec_is_extra(bridge_idx)
-        current_chain_spec = self._bridge_specs[bridge_idx]
-
+        # Build acceptable lengths based on strict mode
         if strict_lengths:
-            all_acceptable = {planned_len}
+            # Only accept exact chain lengths from the remaining bridge pool
+            all_acceptable = set(remaining)
         else:
-            if bridge_is_extra:
-                all_acceptable = set(
-                    self._build_fallback_lengths(planned_len, is_extra=True)
-                )
+            if self._current_bridge_is_extra():
+                all_acceptable = set()
+                for length in remaining:
+                    for l in range(1, min(length + 5, 11)):
+                        all_acceptable.add(l)
             else:
-                all_acceptable = {planned_len}
+                all_acceptable = set(remaining)
 
         # Collect placed clusters with free SU13 sites and their outward directions
-        # Each entry: (cluster, [(site_idx, site, outward_dir), ...])
+        # Each entry: (cluster, [(site_idx, Site, outward_dir), ...])
         placed_with_sites = []
         for c in self.state.graph.clusters:
             if not c.placed:
@@ -1462,9 +1411,8 @@ class FlexStage:
             for bi in range(ai + 1, len(placed_with_sites)):
                 B, b_sites = placed_with_sites[bi]
 
-                if not self._same_rigid_cluster_flex_allowed(
-                    A.id, B.id, max(all_acceptable) if all_acceptable else planned_len
-                ):
+                # Rule 1: Skip pairs within the same rigid cluster
+                if self._rigid_cluster_map.get(A.id) == self._rigid_cluster_map.get(B.id):
                     continue
 
                 for si_a, site_a, outward_a in a_sites:
@@ -1476,28 +1424,20 @@ class FlexStage:
                         self._try_secondary_match(
                             A, si_a, axy, outward_a,
                             B, si_b, bxy, outward_b,
-                            disp_ab, all_acceptable, candidates,
-                            bridge_idx, planned_len, bridge_is_extra, current_chain_spec)
+                            disp_ab, all_acceptable, candidates)
                         # --- direction B → A ---
                         disp_ba = (-disp_ab[0], -disp_ab[1])
                         self._try_secondary_match(
                             B, si_b, bxy, outward_b,
                             A, si_a, axy, outward_a,
-                            disp_ba, all_acceptable, candidates,
-                            bridge_idx, planned_len, bridge_is_extra, current_chain_spec)
-                        if len(candidates) >= max(k * 2, 20):
-                            candidates.sort(key=lambda x: x['score'])
-                            return candidates[:max(k * 2, 20)]
+                            disp_ba, all_acceptable, candidates)
 
         candidates.sort(key=lambda x: x['score'])
         return candidates[:k]
 
     def _try_secondary_match(self, A, si_a, axy, outward_a,
                               B, si_b, bxy, outward_b,
-                              disp, available_lengths, out_list,
-                              bridge_idx: int, planned_len: int,
-                              bridge_is_extra: bool,
-                              current_chain_spec: Optional[ChainSpec]):
+                              disp, available_lengths, out_list):
         """Check displacement table for a valid chain from A-site to B-site,
         enforcing hexagonal direction rules, and append candidate(s) to out_list.
 
@@ -1509,10 +1449,10 @@ class FlexStage:
         matches = _DISP_TABLE.get(disp)
         if not matches:
             return
+        current_chain_spec = self._bridge_specs[self._bridges_done] if self._bridges_done < len(self._bridge_specs) else None
+
         for dir_class, main_dir, m, cap in matches:
             if m not in available_lengths:
-                continue
-            if not self._same_rigid_cluster_flex_allowed(A.id, B.id, m):
                 continue
 
             # Rule 2a: Chain start direction must match source outward
@@ -1526,9 +1466,9 @@ class FlexStage:
             # Build chain geometry and verify endpoint
             try:
                 if dir_class == 'H':
-                    coords_23, end11, _ = horizontal_chain(axy, main_dir, m)
+                    coords_23, end11, last_step = horizontal_chain(axy, main_dir, m)
                 else:
-                    coords_23, end11, _ = vertical_chain(axy, main_dir, m, cap)
+                    coords_23, end11, last_step = vertical_chain(axy, main_dir, m, cap)
             except Exception:
                 continue
 
@@ -1568,28 +1508,22 @@ class FlexStage:
             src_root = self.state._find(A.id)
             tgt_root = self.state._find(B.id)
 
-            remaining_lengths_after = self._get_remaining_lengths(exclude_idx=bridge_idx)
             score = self._score_candidate(
                 A, B, src_root, tgt_root,
                 dir_class, m, m, end11=end11,
                 translation=(0, 0),
-                coords_23=coords_23,
                 chain_spec=current_chain_spec,
-                bridge_idx=bridge_idx,
-                remaining_lengths_after=remaining_lengths_after,
             )
-            if m == planned_len:
-                score -= 20
+            # Prefer exact pool length match; penalize shorter fallbacks
+            remaining = self._get_remaining_lengths()
+            if m in remaining:
+                score -= 20  # exact match in pool
             else:
+                # Fallback: using shorter chain than pool entry
                 score += 12 if m <= 2 else 5
 
             out_list.append({
                 'type': 'flex',
-                'bridge_idx': bridge_idx,
-                'bridge_origin_type': getattr(current_chain_spec, 'origin_type', ''),
-                'bridge_is_extra': bridge_is_extra,
-                'bridge_n23': int(getattr(current_chain_spec, 'n_23', planned_len)),
-                'is_cross_component': src_root != tgt_root,
                 'cluster_a_id': A.id,
                 'site_a_idx': si_a,
                 'cluster_b_id': B.id,
@@ -1602,7 +1536,7 @@ class FlexStage:
                 'outward_dir': outward_a,  # For branch coordinate generation
                 'score': score,
             })
-    
+
     def _compute_center_of_mass(self) -> Tuple[float, float]:
         """Compute center of mass (in 2D cartesian) of all placed clusters."""
         sx, sy, cnt = 0.0, 0.0, 0
@@ -1619,7 +1553,7 @@ class FlexStage:
         if cnt == 0:
             return (0.0, 0.0)
         return (sx / cnt, sy / cnt)
-    
+
     def _get_sector_counts(self, cx: float, cy: float,
                             n_sectors: int = 8) -> List[int]:
         """Count placed clusters in each angular sector around (cx, cy).
@@ -1644,7 +1578,7 @@ class FlexStage:
             sector = min(int(angle / sector_angle), n_sectors - 1)
             counts[sector] += 1
         return counts
-    
+
     def _count_local_density(self, target_pos: Tuple[float, float],
                               radius: float = 5.0) -> int:
         """Count placed vertices within radius of target_pos (2D cartesian)."""
@@ -1658,68 +1592,6 @@ class FlexStage:
                 count += 1
         return count
 
-    @staticmethod
-    def _qr_shape_score_from_points(points: Set[Tuple[int, int]],
-                                    min_ratio: float = 0.9,
-                                    max_ratio: float = 2.3) -> float:
-        if not points:
-            return 1.0
-        qs = [int(q) for q, _ in points]
-        rs = [int(r) for _, r in points]
-        q_span = float(max(qs) - min(qs))
-        r_span = float(max(rs) - min(rs))
-        if q_span < 1e-6 and r_span < 1e-6:
-            return 1.0
-        if r_span < 1e-6:
-            return -1.0
-        ratio = float(q_span / r_span)
-        if min_ratio <= ratio <= max_ratio:
-            mid = math.sqrt(min_ratio * max_ratio)
-            return max(0.0, 1.0 - abs(ratio - mid) / max(mid, 1e-6))
-        if ratio < min_ratio:
-            return -min(1.0, (min_ratio - ratio) / max(min_ratio, 1e-6))
-        return -min(1.0, (ratio - max_ratio) / max(max_ratio, 1e-6))
-
-    def _preview_qr_shape_score(self,
-                                target_cluster: AromaticCluster,
-                                src_root: int,
-                                tgt_root: int,
-                                translation: Tuple[int, int],
-                                coords_23: List[Tuple[int, int]],
-                                end11: Optional[Tuple[int, int]] = None) -> float:
-        points: Set[Tuple[int, int]] = set()
-        points.update((int(q), int(r)) for q, r in self._placed_vertices)
-        points.update((int(q), int(r)) for q, r in self._placed_centers)
-
-        tq, tr = translation
-        if src_root != tgt_root:
-            current_component: Set[Tuple[int, int]] = set()
-            shifted_component: Set[Tuple[int, int]] = set()
-            for c in self.state.graph.clusters:
-                if self.state._find(c.id) != tgt_root:
-                    continue
-                for s in c.sites:
-                    current_component.add((int(s.axial[0]), int(s.axial[1])))
-                    shifted_component.add((int(s.axial[0] + tq), int(s.axial[1] + tr)))
-                for center in c.centers:
-                    current_component.add((int(center[0]), int(center[1])))
-                    shifted_component.add((int(center[0] + tq), int(center[1] + tr)))
-            for cn in self._component_chain_nodes(tgt_root):
-                current_component.add((int(cn.axial[0]), int(cn.axial[1])))
-                shifted_component.add((int(cn.axial[0] + tq), int(cn.axial[1] + tr)))
-            points.difference_update(current_component)
-            points.update(shifted_component)
-        elif not target_cluster.placed and (tq != 0 or tr != 0):
-            for s in target_cluster.sites:
-                points.add((int(s.axial[0] + tq), int(s.axial[1] + tr)))
-            for center in target_cluster.centers:
-                points.add((int(center[0] + tq), int(center[1] + tr)))
-
-        points.update((int(q), int(r)) for q, r in coords_23)
-        if end11 is not None:
-            points.add((int(end11[0]), int(end11[1])))
-        return self._qr_shape_score_from_points(points, 0.9, 2.3)
-    
     def _secondary_match_weight(self, outward_a, outward_b,
                                 axy: Tuple[int, int], bxy: Tuple[int, int],
                                 remaining_lengths: List[int],
@@ -1838,20 +1710,17 @@ class FlexStage:
                           planned_len: int,
                           end11: Optional[Tuple[int, int]] = None,
                           translation: Tuple[int, int] = (0, 0),
-                          coords_23: Optional[List[Tuple[int, int]]] = None,
-                          chain_spec: Optional[ChainSpec] = None,
-                          bridge_idx: Optional[int] = None,
-                          remaining_lengths_after: Optional[List[int]] = None) -> float:
+                          chain_spec: Optional[ChainSpec] = None) -> float:
         """Score a flex candidate (lower is better).
         Includes spatial uniformity terms for balanced growth,
         and lightweight potential energy reward for future loop closures.
         """
         score = 0.0
-        
+
         # 1. Cross-component bonus (strongest signal)
         if src_root != tgt_root:
             score -= 200
-        
+
         # 2. Chain length: prefer planned length
         length_diff = abs(chain_len - planned_len)
         score += length_diff * 10
@@ -1865,35 +1734,32 @@ class FlexStage:
                 score += 18
             elif chain_len >= 4:
                 score -= 10
-        if bridge_idx is not None:
-            score += max(0, bridge_idx - self._bridges_done) * 2
-        
+
         # 3. Direction alternation bonus
         if self._last_direction is not None and direction != self._last_direction:
             score -= 30
-        
+
         # 4. Cluster kind diversity
         if A.kind != B.kind:
             score -= 20
 
-        preview_qr_score = self._preview_qr_shape_score(
-            B, src_root, tgt_root, translation, coords_23=list(coords_23 or []), end11=end11
-        )
-        score -= 35.0 * float(preview_qr_score)
-        
         # --- Lightweight Potential Energy Reward ---
         # If this is a primary action (placing a new cluster B), we want to pull B
         # into a position that makes future secondary (loop-closing) connections easy.
         if src_root != tgt_root and end11 is not None:
-            remaining_lengths = list(remaining_lengths_after or [])
+            remaining_lengths = self._get_remaining_lengths().copy()
             if remaining_lengths:
+                try:
+                    remaining_lengths.remove(chain_len)
+                except ValueError:
+                    remaining_lengths = remaining_lengths[1:]
                 score -= self._future_closure_reward(B, tgt_root, translation, remaining_lengths)
 
         # 5. Spatial uniformity: angular sector balance
         if end11 is not None:
             cx, cy = self._compute_center_of_mass()
             sector_counts = self._get_sector_counts(cx, cy, n_sectors=8)
-            
+
             # Which sector does the target (end11) fall into?
             tx, ty = HexGrid.axial_to_cart(*end11)
             dx, dy = tx - cx, ty - cy
@@ -1902,134 +1768,110 @@ class FlexStage:
                 if angle < 0:
                     angle += 2 * math.pi
                 sector = min(int(angle / (2 * math.pi / 8)), 7)
-                
+
                 avg_count = sum(sector_counts) / max(len(sector_counts), 1)
                 sector_count = sector_counts[sector]
-                
+
                 # Reward placing in under-populated sectors, penalize crowded ones
                 if sector_count < avg_count:
                     score -= 40  # under-populated → good
                 elif sector_count > avg_count * 1.5:
                     score += 35  # over-crowded → bad
-            
+
             # 6. Local density penalty
             local_density = self._count_local_density((tx, ty), radius=4.0)
             score += local_density * 3  # penalize dense areas
-        
+
         # 7. Noise
         score += random.uniform(-15, 15)
-        
-        return score
-    
-    # ==================== Step Execution ====================
-    
-    def _adjust_bridge_pool(self, current_idx: int, target_len: int) -> bool:
-        return self._adjust_bridge_pool_on(
-            self._bridge_pool,
-            self._bridge_specs,
-            self.allocation_result,
-            current_idx,
-            target_len,
-        )
 
-    def _adjust_bridge_pool_on(
-        self,
-        bridge_pool: List[int],
-        bridge_specs: List[ChainSpec],
-        allocation_result,
-        current_idx: int,
-        target_len: int,
-    ) -> bool:
+        return score
+
+    # ==================== Step Execution ====================
+
+    def _adjust_bridge_pool(self, current_idx: int, target_len: int) -> bool:
         """
         Dynamically adjust chain lengths to satisfy target_len for the current bridge chain.
-        
+
         Adjustment order (ensures 23 conservation):
         1. FIRST: Try to balance WITHIN remaining flex chains in the pool
            - Borrow from longer chains (keep min length 1)
            - Give surplus to other flex chains
         2. ONLY IF internal adjustment insufficient: borrow from/give to side chains
-        
+
         Returns True if successful, False otherwise.
         """
-        planned_len = bridge_pool[current_idx]
+        planned_len = self._bridge_pool[current_idx]
         diff = target_len - planned_len  # > 0 means need more 23s, < 0 means surplus
-        cap = MAX_23_PER_CHAIN
-        
-        if target_len < 1 or target_len > cap:
-            return False
 
         if diff == 0:
             return True
 
-        if current_idx < 0 or current_idx >= len(bridge_specs):
+        if not self._bridge_spec_is_extra(current_idx):
             return False
-        if getattr(bridge_specs[current_idx], 'origin_type', None) != 'extra':
-            return False
-        
+
+        original_diff = diff
+
         # =================================================================
         # Phase 1: Balance WITHIN remaining flex chains first
         # =================================================================
         # Sort remaining chains by length (descending for borrowing, ascending for giving)
         remaining_indices = [
-            i for i in range(current_idx + 1, len(bridge_pool))
-            if getattr(bridge_specs[i], 'origin_type', None) == 'extra'
+            i for i in range(current_idx + 1, len(self._bridge_pool))
+            if self._bridge_spec_is_extra(i)
         ]
-        
+
         if diff > 0:
             # Need more 23s - borrow from longer flex chains first
-            remaining_indices.sort(key=lambda i: bridge_pool[i], reverse=True)
+            remaining_indices.sort(key=lambda i: self._bridge_pool[i], reverse=True)
             for i in remaining_indices:
                 if diff == 0:
                     break
                 min_keep = 2
-                if bridge_pool[i] > min_keep:
-                    borrow = min(diff, bridge_pool[i] - min_keep)
-                    bridge_pool[i] -= borrow
+                if self._bridge_pool[i] > min_keep:
+                    borrow = min(diff, self._bridge_pool[i] - min_keep)
+                    self._bridge_pool[i] -= borrow
                     # Update spec
-                    if i < len(bridge_specs):
-                        bridge_specs[i].n_23 = bridge_pool[i]
-                        bridge_specs[i].composition = [11] + [23] * bridge_pool[i] + [11]
+                    if i < len(self._bridge_specs):
+                        self._bridge_specs[i].n_23 = self._bridge_pool[i]
+                        self._bridge_specs[i].composition = [11] + [23] * self._bridge_pool[i] + [11]
                     diff -= borrow
         else:
             # Have surplus 23s - give to other flex chains (spread evenly)
             give_total = -diff
             # Give to chains that are >= 1 (prefer shorter ones first to balance)
-            remaining_indices.sort(key=lambda i: bridge_pool[i])
+            remaining_indices.sort(key=lambda i: self._bridge_pool[i])
             while give_total > 0 and remaining_indices:
                 for i in remaining_indices:
                     if give_total == 0:
                         break
-                    if bridge_pool[i] >= cap:
-                        continue
-                    bridge_pool[i] += 1
-                    if i < len(bridge_specs):
-                        bridge_specs[i].n_23 = bridge_pool[i]
-                        bridge_specs[i].composition = [11] + [23] * bridge_pool[i] + [11]
+                    self._bridge_pool[i] += 1
+                    if i < len(self._bridge_specs):
+                        self._bridge_specs[i].n_23 = self._bridge_pool[i]
+                        self._bridge_specs[i].composition = [11] + [23] * self._bridge_pool[i] + [11]
                     give_total -= 1
-                if all(bridge_pool[i] >= cap for i in remaining_indices):
-                    break
             diff = -give_total  # Remaining surplus
-        
+
         # Update current chain if internal adjustment succeeded
         if diff == 0:
-            bridge_pool[current_idx] = target_len
-            if current_idx < len(bridge_specs):
-                bridge_specs[current_idx].n_23 = target_len
-                bridge_specs[current_idx].composition = [11] + [23] * target_len + [11]
+            self._bridge_pool[current_idx] = target_len
+            if current_idx < len(self._bridge_specs):
+                self._bridge_specs[current_idx].n_23 = target_len
+                self._bridge_specs[current_idx].composition = [11] + [23] * target_len + [11]
             return True
-        
+
         # =================================================================
         # Phase 2: Internal adjustment insufficient - use side chains
         # =================================================================
-        alloc_result = allocation_result
+        alloc_result = self.allocation_result
         if not alloc_result:
             return False
-        
+
         # Only touch 'extra' type side chains
         extra_side_chains = [c for c in alloc_result.side_chains if 'extra' in c.origin_type]
         if not extra_side_chains:
             return False
-        
+
         if diff > 0:
             # Need more 23s - borrow from side chains with most 23s
             extra_side_chains.sort(key=lambda c: c.n_23, reverse=True)
@@ -2051,78 +1893,22 @@ class FlexStage:
                 c.composition = [11] + [23] * c.n_23 + [22]
                 give -= 1
             diff = 0
-        
+
         # Final update
         if diff == 0:
-            bridge_pool[current_idx] = target_len
-            if current_idx < len(bridge_specs):
-                bridge_specs[current_idx].n_23 = target_len
-                bridge_specs[current_idx].composition = [11] + [23] * target_len + [11]
+            self._bridge_pool[current_idx] = target_len
+            if current_idx < len(self._bridge_specs):
+                self._bridge_specs[current_idx].n_23 = target_len
+                self._bridge_specs[current_idx].composition = [11] + [23] * target_len + [11]
             return True
-        
+
         return False
 
-    def _action_resource_feasible(self, action: Dict) -> bool:
-        """Check whether a candidate can satisfy bridge-length conservation at step time."""
-        bridge_idx = int(action.get('bridge_idx', self._bridges_done))
-        target_len = int(action.get('chain_len', 0))
-        if bridge_idx < self._bridges_done or bridge_idx >= len(self._bridge_pool):
-            return False
-
-        pool_copy = list(self._bridge_pool)
-        specs_copy = copy.deepcopy(self._bridge_specs)
-        alloc_copy = copy.deepcopy(self.allocation_result)
-        current_idx = self._bridges_done
-
-        if bridge_idx != current_idx:
-            pool_copy[current_idx], pool_copy[bridge_idx] = pool_copy[bridge_idx], pool_copy[current_idx]
-            specs_copy[current_idx], specs_copy[bridge_idx] = specs_copy[bridge_idx], specs_copy[current_idx]
-
-        planned_len = pool_copy[current_idx]
-        if target_len == planned_len:
-            return True
-
-        return self._adjust_bridge_pool_on(
-            pool_copy,
-            specs_copy,
-            alloc_copy,
-            current_idx,
-            target_len,
-        )
-
-    def _clone_for_action_validation(self) -> 'FlexStage':
-        sim_state = self.state.copy()
-        sim_stage = FlexStage(sim_state, self.original_su_counts, skip_init=True)
-        sim_stage._bridge_pool = list(self._bridge_pool)
-        sim_stage._bridge_specs = copy.deepcopy(self._bridge_specs)
-        sim_stage._n_bridges_total = self._n_bridges_total
-        sim_stage._n_connections_needed = self._n_connections_needed
-        sim_stage._11_consumed = self._11_consumed
-        sim_stage._23_consumed = self._23_consumed
-        sim_stage._bridges_done = self._bridges_done
-        sim_stage._last_direction = self._last_direction
-        sim_stage._connections_made = self._connections_made
-        sim_stage._placed_vertices = set(self._placed_vertices)
-        sim_stage._placed_centers = set(self._placed_centers)
-        sim_stage._flex_used_sites = {
-            cid: set(indices) for cid, indices in self._flex_used_sites.items()
-        }
-        sim_stage._seed_root = self._seed_root
-        sim_stage._rigid_cluster_map = dict(self._rigid_cluster_map)
-        sim_stage._uid_to_cluster = dict(self._uid_to_cluster)
-        sim_stage.allocation_result = copy.deepcopy(self.allocation_result)
-        sim_stage._cluster_map = {c.id: c for c in sim_state.graph.clusters}
-        return sim_stage
-
-    def _action_step_feasible(self, action: Dict) -> bool:
-        sim_stage = self._clone_for_action_validation()
-        return sim_stage.step(copy.deepcopy(action))
-    
     def step(self, action: Dict) -> bool:
         """Execute a flex connection action."""
         if action.get('type') != 'flex':
             return False
-        
+
         cluster_a_id = action['cluster_a_id']
         cluster_b_id = action['cluster_b_id']
         site_a_idx = action['site_a_idx']
@@ -2132,30 +1918,26 @@ class FlexStage:
         translation = action['translation']
         direction = action.get('direction', 'H')
         chain_len = action['chain_len']
-        bridge_idx = int(action.get('bridge_idx', self._bridges_done))
-        if chain_len > MAX_23_PER_CHAIN:
-            return False
-        
+
         cluster_a = self._get_cluster(cluster_a_id)
         cluster_b = self._get_cluster(cluster_b_id)
         if not cluster_a or not cluster_b:
             return False
         target_was_placed = cluster_b.placed
-        
+
         src_root = self.state._find(cluster_a_id)
         tgt_root = self.state._find(cluster_b_id)
         is_cross = src_root != tgt_root
-        
+
         # Guard: must have remaining bridge chains in the pool
+        # If the actual executed chain_len doesn't match the front of the pool,
+        # we adjust the pool dynamically.
         if not self._has_remaining_chains():
             return False
 
-        if not self._activate_bridge_index(bridge_idx):
-            return False
-            
         planned_len = self._bridge_pool[self._bridges_done]
         chain_spec = self._bridge_specs[self._bridges_done] if self._bridges_done < len(self._bridge_specs) else None
-        
+
         if not self._validate_flex_proposal(
             cluster_a,
             site_a_idx,
@@ -2169,7 +1951,7 @@ class FlexStage:
             chain_spec,
         ):
             return False
-                
+
         # 2. 所有碰撞检查通过后，再进行动态调整（转移23号）
         if chain_len != planned_len:
             # We need to borrow/transfer length within flex pool or from side chains
@@ -2177,14 +1959,14 @@ class FlexStage:
             if not success:
                 return False
             chain_spec = self._bridge_specs[self._bridges_done] if self._bridges_done < len(self._bridge_specs) else chain_spec
-                
+
         # 3. 执行平移
         tq, tr = translation
         if is_cross:
             self._translate_component(tgt_root, tq, tr)
         elif not target_was_placed:
             self._translate_single_cluster(cluster_b, tq, tr)
-        
+
         # 4. 更新节点状态
         # Mark source and target sites as 11
         site_a = cluster_a.sites[site_a_idx]
@@ -2193,40 +1975,30 @@ class FlexStage:
         site_a.occupied = True
         site_b.su_type = 11
         site_b.occupied = True
-        
+
         # Track flex-used sites for min_gap enforcement
         self._flex_used_sites.setdefault(cluster_a_id, set()).add(site_a_idx)
         self._flex_used_sites.setdefault(cluster_b_id, set()).add(site_b_idx)
-        
+
         # Get current chain spec for branch info
         branch_info = None
         if chain_spec is not None:
             branch_info = get_branch_info_from_chain_spec(chain_spec)
-        
+
         # Create chain nodes with correct SU types
         chain_nodes = []
         su_types = chain_spec.composition[1:-1] if chain_spec else [23] * len(coords_23)
         for i, p in enumerate(coords_23):
             self._placed_vertices.add(p)
             su = su_types[i] if i < len(su_types) else 23
-            node_meta = {
-                'stage': 'flex',
-                'origin_type': getattr(chain_spec, 'origin_type', None),
-                'bridge_idx': int(bridge_idx),
-                'position_idx': int(i),
-            }
-            if branch_info and int(i) == int(branch_info.get('position_idx', -1)) and int(su) in (24, 25):
-                node_meta['branch_type'] = branch_info.get('branch_type')
-                node_meta['branch_kind'] = 'main'
             node = ChainNode(
                 uid=f"Flex-{site_a.uid}-{site_b.uid}-{i}",
                 su_type=su,
                 axial=p,
                 pos2d=HexGrid.axial_to_cart(*p),
-                meta=node_meta,
             )
             chain_nodes.append(node)
-        
+
         # Add flex edge
         edge = EdgeFlex(
             u=site_a.uid,
@@ -2235,7 +2007,7 @@ class FlexStage:
         )
         self.state.graph.flex.append(edge)
         self.state.graph.chains.extend(chain_nodes)
-        
+
         # Handle 24/25 branch if present
         if branch_info and direction in ('H',) and len(coords_23) > 2:
             # Get the outward direction for branch coordinate generation
@@ -2247,7 +2019,7 @@ class FlexStage:
                     outward, branch_info['branch_type'],
                     branch_info['branch_23_count'] + branch_info['branch_22_count']
                 )
-                
+
                 # Check collision for branch
                 branch_collision = (
                     len(set(branch_coords)) != len(branch_coords)
@@ -2256,11 +2028,11 @@ class FlexStage:
                 if not branch_collision and branch_coords:
                     # Find the 24/25 node in chain_nodes
                     branch_base_node = chain_nodes[branch_info['position_idx']]
-                    
+
                     # Build branch chain nodes
                     branch_nodes = []
                     branch_su_list = [23] * branch_info['branch_23_count'] + [22] * branch_info['branch_22_count']
-                    
+
                     for bi, bc in enumerate(branch_coords):
                         self._placed_vertices.add(bc)
                         su = branch_su_list[bi] if bi < len(branch_su_list) else 22
@@ -2269,21 +2041,14 @@ class FlexStage:
                             su_type=su,
                             axial=bc,
                             pos2d=HexGrid.axial_to_cart(*bc),
-                            meta={
-                                'stage': 'flex_branch',
-                                'origin_type': getattr(chain_spec, 'origin_type', None),
-                                'branch_type': branch_info.get('branch_type'),
-                                'branch_kind': 'tail',
-                                'position_idx': int(bi),
-                            },
                         )
                         branch_nodes.append(bn)
-                    
+
                     if branch_nodes:
                         branch_edge = EdgeBranch(base=branch_base_node.uid, chain=branch_nodes)
                         self.state.graph.branch.append(branch_edge)
                         self.state.graph.chains.extend(branch_nodes)
-                    
+
                     # Handle SU25 extra -22 branch
                     if branch_info.get('extra_22_count', 0) > 0:
                         extra_22_coord = su25_extra_branch_coord(
@@ -2297,17 +2062,11 @@ class FlexStage:
                                 su_type=22,
                                 axial=extra_22_coord,
                                 pos2d=HexGrid.axial_to_cart(*extra_22_coord),
-                                meta={
-                                    'stage': 'flex_branch',
-                                    'origin_type': getattr(chain_spec, 'origin_type', None),
-                                    'branch_type': branch_info.get('branch_type'),
-                                    'branch_kind': 'extra_22',
-                                },
                             )
                             extra_edge = EdgeBranch(base=branch_base_node.uid, chain=[extra_node])
                             self.state.graph.branch.append(extra_edge)
                             self.state.graph.chains.append(extra_node)
-        
+
         # Update connectivity
         cluster_a.connected.add(cluster_b_id)
         cluster_b.connected.add(cluster_a_id)
@@ -2315,62 +2074,57 @@ class FlexStage:
             self.state._union(cluster_a_id, cluster_b_id)
             # Update seed root to follow the union
             self._seed_root = self.state._find(cluster_a_id)
-        
+
         # Consume from allocator chain pool
         self._11_consumed += 2
         self._23_consumed += chain_len
-        
+
         # Update direction tracking: consume from the appropriate pool
         self._last_direction = direction
         self._bridges_done += 1
         self._connections_made += 1
-        
+
         self.state.step_count += 1
-        self.state.stage_step += 1
         return True
-    
+
     # ==================== Done Check ====================
-    
+
     def is_done(self) -> bool:
         """Check if flex stage is complete.
-        Done when all remaining bridge specs have been consumed.
+        Done when: all bridge chains consumed OR all clusters connected.
         """
+        # All bridge chains consumed
         if not self._has_remaining_chains():
             return True
-        
+
         return False
-    
+
     def get_state(self) -> MCTSState:
         return self.state
-    
+
     def get_result(self) -> Dict:
         """Get flex stage result summary."""
         all_roots = set(self.state._find(c.id) for c in self.state.graph.clusters)
-        remaining_flex_23 = int(sum(
-            int(spec.n_23) for spec in self._bridge_specs[self._bridges_done:]
-        )) if self._bridge_specs else 0
-        
+
         su_remaining = dict(self.state.su_counts)
         su_original = dict(self.original_su_counts)
-        
+
         return {
             'stage': 'flex',
             'flex_edges': len(self.state.graph.flex),
             'connections_made': self._connections_made,
             'connections_needed': self._n_connections_needed,
             'bridges_total': self._n_bridges_total,
-            'all_bridges_placed': bool(self._bridges_done >= self._n_bridges_total),
             'all_connected': len(all_roots) <= 1,
             'components': len(all_roots),
             '23_consumed': self._23_consumed,
             '11_consumed': self._11_consumed,
             'bridges_done': self._bridges_done,
-            'remaining_flex_23': int(remaining_flex_23),
             'aspect_ratio': self.state.get_aspect_ratio(),
             'su_original': su_original,
             'su_remaining': su_remaining,
         }
-    
+
     def print_result(self):
         r = self.get_result()
         print(f"\n[FlexStage] Result:")
@@ -2380,12 +2134,12 @@ class FlexStage:
         print(f"  23 consumed: {r['23_consumed']}, 11 consumed: {r['11_consumed']}")
         print(f"  Bridges done: {r['bridges_done']}/{r['bridges_total']}")
         print(f"  Aspect ratio: {r['aspect_ratio']:.2f}")
-        
+
         # Resource table
         su_orig = r.get('su_original', {})
         su_rem = r.get('su_remaining', {})
         all_su = sorted(set(su_orig) | set(su_rem))
-        
+
         print(f"\n  {'SU':>4} | {'Original':>8} | {'Remaining':>9}")
         print(f"  {'-'*4}-+-{'-'*8}-+-{'-'*9}")
         for su in all_su:
@@ -2394,7 +2148,7 @@ class FlexStage:
             if orig == 0 and rem == 0:
                 continue
             print(f"  {su:>4} | {orig:>8} | {rem:>9}")
-        
+
         total_orig = sum(su_orig.values())
         total_rem = sum(su_rem.values())
         print(f"  {'-'*4}-+-{'-'*8}-+-{'-'*9}")

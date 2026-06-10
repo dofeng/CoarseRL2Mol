@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 
 from ...paths import Z_LIBRARY_DIR
 from ..hop1_adjuster import Hop1Adjuster
-from ...shared.inverse_common import HOP1_PORT_COMBINATIONS, _NodeV3, check_external_connection_requirement, validate_connection
+from ...shared.inverse_common import HOP1_PORT_COMBINATIONS, _NodeV3, check_external_connection_requirement, required_external_candidates_for_node, validate_connection
 from .layer1_eval import Layer1NmrEvaluator
 
 
@@ -60,31 +60,7 @@ class Layer1Refiner:
             return None
 
     def _required_external_candidates_for_node(self, node: _NodeV3) -> Optional[List[int]]:
-        su_i = int(getattr(node, 'su_type', -1))
-        if int(su_i) == 19:
-            part = self._node_anchor_partition(node)
-            deg = self._node_target_degree(node)
-            if str(part) == 'thio':
-                return [31]
-            if str(part) == 'ether':
-                if int(deg or 0) == 1:
-                    return [2, 29]
-                return [2, 28, 29]
-            return None
-        try:
-            return [int(x) for x in list({
-                5: [2, 28, 29],
-                6: [0, 27],
-                7: [31],
-                8: [32],
-                9: [0, 1, 2, 3],
-                10: [4, 10],
-                11: [23, 24, 25, 22, 19, 20, 21, 15, 17],
-                20: [0, 27],
-                21: [32],
-            }.get(int(su_i), []) or [])]
-        except Exception:
-            return []
+        return required_external_candidates_for_node(node, missing_su19_as_none=True)
 
     def _required_external_priority(self, center: _NodeV3, required_external: List[int]) -> List[int]:
         center_su = int(getattr(center, 'su_type', -1))

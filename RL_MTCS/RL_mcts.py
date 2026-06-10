@@ -4,7 +4,7 @@ import random
 import copy
 import io
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Tuple, Any
 from contextlib import redirect_stdout
 import torch
 
@@ -13,7 +13,7 @@ from .RL_state import (
     RigidStageEvaluator, FlexStageEvaluator,
     BranchStageEvaluator, SideStageEvaluator,
     SubstitutionStageEvaluator,
-    compute_su_delta, find_overlapping_axials,
+    compute_su_delta,
 )
 from .RL_allocator import FlexAllocator
 from .RL_init import initialize
@@ -42,27 +42,27 @@ class MCTSConfig:
       - NMR: nmr_model_ckpt, target_spectrum, spectrum_csv(alias), nmr_weight
       - misc: max_candidates, max_depth, max_aspect_ratio, seed
     """
-    
+
     # UCT parameters
-    c_puct: float = 1.414              
-    
+    c_puct: float = 1.414
+
     # Search parameters
-    iterations: int = 10             
-    max_depth: int = 20              
-    
+    iterations: int = 10
+    max_depth: int = 20
+
     # Beam search parameters
-    beam_width: int = 1               
-    
+    beam_width: int = 1
+
     # Candidate limits
-    max_candidates: int = 10          
-    
+    max_candidates: int = 10
+
     # Rigid stage parameters
-    max_cluster_size: int = 4         
-    
+    max_cluster_size: int = 4
+
     # Flex stage parameters
-    flex_iterations: int = 5       
-    flex_max_steps: int = 10         
-    flex_beam_width: int = 1          
+    flex_iterations: int = 5
+    flex_max_steps: int = 10
+    flex_beam_width: int = 1
     branch_iterations: int = 30
     side_iterations: int = 30
     subst_iterations: int = 12
@@ -70,20 +70,20 @@ class MCTSConfig:
     side_candidate_k: int = 8
     subst_candidate_k: int = 6
     stage_action_branching: int = 2
-    
+
     # Side stage parameters
-    side_beam_width: int = 1          
+    side_beam_width: int = 1
     subst_n_variants: int = 3
     side_n_seeds: Optional[int] = None   # deprecated alias for subst_n_variants
-    nmr_model_ckpt: Optional[str] = None   
+    nmr_model_ckpt: Optional[str] = None
     target_spectrum: Optional[str] = None
     # Backward-compatible alias used by older notebooks/scripts.
     spectrum_csv: Optional[str] = None
-    nmr_weight: float = 20.0         
-    
+    nmr_weight: float = 20.0
+
     # Geometric constraints
-    max_aspect_ratio: float = 5.0      
-    
+    max_aspect_ratio: float = 5.0
+
     # Random seed
     seed: Optional[int] = None
 
@@ -103,11 +103,11 @@ class BeamCandidate:
     """
     Beam search candidate - represents one possible result.
     """
-    state: MCTSState                 
-    score: float                      
-    action_sequence: List[Dict]        
-    info: Dict = field(default_factory=dict)  
-    
+    state: MCTSState
+    score: float
+    action_sequence: List[Dict]
+    info: Dict = field(default_factory=dict)
+
     def __post_init__(self):
         if self.info is None:
             self.info = {}
@@ -142,35 +142,12 @@ def _normalize_stage_action(obj: Any) -> Any:
             items.append((str(k), _normalize_stage_action(v)))
         return tuple(items)
     if hasattr(obj, 'chain_type') and hasattr(obj, 'composition'):
-        meta = dict(getattr(obj, 'metadata', {}) or {})
-        semantic_keys = (
-            'branch24_profiles',
-            'fixed_c_source_kinds',
-            'fixed_c_path_kinds',
-            'connector_pair',
-            'ring_substitute_types',
-            'tail_sources',
-            'tail_source',
-            'branch_tail_lengths',
-            'side_ring_su',
-            'side_ring_node_types',
-            'side_ring_slot_names',
-            'vertical_ring_su',
-            'base_ring_su',
-            'outer_ring_su',
-        )
-        semantic_fp = tuple(
-            (key, _normalize_stage_action(meta.get(key)))
-            for key in semantic_keys
-            if key in meta
-        )
         return (
             'ChainSpec',
             str(getattr(obj, 'chain_type', '')),
             tuple(int(x) for x in list(getattr(obj, 'composition', []) or [])),
             str(getattr(obj, 'origin_type', '')),
             tuple(int(x) for x in list(getattr(obj, 'source_ids', []) or [])),
-            semantic_fp,
         )
     if hasattr(obj, 'id') and hasattr(obj, 'kind'):
         return ('Cluster', int(getattr(obj, 'id', -1)), str(getattr(obj, 'kind', '')))
@@ -323,7 +300,7 @@ class StageSearchEngine:
 # ==================== MCTS Node ====================
 class MCTSNode:
     """MCTS tree node"""
-    
+
     def __init__(
         self,
         state: MCTSState,
@@ -334,31 +311,31 @@ class MCTSNode:
         self.action = action
         self.parent = parent
         self.children: Dict[str, 'MCTSNode'] = {}
-        
+
         self.visits: int = 0
         self.value: float = 0.0
-        self.prior: float = 0.0  
-        
+        self.prior: float = 0.0
+
         self._untried_actions: Optional[List[Dict]] = None
         self._is_terminal: Optional[bool] = None
-    
+
     def is_fully_expanded(self, stage) -> bool:
         """Check if all actions have been tried"""
         if self._untried_actions is None:
             self._untried_actions = stage.get_candidates()
         return len(self._untried_actions) == 0
-    
+
     def is_terminal(self, stage) -> bool:
         """Check if node is terminal (stage done)"""
         if self._is_terminal is None:
             self._is_terminal = stage.is_done()
         return self._is_terminal
-    
+
     def best_child(self, c_puct: float) -> 'MCTSNode':
         """Select best child using UCT formula"""
         best_score = -float('inf')
         best_child = None
-        
+
         for child in self.children.values():
             if child.visits == 0:
                 score = float('inf')
@@ -366,52 +343,61 @@ class MCTSNode:
                 exploit = child.value / child.visits
                 explore = c_puct * child.prior * math.sqrt(self.visits) / (1 + child.visits)
                 score = exploit + explore
-            
+
             if score > best_score:
                 best_score = score
                 best_child = child
-        
+
         return best_child
-    
+
     def expand(self, stage) -> 'MCTSNode':
         """Expand one untried action. Skip actions whose step() fails.
         Works with any stage type that has step() and get_candidates() methods.
         """
         if self._untried_actions is None:
             self._untried_actions = stage.get_candidates()
-        
+
         # Try actions until one succeeds or all exhausted
         while self._untried_actions:
             action = self._untried_actions.pop(0)
-            
+
             new_state = self.state.copy()
             # Reconstruct stage from the new state (supports RigidStage)
             new_stage = RigidStage(new_state, skip_init=True,
                                    max_cluster_size=getattr(stage, 'max_cluster_size', 4))
-            
+
             if not new_stage.step(action):
                 continue  # Step failed — skip this action
-            
+
             child = MCTSNode(
                 state=new_state,
                 action=action,
                 parent=self,
             )
-            
+
             raw = action.get('score', 0)
             child.prior = 1.0 / (1.0 + math.exp(raw / 100.0))
-            
+
             key = _action_key(action)
             self.children[key] = child
             return child
-        
+
         return self  # All actions exhausted
-    
+
+    def best_action(self) -> Optional[Dict]:
+        """Get best action based on visit counts"""
+        if not self.children:
+            return None
+
+        best_child = max(self.children.values(), key=lambda c: c.visits)
+        return best_child.action
+
+
 def _action_key(action: Dict) -> str:
     """Generate unique key for action"""
     if action is None:
         return "root"
-    
+
     atype = action.get('type', 'unknown')
     if atype == 'rigid':
         return f"rigid_{action['cluster_a_id']}_{action['cluster_b_id']}_{action['site_a_idx']}_{action['site_b_idx']}"
@@ -427,13 +413,13 @@ class RewardCalculator:
     """Calculate rewards for MCTS"""
     def __init__(self, config: MCTSConfig):
         self.config = config
-    
+
     def score_rigid(self, _action: Dict, state: MCTSState) -> float:
         """
         Reward for a rigid connection action.
         """
         score = 0.0
-        
+
         # SU 10 consumption reward (0 to 0.4)
         remaining = state.su_counts.get(10, 0)
         total_sites = sum(1 for c in state.graph.clusters
@@ -442,7 +428,7 @@ class RewardCalculator:
         if total_10 > 0:
             consumed_frac = 1.0 - remaining / max(total_10, 1)
             score += 0.4 * consumed_frac
-        
+
         # Coverage reward: fraction of RCs with rigid edges (0 to 0.4)
         stage = RigidStage(state, skip_init=True)
         rc_map = stage.get_rc_map()
@@ -450,25 +436,25 @@ class RewardCalculator:
             n_with_edges = sum(1 for r in rc_map
                                if stage._rc_has_rigid_edges(r, rc_map))
             score += 0.4 * (n_with_edges / len(rc_map))
-        
+
         # Compactness (0 to 0.2)
         aspect = state.get_aspect_ratio()
         if aspect <= self.config.max_aspect_ratio:
             score += 0.2 * (1.0 / (1.0 + abs(aspect - 1.0) * 0.3))
-        
+
         return score
-    
+
     def score_terminal(self, state: MCTSState) -> float:
         """Calculate terminal state reward (higher = better)."""
         score = 0.0
-        
+
         # Primary: SU 10 consumption (0 to 0.5)
         remaining = state.su_counts.get(10, 0)
         if remaining < 2:
             score += 0.5  # All consumed
         else:
             score += 0.3 * (1.0 - remaining / 50.0)
-        
+
         # Coverage bonus (0 to 0.3)
         stage = RigidStage(state, skip_init=True)
         rc_map = stage.get_rc_map()
@@ -477,19 +463,19 @@ class RewardCalculator:
                                if stage._rc_has_rigid_edges(r, rc_map))
             coverage = n_with_edges / len(rc_map)
             score += 0.3 * coverage
-        
+
         # Giant RC penalty (0 to -0.2)
         if rc_map:
             sizes = [stage._rc_ring_count(r, rc_map) for r in rc_map]
             max_size = max(sizes) if sizes else 0
             if max_size > self.config.max_cluster_size * 2:
                 score -= 0.2
-        
+
         # Aspect ratio (0 to 0.1)
         aspect = state.get_aspect_ratio()
         if aspect <= self.config.max_aspect_ratio:
             score += 0.1
-        
+
         return score
 
 # ==================== Beam MCTS Search ====================
@@ -497,15 +483,15 @@ class BeamMCTSSearch:
     """
     Beam MCTS search algorithm.
     """
-    
+
     def __init__(self, config: MCTSConfig = None, nodes_csv: Optional[str] = None):
         self.config = config or DEFAULT_CONFIG
         self.nodes_csv = nodes_csv
         self.reward_calc = RewardCalculator(self.config)
-        
+
         if self.config.seed is not None:
             random.seed(self.config.seed)
-    
+
     def search(self, initial_state: MCTSState) -> List[BeamCandidate]:
         """
         Run Beam MCTS search for rigid stage.
@@ -516,51 +502,51 @@ class BeamMCTSSearch:
             action_sequence=[],
             info={'stage': 'rigid'}
         )]
-        
+
         max_steps = 80  # Safety limit (typical: ~15 connections for 30 SU 10)
-        
+
         for step in range(1, max_steps + 1):
             new_candidates = []
             any_active = False
-            
+
             for cand in candidates:
                 if cand.info.get('completed'):
                     new_candidates.append(cand)
                     continue
-                
+
                 # Check if this candidate is done
                 stage = RigidStage(
                     cand.state,
                     skip_init=True,
                     max_cluster_size=self.config.max_cluster_size,
                 )
-                
+
                 if stage.is_done():
                     cand.info['completed'] = True
                     new_candidates.append(cand)
                     continue
-                
+
                 any_active = True
-                
+
                 # Run MCTS iterations to explore connection choices
                 root = MCTSNode(cand.state.copy())
                 for _ in range(self.config.iterations):
                     self._iterate(root)
-                
+
                 # Extract top-K diverse actions from MCTS tree
                 top_actions = self._get_diverse_actions(
                     root, k=self.config.beam_width)
-                
+
                 if not top_actions:
                     # No valid actions found — try direct greedy fallback
                     direct_cands = stage.get_candidates(k=5)
                     top_actions = direct_cands[:self.config.beam_width]
-                
+
                 if not top_actions:
                     cand.info['completed'] = True
                     new_candidates.append(cand)
                     continue
-                
+
                 # Expand beam: try each action
                 expanded = False
                 for action in top_actions:
@@ -570,7 +556,7 @@ class BeamMCTSSearch:
                         skip_init=True,
                         max_cluster_size=self.config.max_cluster_size,
                     )
-                    
+
                     if new_stage.step(action):
                         reward = self.reward_calc.score_rigid(action, new_state)
                         new_candidates.append(BeamCandidate(
@@ -580,7 +566,7 @@ class BeamMCTSSearch:
                             info={'stage': 'rigid', 'step': step},
                         ))
                         expanded = True
-                
+
                 if not expanded:
                     # MCTS actions all failed — try broader direct fallback
                     direct_all = stage.get_candidates(k=20)
@@ -601,22 +587,22 @@ class BeamMCTSSearch:
                             ))
                             expanded = True
                             break  # One success is enough for fallback
-                
+
                 if not expanded:
                     # Truly stuck — mark completed
                     cand.info['completed'] = True
                     new_candidates.append(cand)
-            
+
             if not any_active or not new_candidates:
                 break
-            
+
             # Prune beam
             candidates = self._select_diverse_candidates(new_candidates)
-            
+
             # Check if all done
             if all(c.info.get('completed', False) for c in candidates):
                 break
-            
+
             # Progress log
             if step % 3 == 0:
                 active = sum(1 for c in candidates
@@ -627,18 +613,19 @@ class BeamMCTSSearch:
                             if su10_range else "all done")
                 print(f"[BeamMCTS] Step {step}: {len(candidates)} cands "
                       f"({active} active) {su10_str}")
-        
+
         # Final scoring: reward coverage and SU 10 exhaustion
         for cand in candidates:
             stage = RigidStage(cand.state, skip_init=True)
+            rc_map = stage.get_rc_map()
             dist = stage.get_rigid_cluster_distribution()
             cand.info['rigid_clusters'] = dist
             cand.info['num_rigid_clusters'] = len(dist)
-            
+
             # Coverage bonus: more RCs with edges is better
             n_with = sum(1 for d in dist if d.get('has_rigid_edges'))
             cand.score += n_with * 0.15
-            
+
             # SU 10 exhaustion bonus
             remaining = cand.state.su_counts.get(10, 0)
             if remaining < 2:
@@ -649,10 +636,10 @@ class BeamMCTSSearch:
             flex_potential = self._estimate_flex_potential(cand.state)
             cand.info['flex_potential'] = flex_potential
             cand.score += flex_potential
-        
+
         candidates.sort(key=lambda c: -c.score)
         return candidates[:self.config.beam_width]
-    
+
     def _iterate(self, root: MCTSNode):
         """Run one MCTS iteration (Select → Expand → Simulate → Backprop)"""
         node = root
@@ -661,7 +648,7 @@ class BeamMCTSSearch:
             skip_init=True,
             max_cluster_size=self.config.max_cluster_size,
         )
-        
+
         # Selection — descend tree via UCT
         while not node.is_terminal(temp_stage) and node.is_fully_expanded(temp_stage):
             child = node.best_child(self.config.c_puct)
@@ -672,22 +659,22 @@ class BeamMCTSSearch:
                 node.state.copy(), skip_init=True,
                 max_cluster_size=self.config.max_cluster_size,
             )
-        
+
         # Expansion — try to add a new child
         if not node.is_terminal(temp_stage):
             expanded = node.expand(temp_stage)
             if expanded is not node:  # expand succeeded
                 node = expanded
-        
+
         # Simulation (rollout)
         value = self._simulate(node.state.copy())
-        
+
         # Backpropagation
         while node is not None:
             node.visits += 1
             node.value += value
             node = node.parent
-    
+
     def _simulate(self, state: MCTSState, depth: int = 0) -> float:
         """Simulate random rollout — keep connecting until done or max depth."""
         stage = RigidStage(
@@ -695,14 +682,14 @@ class BeamMCTSSearch:
             skip_init=True,
             max_cluster_size=self.config.max_cluster_size,
         )
-        
+
         if depth >= self.config.max_depth or stage.is_done():
             return self.reward_calc.score_terminal(state)
-        
+
         candidates = stage.get_candidates(k=10)
         if not candidates:
             return self.reward_calc.score_terminal(state)
-        
+
         # Weighted random selection (lower score = better → higher weight)
         max_score = max(c.get('score', 0) for c in candidates)
         weights = [max_score - c.get('score', 0) + 1 for c in candidates]
@@ -712,7 +699,7 @@ class BeamMCTSSearch:
             action = random.choices(candidates, weights=weights, k=1)[0]
         else:
             action = random.choice(candidates)
-        
+
         if not stage.step(action):
             # Step failed — try next best
             for alt in candidates[1:5]:
@@ -720,40 +707,40 @@ class BeamMCTSSearch:
                     break
             else:
                 return self.reward_calc.score_terminal(state)
-        
+
         return self._simulate(state, depth + 1)
-    
+
     def _get_diverse_actions(self, root: MCTSNode, k: int) -> List[Dict]:
         """Get top-K diverse actions from MCTS tree."""
         if not root.children:
             return []
-        
+
         # Sort children by visit count
         sorted_children = sorted(
-            root.children.values(), 
-            key=lambda n: n.visits, 
+            root.children.values(),
+            key=lambda n: n.visits,
             reverse=True
         )
-        
+
         actions = []
         seen_clusters = set()
-        
+
         for child in sorted_children:
             if len(actions) >= k:
                 break
-            
+
             action = child.action
             if action is None:
                 continue
-            
+
             # Diversity: prefer actions involving different clusters
             cluster_pair = (action.get('cluster_a_id'), action.get('cluster_b_id'))
             if cluster_pair not in seen_clusters:
                 actions.append(action)
                 seen_clusters.add(cluster_pair)
-        
+
         return actions
-    
+
     def _select_diverse_candidates(self, candidates: List[BeamCandidate]) -> List[BeamCandidate]:
         """Select diverse candidates based on score and structural uniqueness.
 
@@ -761,30 +748,30 @@ class BeamMCTSSearch:
         """
         if not candidates:
             return []
-        
+
         # Sort by score (best first)
         candidates.sort(key=lambda c: -c.score)
-        
+
         # Structural deduplication: use (n_rigid_edges, n_components, last_action_key) as fingerprint
         selected = []
         seen_fingerprints = set()
-        
+
         for cand in candidates:
             n_rigid = len(cand.state.graph.rigid)
             n_comp = cand.state.get_component_count()
             last_key = _action_key(cand.action_sequence[-1]) if cand.action_sequence else ''
             fp = (n_rigid, n_comp, last_key)
-            
+
             if fp not in seen_fingerprints:
                 selected.append(cand)
                 seen_fingerprints.add(fp)
             elif len(selected) < self.config.beam_width:
                 # Allow duplicates if we don't have enough diversity
                 selected.append(cand)
-            
+
             if len(selected) >= self.config.beam_width:
                 break
-        
+
         return selected
 
     def _estimate_flex_potential(self, state: MCTSState) -> float:
@@ -844,7 +831,7 @@ class MCTSRunner:
     """
     MCTS runner for rigid stage.
     """
-    
+
     def __init__(
         self,
         nodes_csv: str,
@@ -853,7 +840,7 @@ class MCTSRunner:
     ):
         """
         Initialize MCTS runner.
-        
+
         Args:
             nodes_csv: Path to nodes CSV file
             spectrum_csv: Optional path to NMR spectrum CSV
@@ -871,10 +858,10 @@ class MCTSRunner:
             self.config.spectrum_csv = spectrum_csv
         # Initialize from RL_init (generates aromatic clusters)
         self.init_data = initialize(nodes_csv, spectrum_csv)
-        
+
         # Create initial state with clusters from initialization
         self.initial_state = self._create_initial_state()
-    
+
     def _create_initial_state(self) -> MCTSState:
         """Create initial MCTS state from initialization data"""
         return MCTSState(
@@ -884,17 +871,17 @@ class MCTSRunner:
             stage='rigid',
             step_count=0,
         )
-    
+
     def run_rigid_stage(self, output_dir: Optional[str] = None) -> Dict:
         """
         Run Beam MCTS search for rigid connection stage.
         """
         print(f"\n[RigidStage] Starting (beam={self.config.beam_width}, iter={self.config.iterations})")
-        
+
         # Run Beam MCTS search
         mcts = BeamMCTSSearch(self.config, nodes_csv=self.nodes_csv)
         beam_candidates = mcts.search(self.initial_state.copy())
-        
+
         # Place ALL remaining clusters and get summaries
         summaries = []
         for i, cand in enumerate(beam_candidates):
@@ -916,24 +903,24 @@ class MCTSRunner:
             summary['score'] = cand.score
             summary['greedy_rigid_added'] = int(greedy_added)
             summaries.append(summary)
-        
+
         result = {
             'beam_candidates': beam_candidates,
             'best_candidate': beam_candidates[0] if beam_candidates else None,
             'summaries': summaries,
         }
-        
+
         # Print concise results
         print(f"[RigidStage] Complete: {len(beam_candidates)} candidates")
         for i, (cand, summary) in enumerate(zip(beam_candidates, summaries)):
             num_rc = summary.get('rigid_cluster_count', 0)
             print(f"  #{i+1}: {summary['rigid_edges']} edges, {summary['total_clusters']} clusters, "
                   f"{num_rc} rigid-clusters, score={cand.score:.2f}, remain10={summary.get('remaining_su10', 0)}")
-        
+
         # Visualize results if output_dir provided
         if output_dir:
             self._visualize_beam_results(beam_candidates, summaries, output_dir)
-        
+
         return result
 
     def run_flex_stage(self, rigid_result: Dict, output_dir: Optional[str] = None) -> Dict:
@@ -943,7 +930,7 @@ class MCTSRunner:
         FlexAllocator; search only chooses valid placement sites/actions.
         """
         print(f"\n[FlexStage] Starting (beam={self.config.flex_beam_width}, iter={self._stage_iterations('flex')})")
-        
+
         rigid_candidates = rigid_result.get('beam_candidates', [])
         if not rigid_candidates:
             print("[FlexStage] No rigid candidates to build on!")
@@ -980,7 +967,7 @@ class MCTSRunner:
             flex_candidates.sort(key=self._flex_result_rank_key, reverse=True)
 
         flex_candidates = flex_candidates[:self.config.flex_beam_width]
-        
+
         # Print concise summary
         print(f"[FlexStage] Complete: {len(flex_candidates)} candidates")
         for i, cand in enumerate(flex_candidates):
@@ -992,17 +979,17 @@ class MCTSRunner:
                          f"(side={redist.get('to_side',0)}, branch={redist.get('to_branch',0)})")
             print(f"  #{i+1}: {fr.get('connections_made',0)}/{fr.get('bridges_total',0)} bridges, "
                   f"connected={fr.get('all_connected',False)}, score={cand.score:.2f}{extra}")
-        
+
         result = {
             'beam_candidates': flex_candidates,
             'best_candidate': flex_candidates[0] if flex_candidates else None,
             'summaries': [c.info.get('flex_result', {}) for c in flex_candidates],
         }
-        
+
         # Visualize
         if output_dir:
             self._visualize_flex_results(flex_candidates, result['summaries'], output_dir)
-        
+
         return result
 
     def _flex_result_rank_key(self, cand: BeamCandidate) -> tuple:
@@ -1083,7 +1070,7 @@ class MCTSRunner:
         Run side stage using the unified stage-search engine.
         """
         print(f"\n[SideStage] Starting (beam={self.config.side_beam_width}, iter={self._stage_iterations('side')})")
-        
+
         branch_candidates = branch_result.get('beam_candidates', [])
         if not branch_candidates:
             print("[SideStage] No branch candidates to build on!")
@@ -1093,7 +1080,7 @@ class MCTSRunner:
         if not side_candidates:
             print("[SideStage] No candidates produced!")
             return result
-        
+
         print(f"[SideStage] Complete: {len(side_candidates)} candidates")
         for i, c in enumerate(side_candidates[:3]):
             sr = c.info.get('side_result', {})
@@ -1102,13 +1089,14 @@ class MCTSRunner:
 
         if output_dir:
             self._visualize_side_results(side_candidates, result.get('summaries', []), output_dir)
-            
+
         return result
-    
+
     def _visualize_beam_results(self, candidates: List[BeamCandidate], summaries: List[Dict], output_dir: str):
         """Visualize all beam candidates."""
+        import os
         os.makedirs(output_dir, exist_ok=True)
-        
+
         try:
             save_rigid_beam_results(candidates, summaries, output_dir)
             print(f"\n[MCTSRunner] Rigid visualization saved to {output_dir}")
@@ -1116,11 +1104,12 @@ class MCTSRunner:
             print(f"[MCTSRunner] Warning: Failed to visualize rigid: {e}")
             import traceback
             traceback.print_exc()
-    
+
     def _visualize_flex_results(self, candidates: List[BeamCandidate], summaries: List[Dict], output_dir: str):
         """Visualize flex stage beam candidates."""
+        import os
         os.makedirs(output_dir, exist_ok=True)
-        
+
         try:
             save_flex_beam_results(candidates, summaries, output_dir)
             print(f"\n[MCTSRunner] Flex visualization saved to {output_dir}")
@@ -1131,8 +1120,9 @@ class MCTSRunner:
 
     def _visualize_side_results(self, candidates: List[BeamCandidate], summaries: List[Dict], output_dir: str):
         """Visualize side stage beam candidates."""
+        import os
         os.makedirs(output_dir, exist_ok=True)
-        
+
         try:
             save_side_beam_results(candidates, summaries, output_dir)
             print(f"\n[MCTSRunner] Side visualization saved to {output_dir}")
@@ -1301,8 +1291,7 @@ class MCTSRunner:
         if stage_name == 'flex':
             if allocator is None:
                 allocator = FlexAllocator(self.nodes_csv)
-                with redirect_stdout(io.StringIO()):
-                    allocator.allocate()
+                allocator.allocate()
             alloc_result = copy.deepcopy(allocation_result) if allocation_result is not None else allocator._result
             return FlexStage(state, self.init_data['su_counts'], allocation_result=alloc_result), allocator
         if stage_name == 'branch':
@@ -1470,11 +1459,12 @@ class MCTSRunner:
         """
         Run the complete pipeline: rigid -> flex -> branch -> side -> substitution.
         Handles intermediate state passing and returns the final side stage result.
-        
+
         Args:
-            output_dir: Base directory for outputs. Subdirectories (rigid, flex, branch, side, subst) 
+            output_dir: Base directory for outputs. Subdirectories (rigid, flex, branch, side, subst)
                        will be created automatically.
         """
+        import os
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
             rigid_dir = os.path.join(output_dir, 'rigid')
@@ -1484,29 +1474,29 @@ class MCTSRunner:
             subst_dir = os.path.join(output_dir, 'subst')
         else:
             rigid_dir = flex_dir = branch_dir = side_dir = subst_dir = None
-            
+
         print(f"\n{'='*60}")
         print("MCTS Pipeline: rigid -> flex -> branch -> side -> substitution")
         print(f"{'='*60}")
-        
+
         # 1. Rigid Stage
         rigid_result = self.run_rigid_stage(output_dir=rigid_dir)
         if not rigid_result.get('beam_candidates'):
             print("[Pipeline] FAILED at rigid stage")
             return {'status': 'failed', 'stage': 'rigid'}
-            
+
         # 2. Flex Stage
         flex_result = self.run_flex_stage(rigid_result, output_dir=flex_dir)
         if not flex_result.get('beam_candidates'):
             print("[Pipeline] FAILED at flex stage")
             return {'status': 'failed', 'stage': 'flex'}
-            
+
         # 3. Branch Stage
         branch_result = self.run_branch_stage(flex_result, output_dir=branch_dir)
         if not branch_result.get('beam_candidates'):
             print("[Pipeline] FAILED at branch stage")
             return {'status': 'failed', 'stage': 'branch'}
-            
+
         # 4. Side Stage
         side_result = self.run_side_stage(branch_result, output_dir=side_dir)
         if not side_result.get('beam_candidates'):
@@ -1515,11 +1505,11 @@ class MCTSRunner:
 
         # 5. Substitution Stage (Carbonyls)
         subst_result = self.run_substitution_stage(side_result, output_dir=subst_dir)
-   
+
         self._print_final_summary(subst_result)
-        
+
         return subst_result
-        
+
     def run_substitution_stage(self, side_result: Dict, output_dir: Optional[str] = None) -> Dict:
         """
         Run substitution stage using the unified stage-search engine.
@@ -1550,6 +1540,7 @@ class MCTSRunner:
         }
 
         if output_dir:
+            import os
             os.makedirs(output_dir, exist_ok=True)
             try:
                 from .visualization import save_subst_beam_results
@@ -1564,35 +1555,32 @@ class MCTSRunner:
         print(f"\n{'='*60}")
         print("PIPELINE COMPLETE - Final Summary")
         print(f"{'='*60}")
-        
+
         best = final_result.get('best_candidate')
         if not best:
             print("  No valid candidates produced.")
             return
-            
+
         state = best.state
-        
+
         n_clusters = len(state.graph.clusters)
         n_placed = sum(1 for c in state.graph.clusters if c.placed)
         n_components = len(set(state._find(c.id) for c in state.graph.clusters if c.placed))
-        
+
         # Edge counts
         n_rigid = len(state.graph.rigid)
         n_flex = len(state.graph.flex)
         n_branch = len(state.graph.branch)
         n_side = len(state.graph.side)
-        
+
         # Chain node counts
         n_chain_nodes = len(state.graph.chains)
-        
+
         print(f"\n[Structure]")
         print(f"  Clusters: {n_placed}/{n_clusters} placed, {n_components} component(s)")
         print(f"  Edges: rigid={n_rigid}, flex={n_flex}, branch_total={n_branch}, side={n_side}")
         print(f"  Chain nodes: {n_chain_nodes}")
-        overlaps = find_overlapping_axials(state.graph)
-        if overlaps:
-            print(f"  Warning: overlapping axial positions detected: {len(overlaps)}")
-        
+
         # SU distribution
         su_dist = state.get_su_distribution()
         print(f"\n[SU Distribution]")
@@ -1614,21 +1602,21 @@ class MCTSRunner:
         print(f"  Actual: {', '.join(actual_parts) if actual_parts else 'none'}")
         print(f"  Target: {', '.join(target_parts) if target_parts else 'none'}")
         print(f"  Delta (actual-target): {', '.join(delta_parts) if delta_parts else 'none'}")
-        
+
         # Score breakdown
         print(f"\n[Scoring]")
         print(f"  Final score: {best.score:.2f}")
-        
+
         # NMR info if available
         nmr_score = best.info.get('nmr_score', 0)
         if nmr_score > 0:
             print(f"  NMR cosine similarity: {nmr_score:.4f}")
-        
+
         # Stage results
         fr = best.info.get('flex_result', {})
         br = best.info.get('branch_result', {})
         sr = best.info.get('side_result', {})
-        
+
         print(f"\n[Stage Results]")
         if fr:
             print(f"  Flex: {fr.get('connections_made', 0)}/{fr.get('bridges_total', 0)} bridges, "
@@ -1655,7 +1643,7 @@ class MCTSRunner:
             else:
                 print("  Final delta vs target: none")
             print(f"  Match target: {subst_complete}, L1 delta={subst_l1_delta}")
-        
+
         print(f"{'='*60}")
 
     def run_branch_stage(self, flex_result: Dict, output_dir: Optional[str] = None) -> Dict:
@@ -1690,6 +1678,7 @@ class MCTSRunner:
 
     def _visualize_branch_results(self, candidates: List[BeamCandidate], summaries: List[Dict], output_dir: str):
         """Visualize branch stage beam candidates."""
+        import os
         os.makedirs(output_dir, exist_ok=True)
 
         try:
@@ -1704,7 +1693,7 @@ class MCTSRunner:
 def main():
     """Main entry point — runs rigid + flex + branch + side stages"""
     import argparse
-    
+
     parser = argparse.ArgumentParser(description='MCTS Rigid + Flex + Branch + Side Stage Search')
     parser.add_argument('--nodes', type=str, required=True, help='Path to nodes CSV')
     parser.add_argument('--spectrum', type=str, default=None, help='Path to spectrum CSV')
@@ -1723,9 +1712,9 @@ def main():
     parser.add_argument('--stage', type=str, default='all',
                         choices=['rigid', 'flex', 'branch', 'side', 'subst', 'both', 'all'],
                         help='Which stage(s) to run (both=rigid+flex, all=rigid+flex+branch+side+subst)')
-    
+
     args = parser.parse_args()
-    
+
     config = MCTSConfig(
         iterations=args.iterations,
         flex_iterations=args.flex_iterations,
@@ -1739,31 +1728,31 @@ def main():
         nmr_weight=args.nmr_weight,
         seed=args.seed,
     )
-    
+
     runner = MCTSRunner(args.nodes, args.spectrum, config)
-    
+
     rigid_dir = os.path.join(args.output, 'rigid')
     flex_dir = os.path.join(args.output, 'flex')
     branch_dir = os.path.join(args.output, 'branch')
     side_dir = os.path.join(args.output, 'side')
     subst_dir = os.path.join(args.output, 'subst')
-    
+
     rigid_result = None
     flex_result = None
     branch_result = None
     side_result = None
     subst_result = None
-    
+
     # Pipeline: rigid → flex → branch → side → subst
     if args.stage in ('rigid', 'flex', 'branch', 'side', 'subst', 'both', 'all'):
         rigid_result = runner.run_rigid_stage(output_dir=rigid_dir)
-    
+
     if args.stage in ('flex', 'branch', 'side', 'subst', 'both', 'all') and rigid_result:
         flex_result = runner.run_flex_stage(rigid_result, output_dir=flex_dir)
-    
+
     if args.stage in ('branch', 'side', 'subst', 'all') and flex_result:
         branch_result = runner.run_branch_stage(flex_result, output_dir=branch_dir)
-    
+
     if args.stage in ('side', 'subst', 'all') and branch_result:
         side_result = runner.run_side_stage(branch_result, output_dir=side_dir)
 
@@ -1771,7 +1760,7 @@ def main():
         subst_result = runner.run_substitution_stage(side_result, output_dir=subst_dir)
     else:
         subst_result = None
-    
+
     print(f"\nResults saved to {args.output}")
     return {'rigid': rigid_result, 'flex': flex_result, 'branch': branch_result, 'side': side_result, 'subst': subst_result}
 

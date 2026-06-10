@@ -1,0 +1,10 @@
+{
+  "input": "/home/dofengqi/Graphnmr/demo/molecule_big.pt",
+  "output_dir": "/home/dofengqi/Graphnmr/demo/molecule_big_3hop_subgraphs",
+  "k": 3,
+  "num_centers": 25,
+  "num_templates": 24,
+  "drawn_plots": 8,
+  "carbon_only": true,
+  "layout_mode": "coarse_graph_hex"
+}

@@ -1,18 +1,15 @@
 from typing import List, Dict, Optional, Tuple, Set
+import copy
 import random
 import math
 
 from .RL_state import (
-    MCTSState, ChainNode, EdgeSide, EdgeBranch, HexGrid,
-    RU, RD, LU, LD, UP, DN,
-    qr_shape_score_from_points, spatial_uniformity_score_from_points,
+    MCTSState, ChainNode, EdgeSide, EdgeBranch, HexGrid, HEX_VERTEX_OFFSETS,
+    RU, RD, LU, LD, UP, DN, OPPOSITE,
 )
-from .RL_allocator import FlexAllocator, ChainSpec, chain_spec_counts_match
+from .RL_allocator import FlexAllocator, ChainSpec
 from .stage_branch import (
-    build_chain_node_meta,
-    horizontal_branch_coords,
-    su25_extra_branch_coord,
-    get_branch_info_from_chain_spec,
+    horizontal_branch_coords, su25_extra_branch_coord, get_branch_info_from_chain_spec
 )
 
 # ---------------------------------------------------------------
@@ -56,7 +53,7 @@ def mcts_state_to_raw_mol(
     """
     try:
         import torch
-        from model.shared.coarse_graph import NUM_SU_TYPES, PPM_AXIS
+        from model.coarse_graph import NUM_SU_TYPES, PPM_AXIS
     except ImportError:
         return {}
 
@@ -316,16 +313,6 @@ class SideStage:
         r = self._repulsion_score(site_pos) * w['repulsion']
         return p + r
 
-    def _preview_qr_shape_score(self, coords: List[Tuple[int, int]]) -> float:
-        points = set((int(q), int(r)) for q, r in self._placed_vertices)
-        points.update((int(q), int(r)) for q, r in coords)
-        return qr_shape_score_from_points(points, 0.9, 2.3)
-
-    def _preview_uniformity_score(self, coords: List[Tuple[int, int]], bins: int = 3) -> float:
-        points = set((int(q), int(r)) for q, r in self._placed_vertices)
-        points.update((int(q), int(r)) for q, r in coords)
-        return spatial_uniformity_score_from_points(points, bins)
-
     # ------------------------------------------------------------------
     # Outward direction
     # ------------------------------------------------------------------
@@ -365,11 +352,10 @@ class SideStage:
         chain_spec = self._get_active_chain()
         if not chain_spec:
             return []
-        su_types = list(chain_spec.composition[1:])
 
         # Check if chain has 24/25 branch
         branch_info = get_branch_info_from_chain_spec(chain_spec)
-        
+
         if branch_info:
             branch_nodes_count = branch_info['branch_23_count'] + branch_info['branch_22_count']
             branch_nodes_count += branch_info.get('extra_22_count', 0)
@@ -379,7 +365,7 @@ class SideStage:
 
         if main_chain_len <= 0:
             return []
-            
+
         # Helper logic for geometry heuristics
         is_long = main_chain_len >= 5  # e.g. >= 3 CH2 groups
         is_short = main_chain_len <= 1 # e.g. 11-22
@@ -397,19 +383,19 @@ class SideStage:
 
         if not available_ports:
             return []
-        
+
         # 3. Generate paths and score with spatial heuristic
         cx, cy = self._global_centroid
-        
+
         for cluster, site_idx, site, outward_dir in available_ports:
             # Only horizontal directions support branches (chain length > 2)
             if branch_info and outward_dir in (UP, DN) and main_chain_len > 2:
                 continue  # Skip vertical directions for chains with branches
-                
+
             paths = self._generate_linear_paths(
                 site.axial, outward_dir, main_chain_len
             )
-            
+
             # Compute outward alignment (dot product with vector from center)
             px, py = site.pos2d
             vx, vy = px - cx, py - cy
@@ -417,11 +403,11 @@ class SideStage:
             dx, dy = HexGrid.axial_to_cart(*outward_dir)
             dir_len = math.hypot(dx, dy)
             outward_alignment = (vx * dx + vy * dy) / (dist_to_center * dir_len + 1e-9)
-            
+
             for path in paths:
                 if self._check_collision(path):
                     continue
-                
+
                 # Generate branch coordinates if chain has 24/25
                 branch_coords = []
                 extra_22_coord = None
@@ -434,7 +420,7 @@ class SideStage:
                     # Check branch collision
                     if self._check_collision(branch_coords):
                         continue
-                    
+
                     # For SU25, get extra -22 branch coordinate
                     if branch_info.get('extra_22_count', 0) > 0:
                         extra_22_coord = su25_extra_branch_coord(
@@ -443,41 +429,26 @@ class SideStage:
                         )
                         if extra_22_coord and extra_22_coord in self._placed_vertices:
                             continue
-                
-                candidate_sus = [int(su_types[idx] if idx < len(su_types) else 23) for idx in range(len(path))]
-                if branch_info:
-                    candidate_sus += [23] * int(branch_info.get('branch_23_count', 0))
-                    candidate_sus += [22] * int(branch_info.get('branch_22_count', 0))
-                    if branch_info.get('su_type') == 25 and extra_22_coord is not None:
-                        candidate_sus += [22]
-                if not chain_spec_counts_match(chain_spec, candidate_sus):
-                    continue
 
                 spatial = self._spatial_score(site.pos2d)
-                
+
                 # Base candidate score is spatial
                 cand_score = spatial
-                
+
                 # Bonus for pointing outwards away from the global centroid
                 cand_score += outward_alignment * 1.5
 
-                preview_coords = list(path) + list(branch_coords)
-                if extra_22_coord is not None:
-                    preview_coords.append(extra_22_coord)
-                cand_score += 3.0 * self._preview_qr_shape_score(preview_coords)
-                cand_score += 2.0 * self._preview_uniformity_score(preview_coords)
-                
                 # Penalty for long chains going vertically
                 is_vertical = outward_dir in (UP, DN)
                 if is_long and is_vertical:
                     cand_score -= 2.0
-                    
+
                 # Strict penalty for ultra-short chains pointing inwards or not being peripheral enough
                 if is_short:
                     if outward_alignment < 0.2:
                         cand_score -= 4.0  # huge penalty for pointing inwards/tangentially
                     cand_score += self._peripheral_score(site.pos2d) * 5.0  # extra weight for peripheral
-                
+
                 candidates.append({
                     'type': 'side_placement',
                     'cluster_id': cluster.id,
@@ -555,16 +526,6 @@ class SideStage:
         branch_info = action.get('branch_info')
         branch_coords = action.get('branch_coords', [])
         extra_22_coord = action.get('extra_22_coord')
-        su_types = list(chain_spec.composition[1:])
-
-        expected_sus = [int(su_types[idx] if idx < len(su_types) else 23) for idx in range(len(path))]
-        if branch_info:
-            expected_sus += [23] * int(branch_info.get('branch_23_count', 0))
-            expected_sus += [22] * int(branch_info.get('branch_22_count', 0))
-            if branch_info.get('su_type') == 25 and extra_22_coord is not None:
-                expected_sus += [22]
-        if not chain_spec_counts_match(chain_spec, expected_sus):
-            return False
 
         cluster = self.state.graph.clusters[cluster_id]
         site = cluster.sites[site_idx]
@@ -578,34 +539,20 @@ class SideStage:
 
         # Build ChainNode objects for main chain
         chain_nodes: List[ChainNode] = []
+        su_types = chain_spec.composition[1:]
+
+        # Get the length of main chain body (excluding branch parts from composition)
+        main_chain_len = len(path)
 
         for idx, p in enumerate(path):
             self._placed_vertices.add(p)
             pos2d = HexGrid.axial_to_cart(*p)
             su = su_types[idx] if idx < len(su_types) else 23
-            node_meta = {
-                'stage': 'side',
-                'origin_type': getattr(chain_spec, 'origin_type', None),
-                'chain_type': getattr(chain_spec, 'chain_type', None),
-                'position_idx': int(idx),
-            }
-            if branch_info and int(idx) == int(branch_info.get('position_idx', -1)) and int(su) in (24, 25):
-                node_meta = build_chain_node_meta(
-                    chain_spec,
-                    stage='side',
-                    branch_type=branch_info.get('branch_type'),
-                    branch_kind='main',
-                    position_idx=idx,
-                    profile_role='branch_single',
-                    tail_source=branch_info.get('tail_source'),
-                    su_type=su,
-                )
             node = ChainNode(
                 uid=f"Side-{cluster.id}-{site_idx}-{idx}",
                 su_type=su,
                 axial=p,
                 pos2d=pos2d,
-                meta=node_meta,
             )
             chain_nodes.append(node)
 
@@ -613,17 +560,22 @@ class SideStage:
         self.state.graph.side.append(edge)
         self.state.graph.chains.extend(chain_nodes)
 
-        branch_base_node = chain_nodes[branch_info['position_idx']] if branch_info else None
-
         # Create branch nodes if chain has 24/25
         if branch_info and branch_coords:
+            # Find the 24/25 node in chain_nodes
+            branch_base_node = chain_nodes[branch_info['position_idx']]
+
             # Build branch chain nodes
             branch_nodes: List[ChainNode] = []
             branch_23_count = branch_info['branch_23_count']
             branch_22_count = branch_info['branch_22_count']
-            
-            branch_su_list = [23] * branch_23_count + [22] * branch_22_count
-            
+
+            # For SU25, main branch has 1×23 + 1×22 (the extra 22 is separate)
+            if branch_info['su_type'] == 25:
+                branch_su_list = [23] * 1 + [22] * 1  # -23-22 for main branch
+            else:
+                branch_su_list = [23] * branch_23_count + [22] * branch_22_count
+
             for bi, bc in enumerate(branch_coords):
                 self._placed_vertices.add(bc)
                 pos2d = HexGrid.axial_to_cart(*bc)
@@ -633,49 +585,29 @@ class SideStage:
                     su_type=su,
                     axial=bc,
                     pos2d=pos2d,
-                    meta=build_chain_node_meta(
-                        chain_spec,
-                        stage='side_branch',
-                        branch_type=branch_info.get('branch_type'),
-                        branch_kind='tail',
-                        position_idx=bi,
-                        profile_role='branch_single',
-                        tail_source=branch_info.get('tail_source'),
-                        su_type=su,
-                    ),
                 )
                 branch_nodes.append(bn)
-            
+
             if branch_nodes:
                 branch_edge = EdgeBranch(base=branch_base_node.uid, chain=branch_nodes)
                 self.state.graph.branch.append(branch_edge)
                 self.state.graph.chains.extend(branch_nodes)
-            
+
             # Handle SU25 extra -22 branch
-        if branch_info and branch_base_node is not None and branch_info.get('su_type') == 25 and extra_22_coord:
-            self._placed_vertices.add(extra_22_coord)
-            pos2d = HexGrid.axial_to_cart(*extra_22_coord)
-            extra_node = ChainNode(
-                uid=f"Side-{cluster.id}-{site_idx}-br-extra",
-                su_type=22,
-                axial=extra_22_coord,
-                pos2d=pos2d,
-                meta=build_chain_node_meta(
-                    chain_spec,
-                    stage='side_branch',
-                    branch_type=branch_info.get('branch_type'),
-                    branch_kind='extra_22',
-                    profile_role='branch_single',
-                    tail_source=branch_info.get('tail_source'),
+            if branch_info['su_type'] == 25 and extra_22_coord:
+                self._placed_vertices.add(extra_22_coord)
+                pos2d = HexGrid.axial_to_cart(*extra_22_coord)
+                extra_node = ChainNode(
+                    uid=f"Side-{cluster.id}-{site_idx}-br-extra",
                     su_type=22,
-                ),
-            )
-            extra_edge = EdgeBranch(base=branch_base_node.uid, chain=[extra_node])
-            self.state.graph.branch.append(extra_edge)
-            self.state.graph.chains.append(extra_node)
+                    axial=extra_22_coord,
+                    pos2d=pos2d,
+                )
+                extra_edge = EdgeBranch(base=branch_base_node.uid, chain=[extra_node])
+                self.state.graph.branch.append(extra_edge)
+                self.state.graph.chains.append(extra_node)
 
         self._sides_done += 1
-        self.state.stage_step += 1
         return True
 
     # ------------------------------------------------------------------
@@ -718,4 +650,4 @@ class SideStage:
             'side_edges': len(self.state.graph.side),
             'side_chain_nodes': sum(len(e.chain) for e in self.state.graph.side),
         }
-        
+

@@ -7,6 +7,7 @@ from typing import Tuple, Dict, Any, Optional
 
 from ...shared.inverse_common import (
     SPECIAL_DEGREE_PRIORS,
+    TERMINAL_PORT_BASE_SU,
     allocate_special_degree_counts,
     get_effective_hist_element_vector,
     estimate_region_carbon_budgets,
@@ -332,7 +333,7 @@ class Layer0Estimator:
     @staticmethod
     def _nonterminal_fixed_anchor_slot_capacity(H_cpu: torch.Tensor,
                                                 anchor_types: Tuple[int, ...]) -> int:
-        terminal_like = {1, 22, 28, 32}
+        terminal_like = set(int(x) for x in TERMINAL_PORT_BASE_SU)
         slot_multipliers = {27: 2, 29: 2, 31: 2}
         total = 0
         for su_i in tuple(int(x) for x in anchor_types):
@@ -581,7 +582,7 @@ class Layer0Estimator:
         """
         Enforce the same SU10 parity rule expected later by Layer1/Layer4.
 
-        SU10's external anchor port is satisfied by SU4 or SU10. When SU10 is odd,
+        SU10's external anchor port is satisfied by SU10. When SU10 is odd,
         Layer1 can leave one SU10 unmatched. We therefore convert one SU10 to SU11
         at Layer0 closure time so the histogram enters Layer1 in a feasible state.
         This conversion is element-neutral.
