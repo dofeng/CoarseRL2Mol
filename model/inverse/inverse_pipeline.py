@@ -473,12 +473,13 @@ class InversePipelineV3:
             return nodes_local, bool(layer1_accept_ok_local), list(layer1_errors_local or [])
 
         layer1_cfg_warm = dict(layer1_runtime_cfg)
+        preserve_seed_node_ids = bool(layer1_cfg_warm.get('preserve_seed_node_ids', False))
         nodes, layer1_ok, layer1_errors = _run_layer1_once(
             seed_local=seed_nodes,
             cfg_local=layer1_cfg_warm,
             attempt_name='warm-start' if seed_nodes is not None else 'cold-start',
         )
-        if (not bool(layer1_ok)) and seed_nodes is not None:
+        if (not bool(layer1_ok)) and seed_nodes is not None and not bool(preserve_seed_node_ids):
             print("  [Layer1 fallback] warm-start 拓扑不可行，改用 cold-start 重建候选图")
             layer1_cfg_cold = dict(layer1_runtime_cfg)
             try:
@@ -490,6 +491,8 @@ class InversePipelineV3:
                 cfg_local=layer1_cfg_cold,
                 attempt_name='cold-start',
             )
+        elif (not bool(layer1_ok)) and seed_nodes is not None and bool(preserve_seed_node_ids):
+            print("  [Layer1 fallback] 已保留Block-C节点ID，warm-start失败时不切换到cold-start")
         if not bool(layer1_ok):
             raise RuntimeError(f"layer1_graph_invalid: {_first_layer1_error(list(layer1_errors or []))}")
         nodes = self.layer2_assign(
@@ -796,6 +799,108 @@ class InversePipelineV3:
                     print(f"[{tag}] 回退: 直方图/固定连接预校验未通过，reason={reason}")
                     return False, reason
                 return True, 'ok'
+
+            def _allocation_score(nodes_local: List[_NodeV3]) -> Tuple[Tuple[int, ...], Dict[str, Any]]:
+                meta_before_eval = copy.deepcopy(getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {})
+                try:
+                    self._sync_fixed_partition_meta_from_nodes(nodes_local)
+                    diag = self.layer4_adjuster._evaluate_full_allocation_balance(
+                        nodes_local,
+                        flex_ratio=0.80,
+                        flex_lower_extra=1,
+                        S_target=S_target,
+                        E_target=E_target,
+                    )
+                except Exception as e:
+                    diag = {
+                        'ok': False,
+                        'reason': f'allocation_eval_exception:{e}',
+                        'abstract_gap_by_kind': {},
+                        'remaining': {},
+                    }
+                finally:
+                    try:
+                        self._set_fixed_partition_meta(meta_before_eval)
+                    except Exception:
+                        pass
+                abstract_gap = sum(
+                    max(0, int(v))
+                    for v in dict(diag.get('abstract_gap_by_kind', {}) or {}).values()
+                )
+                flex_gap = max(
+                    0,
+                    int(diag.get('flexible_bridge_min', 0)) - int(diag.get('flexible_bridge_count', 0)),
+                )
+                req_total = (
+                    max(0, int(diag.get('required_extra_11', 0))) +
+                    max(0, int(diag.get('required_extra_22', 0))) +
+                    max(0, int(diag.get('required_extra_23', 0))) +
+                    max(0, int(diag.get('required_extra_24', 0))) +
+                    max(0, int(diag.get('required_extra_25', 0)))
+                )
+                remaining = dict(diag.get('remaining', {}) or {})
+                score = (
+                    0 if bool(diag.get('ok', False)) else 1,
+                    max(0, int(diag.get('pending_closure_total_count', diag.get('pending_closure_count', 0)))),
+                    int(abstract_gap),
+                    max(0, int(diag.get('unallocated_branch', 0))),
+                    max(0, int(diag.get('unallocated_bridge', 0))),
+                    int(req_total),
+                    max(0, int(diag.get('required_extra_23', 0))),
+                    max(0, int(diag.get('required_extra_24', 0))),
+                    max(0, int(diag.get('required_extra_22', 0))),
+                    max(0, int(diag.get('required_extra_11', 0))),
+                    max(0, int(diag.get('required_extra_25', 0))),
+                    int(flex_gap),
+                    max(0, int(remaining.get('24', 0))),
+                    max(0, int(remaining.get('25', 0))),
+                )
+                return tuple(int(x) for x in score), dict(diag)
+
+            def _candidate_allocation_not_worse(base_nodes: List[_NodeV3],
+                                                cand_nodes: List[_NodeV3],
+                                                tag: str) -> Tuple[bool, str]:
+                base_score, _base_diag = _allocation_score(base_nodes)
+                cand_score, cand_diag = _allocation_score(cand_nodes)
+                if tuple(cand_score) <= tuple(base_score):
+                    return True, 'allocation_not_worse'
+                return (
+                    False,
+                    (
+                        f"allocation_worse base={tuple(base_score)} "
+                        f"candidate={tuple(cand_score)} "
+                        f"reason={cand_diag.get('reason', 'unknown')}"
+                    ),
+                )
+
+            def _candidate_branch_allocation_ok(cand_nodes: List[_NodeV3],
+                                                tag: str) -> Tuple[bool, str]:
+                """Branch stage only owns 24/25 branch allocation, not full bridge/flex closure."""
+                try:
+                    from RL_MTCS.RL_allocator import FlexAllocator
+                    branch_diag = FlexAllocator(nodes=cand_nodes).evaluate_su24_branches(
+                        cand_nodes,
+                        quiet=True,
+                    )
+                except Exception as e:
+                    return False, f'branch_eval_exception:{e}'
+
+                abstract_gap_total = int(branch_diag.get('abstract_gap_total', 0) or 0)
+                unallocated_branch = int(branch_diag.get('unallocated_branch', 0) or 0)
+                req11 = int(branch_diag.get('req_11', 0) or 0)
+                req22 = int(branch_diag.get('req_22', 0) or 0)
+                req23 = int(branch_diag.get('req_23', 0) or 0)
+                if bool(branch_diag.get('ok', False)):
+                    return True, 'branch_allocation_ok'
+                return (
+                    False,
+                    (
+                        f"branch_allocation_failed reason={branch_diag.get('shortage_type', 'unknown')} "
+                        f"unallocated_branch={unallocated_branch} "
+                        f"req11={req11} req22={req22} req23={req23} "
+                        f"abstract_gap={abstract_gap_total}"
+                    ),
+                )
 
             # Stage A: compare with current best layer2 R2, reject if not improved.
             block_a_cfg = dict(default_stage_configs['block_a'])
@@ -1143,66 +1248,111 @@ class InversePipelineV3:
                     break
 
                 branch_cfg = dict(default_stage_configs['block_c_branch'])
+                try:
+                    branch_unit_steps = max(1, int(branch_cfg.pop('max_steps', 1)))
+                except Exception:
+                    branch_unit_steps = 1
                 nodes_branch_base = copy.deepcopy(current_nodes)
                 H_branch_base = current_H.detach().clone()
                 diff_branch_base = copy.deepcopy(current_diff)
-                meta_branch_base = copy.deepcopy(getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {})
-                try:
-                    H_branch, _moves_branch, _meta_branch = self.layer4_adjuster.adjust_by_stage(
-                        H=H_branch_base,
-                        ppm=diff_branch_base.get('ppm'),
-                        diff=diff_branch_base.get('diff'),
-                        E_target=E_target,
-                        S_target=S_target,
-                        stage='block_c_branch',
-                        nodes=nodes_branch_base,
-                        **branch_cfg,
-                    )
-                    branch_changed = bool(_moves_branch) or not bool(
-                        torch.equal(H_branch.detach().cpu(), H_branch_base.detach().cpu())
-                    )
-                    if branch_changed:
-                        block_c_group_attempted = True
-                    if not bool((_meta_branch or {}).get('ok', False)) and bool(branch_changed):
-                        reason = str((_meta_branch or {}).get('final_scenario', 'branch_not_ok'))
-                        print(
-                            f"[Block C:branch #{block_c_iter + 1}] 强制继续: "
-                            f"branch meta pending ({reason})，转入 Layer1-2 重建"
-                        )
-                    elif not bool((_meta_branch or {}).get('ok', False)):
-                        reason = str((_meta_branch or {}).get('final_scenario', 'branch_not_ok'))
-                        print(
-                            f"[Block C:branch #{block_c_iter + 1}] 跳过重建: "
-                            f"branch候选未产生可采纳H ({reason})"
-                        )
-                    if branch_changed:
+                base_branch_score, base_branch_diag = _allocation_score(nodes_branch_base)
+                if bool(base_branch_diag.get('ok', False)):
+                    print(f"[Block C:branch #{block_c_iter + 1}] 已闭合，停止branch闭环")
+                else:
+                    last_branch_rebuild: Dict[str, Any] = {}
+
+                    def _rebuild_branch_after_unit_step(seed_nodes_local: List[_NodeV3],
+                                                        H_seed_local: torch.Tensor,
+                                                        step_index: int,
+                                                        step_meta: Dict[str, Any]) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], float]:
                         layer1_branch_cfg = dict(layer1_runtime_cfg)
                         try:
                             base_variant = int(layer1_branch_cfg.get('build_variant', 0))
                         except Exception:
                             base_variant = 0
-                        layer1_branch_cfg['build_variant'] = int(base_variant) + 307 * int(block_c_iter)
+                        layer1_branch_cfg['preserve_seed_node_ids'] = True
+                        layer1_branch_cfg['build_variant'] = (
+                            int(base_variant) +
+                            307 * int(block_c_iter) +
+                            int(step_index)
+                        )
                         cand_nodes, cand_H, cand_diff, branch_r2 = self._run_layer12_cycle(
-                            H_seed=H_branch.detach().clone(),
+                            H_seed=H_seed_local.detach().clone(),
                             S_target=S_target,
                             E_target=E_target,
                             eval_lib_path=eval_lib_path,
                             layer1_runtime_cfg=layer1_branch_cfg,
                             layer2_runtime_cfg=layer2_runtime_cfg,
-                            seed_nodes=None,
+                            seed_nodes=copy.deepcopy(seed_nodes_local),
                             eval_nmr=False,
                         )
-                        cand_valid, _cand_reason = _candidate_structurally_valid(cand_nodes, cand_H, tag='BlockC:branch')
-                        if cand_valid:
-                            current_nodes = cand_nodes
-                            current_H = cand_H.detach().clone()
-                            current_diff = copy.deepcopy(cand_diff)
+                        cand_valid, cand_reason = _candidate_structurally_valid(
+                            cand_nodes,
+                            cand_H,
+                            tag=f'BlockC:branch #{block_c_iter + 1}.{int(step_index)}',
+                        )
+                        if not bool(cand_valid):
+                            raise RuntimeError(f'candidate_invalid:{cand_reason}')
+                        last_branch_rebuild.clear()
+                        last_branch_rebuild.update({
+                            'nodes': copy.deepcopy(cand_nodes),
+                            'H': cand_H.detach().clone(),
+                            'diff': copy.deepcopy(cand_diff),
+                            'r2': float(branch_r2),
+                        })
+                        cand_diff = dict(cand_diff or {})
+                        cand_diff['mode'] = 'layer1_layer2'
+                        return cand_nodes, cand_H, cand_diff, float(branch_r2)
+
+                    try:
+                        branch_loop_nodes = copy.deepcopy(nodes_branch_base)
+                        H_branch, _moves_branch, _meta_branch = self.layer4_adjuster.run_block_c_topology_closure_loop(
+                            nodes=branch_loop_nodes,
+                            E_target=E_target,
+                            S_target=S_target,
+                            ppm=diff_branch_base.get('ppm'),
+                            diff=diff_branch_base.get('diff'),
+                            max_steps=int(branch_unit_steps),
+                            phase='branch',
+                            rebuild_callback=_rebuild_branch_after_unit_step,
+                            keep_unimproved=True,
+                            stop_on_cycle=True,
+                            show_log=True,
+                        )
+                        branch_effective_progress = bool(
+                            _moves_branch
+                            and (
+                                bool((_meta_branch or {}).get('ok', False))
+                                or bool((_meta_branch or {}).get('partial_progress', False))
+                                or tuple((_meta_branch or {}).get('final_penalty', ()) or ()) < tuple((_meta_branch or {}).get('initial_penalty', ()) or ())
+                            )
+                        )
+                        if branch_effective_progress:
+                            block_c_group_attempted = True
+                            block_c_group_progress = True
+                            current_nodes = copy.deepcopy(branch_loop_nodes)
+                            current_H = H_branch.detach().clone()
+                            if last_branch_rebuild:
+                                current_diff = copy.deepcopy(last_branch_rebuild.get('diff', current_diff))
+                                branch_r2 = float(last_branch_rebuild.get('r2', cycle_best_layer2_r2))
+                            else:
+                                current_diff = self._compute_difference_spectrum_from_nodes_mu(
+                                    nodes=current_nodes,
+                                    S_target=S_target,
+                                    hwhm=float(layer2_eval_hwhm),
+                                )
+                                branch_r2 = float(current_diff.get('r2', cycle_best_layer2_r2))
                             cycle_pre_layer3_r2 = float(branch_r2)
                             accepted_layer2_r2 = float(branch_r2)
                             historical_best_layer2_r2 = max(float(historical_best_layer2_r2), float(branch_r2))
                             cycle_best_layer2_r2 = float(branch_r2)
-                            block_c_group_progress = True
-                            print(f"[Block C:branch #{block_c_iter + 1}] 直接采纳: layer2_r2={branch_r2:.4f}")
+                            print(
+                                f"[Block C:branch #{block_c_iter + 1}] 闭环完成: "
+                                f"moves={len(_moves_branch)} stop={_meta_branch.get('stop_reason', '')} "
+                                f"penalty {tuple(_meta_branch.get('initial_penalty', ()) or ())} -> "
+                                f"{tuple(_meta_branch.get('final_penalty', ()) or ())} "
+                                f"layer2_r2={branch_r2:.4f}"
+                            )
                             self._print_histogram_and_elements(
                                 current_H,
                                 E_target,
@@ -1214,22 +1364,15 @@ class InversePipelineV3:
                                 label=f'Block C:branch #{block_c_iter + 1} Accepted',
                             )
                         else:
-                            try:
-                                self._set_fixed_partition_meta(meta_branch_base)
-                            except Exception:
-                                pass
-                            print(f"[Block C:branch #{block_c_iter + 1}] 回退: 结构/约束校验未通过")
-                    else:
-                        try:
-                            self._set_fixed_partition_meta(meta_branch_base)
-                        except Exception:
-                            pass
-                except Exception as e:
-                    try:
-                        self._set_fixed_partition_meta(meta_branch_base)
-                    except Exception:
-                        pass
-                    print(f"[Block C:branch #{block_c_iter + 1}] 失败，保持当前状态: {e}")
+                            print(
+                                f"[Block C:branch #{block_c_iter + 1}] 无单步候选，停止branch闭环: "
+                                f"{_meta_branch.get('stop_reason', 'branch_no_move')}"
+                            )
+                    except Exception as e:
+                        print(
+                            f"[Block C:branch #{block_c_iter + 1}] "
+                            f"失败，保持当前状态: {e}"
+                        )
 
                 extra_cfg = dict(default_stage_configs['block_c_extra'])
                 nodes_extra_base = copy.deepcopy(current_nodes)
@@ -1276,7 +1419,12 @@ class InversePipelineV3:
                             eval_nmr=False,
                         )
                         cand_valid, _cand_reason = _candidate_structurally_valid(cand_nodes, cand_H, tag='BlockC:extra')
-                        if cand_valid:
+                        alloc_valid, alloc_reason = (
+                            _candidate_allocation_not_worse(nodes_extra_base, cand_nodes, tag='BlockC:extra')
+                            if bool(cand_valid) else
+                            (False, _cand_reason)
+                        )
+                        if cand_valid and alloc_valid:
                             current_nodes = cand_nodes
                             current_H = cand_H.detach().clone()
                             current_diff = copy.deepcopy(cand_diff)
@@ -1301,7 +1449,10 @@ class InversePipelineV3:
                                 self._set_fixed_partition_meta(meta_extra_base)
                             except Exception:
                                 pass
-                            print(f"[Block C:extra #{block_c_iter + 1}] 回退: 结构/约束校验未通过")
+                            print(
+                                f"[Block C:extra #{block_c_iter + 1}] 回退: "
+                                f"{alloc_reason if cand_valid else '结构/约束校验未通过'}"
+                            )
                     else:
                         try:
                             self._set_fixed_partition_meta(meta_extra_base)
@@ -1478,7 +1629,8 @@ class InversePipelineV3:
                       enable_hop1_adjust: bool = True,
                       hop1_adjust_iterations: int = 4,
                       hop1_neg_threshold: float = -0.7,
-                      hop1_pos_threshold: float = 0.7) -> List[_NodeV3]:
+                      hop1_pos_threshold: float = 0.7,
+                      preserve_seed_node_ids: bool = False) -> List[_NodeV3]:
         """委托给Layer1Assigner执行1-hop分配"""
         eval_lib_path = eval_lib_path or self.default_template_lib_path
         return self.layer1_assigner.layer1_assign(
@@ -1497,6 +1649,7 @@ class InversePipelineV3:
             hop1_adjust_iterations=hop1_adjust_iterations,
             hop1_neg_threshold=hop1_neg_threshold,
             hop1_pos_threshold=hop1_pos_threshold,
+            preserve_seed_node_ids=preserve_seed_node_ids,
         )
     
     def _compute_layer1_difference_spectrum(self, nodes: List[_NodeV3], S_target: torch.Tensor,
@@ -1862,7 +2015,91 @@ class InversePipelineV3:
                 })
         pd.DataFrame(ledger_rows).to_csv(final_dir / 'final_resource_ledger.csv', index=False)
 
+        su_ledger_rows = []
+        su_names = [name for name, _ in SU_DEFS]
+        for su_key, vals in dict((alloc_diag or {}).get('source_su_ledger', {}) or {}).items():
+            try:
+                su_i = int(su_key)
+            except Exception:
+                continue
+            vals = dict(vals or {})
+            su_ledger_rows.append({
+                'su_type': int(su_i),
+                'su_name': su_names[su_i] if 0 <= su_i < len(su_names) else str(su_i),
+                'total': int(vals.get('total', 0)),
+                'allocated': int(vals.get('consumed', 0)),
+                'remaining': int(vals.get('remaining', 0)),
+            })
+        pd.DataFrame(
+            su_ledger_rows,
+            columns=['su_type', 'su_name', 'total', 'allocated', 'remaining'],
+        ).sort_values(['su_type'], kind='stable').to_csv(
+            final_dir / 'final_allocation_su_ledger.csv',
+            index=False,
+        )
+
+        section_rows = []
+        for section, vals in dict((alloc_diag or {}).get('section_consumed_by_kind', {}) or {}).items():
+            vals = dict(vals or {})
+            for kind in ('11', '22', '23', '24', '25'):
+                section_rows.append({
+                    'section': str(section),
+                    'resource_kind': str(kind),
+                    'effective_consumed': int(vals.get(kind, 0)),
+                    'trace_consumed': int(
+                        ((alloc_diag or {}).get('trace_consumed_by_section_kind', {}) or {})
+                        .get(section, {})
+                        .get(kind, 0)
+                    ),
+                })
+        pd.DataFrame(
+            section_rows,
+            columns=['section', 'resource_kind', 'effective_consumed', 'trace_consumed'],
+        ).to_csv(final_dir / 'final_allocation_resource_by_section.csv', index=False)
+
+        origin_rows = []
+        for origin, vals in dict((alloc_diag or {}).get('origin_consumed_by_kind', {}) or {}).items():
+            vals = dict(vals or {})
+            for kind in ('11', '22', '23', '24', '25'):
+                origin_rows.append({
+                    'origin_type': str(origin),
+                    'resource_kind': str(kind),
+                    'effective_consumed': int(vals.get(kind, 0)),
+                    'trace_consumed': int(
+                        ((alloc_diag or {}).get('trace_consumed_by_origin_kind', {}) or {})
+                        .get(origin, {})
+                        .get(kind, 0)
+                    ),
+                })
+        pd.DataFrame(
+            origin_rows,
+            columns=['origin_type', 'resource_kind', 'effective_consumed', 'trace_consumed'],
+        ).to_csv(final_dir / 'final_allocation_resource_by_origin.csv', index=False)
+
+        abstract_gap_rows = []
+        for kind, value in dict((alloc_diag or {}).get('abstract_gap_by_kind', {}) or {}).items():
+            abstract_gap_rows.append({
+                'resource_kind': str(kind),
+                'abstract_gap': int(value),
+            })
+        pd.DataFrame(
+            abstract_gap_rows,
+            columns=['resource_kind', 'abstract_gap'],
+        ).to_csv(final_dir / 'final_allocation_abstract_gap.csv', index=False)
+
+        abstract_audit_rows = []
+        for kind, value in dict((alloc_diag or {}).get('abstract_gap_audit_by_kind', {}) or {}).items():
+            abstract_audit_rows.append({
+                'resource_kind': str(kind),
+                'abstract_gap_audit': int(value),
+            })
+        pd.DataFrame(
+            abstract_audit_rows,
+            columns=['resource_kind', 'abstract_gap_audit'],
+        ).to_csv(final_dir / 'final_allocation_abstract_gap_audit.csv', index=False)
+
         detail_rows = []
+        fragment_rows = []
         try:
             alloc_details = dict((alloc_diag or {}).get('allocation_details', {}) or {})
             for section_name, row_key in (
@@ -1876,10 +2113,43 @@ class InversePipelineV3:
                         'index': int(idx),
                         'detail': str(text),
                     })
+            fragment_rows = list(alloc_details.get('fragment_rows', []) or [])
+            catalog_fragment_rows = list(alloc_details.get('catalog_fragment_rows', []) or [])
         except Exception:
             detail_rows = []
+            fragment_rows = []
+            catalog_fragment_rows = []
         pd.DataFrame(detail_rows, columns=['section', 'index', 'detail']).to_csv(
             final_dir / 'final_allocation_details.csv',
+            index=False,
+        )
+        pd.DataFrame(
+            fragment_rows,
+            columns=[
+                'section',
+                'chain_index',
+                'fragment_index',
+                'chain_type',
+                'origin_type',
+                'slot_name',
+                'branch_type',
+                'fragment_kind',
+                'source_tag',
+                'endpoint_role',
+                'composition',
+                'source_ids',
+                'trace_ids',
+                'trace_required_counts',
+                'abstract_required_counts',
+                'raw_topology',
+                'metadata',
+            ],
+        ).to_csv(
+            final_dir / 'final_allocation_fragments.csv',
+            index=False,
+        )
+        pd.DataFrame(catalog_fragment_rows).to_csv(
+            final_dir / 'final_allocation_fragment_catalog.csv',
             index=False,
         )
     

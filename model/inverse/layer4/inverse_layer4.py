@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import pandas as pd
+import json
 from typing import Tuple, Dict, Optional, List, Any
 from pathlib import Path
 from collections import Counter
@@ -11,7 +12,7 @@ from contextlib import redirect_stdout
 from ...paths import Z_LIBRARY_DIR
 from ...shared.inverse_common import (
     SU_ALIPHATIC, E_SU, _NodeV3,
-    SPECIAL_D3_TERMINAL_NEIGHBORS,
+    TERMINAL_PORT_BASE_SU,
     SPECIAL_DEGREE_PRIORS,
     get_aliphatic_carbon_policy,
     get_effective_hist_element_vector,
@@ -20,6 +21,7 @@ from ...shared.inverse_common import (
     rebuild_su19_partition_meta,
 )
 from RL_MTCS.RL_allocator import FlexAllocator
+from RL_MTCS.allocator_models import chain_23_count
 from RL_MTCS.RL_init import ClusterGenerator
 from ..layer0.inverse_layer0 import Layer0Estimator
 from .inverse_layer4_block_a import (
@@ -32,6 +34,7 @@ from .inverse_layer4_block_c import (
     adjust_block_c_aliphatic_tail_impl,
     adjust_block_c_branch_phase_impl,
     adjust_block_c_extra_phase_impl,
+    run_block_c_topology_closure_loop_impl,
 )
 
 class Layer4Adjuster:
@@ -1549,7 +1552,7 @@ class Layer4Adjuster:
         ether_single_d1_cap = int(n2 + n29)
         ether_d1_pool_ok = bool(int(ether_single_d1) <= int(ether_single_d1_cap))
         def _nonterminal_anchor_capacity(anchor_types: List[int]) -> int:
-            terminal_set = set(int(x) for x in SPECIAL_D3_TERMINAL_NEIGHBORS)
+            terminal_set = set(int(x) for x in TERMINAL_PORT_BASE_SU)
             slot_multipliers = {27: 2, 29: 2, 31: 2}
             return int(sum(
                 int(H_cpu[int(su)].item()) * int(slot_multipliers.get(int(su), 1))
@@ -1895,6 +1898,13 @@ class Layer4Adjuster:
         src_eff = list(meta.get('source_effective_kinds', []) or [])
         src_deg = list(meta.get('source_target_degrees', []) or [])
         src_modes = list(meta.get('source_anchor_modes', []) or [])
+        actual_topology = [
+            int(x) for x in list(
+                meta.get('actual_topology_su')
+                or meta.get('actual_used_su')
+                or []
+            )
+        ]
 
         def _raw_node_label(idx: int, su_type: Any, hop1_vals: Any) -> str:
             try:
@@ -1942,6 +1952,11 @@ class Layer4Adjuster:
                 meta_brief.append(f"tail={meta['tail_source']}")
             if 'tail_sources' in meta:
                 meta_brief.append(f"tails={meta['tail_sources']}")
+            if actual_topology:
+                meta_brief.append(f"actual={'-'.join(str(int(x)) for x in actual_topology)}")
+            signature = list(meta.get('chain_port_signature', []) or [])
+            if signature:
+                meta_brief.append(f"signature={'-'.join(str(int(x)) for x in signature)}")
             if src_su:
                 meta_brief.append(f"src_su={src_su}")
             if src_eff:
@@ -1952,8 +1967,124 @@ class Layer4Adjuster:
                 meta_brief.append(f"src_mode={src_modes}")
             if src_hop1:
                 meta_brief.append(f"src_hop1={src_hop1}")
+            usage_exact = bool(meta.get('usage_is_exact', False))
+            gap = dict(meta.get('abstract_resource_gap', {}) or {})
+            consumed_ids = dict(meta.get('consumed_resource_ids', {}) or {})
+            if gap:
+                meta_brief.append(f"trace=gap:{gap}")
+            else:
+                meta_brief.append(f"trace={'exact' if usage_exact else 'unknown'}")
+            if consumed_ids:
+                meta_brief.append(f"used={consumed_ids}")
+            fragment_brief = Layer4Adjuster._format_chain_fragment_brief(meta)
+            if fragment_brief:
+                meta_brief.append(fragment_brief)
         meta_txt = f" | {', '.join(meta_brief)}" if meta_brief else ""
         return f"{ctype}/{origin}: effective={comp} | raw={raw_topology} | src={src}{meta_txt}"
+
+    @staticmethod
+    def _compact_count_map(raw: Any) -> Dict[str, int]:
+        return {
+            str(k): int(v)
+            for k, v in dict(raw or {}).items()
+            if int(v) != 0
+        }
+
+    @staticmethod
+    def _fragment_label(fragment: Any) -> str:
+        frag = dict(fragment or {})
+        comp = "-".join(str(int(x)) for x in list(frag.get('composition', []) or []))
+        tag = str(frag.get('source_tag', frag.get('kind', '?')))
+        trace_ids = list(frag.get('trace_ids', []) or [])
+        abstract_counts = Layer4Adjuster._compact_count_map(frag.get('abstract_required_counts', {}) or {})
+        trace_counts = Layer4Adjuster._compact_count_map(frag.get('trace_required_counts', {}) or {})
+        gap_txt = f",abs={abstract_counts}" if abstract_counts else ""
+        trace_txt = f",trace={trace_counts}" if trace_counts else ""
+        ids_txt = f",ids={trace_ids}" if trace_ids else ""
+        return f"{tag}:{comp}{ids_txt}{trace_txt}{gap_txt}"
+
+    @staticmethod
+    def _chain_fragments_from_meta(meta: Dict[str, Any]) -> List[Dict[str, Any]]:
+        fragments: List[Dict[str, Any]] = []
+
+        def _add_fragment(frag: Any, slot_name: Optional[str] = None, branch_type: Optional[str] = None) -> None:
+            if not isinstance(frag, dict):
+                return
+            rec = dict(frag)
+            if slot_name is not None and 'slot_name' not in rec:
+                rec['slot_name'] = str(slot_name)
+            if branch_type is not None and 'branch_type' not in rec:
+                rec['branch_type'] = str(branch_type)
+            fragments.append(rec)
+
+        for frag in list(meta.get('branch_tail_fragments', []) or []):
+            _add_fragment(frag)
+
+        for bf in list(meta.get('branch_fragments', []) or []):
+            if not isinstance(bf, dict):
+                continue
+            slot_name = bf.get('slot_name')
+            branch_type = bf.get('branch_type')
+            tail = bf.get('tail')
+            _add_fragment(tail, slot_name=slot_name, branch_type=branch_type)
+
+        # Keep order but remove exact duplicate JSON records. This prevents the
+        # same TailFragment appearing once in branch_tail_fragments and once
+        # nested under branch_fragments from cluttering final CSVs.
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for frag in fragments:
+            key = json.dumps(frag, sort_keys=True, ensure_ascii=True, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(frag)
+        return out
+
+    @staticmethod
+    def _format_chain_fragment_brief(meta: Dict[str, Any], limit: int = 4) -> str:
+        fragments = Layer4Adjuster._chain_fragments_from_meta(dict(meta or {}))
+        if not fragments:
+            return ''
+        shown = [Layer4Adjuster._fragment_label(frag) for frag in fragments[:max(0, int(limit))]]
+        extra = len(fragments) - len(shown)
+        suffix = f";...+{extra}" if extra > 0 else ""
+        return f"fragments=[{';'.join(shown)}{suffix}]"
+
+    @staticmethod
+    def _extract_chain_fragment_rows(chain: Any, section: str, chain_index: int) -> List[Dict[str, Any]]:
+        meta = dict(getattr(chain, 'metadata', {}) or {})
+        rows: List[Dict[str, Any]] = []
+        for frag_idx, frag in enumerate(Layer4Adjuster._chain_fragments_from_meta(meta)):
+            frag = dict(frag or {})
+            rows.append({
+                'section': str(section),
+                'chain_index': int(chain_index),
+                'fragment_index': int(frag_idx),
+                'chain_type': str(getattr(chain, 'chain_type', '')),
+                'origin_type': str(getattr(chain, 'origin_type', '')),
+                'slot_name': str(frag.get('slot_name', '')),
+                'branch_type': str(frag.get('branch_type', '')),
+                'fragment_kind': str(frag.get('kind', '')),
+                'source_tag': str(frag.get('source_tag', '')),
+                'endpoint_role': str(frag.get('endpoint_role', '')),
+                'composition': "-".join(str(int(x)) for x in list(frag.get('composition', []) or [])),
+                'source_ids': json.dumps(list(frag.get('source_ids', []) or []), ensure_ascii=True),
+                'trace_ids': json.dumps(list(frag.get('trace_ids', []) or []), ensure_ascii=True),
+                'trace_required_counts': json.dumps(
+                    Layer4Adjuster._compact_count_map(frag.get('trace_required_counts', {}) or {}),
+                    sort_keys=True,
+                    ensure_ascii=True,
+                ),
+                'abstract_required_counts': json.dumps(
+                    Layer4Adjuster._compact_count_map(frag.get('abstract_required_counts', {}) or {}),
+                    sort_keys=True,
+                    ensure_ascii=True,
+                ),
+                'raw_topology': str(frag.get('raw_topology', '')),
+                'metadata': json.dumps(dict(frag.get('metadata', {}) or {}), sort_keys=True, ensure_ascii=True, default=str),
+            })
+        return rows
 
     def _extract_allocation_details(self, alloc_res: Any) -> Dict[str, Any]:
         def _rows(chains: List[Any]) -> List[str]:
@@ -1962,13 +2093,57 @@ class Layer4Adjuster:
         bridge_rows = _rows(getattr(alloc_res, 'bridge_chains', []))
         side_rows = _rows(getattr(alloc_res, 'side_chains', []))
         branch_rows = _rows(getattr(alloc_res, 'branch_chains', []))
+        pending_chains = list(getattr(alloc_res, 'pending_closure_topologies', []) or [])
+        pending_rows = _rows(pending_chains)
+
+        def _is_blocking_pending(chain: Any) -> bool:
+            meta = dict(getattr(chain, 'metadata', {}) or {})
+
+            def _flag_true(key: str) -> bool:
+                value = meta.get(str(key))
+                if isinstance(value, str):
+                    return value.strip().lower() in {'1', 'true', 'yes', 'y'}
+                return bool(value)
+
+            if _flag_true('deferred_nonblocking') or _flag_true('ring_builder_deferred'):
+                return False
+            if str(meta.get('unclosed_reason') or '') == 'ring_option_disabled_pending_ring_builder':
+                return False
+            return True
+
+        fallback_blocking_count = sum(1 for chain in pending_chains if _is_blocking_pending(chain))
+        pending_blocking_count = int(getattr(alloc_res, 'pending_closure_count', fallback_blocking_count))
+        pending_total_count = int(getattr(alloc_res, 'pending_closure_total_count', len(pending_rows)))
+        pending_deferred_count = int(getattr(
+            alloc_res,
+            'pending_closure_deferred_count',
+            max(0, pending_total_count - pending_blocking_count),
+        ))
+        fragment_rows: List[Dict[str, Any]] = []
+        for section, chains in (
+            ('bridge', getattr(alloc_res, 'bridge_chains', [])),
+            ('side', getattr(alloc_res, 'side_chains', [])),
+            ('branch', getattr(alloc_res, 'branch_chains', [])),
+            ('pending_closure', getattr(alloc_res, 'pending_closure_topologies', [])),
+        ):
+            for idx, chain in enumerate(list(chains or [])):
+                fragment_rows.extend(self._extract_chain_fragment_rows(chain, section, int(idx)))
         return {
             'bridge_count': int(len(bridge_rows)),
             'side_count': int(len(side_rows)),
             'branch_count': int(len(branch_rows)),
+            'pending_closure_count': int(pending_blocking_count),
+            'pending_closure_blocking_count': int(pending_blocking_count),
+            'pending_closure_total_count': int(pending_total_count),
+            'pending_closure_deferred_count': int(pending_deferred_count),
             'bridge_rows': bridge_rows,
             'side_rows': side_rows,
             'branch_rows': branch_rows,
+            'pending_closure_rows': pending_rows,
+            'fragment_rows': fragment_rows,
+            'pending_closure_fragment_rows': list(getattr(alloc_res, 'pending_closure_rows', []) or []),
+            'catalog_fragment_rows': list(getattr(alloc_res, 'catalog_fragment_rows', []) or []),
+            'catalog_summary': dict(getattr(alloc_res, 'catalog_summary', {}) or {}),
         }
 
     def _print_allocation_details(self, alloc_res: Any, header: str = "候选完整资源分配结果（未验收）") -> None:
@@ -1977,7 +2152,11 @@ class Layer4Adjuster:
         print(
             f"    Bridge chains: {details['bridge_count']} | "
             f"Side chains: {details['side_count']} | "
-            f"Branch structures: {details['branch_count']}"
+            f"Branch structures: {details['branch_count']} | "
+            f"Pending closures(blocking/total/deferred): "
+            f"{details['pending_closure_count']}/"
+            f"{details['pending_closure_total_count']}/"
+            f"{details['pending_closure_deferred_count']}"
         )
         if details['bridge_rows']:
             print("    [Bridge]")
@@ -1990,6 +2169,10 @@ class Layer4Adjuster:
         if details['branch_rows']:
             print("    [Branch]")
             for idx, row in enumerate(details['branch_rows']):
+                print(f"      [{idx}] {row}")
+        if details['pending_closure_rows']:
+            print("    [Pending Closure]")
+            for idx, row in enumerate(details['pending_closure_rows']):
                 print(f"      [{idx}] {row}")
 
     @staticmethod
@@ -2012,16 +2195,73 @@ class Layer4Adjuster:
             'proxy_remaining': _get_map('proxy_remaining_by_kind'),
         }
 
+    @staticmethod
+    def _extract_allocation_usage_ledgers(alloc_res: Any) -> Dict[str, Dict[Any, Any]]:
+        su_keys = sorted(
+            set((getattr(alloc_res, 'source_su_total_counts', {}) or {}).keys()) |
+            set((getattr(alloc_res, 'source_su_consumed_counts', {}) or {}).keys()) |
+            set((getattr(alloc_res, 'source_su_remaining_counts', {}) or {}).keys())
+        )
+        su_ledger = {
+            int(k): {
+                'total': int((getattr(alloc_res, 'source_su_total_counts', {}) or {}).get(k, 0)),
+                'consumed': int((getattr(alloc_res, 'source_su_consumed_counts', {}) or {}).get(k, 0)),
+                'remaining': int((getattr(alloc_res, 'source_su_remaining_counts', {}) or {}).get(k, 0)),
+            }
+            for k in su_keys
+        }
+        return {
+            'source_su_ledger': su_ledger,
+            'section_consumed_by_kind': {
+                str(section): {
+                    str(kind): int(vals.get(kind, 0))
+                    for kind in ('11', '22', '23', '24', '25')
+                }
+                for section, vals in dict(getattr(alloc_res, 'section_consumed_by_kind', {}) or {}).items()
+            },
+            'origin_consumed_by_kind': {
+                str(origin): {
+                    str(kind): int(vals.get(kind, 0))
+                    for kind in ('11', '22', '23', '24', '25')
+                }
+                for origin, vals in dict(getattr(alloc_res, 'origin_consumed_by_kind', {}) or {}).items()
+            },
+            'trace_consumed_by_section_kind': {
+                str(section): {
+                    str(kind): int(vals.get(kind, 0))
+                    for kind in ('11', '22', '23', '24', '25')
+                }
+                for section, vals in dict(getattr(alloc_res, 'trace_consumed_by_section_kind', {}) or {}).items()
+            },
+            'trace_consumed_by_origin_kind': {
+                str(origin): {
+                    str(kind): int(vals.get(kind, 0))
+                    for kind in ('11', '22', '23', '24', '25')
+                }
+                for origin, vals in dict(getattr(alloc_res, 'trace_consumed_by_origin_kind', {}) or {}).items()
+            },
+            'abstract_gap_by_kind': {
+                str(kind): int(value)
+                for kind, value in dict(getattr(alloc_res, 'abstract_gap_by_kind', {}) or {}).items()
+            },
+            'abstract_gap_audit_by_kind': {
+                str(kind): int(value)
+                for kind, value in dict(getattr(alloc_res, 'abstract_gap_audit_by_kind', {}) or {}).items()
+            },
+            'catalog_summary': {
+                str(kind): int(value)
+                for kind, value in dict(getattr(alloc_res, 'catalog_summary', {}) or {}).items()
+            },
+            'trace_exact_chain_count': int(getattr(alloc_res, 'trace_exact_chain_count', 0)),
+            'trace_inexact_chain_count': int(getattr(alloc_res, 'trace_inexact_chain_count', 0)),
+        }
+
     def _evaluate_full_allocation_balance(self,
                                           nodes: List[_NodeV3],
                                           flex_ratio: float = 0.80,
                                           flex_lower_extra: int = 1,
                                           S_target: Optional[torch.Tensor] = None,
                                           E_target: Optional[torch.Tensor] = None) -> Dict[str, Any]:
-        allocator = FlexAllocator(nodes=nodes)
-        with redirect_stdout(io.StringIO()):
-            alloc_res = allocator.allocate()
-
         cluster_meta = self._compute_aromatic_cluster_metrics(nodes)
         cluster_count = int(cluster_meta.get('cluster_count', 0))
         rigid_pairs = max(0, sum(1 for n in nodes if int(getattr(n, 'su_type', -1)) == 10) // 2)
@@ -2031,20 +2271,44 @@ class Layer4Adjuster:
             flex_ratio=float(flex_ratio),
             flex_lower_extra=int(flex_lower_extra),
         )
+        allocator = FlexAllocator(
+            nodes=nodes,
+            topology_constraints={
+                'flex_lower': int(flex_lower),
+                'flex_upper': int(flex_upper),
+                'flexible_bridge_min': int(flex_lower),
+                'flexible_bridge_limit': int(flex_upper),
+            },
+        )
+        with redirect_stdout(io.StringIO()):
+            alloc_res = allocator.allocate()
+        topology_diag = dict(getattr(alloc_res, 'topology_assembly_diagnostics', {}) or {})
         def _is_flexible_bridge(ch) -> bool:
             comp = list(getattr(ch, 'composition', []) or [])
-            return len(comp) >= 3 and int(comp[0]) == 11 and int(comp[-1]) == 11 and int(getattr(ch, 'n_23', 0)) >= 1
+            return len(comp) >= 3 and int(comp[0]) == 11 and int(comp[-1]) == 11 and int(chain_23_count(ch)) >= 1
 
         def _is_aliphatic_side_to_22(ch) -> bool:
             comp = list(getattr(ch, 'composition', []) or [])
             if len(comp) < 3:
                 return False
-            if int(getattr(ch, 'n_23', 0)) < 1:
+            if int(chain_23_count(ch)) < 1:
                 return False
             return {int(comp[0]), int(comp[-1])} == {11, 22}
 
         flexible_bridge_chains = [ch for ch in getattr(alloc_res, 'bridge_chains', []) if _is_flexible_bridge(ch)]
-        flexible_bridge_count = int(len(flexible_bridge_chains))
+        flexible_bridge_chains = [
+            ch for ch in flexible_bridge_chains
+            if not dict(getattr(ch, 'metadata', {}) or {}).get('abstract_resource_gap')
+        ]
+        branch_flex_count = int(topology_diag.get('flex_count', 0))
+        branch_bridge_in_pool = sum(
+            1 for ch in flexible_bridge_chains
+            if str(getattr(ch, 'chain_type', '')) == 'branch_bridge'
+        )
+        flexible_bridge_count = int(len(flexible_bridge_chains)) + max(
+            0,
+            int(branch_flex_count) - int(branch_bridge_in_pool),
+        )
         extra_flexible_bridge_count = int(sum(1 for ch in flexible_bridge_chains if str(getattr(ch, 'origin_type', '')) == 'extra'))
         fixed_flexible_bridge_count = int(max(0, flexible_bridge_count - extra_flexible_bridge_count))
         side_to_22_count = sum(1 for ch in getattr(alloc_res, 'side_chains', []) if _is_aliphatic_side_to_22(ch))
@@ -2054,10 +2318,31 @@ class Layer4Adjuster:
         effective_cluster_count = max(1, int(cluster_count))
         unallocated_bridge = int(getattr(alloc_res, 'unallocated_bridge', 0))
         unallocated_branch = int(getattr(alloc_res, 'unallocated_branch', 0))
-        required_extra_11 = int(getattr(alloc_res, 'required_extra_11', 0))
-        required_extra_22 = int(getattr(alloc_res, 'required_extra_22', 0))
-        required_extra_23 = int(getattr(alloc_res, 'required_extra_23', 0))
+        topology_shortage = dict(topology_diag.get('resource_shortage', {}) or {})
+        required_extra_11 = max(int(getattr(alloc_res, 'required_extra_11', 0)), int(topology_shortage.get('11', 0)))
+        required_extra_22 = max(int(getattr(alloc_res, 'required_extra_22', 0)), int(topology_shortage.get('22', 0)))
+        required_extra_23 = max(int(getattr(alloc_res, 'required_extra_23', 0)), int(topology_shortage.get('23', 0)))
+        required_extra_24 = max(int(getattr(alloc_res, 'required_extra_24', 0)), int(topology_shortage.get('24', 0)))
+        required_extra_25 = max(int(getattr(alloc_res, 'required_extra_25', 0)), int(topology_shortage.get('25', 0)))
         resource_ledger = self._extract_resource_ledger(alloc_res)
+        usage_ledgers = self._extract_allocation_usage_ledgers(alloc_res)
+        allocation_details = self._extract_allocation_details(alloc_res)
+        pending_closure_blocking_count = int(allocation_details.get('pending_closure_count', 0))
+        pending_closure_total_count = int(
+            allocation_details.get('pending_closure_total_count', pending_closure_blocking_count)
+        )
+        abstract_gap_by_kind = {
+            str(k): int(v)
+            for k, v in dict(usage_ledgers.get('abstract_gap_by_kind', {}) or {}).items()
+            if int(v) != 0
+        }
+        abstract_gap_audit_by_kind = {
+            str(k): int(v)
+            for k, v in dict(usage_ledgers.get('abstract_gap_audit_by_kind', {}) or {}).items()
+            if int(v) != 0
+        }
+        trace_inexact_chain_count = int(usage_ledgers.get('trace_inexact_chain_count', 0))
+        trace_exact_ok = not abstract_gap_by_kind and int(trace_inexact_chain_count) == 0
 
         bounds = self._estimate_aliphatic_region_bounds(S_target, E_target)
         aliphatic_min = int(bounds.get('total_min', 0))
@@ -2081,17 +2366,48 @@ class Layer4Adjuster:
         extra_resource_ok = (
             int(required_extra_11) == 0 and
             int(required_extra_22) == 0 and
-            int(required_extra_23) == 0
+            int(required_extra_23) == 0 and
+            int(required_extra_24) == 0 and
+            int(required_extra_25) == 0
         )
+        topology_ok = bool(topology_diag.get('ok', False))
+        topology_plan_feasible = bool(topology_diag.get('topology_plan_feasible', topology_ok))
+        topology_materialized_ok = bool(topology_diag.get('topology_materialized_ok', topology_ok))
+        materialization_required = bool(topology_diag.get('materialization_required', False))
+        planned_conversions = list(topology_diag.get('planned_conversions', []) or [])
+        planned_conversion_count = int(topology_diag.get('planned_conversion_count', 0) or 0)
+        residual_remaining_by_kind = dict(topology_diag.get('residual_remaining', {}) or {})
+        chain_23_limit_violations = list(topology_diag.get('chain_23_limit_violations', []) or [])
+        backbone_residual = int(getattr(alloc_res, 'remaining_11', 0)) + int(getattr(alloc_res, 'remaining_22', 0)) + int(getattr(alloc_res, 'remaining_23', 0))
+        allowed_backbone_residual = int(topology_diag.get('allowed_backbone_residual', 0))
+        residual_total = int(sum(max(0, int(residual_remaining_by_kind.get(str(k), 0))) for k in ('11', '22', '23', '24', '25')))
+        backbone_residual_ok = int(residual_total if residual_remaining_by_kind else backbone_residual) <= int(allowed_backbone_residual)
+        pending_closure_ok = int(pending_closure_total_count) == 0
 
         reasons = []
         warnings = []
+        if not topology_plan_feasible:
+            reasons.append('topology_assembly_failed')
+        if not topology_materialized_ok:
+            reasons.append('topology_not_materialized')
+        if materialization_required:
+            reasons.append('planned_conversion_required')
         if not bridge_alloc_ok:
             reasons.append('bridge_unallocated')
         if not branch_alloc_ok:
             reasons.append('branch_unallocated')
+        if not pending_closure_ok:
+            reasons.append('pending_closure')
+            warnings.append('pending_closure')
         if not extra_resource_ok:
             reasons.append('resource_shortage')
+        if not backbone_residual_ok:
+            reasons.append('backbone_resource_residual')
+        if chain_23_limit_violations:
+            reasons.append('chain_23_limit_violation')
+        if not trace_exact_ok:
+            reasons.append('abstract_topology_gap')
+            warnings.append('abstract_topology_gap')
         if not rigid_ok:
             reasons.append('rigid_excess')
         if not flex_lo_ok:
@@ -2117,7 +2433,14 @@ class Layer4Adjuster:
             'ok': bool(
                 bridge_alloc_ok and
                 branch_alloc_ok and
+                topology_plan_feasible and
+                topology_materialized_ok and
+                not materialization_required and
+                pending_closure_ok and
                 extra_resource_ok and
+                backbone_residual_ok and
+                not chain_23_limit_violations and
+                trace_exact_ok and
                 rigid_ok and
                 flex_hi_ok and
                 flex_lo_ok and
@@ -2130,6 +2453,25 @@ class Layer4Adjuster:
             ),
             'reason': str(reason),
             'warnings': [str(x) for x in warnings],
+            'trace_exact_ok': bool(trace_exact_ok),
+            'topology_assembly_ok': bool(topology_materialized_ok),
+            'topology_plan_feasible': bool(topology_plan_feasible),
+            'topology_materialized_ok': bool(topology_materialized_ok),
+            'materialization_required': bool(materialization_required),
+            'planned_conversions': list(planned_conversions),
+            'planned_conversion_count': int(planned_conversion_count),
+            'residual_growth_actions': list(topology_diag.get('residual_growth_actions', []) or []),
+            'residual_chain_actions': list(topology_diag.get('residual_chain_actions', []) or []),
+            'residual_remaining': dict(residual_remaining_by_kind),
+            'chain_23_limit_violations': list(chain_23_limit_violations),
+            'pending_closure_count': int(pending_closure_blocking_count),
+            'pending_closure_total_count': int(pending_closure_total_count),
+            'pending_closure_blocking_count': int(pending_closure_blocking_count),
+            'pending_closure_deferred_count': int(allocation_details.get('pending_closure_deferred_count', 0)),
+            'pending_closure_ok': bool(pending_closure_ok),
+            'backbone_residual': int(backbone_residual),
+            'backbone_residual_ok': bool(backbone_residual_ok),
+            'allowed_backbone_residual': int(allowed_backbone_residual),
             'cluster_count': int(cluster_count),
             'effective_cluster_count': int(effective_cluster_count),
             'rigid_pairs': int(rigid_pairs),
@@ -2157,13 +2499,32 @@ class Layer4Adjuster:
             'aliphatic_region_bounds': dict(bounds),
             'cluster_meta': cluster_meta,
             'allocation_result': alloc_res,
-            'allocation_details': self._extract_allocation_details(alloc_res),
+            'allocation_details': allocation_details,
+            'topology_assembly_diagnostics': dict(topology_diag),
+            'closed_topology_count': int(topology_diag.get('closed_topology_count', 0)),
+            'unclosed_like24_count': int(topology_diag.get('unclosed_like24_count', 0)),
+            'topology_selected_options': list(getattr(alloc_res, 'topology_selected_options', []) or []),
+            'topology_unclosed_candidates': list(getattr(alloc_res, 'topology_unclosed_candidates', []) or []),
+            'recommended_adjustments': list(topology_diag.get('recommended_adjustments', []) or []),
             'resource_ledger': resource_ledger,
+            'allocation_usage_ledgers': usage_ledgers,
+            'source_su_ledger': dict(usage_ledgers.get('source_su_ledger', {}) or {}),
+            'section_consumed_by_kind': dict(usage_ledgers.get('section_consumed_by_kind', {}) or {}),
+            'origin_consumed_by_kind': dict(usage_ledgers.get('origin_consumed_by_kind', {}) or {}),
+            'trace_consumed_by_section_kind': dict(usage_ledgers.get('trace_consumed_by_section_kind', {}) or {}),
+            'trace_consumed_by_origin_kind': dict(usage_ledgers.get('trace_consumed_by_origin_kind', {}) or {}),
+            'abstract_gap_by_kind': dict(abstract_gap_by_kind),
+            'abstract_gap_audit_by_kind': dict(abstract_gap_audit_by_kind),
+            'catalog_summary': dict(usage_ledgers.get('catalog_summary', {}) or {}),
+            'trace_exact_chain_count': int(usage_ledgers.get('trace_exact_chain_count', 0)),
+            'trace_inexact_chain_count': int(trace_inexact_chain_count),
             'unallocated_bridge': int(unallocated_bridge),
             'unallocated_branch': int(unallocated_branch),
             'required_extra_11': int(required_extra_11),
             'required_extra_22': int(required_extra_22),
             'required_extra_23': int(required_extra_23),
+            'required_extra_24': int(required_extra_24),
+            'required_extra_25': int(required_extra_25),
             'remaining': {
                 '11': int(getattr(alloc_res, 'remaining_11', 0)),
                 '22': int(getattr(alloc_res, 'remaining_22', 0)),
@@ -2282,6 +2643,10 @@ class Layer4Adjuster:
                 'ok': bool(branch_meta.get('ok', False)),
                 'branch_ok': bool(branch_meta.get('ok', False)),
                 'extra_ok': True,
+                'partial_progress': bool(branch_meta.get('partial_progress', False)),
+                'initial_penalty': tuple(branch_meta.get('initial_penalty', ()) or ()),
+                'best_penalty': tuple(branch_meta.get('best_penalty', ()) or ()),
+                'final_penalty': tuple(branch_meta.get('final_penalty', ()) or ()),
                 'final_h_ratio': float(final_h_ratio),
                 'records': all_moves,
                 'branch_meta': branch_meta,
@@ -2550,4 +2915,39 @@ class Layer4Adjuster:
         self._print_stage_distribution_summary(f"{stage.upper()} final_literal_vs_effective", torch.clamp(H_work, min=0).long().cpu())
         print(f"\n{stage.upper()}阶段调整完成: 共{len(moves)}次变更")
         return H_work, moves, meta
+
+    def run_block_c_topology_closure_loop(
+        self,
+        nodes: List[_NodeV3],
+        E_target: Optional[torch.Tensor],
+        S_target: Optional[torch.Tensor] = None,
+        ppm: Optional[np.ndarray] = None,
+        diff: Optional[np.ndarray] = None,
+        max_steps: int = 8,
+        phase: str = 'branch',
+        rebuild_callback=None,
+        keep_unimproved: bool = True,
+        stop_on_cycle: bool = True,
+        show_log: bool = False,
+        return_best_on_exhaustion: bool = True,
+        units_per_step: int = 1,
+        apply_recommendation_count: bool = False,
+    ) -> Tuple[torch.Tensor, List[Dict], Dict]:
+        return run_block_c_topology_closure_loop_impl(
+            self,
+            nodes=nodes,
+            E_target=E_target,
+            S_target=S_target,
+            ppm=ppm,
+            diff=diff,
+            max_steps=max_steps,
+            phase=phase,
+            rebuild_callback=rebuild_callback,
+            keep_unimproved=keep_unimproved,
+            stop_on_cycle=stop_on_cycle,
+            show_log=show_log,
+            return_best_on_exhaustion=return_best_on_exhaustion,
+            units_per_step=units_per_step,
+            apply_recommendation_count=apply_recommendation_count,
+        )
     

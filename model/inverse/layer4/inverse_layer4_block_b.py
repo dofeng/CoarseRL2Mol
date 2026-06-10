@@ -5,7 +5,7 @@ import torch
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
-from ...shared.inverse_common import SPECIAL_D3_TERMINAL_NEIGHBORS, violates_special_d3_terminal_limit
+from ...shared.inverse_common import TERMINAL_PORT_BASE_SU, terminal_neighbor_count
 
 
 AROMATIC_ANCHOR_WINDOWS: Dict[int, Tuple[float, float, float]] = {
@@ -406,9 +406,11 @@ def _fixed_anchor_types_for_special_su(su_type: int,
 def _classify_anchor_mode_from_hop1(su_type: int, hop1_multiset: Tuple[int, ...]) -> Optional[str]:
     su_i = int(su_type)
     degree_i = int(len(tuple(hop1_multiset)))
-    if int(degree_i) not in {2, 3}:
+    if int(su_i) in {19, 20} and int(degree_i) not in {1, 2, 3}:
         return None
-    if violates_special_d3_terminal_limit(int(su_i), int(degree_i), tuple(hop1_multiset)):
+    if int(su_i) == 21 and int(degree_i) not in {2, 3}:
+        return None
+    if int(terminal_neighbor_count(tuple(hop1_multiset))) > 1:
         return None
     partition = 'thio' if 31 in set(int(x) for x in tuple(hop1_multiset)) else 'ether'
     fixed_types = set(int(x) for x in _fixed_anchor_types_for_special_su(int(su_i), partition=partition))
@@ -527,7 +529,7 @@ def _classify_anchor_mode_from_node(adjuster: Any,
     part = str(getattr(node, 'special_anchor_partition', None) or '')
     fixed_types = set(int(x) for x in _fixed_anchor_types_for_special_su(int(su_i), partition=part))
     neighbor_types = [int(x) for x in list(adjuster._current_neighbor_types(node, nodes) or [])]
-    if violates_special_d3_terminal_limit(int(su_i), int(degree_i), neighbor_types):
+    if int(terminal_neighbor_count(neighbor_types)) > 1:
         return None
     fixed_count = int(sum(1 for x in neighbor_types if int(x) in fixed_types))
     if int(su_i) == 21:
@@ -877,7 +879,7 @@ def _count_nonterminal_fixed_anchor_capacity(H: torch.Tensor,
     return int(sum(
         int(H_cpu[int(su)].item()) * int(slot_multipliers.get(int(su), 1))
         for su in list(anchor_types or [])
-        if int(su) not in set(int(x) for x in SPECIAL_D3_TERMINAL_NEIGHBORS)
+        if int(su) not in set(int(x) for x in TERMINAL_PORT_BASE_SU)
         and 0 <= int(su) < int(H_cpu.numel())
     ))
 
