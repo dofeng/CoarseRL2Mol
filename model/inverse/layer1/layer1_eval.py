@@ -1,5 +1,4 @@
 from collections import defaultdict
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -321,6 +320,7 @@ class Layer1NmrEvaluator:
         snapshot: Dict[str, object] = {
             'ppm': ppm_axis.detach().cpu().numpy(),
             'rows': list(peak_data['rows']),
+            'assignments': assignments,
             'matched_cnt': matched_cnt,
             'carbon_cnt': carbon_cnt,
             'matched_ratio': matched_ratio,

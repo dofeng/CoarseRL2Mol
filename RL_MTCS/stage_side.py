@@ -530,9 +530,8 @@ class SideStage:
         cluster = self.state.graph.clusters[cluster_id]
         site = cluster.sites[site_idx]
 
-        # Mark attachment site as occupied
         site.occupied = True
-        site.su_type = 11
+        site.su_type = self._side_endpoint_su(chain_spec)
 
         # Record attachment position for repulsion scoring
         self._side_attach_positions.append(site.pos2d)
@@ -610,6 +609,16 @@ class SideStage:
         self._sides_done += 1
         return True
 
+    @staticmethod
+    def _side_endpoint_su(chain_spec) -> int:
+        if chain_spec is None:
+            return 11
+        comp = [int(x) for x in list(getattr(chain_spec, "composition", []) or [])]
+        if not comp:
+            return 11
+        su = int(comp[0])
+        return su if su in {5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 30} else 11
+
     # ------------------------------------------------------------------
     # Scoring
     # ------------------------------------------------------------------
@@ -650,4 +659,3 @@ class SideStage:
             'side_edges': len(self.state.graph.side),
             'side_chain_nodes': sum(len(e.chain) for e in self.state.graph.side),
         }
-

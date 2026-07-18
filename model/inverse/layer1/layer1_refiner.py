@@ -51,14 +51,6 @@ class Layer1Refiner:
         except Exception:
             return None
 
-    @staticmethod
-    def _node_anchor_partition(node: _NodeV3) -> Optional[str]:
-        try:
-            val = getattr(node, 'special_anchor_partition', None)
-            return str(val) if val is not None else None
-        except Exception:
-            return None
-
     def _required_external_candidates_for_node(self, node: _NodeV3) -> Optional[List[int]]:
         return required_external_candidates_for_node(node, missing_su19_as_none=True)
 
@@ -419,20 +411,49 @@ class Layer1Refiner:
 
     def repair_remaining_hop1_slots(self,
                                     assigner: Any,
-                                    nodes: List[_NodeV3]) -> None:
+                                    nodes: List[_NodeV3],
+                                    max_iters: Optional[int] = 64) -> None:
         """
         Final structural repair pass for Layer1.
 
-        Compared with the original version, this pass:
-        - prioritizes nodes missing required external anchors,
-        - retries other unfinished nodes instead of stopping at the first hard case,
-        - re-runs required-anchor filling between repair rounds.
+        First fill direct legal residual edges, then run a bounded local
+        split/swap search only when strict SU19/20/21 degree gaps remain.
         """
-        remaining = [n for n in nodes if n.remaining_hop1_slots() > 0]
-        if not remaining:
+        self.repair_remaining_hop1_slots_fast(
+            assigner=assigner,
+            nodes=nodes,
+            max_rounds=max_iters,
+        )
+        strict_remaining = [
+            node for node in nodes
+            if int(getattr(node, 'su_type', -1)) in {19, 20, 21}
+            and int(node.remaining_hop1_slots()) > 0
+        ]
+        if not strict_remaining:
+            assigner._last_local_swap_diagnostics = {
+                'attempted_swaps': 0,
+                'max_attempts': int(max_iters or 0),
+                'remaining_special_gaps': [],
+                'ok': True,
+            }
             return
 
-        max_iters = len(remaining) * 20
+        remaining = list(strict_remaining)
+        if not remaining:
+            assigner._last_local_swap_diagnostics = {
+                'attempted_swaps': 0,
+                'max_attempts': int(max_iters or 0),
+                'remaining_special_gaps': [],
+                'ok': True,
+            }
+            return
+
+        try:
+            max_iters_eff = int(max_iters) if max_iters is not None else 0
+        except Exception:
+            max_iters_eff = 600
+        if int(max_iters_eff) <= 0:
+            max_iters_eff = len(remaining) * 20
         iters = 0
 
         def _can_direct_connect(u: _NodeV3, v: _NodeV3) -> bool:
@@ -679,7 +700,7 @@ class Layer1Refiner:
                 return False
             return True
 
-        while iters < max_iters:
+        while iters < max_iters_eff:
             iters += 1
             self.complete_required_external_anchors(assigner, nodes, [11, 19, 20, 21, 5, 6, 7, 8, 9], max_rounds=1)
             remaining = [n for n in nodes if n.remaining_hop1_slots() > 0]
@@ -853,6 +874,101 @@ class Layer1Refiner:
                     break
 
             if not bool(progressed):
+                break
+
+        final_gaps = [
+            {
+                'node_id': int(getattr(node, 'global_id', -1)),
+                'su_type': int(getattr(node, 'su_type', -1)),
+                'degree_gap': int(node.remaining_hop1_slots()),
+                'target_degree': int(getattr(node, 'target_hop1_degree', 0) or 0),
+                'anchor_mode': str(getattr(node, 'special_anchor_mode', '') or ''),
+            }
+            for node in nodes
+            if int(getattr(node, 'su_type', -1)) in {19, 20, 21}
+            and int(node.remaining_hop1_slots()) > 0
+        ]
+        assigner._last_local_swap_diagnostics = {
+            'attempted_swaps': int(iters),
+            'max_attempts': int(max_iters_eff),
+            'remaining_special_gaps': final_gaps,
+            'ok': not bool(final_gaps),
+        }
+
+    def repair_remaining_hop1_slots_fast(self,
+                                         assigner: Any,
+                                         nodes: List[_NodeV3],
+                                         max_rounds: Optional[int] = 600) -> None:
+        """
+        Bounded structural cleanup used by default.
+
+        This intentionally avoids split-edge and two-edge swap searches.  It
+        only performs actions that are local and cheap:
+        - refill required external anchors;
+        - directly connect two nodes that both have free slots and satisfy
+          endpoint rules.
+        """
+        try:
+            max_rounds_eff = int(max_rounds) if max_rounds is not None else 0
+        except Exception:
+            max_rounds_eff = 600
+        if int(max_rounds_eff) <= 0:
+            max_rounds_eff = 600
+
+        def _has_pending_external(n: _NodeV3, graph_nodes: List[_NodeV3]) -> bool:
+            return bool(assigner._has_pending_required_external(n, graph_nodes))
+
+        def _node_priority(node: _NodeV3) -> Tuple[int, int, int, int]:
+            su_i = int(getattr(node, 'su_type', -1))
+            pending = int(_has_pending_external(node, nodes))
+            rem = int(node.remaining_hop1_slots())
+            special = int(su_i in {5, 6, 7, 8, 9, 11, 19, 20, 21})
+            return (-pending, -special, -rem, int(getattr(node, 'global_id', 0)))
+
+        def _can_direct_connect(u: _NodeV3, v: _NodeV3) -> bool:
+            if int(u.global_id) == int(v.global_id):
+                return False
+            if int(v.global_id) in set(getattr(u, 'hop1_ids', []) or []):
+                return False
+            if int(u.remaining_hop1_slots()) <= 0 or int(v.remaining_hop1_slots()) <= 0:
+                return False
+            return bool(assigner._can_add_hop1_connection(nodes, u, v))
+
+        rounds = 0
+        while rounds < int(max_rounds_eff):
+            rounds += 1
+            before_open = sum(max(0, int(n.remaining_hop1_slots())) for n in nodes)
+            self.complete_required_external_anchors(
+                assigner,
+                nodes,
+                [11, 19, 20, 21, 5, 6, 7, 8, 9],
+                max_rounds=1,
+            )
+            remaining = [n for n in nodes if int(n.remaining_hop1_slots()) > 0]
+            if not remaining:
+                break
+            remaining.sort(key=_node_priority)
+
+            progressed = False
+            for u in remaining:
+                if int(u.remaining_hop1_slots()) <= 0:
+                    continue
+                candidates = [
+                    v for v in remaining
+                    if int(v.global_id) != int(u.global_id)
+                    and int(v.remaining_hop1_slots()) > 0
+                    and _can_direct_connect(u, v)
+                ]
+                if not candidates:
+                    continue
+                candidates.sort(key=_node_priority)
+                v = candidates[0]
+                if assigner._add_bidirectional_hop1(nodes, int(u.global_id), int(v.global_id)):
+                    progressed = True
+                    break
+
+            after_open = sum(max(0, int(n.remaining_hop1_slots())) for n in nodes)
+            if not bool(progressed) and int(after_open) >= int(before_open):
                 break
 
     def _partition_aware_external_requirement(self,
@@ -1233,12 +1349,18 @@ class Layer1Refiner:
                                       neg_threshold: float = -0.5,
                                       pos_threshold: float = 0.5,
                                       max_iterations: int = 3,
-                                      adjustment_groups: Optional[List[str]] = None) -> Tuple[List[_NodeV3], Dict[str, object]]:
+                                      adjustment_groups: Optional[List[str]] = None,
+                                      max_candidate_trials: int = 240,
+                                      max_candidate_nodes_per_su: int = 24,
+                                      max_alternatives_per_node: int = 4,
+                                      max_moves_per_region: int = 8,
+                                      max_full_evals: int = 32) -> Tuple[List[_NodeV3], Dict[str, object]]:
         device = self.device
         if output_dir:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
         if adjustment_groups is None:
             adjustment_groups = ['aromatic', 'carbonyl', 'unsaturated', 'aliphatic']
+        wanted_groups = [str(x).strip().lower() for x in list(adjustment_groups or []) if str(x).strip()]
 
         adjuster = Hop1Adjuster(
             port_combinations=HOP1_PORT_COMBINATIONS,
@@ -1251,16 +1373,42 @@ class Layer1Refiner:
         S_target, _ = self.evaluator.resolve_inputs(S_target)
 
         total_adjustments = 0
+        total_candidate_trials = 0
+        candidate_trial_budget = int(max_candidate_trials or 0)
+        if candidate_trial_budget <= 0:
+            candidate_trial_budget = 10**9
+        candidate_cap = max(1, int(max_candidate_nodes_per_su or 1))
+        alternative_cap = max(1, int(max_alternatives_per_node or 1))
+        moves_per_region_cap = max(1, int(max_moves_per_region or 1))
+        full_eval_budget = int(max_full_evals or 0)
+        if full_eval_budget <= 0:
+            full_eval_budget = 10**9
+        full_eval_count = 0
         iteration_summaries: List[Dict[str, object]] = []
+        reject_summaries: List[Dict[str, object]] = []
         best_r2 = -1e9
         best_nodes = copy.deepcopy(nodes)
         region_summaries: List[Dict[str, object]] = []
+        budget_exhausted = False
 
         for region_name, region_lo, region_hi, priority_list in self._region_specs():
+            if wanted_groups and str(region_name).lower() not in set(wanted_groups):
+                continue
             region_adjustments = 0
             region_details: List[Dict[str, object]] = []
             stop_reason = 'max_iterations'
             for region_iter in range(max(1, int(max_iterations))):
+                if int(region_adjustments) >= int(moves_per_region_cap):
+                    stop_reason = 'region_move_budget_exhausted'
+                    break
+                if int(total_candidate_trials) >= int(candidate_trial_budget):
+                    stop_reason = 'candidate_trial_budget_exhausted'
+                    budget_exhausted = True
+                    break
+                if int(full_eval_count) >= int(full_eval_budget):
+                    stop_reason = 'full_eval_budget_exhausted'
+                    budget_exhausted = True
+                    break
                 snapshot = self.evaluator.build_eval_snapshot(
                     nodes=nodes,
                     S_target=S_target,
@@ -1268,6 +1416,7 @@ class Layer1Refiner:
                     hwhm=hwhm,
                     allow_approx=bool(allow_approx),
                 )
+                full_eval_count += 1
                 if int(snapshot.get('n_peaks', 0)) <= 0:
                     stop_reason = 'no_valid_peaks'
                     break
@@ -1295,7 +1444,6 @@ class Layer1Refiner:
                     stop_reason = 'no_positive_peaks'
                     break
 
-                neg_peak = neg_peaks[0]
                 su_priority = self._rank_su_types_for_positive_peaks(
                     priority_list=priority_list,
                     positive_peaks=pos_peaks,
@@ -1303,72 +1451,134 @@ class Layer1Refiner:
                 )
 
                 accepted_move: Optional[Dict[str, object]] = None
-                neg_nodes_all = adjuster.find_nodes_in_peak_region(nodes, node_peak_rows, neg_peak)
-                for su_type in su_priority:
-                    cand_nodes = [x for x in neg_nodes_all if int(x['center_su']) == int(su_type)]
-                    cand_nodes.sort(key=lambda x: int(x['global_id']))
-                    for node_info in cand_nodes:
-                        pos_peak = self._pick_positive_peak_for_node(
-                            center_su=int(node_info['center_su']),
-                            positive_peaks=pos_peaks,
-                            neg_peak=neg_peak,
-                        )
-                        if pos_peak is None:
-                            continue
-                        alternatives = adjuster.find_alternative_hop1(
-                            int(node_info['center_su']),
-                            tuple(node_info['hop1_ms']),
-                            (float(pos_peak.ppm_min), float(pos_peak.ppm_max)),
-                        )
-                        if not alternatives:
-                            continue
-                        for alt in alternatives[: min(8, len(alternatives))]:
-                            prev_state = self._capture_hop1_state(nodes)
-                            result = adjuster.execute_hop1_replacement(
-                                nodes=nodes,
-                                target_node_id=int(node_info['global_id']),
-                                new_hop1_tuple=tuple(alt['hop1_tuple']),
-                                E_target=E_target,
-                                dry_run=False,
-                            )
-                            if not bool(result.get('success', False)):
-                                self._restore_hop1_state(nodes, prev_state)
-                                continue
-                            snapshot_try = self.evaluator.build_eval_snapshot(
-                                nodes=nodes,
-                                S_target=S_target,
-                                lib_path=lib_path,
-                                hwhm=hwhm,
-                                allow_approx=bool(allow_approx),
-                            )
-                            diff_try = np.asarray(snapshot_try.get('diff', []), dtype=np.float64)
-                            ppm_try = np.asarray(snapshot_try.get('ppm', []), dtype=np.float64)
-                            loss_after = self._region_abs_loss(ppm_try, diff_try, float(region_lo), float(region_hi))
-                            if float(loss_after) < float(loss_before) - 1e-9:
-                                accepted_move = {
-                                    'region': str(region_name),
-                                    'iteration': int(region_iter + 1),
-                                    'global_id': int(node_info['global_id']),
-                                    'center_su': int(node_info['center_su']),
-                                    'old_hop1': tuple(node_info['hop1_ms']),
-                                    'new_hop1': tuple(alt['hop1_tuple']),
-                                    'old_mu': float(node_info['mu']),
-                                    'target_pos_window': (float(pos_peak.ppm_min), float(pos_peak.ppm_max)),
-                                    'target_pos_center': float(pos_peak.center_ppm),
-                                    'target_mu_median': float(alt.get('mu_median', 0.0)),
-                                    'loss_before': float(loss_before),
-                                    'loss_after': float(loss_after),
-                                    'affected_nodes': list(result.get('affected_nodes', []) or []),
-                                }
-                                break
-                            self._restore_hop1_state(nodes, prev_state)
-                        if accepted_move is not None:
-                            break
-                    if accepted_move is not None:
+                candidate_records: List[Dict[str, object]] = []
+                for neg_peak in list(neg_peaks[: max(1, min(5, len(neg_peaks)))]):
+                    neg_nodes_all = adjuster.find_nodes_in_peak_region(nodes, node_peak_rows, neg_peak)
+                    for su_type in su_priority:
+                        cand_nodes = [x for x in neg_nodes_all if int(x['center_su']) == int(su_type)]
+                        cand_nodes.sort(key=lambda x: int(x['global_id']))
+                        cand_nodes = cand_nodes[:candidate_cap]
+                        for node_info in cand_nodes:
+                            for pos_peak in list(pos_peaks[: max(1, min(5, len(pos_peaks)))]):
+                                alternatives = adjuster.find_alternative_hop1(
+                                    int(node_info['center_su']),
+                                    tuple(node_info['hop1_ms']),
+                                    (float(pos_peak.ppm_min), float(pos_peak.ppm_max)),
+                                )
+                                if not alternatives:
+                                    reject_summaries.append({
+                                        'region': str(region_name),
+                                        'iteration': int(region_iter + 1),
+                                        'global_id': int(node_info['global_id']),
+                                        'center_su': int(node_info['center_su']),
+                                        'old_hop1': tuple(node_info['hop1_ms']),
+                                        'neg_window': (float(neg_peak.ppm_min), float(neg_peak.ppm_max)),
+                                        'pos_window': (float(pos_peak.ppm_min), float(pos_peak.ppm_max)),
+                                        'reason': 'no_alternative_hop1_template',
+                                    })
+                                    continue
+                                for alt in alternatives[: min(int(alternative_cap), len(alternatives))]:
+                                    pos_center = 0.5 * (float(pos_peak.ppm_min) + float(pos_peak.ppm_max))
+                                    candidate_records.append({
+                                        'node_info': node_info,
+                                        'neg_peak': neg_peak,
+                                        'pos_peak': pos_peak,
+                                        'alt': alt,
+                                        'rank': (
+                                            -abs(float(neg_peak.intensity)),
+                                            abs(float(alt.get('mu_median', pos_center)) - float(pos_center)),
+                                            int(node_info['global_id']),
+                                        ),
+                                    })
+                candidate_records.sort(key=lambda x: x['rank'])
+
+                for rec in candidate_records:
+                    if int(total_candidate_trials) >= int(candidate_trial_budget):
+                        budget_exhausted = True
                         break
+                    node_info = rec['node_info']
+                    neg_peak = rec['neg_peak']
+                    pos_peak = rec['pos_peak']
+                    alt = rec['alt']
+                    total_candidate_trials += 1
+                    prev_state = self._capture_hop1_state(nodes)
+                    result = adjuster.execute_hop1_replacement(
+                        nodes=nodes,
+                        target_node_id=int(node_info['global_id']),
+                        new_hop1_tuple=tuple(alt['hop1_tuple']),
+                        E_target=E_target,
+                        dry_run=False,
+                    )
+                    if not bool(result.get('success', False)):
+                        self._restore_hop1_state(nodes, prev_state)
+                        reject_summaries.append({
+                            'region': str(region_name),
+                            'iteration': int(region_iter + 1),
+                            'global_id': int(node_info['global_id']),
+                            'center_su': int(node_info['center_su']),
+                            'old_hop1': tuple(node_info['hop1_ms']),
+                            'new_hop1': tuple(alt['hop1_tuple']),
+                            'neg_window': (float(neg_peak.ppm_min), float(neg_peak.ppm_max)),
+                            'pos_window': (float(pos_peak.ppm_min), float(pos_peak.ppm_max)),
+                            'reason': str(result.get('error', 'strict_swap_failed')),
+                        })
+                        continue
+                    if int(full_eval_count) >= int(full_eval_budget):
+                        self._restore_hop1_state(nodes, prev_state)
+                        budget_exhausted = True
+                        break
+                    snapshot_try = self.evaluator.build_eval_snapshot(
+                        nodes=nodes,
+                        S_target=S_target,
+                        lib_path=lib_path,
+                        hwhm=hwhm,
+                        allow_approx=bool(allow_approx),
+                    )
+                    full_eval_count += 1
+                    diff_try = np.asarray(snapshot_try.get('diff', []), dtype=np.float64)
+                    ppm_try = np.asarray(snapshot_try.get('ppm', []), dtype=np.float64)
+                    loss_after = self._region_abs_loss(ppm_try, diff_try, float(region_lo), float(region_hi))
+                    r2_after = float(snapshot_try.get('r2', r2))
+                    if float(loss_after) < float(loss_before) - 1e-9 and float(r2_after) >= float(r2) - 1e-6:
+                        accepted_move = {
+                            'region': str(region_name),
+                            'iteration': int(region_iter + 1),
+                            'global_id': int(node_info['global_id']),
+                            'center_su': int(node_info['center_su']),
+                            'old_hop1': tuple(node_info['hop1_ms']),
+                            'new_hop1': tuple(alt['hop1_tuple']),
+                            'old_mu': float(node_info['mu']),
+                            'target_pos_window': (float(pos_peak.ppm_min), float(pos_peak.ppm_max)),
+                            'target_pos_center': float(pos_peak.center_ppm),
+                            'target_mu_median': float(alt.get('mu_median', 0.0)),
+                            'loss_before': float(loss_before),
+                            'loss_after': float(loss_after),
+                            'r2_before': float(r2),
+                            'r2_after': float(r2_after),
+                            'neg_window': (float(neg_peak.ppm_min), float(neg_peak.ppm_max)),
+                            'pos_window': (float(pos_peak.ppm_min), float(pos_peak.ppm_max)),
+                            'affected_nodes': list(result.get('affected_nodes', []) or []),
+                        }
+                        break
+                    self._restore_hop1_state(nodes, prev_state)
+                    reject_summaries.append({
+                        'region': str(region_name),
+                        'iteration': int(region_iter + 1),
+                        'global_id': int(node_info['global_id']),
+                        'center_su': int(node_info['center_su']),
+                        'old_hop1': tuple(node_info['hop1_ms']),
+                        'new_hop1': tuple(alt['hop1_tuple']),
+                        'neg_window': (float(neg_peak.ppm_min), float(neg_peak.ppm_max)),
+                        'pos_window': (float(pos_peak.ppm_min), float(pos_peak.ppm_max)),
+                        'loss_before': float(loss_before),
+                        'loss_after': float(loss_after),
+                        'r2_before': float(r2),
+                        'r2_after': float(r2_after),
+                        'reason': 'loss_or_r2_not_improved',
+                    })
 
                 if accepted_move is None:
-                    stop_reason = 'no_valid_structural_swap'
+                    stop_reason = 'candidate_trial_budget_exhausted' if bool(budget_exhausted) else 'no_valid_structural_swap'
                     break
 
                 region_adjustments += 1
@@ -1383,6 +1593,53 @@ class Layer1Refiner:
                 'stop_reason': str(stop_reason),
                 'details': region_details,
             })
+            if bool(budget_exhausted):
+                break
+
+        if output_dir:
+            try:
+                out = Path(output_dir)
+                out.mkdir(parents=True, exist_ok=True)
+                rows = []
+                for move in iteration_summaries:
+                    rows.append({
+                        'region': str(move.get('region', '')),
+                        'iteration': int(move.get('iteration', 0)),
+                        'global_id': int(move.get('global_id', -1)),
+                        'center_su': int(move.get('center_su', -1)),
+                        'old_hop1': str(tuple(move.get('old_hop1', ()) or ())),
+                        'new_hop1': str(tuple(move.get('new_hop1', ()) or ())),
+                        'affected_nodes': ','.join(str(x) for x in list(move.get('affected_nodes', []) or [])),
+                        'neg_window': str(tuple(move.get('neg_window', ()) or ())),
+                        'pos_window': str(tuple(move.get('pos_window', ()) or ())),
+                        'old_mu': float(move.get('old_mu', 0.0)),
+                        'target_mu_median': float(move.get('target_mu_median', 0.0)),
+                        'loss_before': float(move.get('loss_before', 0.0)),
+                        'loss_after': float(move.get('loss_after', 0.0)),
+                        'r2_before': float(move.get('r2_before', 0.0)),
+                        'r2_after': float(move.get('r2_after', 0.0)),
+                    })
+                pd.DataFrame(rows).to_csv(str(out / 'layer1_hop1_adjust_moves.csv'), index=False)
+                reject_rows = []
+                for rec in reject_summaries:
+                    reject_rows.append({
+                        'region': str(rec.get('region', '')),
+                        'iteration': int(rec.get('iteration', 0)),
+                        'global_id': int(rec.get('global_id', -1)),
+                        'center_su': int(rec.get('center_su', -1)),
+                        'old_hop1': str(tuple(rec.get('old_hop1', ()) or ())),
+                        'new_hop1': str(tuple(rec.get('new_hop1', ()) or ())),
+                        'neg_window': str(tuple(rec.get('neg_window', ()) or ())),
+                        'pos_window': str(tuple(rec.get('pos_window', ()) or ())),
+                        'loss_before': rec.get('loss_before', ''),
+                        'loss_after': rec.get('loss_after', ''),
+                        'r2_before': rec.get('r2_before', ''),
+                        'r2_after': rec.get('r2_after', ''),
+                        'reason': str(rec.get('reason', '')),
+                    })
+                pd.DataFrame(reject_rows).to_csv(str(out / 'layer1_hop1_adjust_rejects.csv'), index=False)
+            except Exception as e:
+                print(f"  [Hop1调整] 保存move表失败: {e}")
 
         final_metrics = self.evaluator.evaluate_with_library(
             nodes=nodes,
@@ -1423,5 +1680,12 @@ class Layer1Refiner:
             'final_attempt_r2': float(final_attempt_r2),
             'selected_source': str(best_source),
             'adjuster_stats': dict(adjuster.stats),
+            'candidate_trials': int(total_candidate_trials),
+            'candidate_trial_budget': int(candidate_trial_budget),
+            'rejects': int(len(reject_summaries)),
+            'full_eval_count': int(full_eval_count),
+            'full_eval_budget': int(full_eval_budget),
+            'moves_per_region_budget': int(moves_per_region_cap),
+            'budget_exhausted': bool(budget_exhausted),
         }
         return selected_nodes, summary

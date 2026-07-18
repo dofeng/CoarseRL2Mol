@@ -1,253 +1,178 @@
-import argparse
-import torch
-import pandas as pd
-import os
-import glob
-from pathlib import Path
-import matplotlib.pyplot as plt
-import numpy as np
-import re
+"""Predict SU inventories with a trained S2N checkpoint."""
 
-import torch.nn.functional as F
+from __future__ import annotations
+
+import argparse
+import re
+from pathlib import Path
+
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader
 
 try:
-    from .s2n_model import S2NModel
-    from ...shared.coarse_graph import SU_DEFS, _node_color
-    from ...shared.inverse_common import (
-        normalize_spectrum_to_carbon_count,
-        resample_spectrum_to_ppm_axis,
+    from .s2n_model import S2NDataset, apply_element_feasibility_mask, extract_spectrum_stats
+    from .s2n_utils import (
+        compute_s2n_metrics,
+        load_s2n_checkpoint,
+        plot_su_bar,
+        predict_loader,
+        save_json,
+        save_s2n_plot_data,
+        save_prediction_table,
     )
+    from ...shared.inverse_common import normalize_spectrum_to_carbon_count, resample_spectrum_to_ppm_axis
 except ImportError:
-    from model.forward.s2n.s2n_model import S2NModel
-    from model.shared.coarse_graph import SU_DEFS, _node_color
-    from model.shared.inverse_common import (
-        normalize_spectrum_to_carbon_count,
-        resample_spectrum_to_ppm_axis,
+    from model.forward.s2n.s2n_model import S2NDataset, apply_element_feasibility_mask, extract_spectrum_stats
+    from model.forward.s2n.s2n_utils import (
+        compute_s2n_metrics,
+        load_s2n_checkpoint,
+        plot_su_bar,
+        predict_loader,
+        save_json,
+        save_s2n_plot_data,
+        save_prediction_table,
     )
+    from model.shared.inverse_common import normalize_spectrum_to_carbon_count, resample_spectrum_to_ppm_axis
 
-def predict_from_csv_and_elements(model_path: Path, spectrum_csv: Path, elements_str: str, output_name: str):
-    """
-    从谱图CSV和元素组成直接进行S2N预测。
-    """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
 
-    # 1. 加载模型
-    model = S2NModel(hid=256).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
-    model.eval()
-    print(f"S2N模型 '{model_path}' 加载成功。")
+def parse_elements(expr: str) -> torch.Tensor:
+    matches = dict(re.findall(r"([CHONSX])\s*=\s*([0-9]+(?:\.[0-9]+)?)", expr.upper()))
+    return torch.tensor([float(matches.get(sym, 0.0)) for sym in ["C", "H", "O", "N", "S", "X"]], dtype=torch.float)
 
-    # 2. 加载和处理输入数据
-    # 从CSV加载谱图
-    df_spec = pd.read_csv(spectrum_csv, sep=r'[;, \t]', engine='python', header=None)
+
+def predict_from_csv(model_path: Path,
+                     spectrum_csv: Path,
+                     elements_str: str,
+                     output_name: str,
+                     output_dir: Path,
+                     apply_mask: bool):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, config, _metadata = load_s2n_checkpoint(model_path, device=device)
+
+    df_spec = pd.read_csv(spectrum_csv, sep=r"[;, \t]", engine="python", header=None)
     if df_spec.shape[1] < 2:
-        raise ValueError("谱图CSV需要两列: ppm, intensity")
-    S_target = resample_spectrum_to_ppm_axis(
-        df_spec.iloc[:, 0].values,
-        df_spec.iloc[:, 1].values,
-    ).to(device)
-    
-    # 解析元素字符串
-    matches = dict(re.findall(r"([CHONSX])\s*=\s*(\d+)", elements_str.upper()))
-    E_target = torch.tensor([int(matches.get(sym, 0)) for sym in ['C','H','O','N','S','X']], dtype=torch.float).to(device)
-    
-    # 预处理：强度缩放 (与 inverse_pipeline.py 保持一致)
-    num_carbons = E_target[0].item()
-    S_target = normalize_spectrum_to_carbon_count(S_target, float(num_carbons)).to(device)
-    
-    print("\n--- 输入数据 ---")
-    print(f"谱图文件: {spectrum_csv}")
-    print(f"元素组成: {elements_str} (C={num_carbons})")
-    print(f"谱图总面积缩放至: {S_target.sum().item():.2f}")
+        raise ValueError("Spectrum CSV requires at least two columns: ppm, intensity")
+    spectrum = resample_spectrum_to_ppm_axis(df_spec.iloc[:, 0].values, df_spec.iloc[:, 1].values)
+    elements = parse_elements(elements_str)
+    spectrum = normalize_spectrum_to_carbon_count(spectrum, float(elements[0].item()))
+    spectrum_stats = extract_spectrum_stats(spectrum.unsqueeze(0), mode="regions_v1").squeeze(0).cpu()
 
-    # 3. 模型推理
     with torch.no_grad():
-        su_hist_pred = model.infer_su_hist(S_target.unsqueeze(0), E_target.unsqueeze(0)).squeeze(0).cpu()
+        pred = model.infer_su_hist(
+            spectrum.unsqueeze(0).to(device),
+            elements.unsqueeze(0).to(device),
+            apply_mask=False,
+        ).squeeze(0).cpu()
+    if apply_mask:
+        pred = apply_element_feasibility_mask(pred, elements)
 
-    # 4. 打印结果
-    print("\n--- 预测的SU直方图 ---")
-    su_names = [name for name, _ in SU_DEFS]
-    df = pd.DataFrame({
-        'SU_Name': su_names,
-        'Predicted_Count': su_hist_pred.round().long().tolist()
-    })
-    df_filtered = df[df['Predicted_Count'] > 0]
-    print(df_filtered.to_string(index=False))
-    
-    # 保存结果
-    output_dir = Path("s2n_prediction_results")
-    output_dir.mkdir(exist_ok=True)
-    csv_out_path = output_dir / f"{output_name}_pred_su_hist.csv"
-    df_filtered.to_csv(csv_out_path, index=False)
-    print(f"\n[✓] 预测结果已保存至: {csv_out_path}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    save_prediction_table(pred, None, output_dir / f"{output_name}_pred_su_hist.csv")
+    plot_su_bar(pred, output_dir / f"{output_name}_pred_su_hist.png", title="Predicted Structural Unit Distribution")
+    save_json(output_dir / f"{output_name}_config.json", config.to_dict())
+    stat_names = [
+        "frac_0_25", "frac_25_50", "frac_50_70", "frac_70_90",
+        "frac_90_110", "frac_110_130", "frac_130_160",
+        "frac_160_190", "frac_190_240", "frac_ordinary_0_50",
+        "frac_oxygenated_50_90", "frac_aliphatic_0_90",
+        "frac_aromatic_90_160", "frac_carbonyl_160_240",
+        "log_area_scaled", "aromatic_minus_aliphatic",
+    ]
+    pd.DataFrame([{
+        "feature": name,
+        "value": float(spectrum_stats[i].item()),
+    } for i, name in enumerate(stat_names)]).to_csv(output_dir / f"{output_name}_spectrum_stats.csv", index=False)
 
-    # 可视化预测的 SU 直方图（与 dataset_utils.py 风格一致）
-    plt.rcParams['font.family'] = 'Times New Roman'
-    plt.rcParams['axes.edgecolor'] = '#333333'
-    plt.rcParams['axes.linewidth'] = 1.0
-    
-    # 使用完整的预测结果（包含所有33个SU），按ID顺序
-    all_counts = su_hist_pred.round().numpy()
-    x_indices = np.arange(len(SU_DEFS))  # 0-32
-    
-    # 使用 _node_color 为每个 SU 设置颜色
-    colors = [_node_color(int(idx)) for idx in x_indices]
-    labels = [f"{idx}" for idx in x_indices]
+    df = pd.read_csv(output_dir / f"{output_name}_pred_su_hist.csv")
+    nonzero = df[df["Predicted_Rounded"] > 0]
+    print("\n--- S2N prediction ---")
+    print(f"model: {model_path}")
+    print(f"spectrum: {spectrum_csv}")
+    print(f"elements: {elements.tolist()}")
+    print(f"spectrum_stats_csv: {output_dir / f'{output_name}_spectrum_stats.csv'}")
+    print(nonzero[["SU_Index", "SU_Name", "Predicted_Rounded"]].to_string(index=False))
+    print(f"[done] results written to {output_dir}")
 
-    fig, ax = plt.subplots(figsize=(18, 6))
-    bars = ax.bar(range(len(x_indices)), all_counts, color=colors, edgecolor='white', linewidth=0.5)
-    
-    # 在柱状图顶部添加数值标签
-    for i, (bar, count) in enumerate(zip(bars, all_counts)):
-        height = bar.get_height()
-        if count > 0:  # 只为非零值添加标签
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{int(count)}',
-                    ha='center', va='bottom', fontsize=16)
-    
-    ax.set_xticks(range(len(x_indices)))
-    ax.set_xticklabels(labels, rotation=0, fontsize=10)
-    ax.set_ylabel('Predicted Count', fontsize=24)
-    ax.set_title('Predicted Structural Unit Distribution (Indices 0-32)', fontsize=24, pad=12)
-    ax.tick_params(axis='both', labelsize=18)
-    ax.grid(False)
 
-    fig.tight_layout()
-    png_out_path = output_dir / f"{output_name}_pred_su_hist.png"
-    fig.savefig(png_out_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    print(f"[✓] 预测直方图已保存至: {png_out_path}")
-
-def validate_s2n_model(model_path: Path, input_path: Path, num_samples: int):
-    """
-    加载S2N模型并在一系列测试样本上验证其性能。
-    """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
-
-    # 1. 加载模型
-    model = S2NModel(hid=256).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
-    model.eval()
-    print(f"S2N模型 '{model_path}' 加载成功。")
-
-    # 2. 加载测试数据
-    if os.path.isdir(input_path):
-        pt_files = sorted(glob.glob(os.path.join(input_path, "*.pt")))
-    elif os.path.isfile(input_path):
-        pt_files = [str(input_path)]
+def validate_pt_inputs(model_path: Path,
+                       input_path: Path,
+                       output_dir: Path,
+                       num_samples: int,
+                       apply_mask: bool):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, config, _metadata = load_s2n_checkpoint(model_path, device=device)
+    if input_path.is_dir():
+        files = sorted(str(p) for p in input_path.glob("*.pt"))
+    elif input_path.is_file():
+        files = [str(input_path)]
     else:
-        raise FileNotFoundError(f"输入路径 '{input_path}' 无效。")
+        raise FileNotFoundError(f"Invalid input path: {input_path}")
+    if not files:
+        raise FileNotFoundError(f"No .pt files found in {input_path}")
+    if num_samples > 0 and len(files) > num_samples:
+        files = files[:num_samples]
 
-    if not pt_files:
-        raise FileNotFoundError(f"在 '{input_path}' 中未找到.pt文件。")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    loader = DataLoader(S2NDataset(files), batch_size=16, shuffle=False)
+    result = predict_loader(model, loader, device, apply_mask=apply_mask)
+    metrics = compute_s2n_metrics(result["pred"], result["true"], result["elements"])
+    save_json(output_dir / "metrics.json", metrics)
+    pd.DataFrame([metrics]).to_csv(output_dir / "metrics.csv", index=False)
+    save_s2n_plot_data(result, output_dir / "plot_data", prefix="validation")
 
-    if len(pt_files) > num_samples:
-        import random
-        pt_files = random.sample(pt_files, num_samples)
-        print(f"随机抽取 {num_samples} 个样本进行验证。")
+    for i, path in enumerate(result["paths"]):
+        stem = Path(path).stem
+        save_prediction_table(result["pred"][i], result["true"][i], output_dir / f"{stem}_prediction.csv")
+        plot_su_bar(
+            result["pred"][i],
+            output_dir / f"{stem}_prediction.png",
+            true=result["true"][i],
+            title=f"S2N validation: {stem}",
+        )
 
-    output_dir = Path("s2n_validation_results")
-    output_dir.mkdir(exist_ok=True)
-    print(f"验证结果将保存在 '{output_dir}' 目录中。")
-    
-    # 3. 循环验证
-    total_mae = 0.0
-    for pt_file in pt_files:
-        data = torch.load(pt_file, weights_only=False)
-        
-        S_target = data['y_spectrum'].to(device)
-        E_target = data['total_atom_counts'].to(device)
-        su_hist_true = data['su_hist']
+    save_json(output_dir / "checkpoint_config.json", config.to_dict())
+    print("\n--- S2N validation ---")
+    print(pd.DataFrame([metrics]).to_string(index=False))
+    print(f"[done] results written to {output_dir}")
 
-        # 模型推理
-        with torch.no_grad():
-            su_hist_pred = model.infer_su_hist(S_target.unsqueeze(0), E_target.unsqueeze(0)).squeeze(0).cpu()
 
-        mae = F.l1_loss(su_hist_pred, su_hist_true).item()
-        total_mae += mae
-        
-        basename = Path(pt_file).stem
-        print(f"\n--- 验证样本: {basename} ---")
-        print(f"SU 直方图 MAE: {mae:.4f}")
+def parse_args():
+    parser = argparse.ArgumentParser("S2N prediction / quick validation")
+    parser.add_argument("--model_path", "--checkpoint", dest="model_path", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--spectrum_csv", type=Path)
+    mode.add_argument("--input_path", type=Path)
+    parser.add_argument("--elements", type=str, help="e.g. 'C=230,H=200,O=30,N=1,S=1,X=0'")
+    parser.add_argument("--output_name", type=str, default="prediction")
+    parser.add_argument("--output_dir", type=Path, default=Path("s2n_prediction_results"))
+    parser.add_argument("--num_samples", type=int, default=10)
+    parser.add_argument("--apply_mask", action="store_true", help="Apply element-feasibility mask to predictions.")
+    return parser.parse_args()
 
-        # 打印对比表格
-        su_names = [name for name, _ in SU_DEFS]
-        df = pd.DataFrame({
-            'SU_Name': su_names,
-            'True_Count': su_hist_true.round().long().tolist(),
-            'Pred_Count': su_hist_pred.round().long().tolist()
-        })
-        df_filtered = df[(df['True_Count'] > 0) | (df['Pred_Count'] > 0)]
-        print(df_filtered.to_string(index=False))
 
-        # 可视化对比：仅绘制 True 或 Pred 非零的 SU 类型，使用 SU ID
-        plt.rcParams['font.family'] = 'Times New Roman'
-        plt.rcParams['axes.linewidth'] = 1.2
-        
-        su_hist_true_np = su_hist_true.numpy()
-        su_hist_pred_np = su_hist_pred.numpy()
-        mask = (su_hist_true_np > 0) | (su_hist_pred_np > 0)
-
-        if mask.any():
-            # 获取 SU ID 列表
-            su_ids_sel = [i for i, keep in enumerate(mask) if keep]
-            true_sel = su_hist_true_np[mask]
-            pred_sel = su_hist_pred_np[mask]
-
-            indices = np.arange(len(su_ids_sel))
-            width = 0.38
-
-            fig, ax = plt.subplots(figsize=(max(8, len(su_ids_sel) * 0.6), 5))
-            ax.bar(indices - width/2, true_sel, width, label='True', 
-                   color='#4C72B0', edgecolor='#2E4A71', linewidth=0.8)
-            ax.bar(indices + width/2, pred_sel, width, label='Predicted', 
-                   color='#DD8452', edgecolor='#A85C32', linewidth=0.8)
-
-            ax.set_xlabel('SU ID', fontsize=18)
-            ax.set_ylabel('Counts', fontsize=18)
-            ax.set_xticks(indices)
-            ax.set_xticklabels([str(sid) for sid in su_ids_sel], fontsize=16)
-            ax.set_yticklabels([str(sid) for sid in su_ids_sel], fontsize=16)
-            ax.legend(frameon=False, fontsize=16, loc='upper right')
-            ax.tick_params(direction='in', width=1.2)
-            for spine in ax.spines.values():
-                spine.set_linewidth(1.2)
-
-            fig.tight_layout()
-            plt.savefig(output_dir / f"{basename}_validation.png", dpi=300, bbox_inches='tight')
-            plt.close(fig)
-
-    print(f"\n--- 验证完成 ---")
-    print(f"在 {len(pt_files)} 个样本上的平均 MAE: {total_mae / len(pt_files):.4f}")
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser("S2N模型预测与验证脚本")
-    parser.add_argument('--model_path', type=Path, required=True, help='训练好的 S2N 模型权重路径. Aliased to --checkpoint for convenience.')
-    
-    # Group for different modes
-    mode_group = parser.add_mutually_exclusive_group(required=True)
-    mode_group.add_argument('--input_path', type=Path, help='[验证模式] 包含测试.pt文件的目录或单个.pt文件路径')
-    mode_group.add_argument('--spectrum_csv', type=Path, help='[预测模式] 目标谱图CSV文件路径')
-    
-    # Arguments for prediction mode
-    parser.add_argument('--elements', type=str, help="[预测模式] 目标元素组成, e.g., 'C=230,H=200,O=30'")
-    parser.add_argument('--output_name', type=str, default='prediction', help='[预测模式] 输出文件的前缀名')
-
-    # Arguments for validation mode
-    parser.add_argument('--num_samples', type=int, default=10, help='[验证模式] 如果输入是目录，则随机抽样的最大样本数')
-
-    # Alias for convenience to match notebook
-    parser.add_argument('--checkpoint', type=Path, dest='model_path', help=argparse.SUPPRESS)
-
-    args = parser.parse_args()
-    
-    if args.input_path:
-        # --- 验证模式 ---
-        validate_s2n_model(args.model_path, args.input_path, args.num_samples)
-    elif args.spectrum_csv:
-        # --- 预测模式 ---
+def main():
+    args = parse_args()
+    if args.spectrum_csv:
         if not args.elements:
-            parser.error("--elements 参数在预测模式下是必需的。")
-        predict_from_csv_and_elements(args.model_path, args.spectrum_csv, args.elements, args.output_name) 
+            raise SystemExit("--elements is required with --spectrum_csv")
+        predict_from_csv(
+            args.model_path,
+            args.spectrum_csv,
+            args.elements,
+            args.output_name,
+            args.output_dir,
+            apply_mask=args.apply_mask,
+        )
+    else:
+        validate_pt_inputs(
+            args.model_path,
+            args.input_path,
+            args.output_dir,
+            args.num_samples,
+            apply_mask=args.apply_mask,
+        )
+
+
+if __name__ == "__main__":
+    main()

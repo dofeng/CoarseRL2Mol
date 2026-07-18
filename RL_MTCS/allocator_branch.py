@@ -19,7 +19,6 @@ from .allocator_models import (
     _FixedConnectorExpansion,
 )
 
-
 class BranchTopologyMixin:
     # ---------- branch topology candidates ----------
 
@@ -29,11 +28,13 @@ class BranchTopologyMixin:
     ) -> List[_BranchTopologyCandidate]:
         skip = {int(x) for x in set(skip_node_ids or set()) if int(x) >= 0}
         out: List[_BranchTopologyCandidate] = []
+        self._branch_classification_rejects = []
         for node in self._nodes:
             gid = int(node.global_id)
             if gid in skip:
                 continue
             center = state_for_node(node)
+            before = int(len(out))
             if int(center.su) == 24:
                 out.extend(self._classify_native24_branch_candidates(node, center, skip))
             elif int(center.su) == 25:
@@ -42,6 +43,34 @@ class BranchTopologyMixin:
                 out.extend(self._classify_su14_branch_candidates(node, center, skip))
             elif is_special_d3(center):
                 out.extend(self._classify_special_d3_branch_candidates(node, center, skip))
+            else:
+                continue
+            if int(len(out)) == int(before):
+                try:
+                    neighbors = [
+                        {
+                            "gid": int(getattr(nb, "global_id", -1)),
+                            "su": int(getattr(st, "su", getattr(nb, "su_type", -1))),
+                            "label": str(getattr(st, "label", "")),
+                        }
+                        for nb, st in self._neighbor_states(node)
+                        if int(getattr(nb, "global_id", -1)) not in skip
+                    ]
+                except Exception:
+                    neighbors = []
+                self._branch_classification_rejects.append({
+                    "global_id": int(gid),
+                    "su_type": int(center.su),
+                    "label": str(getattr(center, "label", "")),
+                    "reason": "no_branch_candidate_matched",
+                    "neighbor_states": list(neighbors),
+                    "hop1": [int(x) for x in list(getattr(node, "hop1", []) or [])],
+                    "hop1_ids": [int(x) for x in list(getattr(node, "hop1_ids", []) or [])],
+                    "target_degree": getattr(node, "target_degree", None),
+                    "target_fixed_anchor_count": getattr(node, "target_fixed_anchor_count", None),
+                    "anchor_partition": getattr(node, "anchor_partition", None),
+                    "anchor_mode": getattr(node, "anchor_mode", None),
+                })
         out.extend(self._classify_su14_pair_candidates(skip))
         out.extend(self._classify_like24_n_bridge_candidates(skip))
         return out
@@ -1331,6 +1360,9 @@ class BranchTopologyMixin:
         ring_position_role: str = "",
         disallow_ring_reason: str = "",
         left_endpoint_state: Optional[Any] = None,
+        topology_role_override: str = "",
+        main_open_class_override: str = "",
+        connector_policy: str = "",
     ) -> _BranchTopologyCandidate:
         prefix = f"{left_prefix}-" if left_prefix else "-"
         topology = f"{prefix}{center.label}(-{'-'.join(exp.path_labels)})-"
@@ -1374,6 +1406,9 @@ class BranchTopologyMixin:
             branch_connector_ids=self._connector_expansion_ids(exp) if assembly_family else [],
             exclusive_group_key=group_id,
             disallow_ring_reason=disallow_ring_reason,
+            topology_role_override=topology_role_override,
+            main_open_class_override=main_open_class_override,
+            connector_policy=connector_policy,
         )
 
     def _candidate_from_main_connector(
@@ -1400,6 +1435,9 @@ class BranchTopologyMixin:
         branch_connector_ids: Optional[Sequence[int]] = None,
         disallow_ring_reason: str = "",
         left_endpoint_state: Optional[Any] = None,
+        topology_role_override: str = "",
+        main_open_class_override: str = "",
+        connector_policy: str = "",
     ) -> _BranchTopologyCandidate:
         branch_states_all: List[Any] = list(branch_states or [])
         if not branch_states_all:
@@ -1476,6 +1514,9 @@ class BranchTopologyMixin:
             branch_connector_ids=branch_connector_ids,
             exclusive_group_key=group_id,
             disallow_ring_reason=disallow_ring_reason,
+            topology_role_override=topology_role_override,
+            main_open_class_override=main_open_class_override,
+            connector_policy=connector_policy,
         )
 
     def _candidate_from_double_d3_fixed_connectors(
@@ -1498,6 +1539,9 @@ class BranchTopologyMixin:
         ring_scope: str = "",
         ring_position_role: str = "",
         disallow_ring_reason: str = "",
+        topology_role_override: str = "",
+        main_open_class_override: str = "",
+        connector_policy: str = "",
     ) -> _BranchTopologyCandidate:
         main_states = [center] + self._states_from_expansion(main_exp)
         branch_states = self._states_from_expansion(branch_exp)
@@ -1595,6 +1639,9 @@ class BranchTopologyMixin:
             branch_connector_ids=self._connector_expansion_ids(branch_exp) if assembly_family else [],
             exclusive_group_key=group_id,
             disallow_ring_reason=disallow_ring_reason,
+            topology_role_override=topology_role_override,
+            main_open_class_override=main_open_class_override,
+            connector_policy=connector_policy,
             evidence_ids=evidence_ids,
             abstracted_neighbors=abstracted_neighbors,
         )
@@ -1667,6 +1714,9 @@ class BranchTopologyMixin:
                     "ring_eligible": False,
                     "ring_scope": "",
                     "ring_position_role": "internal_24CD_bridge",
+                    "topology_role_override": "definite_flex",
+                    "main_open_class_override": "closed",
+                    "connector_policy": "two_M_fixed_connectors_main_bridge",
                 }
             usage = ["flex_branch", "side_branch"]
             ring_eligible = not main_uses_02
@@ -1680,6 +1730,9 @@ class BranchTopologyMixin:
                 "ring_scope": "side_aliphatic_ring" if ring_eligible else "",
                 "ring_position_role": "internal_24CD" if ring_eligible else "",
                 "disallow_ring_reason": "" if ring_eligible else "main_connector_0_or_2",
+                "topology_role_override": "b_like_open",
+                "main_open_class_override": "one_chain_open",
+                "connector_policy": "single_M_fixed_connector_main",
             }
         if kind == "P":
             return {
@@ -1688,6 +1741,9 @@ class BranchTopologyMixin:
                 "usage_modes": ["side_branch"],
                 "ring_eligible": False,
                 "disallow_ring_reason": "terminal_P_side_branch_only",
+                "topology_role_override": "e_like_open",
+                "main_open_class_override": "one_chain_open",
+                "connector_policy": "P_fixed_connector_terminal_side",
             }
         ring_eligible = not main_uses_02
         usage = ["flex_branch", "side_branch"]
@@ -1701,6 +1757,9 @@ class BranchTopologyMixin:
             "ring_scope": "upper_or_fused_aliphatic_ring" if ring_eligible else "",
             "ring_position_role": "internal_24CD" if ring_eligible else "",
             "disallow_ring_reason": "" if ring_eligible else "main_connector_0_or_2",
+            "topology_role_override": "d_like_open",
+            "main_open_class_override": "two_chain_open",
+            "connector_policy": "N_fixed_connector_main",
         }
 
     def _cd_14_main_assembly_kwargs(self, bridgehead_replace: bool = False) -> Dict[str, Any]:
@@ -1717,6 +1776,9 @@ class BranchTopologyMixin:
             "ring_scope": "side_or_fused_aliphatic_ring",
             "ring_position_role": "internal_24CD",
             "bridgehead_replace_24c_eligible": bool(bridgehead_replace),
+            "topology_role_override": "d_like_open",
+            "main_open_class_override": "two_chain_open",
+            "connector_policy": "N_14_like_main",
         }
 
     def _cd_branch_assembly_kwargs(
@@ -1735,6 +1797,9 @@ class BranchTopologyMixin:
             "ring_eligible": True,
             "ring_scope": "side_or_upper_or_fused_aliphatic_ring",
             "ring_position_role": "internal_24CD",
+            "topology_role_override": "ring_slot_open",
+            "main_open_class_override": "two_chain_open",
+            "connector_policy": "N_fixed_connector_branch",
         }
 
     @staticmethod
@@ -1807,6 +1872,9 @@ class BranchTopologyMixin:
         bridgehead_replace_24c_eligible: bool = False,
         suppresses_local_candidate_keys: Optional[Sequence[str]] = None,
         priority_rank: int = 0,
+        topology_role_override: str = "",
+        main_open_class_override: str = "",
+        connector_policy: str = "",
         actual_main_path_su: Optional[Sequence[int]] = None,
         actual_main_path_labels: Optional[Sequence[str]] = None,
         actual_used_su: Optional[Sequence[int]] = None,
@@ -1908,6 +1976,9 @@ class BranchTopologyMixin:
             bridgehead_replace_24c_eligible=bool(bridgehead_replace_24c_eligible),
             suppresses_local_candidate_keys=[str(x) for x in list(suppresses_local_candidate_keys or [])],
             priority_rank=int(priority_rank),
+            topology_role_override=str(topology_role_override),
+            main_open_class_override=str(main_open_class_override),
+            connector_policy=str(connector_policy),
             branch_slots_su={
                 str(k): [int(x) for x in list(v or [])]
                 for k, v in dict(branch_slots_su or {}).items()
@@ -1990,10 +2061,11 @@ class BranchTopologyMixin:
                 ring_usable = "ring"
 
             return {
-                "topology_role": topology_role,
-                "main_open_class": main_open_class,
+                "topology_role": str(cand.topology_role_override or topology_role),
+                "main_open_class": str(cand.main_open_class_override or main_open_class),
                 "branch_closure_need": branch_closure_need,
                 "ring_usable": ring_usable,
+                "connector_policy": str(cand.connector_policy or ""),
             }
 
         candidate_rows = [

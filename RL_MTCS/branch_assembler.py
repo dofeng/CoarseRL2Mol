@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .allocator_patterns import AROMATIC_SU, TERMINAL_BASE_SU
 from .allocator_models import (
     BRANCH_CLOSURE_INTENTS,
-    CONVERSION_RESOURCE_KEYS,
     MAX_23_PER_CHAIN,
     ChainSpec,
+    TopologyAssemblyPlan,
     _chain_required_resource_counts,
     _sum_chain_required_resource_counts,
     chain_23_count,
@@ -21,6 +21,26 @@ from .topology_solver import TopologyAssemblySolver
 
 
 RESOURCE_KEYS = ("11", "22", "23", "24", "25")
+
+MANDATORY_FLEX_FAMILIES = {
+    "24_AB_M",
+    "24_CD_M_BRIDGE",
+    "24_AB_N_AB_BRIDGE",
+}
+MANDATORY_SIDE_FAMILIES = {
+    "24_AB_P",
+    "24_CD_P",
+}
+FLEX_USAGE_MODES = {
+    "flex_branch",
+    "ordinary_bridge",
+    "ordinary_pair_bridge",
+}
+SIDE_USAGE_MODES = {
+    "side_branch",
+    "ordinary_side",
+    "ordinary_pair_side",
+}
 
 
 @dataclass
@@ -63,55 +83,6 @@ class TopologyAssemblyOption:
         }
 
 
-class ResourceLedger:
-    def __init__(self, totals: Dict[str, int], pre_consumed: Optional[Dict[str, int]] = None):
-        self.total = {str(k): int(totals.get(k, 0)) for k in RESOURCE_KEYS}
-        self.pre_consumed = {str(k): int((pre_consumed or {}).get(k, 0)) for k in RESOURCE_KEYS}
-        self.consumed = {str(k): int(self.pre_consumed.get(k, 0)) for k in RESOURCE_KEYS}
-        self.shortage = {str(k): 0 for k in RESOURCE_KEYS}
-        self.consumed_by_option: List[Dict[str, Any]] = []
-
-    def remaining(self) -> Dict[str, int]:
-        return {
-            str(k): max(0, int(self.total.get(k, 0)) - int(self.consumed.get(k, 0)))
-            for k in RESOURCE_KEYS
-        }
-
-    def can_consume(self, cost: Dict[str, int]) -> bool:
-        rem = self.remaining()
-        return all(int(cost.get(k, 0)) <= int(rem.get(k, 0)) for k in RESOURCE_KEYS)
-
-    def consume(self, option: TopologyAssemblyOption) -> bool:
-        cost = {str(k): int(option.resource_cost.get(k, 0)) for k in RESOURCE_KEYS}
-        if not self.can_consume(cost):
-            rem = self.remaining()
-            for key in RESOURCE_KEYS:
-                gap = max(0, int(cost.get(key, 0)) - int(rem.get(key, 0)))
-                if gap:
-                    self.shortage[key] = max(int(self.shortage.get(key, 0)), int(gap))
-            return False
-        for key in RESOURCE_KEYS:
-            self.consumed[key] = int(self.consumed.get(key, 0)) + int(cost.get(key, 0))
-        self.consumed_by_option.append({
-            "option_id": str(option.option_id),
-            "assembly_family": str(option.assembly_family),
-            "usage_mode": str(option.usage_mode),
-            "cost": dict(cost),
-            "source_ids": [int(x) for x in option.source_ids],
-        })
-        return True
-
-    def row(self) -> Dict[str, Any]:
-        return {
-            "total": dict(self.total),
-            "pre_consumed": dict(self.pre_consumed),
-            "consumed": dict(self.consumed),
-            "remaining": self.remaining(),
-            "shortage": dict(self.shortage),
-            "consumed_by_option": list(self.consumed_by_option),
-        }
-
-
 @dataclass
 class BranchAssemblyResult:
     ordinary_chains: List[ChainSpec] = field(default_factory=list)
@@ -149,23 +120,23 @@ class BranchTopologyAssembler:
                 self.constraints.get("flex_lower", self.constraints.get("flexible_bridge_min", 0)),
             ) or 0
         ))
-        self.flex_upper_raw = int(
-            self.constraints.get(
-                "flex_upper_raw",
-                self.constraints.get("flex_upper", self.constraints.get("flexible_bridge_limit", 10**9)),
-            ) or 10**9
+        flex_upper_value = self.constraints.get(
+            "flex_upper_raw",
+            self.constraints.get("flex_upper", self.constraints.get("flexible_bridge_limit", None)),
         )
-        self.flex_window_ok = bool(self.constraints.get("flex_window_ok", int(self.flex_lower_raw) <= int(self.flex_upper_raw)))
+        self.flex_upper_raw = int(10**9 if flex_upper_value is None else flex_upper_value)
+        bounds_ok = int(self.flex_lower_raw) <= int(self.flex_upper_raw)
+        self.flex_window_ok = bool(bounds_ok and bool(self.constraints.get("flex_window_ok", bounds_ok)))
         self.flex_lower = int(self.flex_lower_raw)
         self.flex_upper = int(self.flex_upper_raw)
         self.flex_upper_adjusted_to_lower = False
-        if self.flex_upper < self.flex_lower:
-            self.flex_upper = self.flex_lower
-            self.flex_upper_adjusted_to_lower = True
         self.allowed_backbone_residual = max(0, int(self.constraints.get("allowed_backbone_residual", 0) or 0))
+        self.defer_residual_to_extra = bool(self.constraints.get("defer_residual_to_extra", False))
 
     def assemble(self) -> BranchAssemblyResult:
-        return self._assemble_with_solver()
+        if bool(self.constraints.get("use_legacy_topology_solver", False)):
+            return self._assemble_with_solver()
+        return self._assemble_staged()
 
     def _assemble_with_solver(self) -> BranchAssemblyResult:
         pre_consumed = _sum_chain_required_resource_counts(self.ordinary_chains)
@@ -173,6 +144,24 @@ class BranchTopologyAssembler:
         ring_options = self._build_ring_options(base_options, set())
         all_options = list(base_options) + list(ring_options)
         pending_specs, pending_group_ids = self._pending_specs_with_group_ids()
+        pending_group_set = {str(gid) for gid in pending_group_ids}
+        solver_group_ids: List[str] = []
+        optionless_group_ids: List[str] = []
+        covered_by_usable: set[str] = set()
+        for opt in list(all_options or []):
+            if str(getattr(opt, "usage_mode", "") or "") == "ring_candidate":
+                continue
+            covered_by_usable.update(
+                str(gid)
+                for gid in TopologyAssemblySolver._covered_groups(opt)
+                if str(gid) in pending_group_set
+            )
+        for gid in pending_group_ids:
+            gid_s = str(gid)
+            if gid_s in covered_by_usable:
+                solver_group_ids.append(gid_s)
+            else:
+                optionless_group_ids.append(gid_s)
         solver = TopologyAssemblySolver(
             resource_totals={
                 **{str(k): int(self.resource_totals.get(str(k), 0)) for k in RESOURCE_KEYS},
@@ -183,20 +172,44 @@ class BranchTopologyAssembler:
             flex_upper=int(self.flex_upper),
             ordinary_flex_count=self._ordinary_flex_count(self.ordinary_chains),
             ordinary_chains=self.ordinary_chains,
-            pending_group_ids=pending_group_ids,
+            pending_group_ids=solver_group_ids if optionless_group_ids else pending_group_ids,
             option_to_chain=self._chain_from_option,
             used_source_ids=self._source_ids_for_chains(self.ordinary_chains),
             used_exclusive_keys=self._exclusive_keys_for_chains(self.ordinary_chains),
             max_23_per_chain=MAX_23_PER_CHAIN,
         )
-        solved = solver.solve(all_options, pre_consumed)
+        if pending_group_ids and not solver_group_ids:
+            solved = type("SolverResultLike", (), {})()
+            solved.plan = TopologyAssemblyPlan(
+                feasible=True,
+                materialized=True,
+                materialization_required=False,
+                selected_option_ids=[],
+                planned_conversions=[],
+                residual_growth_actions=[],
+                residual_chain_actions=[],
+                residual_remaining={str(k): 0 for k in RESOURCE_KEYS},
+                chain_23_limit_violations=[],
+                reason="pending_groups_without_options",
+            )
+            solved.selected_options = []
+            solved.residual_specs = []
+            solved.unresolved_group_ids = list(optionless_group_ids)
+            solved.reason = "pending_groups_without_options"
+        else:
+            solved = solver.solve(all_options, pre_consumed)
         plan = solved.plan
 
         selected_options = list(solved.selected_options or [])
         selected_specs = [self._chain_from_option(opt) for opt in selected_options]
+        residual_specs_for_apply = (
+            []
+            if optionless_group_ids or bool(self.defer_residual_to_extra)
+            else list(solved.residual_specs or [])
+        )
         materialized_base, residual_specs = TopologyAssemblySolver._apply_growth_specs(
             list(self.ordinary_chains) + list(selected_specs),
-            list(solved.residual_specs or []),
+            residual_specs_for_apply,
         )
         ordinary_chains = list(materialized_base[:len(self.ordinary_chains)])
         selected_specs = list(materialized_base[len(self.ordinary_chains):])
@@ -204,9 +217,27 @@ class BranchTopologyAssembler:
         unclosed_specs: List[ChainSpec] = []
         unclosed_rows: List[Dict[str, Any]] = []
         if not bool(plan.feasible):
+            infeasible_group_ids = set(str(gid) for gid in (solver_group_ids or pending_group_ids))
             for chain, group_id in zip(pending_specs, pending_group_ids):
+                if str(group_id) not in infeasible_group_ids:
+                    continue
                 row = self._unclosed_row_for_chain(chain, str(group_id), all_options, {})
                 row["reason"] = str(plan.reason or solved.reason or row.get("reason", "solver_infeasible"))
+                row["deferred_nonblocking"] = False
+                unclosed_rows.append(row)
+                pending = copy.deepcopy(chain)
+                pending.metadata = dict(pending.metadata or {})
+                pending.metadata["unclosed_topology_candidate"] = True
+                pending.metadata["unclosed_reason"] = str(row["reason"])
+                pending.metadata["deferred_nonblocking"] = False
+                unclosed_specs.append(pending)
+        if optionless_group_ids:
+            optionless_set = {str(gid) for gid in optionless_group_ids}
+            for chain, group_id in zip(pending_specs, pending_group_ids):
+                if str(group_id) not in optionless_set:
+                    continue
+                row = self._unclosed_row_for_chain(chain, str(group_id), all_options, {})
+                row["reason"] = f"no_options_for_group:{group_id}"
                 row["deferred_nonblocking"] = False
                 unclosed_rows.append(row)
                 pending = copy.deepcopy(chain)
@@ -233,6 +264,12 @@ class BranchTopologyAssembler:
             str(k): max(0, int(dict(plan.residual_remaining or {}).get(str(k), 0)))
             for k in RESOURCE_KEYS
         }
+        if bool(self.defer_residual_to_extra) and bool(plan.feasible):
+            consumed_for_branch = _sum_chain_required_resource_counts(list(ordinary_chains) + list(selected_specs))
+            residual_remaining = {
+                str(k): max(0, int(self.resource_totals.get(str(k), 0)) - int(consumed_for_branch.get(str(k), 0)))
+                for k in RESOURCE_KEYS
+            }
         chain_23_violations = list(plan.chain_23_limit_violations or [])
         for idx, chain in enumerate(list(ordinary_chains) + list(closed_specs)):
             if not chain_23_limit_ok(chain, MAX_23_PER_CHAIN):
@@ -246,13 +283,21 @@ class BranchTopologyAssembler:
                 })
 
         resource_shortage = {str(k): 0 for k in RESOURCE_KEYS}
+        pending_available = {
+            str(k): max(
+                0,
+                int(self.resource_totals.get(str(k), 0))
+                - int(_sum_chain_required_resource_counts(list(ordinary_chains) + list(selected_specs)).get(str(k), 0)),
+            )
+            for k in RESOURCE_KEYS
+        }
         pending_demand_summary = self._pending_closure_demand_summary(
             unclosed_rows,
             all_options,
             [],
-            {str(k): max(0, int(self.resource_totals.get(str(k), 0)) - int(pre_consumed.get(str(k), 0))) for k in RESOURCE_KEYS},
+            pending_available,
         )
-        if not bool(plan.feasible):
+        if (not bool(plan.feasible)) or unclosed_specs:
             for key, value in dict(pending_demand_summary.get("resource_deficit", {}) or {}).items():
                 resource_shortage[str(key)] = max(0, int(value))
 
@@ -261,6 +306,7 @@ class BranchTopologyAssembler:
         materialization_required = bool(plan.materialization_required)
         materialized_ok = bool(
             bool(plan.feasible)
+            and bool(self.flex_window_ok)
             and not bool(materialization_required)
             and not unclosed_specs
             and not any(int(v) > 0 for v in resource_shortage.values())
@@ -276,22 +322,34 @@ class BranchTopologyAssembler:
             self.flex_lower,
             self.flex_upper,
             len(unclosed_specs),
+            flex_window_ok=bool(self.flex_window_ok),
+            flex_lower_raw=int(self.flex_lower_raw),
+            flex_upper_raw=int(self.flex_upper_raw),
             backbone_residual=sum(int(v) for v in residual_remaining.values()),
             unclosed_rows=unclosed_rows,
             pending_demand_summary=pending_demand_summary,
         )
         diag = {
             "ok": bool(materialized_ok),
-            "topology_plan_feasible": bool(plan.feasible),
+            "topology_plan_feasible": bool(bool(plan.feasible) and not unclosed_specs),
             "topology_materialized_ok": bool(materialized_ok),
             "materialization_required": bool(materialization_required),
-            "solver_reason": str(plan.reason or solved.reason or ""),
+            "solver_reason": str(
+                f"pending_groups_without_options:{len(optionless_group_ids)}"
+                if optionless_group_ids else
+                (plan.reason or solved.reason or "")
+            ),
             "solver_state_count": int(getattr(solver, "states_seen", 0)),
+            "solver_phase_attempts": list(getattr(solver, "phase_attempts", []) or []),
+            "solver_pending_group_count": int(len(solver_group_ids if optionless_group_ids else pending_group_ids)),
+            "optionless_pending_group_count": int(len(optionless_group_ids)),
+            "optionless_pending_group_ids": list(optionless_group_ids),
             "planned_conversions": [conv.to_row() for conv in list(plan.planned_conversions or [])],
             "planned_conversion_count": int(sum(int(conv.count) for conv in list(plan.planned_conversions or []))),
             "residual_growth_actions": [act.to_row() for act in list(plan.residual_growth_actions or [])],
             "residual_chain_actions": [act.to_row() for act in list(plan.residual_chain_actions or [])],
             "residual_topology_count": int(len(residual_specs)),
+            "defer_residual_to_extra": bool(self.defer_residual_to_extra),
             "residual_remaining": dict(residual_remaining),
             "chain_23_limit_violations": list(chain_23_violations),
             "closed_topology_count": int(len(closed_specs)),
@@ -315,6 +373,7 @@ class BranchTopologyAssembler:
             "flex_lower_raw": int(self.flex_lower_raw),
             "flex_upper_raw": int(self.flex_upper_raw),
             "flex_window_ok": bool(self.flex_window_ok),
+            "flex_window_conflict": bool(not bool(self.flex_window_ok)),
             "flex_upper_adjusted_to_lower": bool(self.flex_upper_adjusted_to_lower),
             "X": int(self.constraints.get("X", 0) or 0),
             "Y": int(self.constraints.get("Y", 0) or 0),
@@ -378,268 +437,354 @@ class BranchTopologyAssembler:
             recommended_adjustments=list(recommendations),
         )
 
-    def _assemble_greedy_legacy(self) -> BranchAssemblyResult:
+    def _assemble_staged(self) -> BranchAssemblyResult:
         pre_consumed = _sum_chain_required_resource_counts(self.ordinary_chains)
-        ledger = ResourceLedger(self.resource_totals, pre_consumed=pre_consumed)
-        all_options = self.expand_options()
+        base_options = self.expand_options()
+        pending_specs, pending_group_ids = self._pending_specs_with_group_ids()
+        pending_group_set = {str(gid) for gid in pending_group_ids}
+
         selected_options: List[TopologyAssemblyOption] = []
-        closed_specs: List[ChainSpec] = []
+        selected_stage: Dict[str, str] = {}
         rejected_options: List[Dict[str, Any]] = []
         group_reject_reasons: Dict[str, List[str]] = {}
-        used_groups: set[str] = set()
+        covered_groups: set[str] = set()
         used_source_ids = self._source_ids_for_chains(self.ordinary_chains)
         used_exclusive_keys = self._exclusive_keys_for_chains(self.ordinary_chains)
-        flex_count = self._ordinary_flex_count(self.ordinary_chains)
-        side_count = self._ordinary_side_count(self.ordinary_chains)
-        ring_count = self._ordinary_ring_count(self.ordinary_chains)
+        demand = {str(k): int(pre_consumed.get(str(k), 0)) for k in RESOURCE_KEYS}
+        flex_count = int(self._ordinary_flex_count(self.ordinary_chains))
+        side_count = int(self._ordinary_side_count(self.ordinary_chains))
+        ring_count = int(self._ordinary_ring_count(self.ordinary_chains))
         ordinary_explicit_flex_count = int(flex_count)
-        mandatory_branch_flex_count = 0
-        prefill_flex_count = 0
-        final_repair_flex_count = 0
-        extra_backbone_flex_count = 0
+        stage_counts: Dict[str, int] = {}
+        stage_flex_delta: Dict[str, int] = {}
+        stage_side_delta: Dict[str, int] = {}
+        stage_ring_delta: Dict[str, int] = {}
 
-        def reject(option: TopologyAssemblyOption, reason: str) -> None:
+        def _covered(option: TopologyAssemblyOption) -> set[str]:
+            return TopologyAssemblySolver._covered_groups(option)
+
+        def _add_resource_cost(cost: Dict[str, int]) -> None:
+            for key in RESOURCE_KEYS:
+                demand[str(key)] = int(demand.get(str(key), 0)) + int((cost or {}).get(str(key), 0))
+
+        def _reject(option: TopologyAssemblyOption, reason: str, stage: str) -> None:
             row = option.to_row()
             row["reason"] = str(reason)
+            row["selection_stage"] = str(stage)
             rejected_options.append(row)
-            group_reject_reasons.setdefault(str(option.source_group_id), []).append(str(reason))
-            if str(option.usage_mode) == "ring":
-                for slot_group_id in list((option.constraints or {}).get("slot_group_ids", []) or []):
-                    if str(slot_group_id):
-                        group_reject_reasons.setdefault(str(slot_group_id), []).append(str(reason))
+            for gid in sorted(_covered(option) or {str(option.source_group_id)}):
+                group_reject_reasons.setdefault(str(gid), []).append(str(reason))
 
-        def try_select(option: TopologyAssemblyOption) -> bool:
-            nonlocal flex_count, side_count, ring_count
-            group_id = str(option.source_group_id)
-            if group_id in used_groups:
-                reject(option, "candidate_group_already_selected")
+        def _can_select(option: TopologyAssemblyOption, stage: str) -> bool:
+            if str(option.usage_mode) == "ring_candidate":
+                _reject(option, "ring_candidate_placeholder", stage)
+                return False
+            covers = _covered(option)
+            if not covers:
+                _reject(option, "option_covers_no_group", stage)
+                return False
+            if covers & covered_groups:
+                _reject(option, "candidate_group_already_selected", stage)
                 return False
             src = {int(x) for x in list(option.source_ids or []) if int(x) >= 0}
             if src & used_source_ids:
-                reason = (
-                    "source_id_conflict_with_ordinary_chain"
-                    if not selected_options
-                    else "source_id_conflict_with_selected_option"
-                )
-                reject(option, reason)
+                _reject(option, "source_id_conflict", stage)
                 return False
-            exclusive = self._exclusive_keys_for_option(option)
+            exclusive = TopologyAssemblySolver._exclusive_keys(option)
             if exclusive & used_exclusive_keys:
-                reject(option, "exclusive_group_conflict")
+                _reject(option, "exclusive_group_conflict", stage)
                 return False
-            if not ledger.consume(option):
-                reject(option, "resource_shortage")
+            try:
+                chain = self._chain_from_option(option)
+            except Exception:
+                _reject(option, "option_chain_materialization_failed", stage)
                 return False
-            chain = self._chain_from_option(option)
-            closed_specs.append(chain)
+            if not chain_23_limit_ok(chain, MAX_23_PER_CHAIN):
+                _reject(option, "chain_23_limit", stage)
+                return False
+            return True
+
+        def _select(option: TopologyAssemblyOption, stage: str) -> bool:
+            nonlocal flex_count, side_count, ring_count
+            if not _can_select(option, stage):
+                return False
             selected_options.append(option)
-            used_groups.add(group_id)
-            used_source_ids.update(src)
-            used_exclusive_keys.update(exclusive)
+            selected_stage[str(option.option_id)] = str(stage)
+            stage_counts[str(stage)] = int(stage_counts.get(str(stage), 0)) + 1
+            stage_flex_delta[str(stage)] = int(stage_flex_delta.get(str(stage), 0)) + int(option.flex_count_delta)
+            stage_side_delta[str(stage)] = int(stage_side_delta.get(str(stage), 0)) + int(option.side_count_delta)
+            stage_ring_delta[str(stage)] = int(stage_ring_delta.get(str(stage), 0)) + int(option.ring_count_delta)
+            covered_groups.update(_covered(option))
+            used_source_ids.update(int(x) for x in list(option.source_ids or []) if int(x) >= 0)
+            used_exclusive_keys.update(TopologyAssemblySolver._exclusive_keys(option))
+            _add_resource_cost(option.resource_cost)
             flex_count += int(option.flex_count_delta)
             side_count += int(option.side_count_delta)
             ring_count += int(option.ring_count_delta)
             return True
 
-        selectable = [
-            opt for opt in all_options
-            if str(opt.usage_mode) in {
-                "ordinary_bridge",
-                "ordinary_side",
-                "ordinary_pair_bridge",
-                "ordinary_pair_side",
-                "flex_branch",
-                "side_branch",
-            }
+        usable_base = [
+            opt for opt in list(base_options or [])
+            if str(getattr(opt, "usage_mode", "") or "") != "ring_candidate"
         ]
-        mandatory_flex_families = {
-            "24_AB_M",
-            "24_CD_M_BRIDGE",
-            "24_AB_N_AB_BRIDGE",
-        }
-        for opt in sorted(
-            [
-                o for o in selectable
-                if str(o.usage_mode) == "flex_branch"
-                and str(o.assembly_family) in mandatory_flex_families
-            ],
-            key=self._option_sort_key,
-        ):
-            before = int(flex_count)
-            if try_select(opt) and int(flex_count) > before:
-                mandatory_branch_flex_count += int(flex_count) - int(before)
+        mandatory_flex_options = [
+            opt for opt in usable_base
+            if self._is_mandatory_flex_option(opt)
+        ]
+        for group_id in pending_group_ids:
+            gid = str(group_id)
+            if gid in covered_groups:
+                continue
+            group_options = sorted(
+                [opt for opt in mandatory_flex_options if gid in _covered(opt)],
+                key=self._staged_mandatory_flex_sort_key,
+            )
+            for opt in group_options:
+                if _select(opt, "mandatory_flex"):
+                    break
 
-        flex_target = self._target_flex_count(flex_count)
-        explicit_flex_count = int(flex_count)
-        fixed_flex_count = int(explicit_flex_count)
+        fixed_flex_count = int(flex_count)
+        explicit_flex_count = int(fixed_flex_count)
         if not bool(self.flex_window_ok):
             flex_scenario = "flex_window_invalid"
-        elif int(explicit_flex_count) < int(self.flex_lower):
-            flex_scenario = "flex_short"
-        elif int(explicit_flex_count) > int(self.flex_upper):
-            flex_scenario = "explicit_flex_excess"
+        elif int(fixed_flex_count) < int(self.flex_lower):
+            flex_scenario = "explicit_flex_below_range"
+        elif int(fixed_flex_count) > int(self.flex_upper):
+            flex_scenario = "explicit_flex_above_range"
         else:
-            flex_scenario = "flex_in_range"
-        flex_prefill_target = (
-            int(flex_target)
-            if str(flex_scenario) == "flex_short"
-            else int(flex_count)
-        )
-        if str(flex_scenario) == "flex_short" and int(flex_count) < int(flex_prefill_target):
-            flex_candidates = [
-                o for o in selectable
-                if str(o.source_group_id) not in used_groups
-                and str(o.usage_mode) in {"ordinary_bridge", "ordinary_pair_bridge", "flex_branch"}
-            ]
-            for opt in sorted(flex_candidates, key=self._option_sort_key):
-                if flex_count >= flex_prefill_target:
+            flex_scenario = "explicit_flex_in_range"
+
+        flex_prefill_target = int(self._target_flex_count(fixed_flex_count))
+        if bool(self.flex_window_ok) and int(fixed_flex_count) < int(self.flex_lower):
+            prefill_options = sorted(
+                [
+                    opt for opt in usable_base
+                    if self._is_flex_option(opt)
+                    and not self._is_mandatory_flex_option(opt)
+                ],
+                key=self._staged_prefill_flex_sort_key,
+            )
+            for opt in prefill_options:
+                if int(flex_count) >= int(flex_prefill_target):
                     break
-                before = int(flex_count)
-                if try_select(opt) and int(flex_count) > before:
-                    prefill_flex_count += int(flex_count) - int(before)
+                _select(opt, "prefill_flex")
 
-        ring_options = self._build_ring_options(all_options, used_groups)
-        for opt in sorted(ring_options, key=self._ring_option_sort_key):
-            try_select(opt)
+        ring_options = self._build_ring_options(base_options, covered_groups)
+        all_options = list(base_options) + list(ring_options)
+        for opt in sorted(ring_options, key=self._staged_ring_sort_key):
+            _select(opt, "ring")
 
-        side_candidates = [
-            o for o in selectable
-            if str(o.source_group_id) not in used_groups
-            and str(o.usage_mode) in {"ordinary_side", "ordinary_pair_side", "side_branch"}
-        ]
-        for opt in sorted(side_candidates, key=self._side_option_sort_key):
-            try_select(opt)
+        side_options = sorted(
+            [opt for opt in usable_base if self._is_side_option(opt)],
+            key=self._staged_side_sort_key,
+        )
+        for opt in side_options:
+            _select(opt, "side")
 
-        if bool(self.flex_window_ok):
-            pending_flex_candidates = [
-                o for o in selectable
-                if str(o.source_group_id) not in used_groups
-                and str(o.usage_mode) in {"flex_branch", "ordinary_bridge", "ordinary_pair_bridge"}
-            ]
-            for opt in sorted(pending_flex_candidates, key=self._option_sort_key):
+        if bool(self.flex_window_ok) and int(flex_count) < int(self.flex_upper):
+            late_flex_options = sorted(
+                [
+                    opt for opt in usable_base
+                    if self._is_flex_option(opt)
+                    and not self._is_mandatory_flex_option(opt)
+                ],
+                key=self._staged_late_flex_sort_key,
+            )
+            for opt in late_flex_options:
                 if int(flex_count) >= int(self.flex_upper):
                     break
-                if int(opt.flex_count_delta) <= 0:
-                    continue
-                before = int(flex_count)
-                if try_select(opt) and int(flex_count) > before:
-                    final_repair_flex_count += int(flex_count) - int(before)
+                _select(opt, "late_flex")
 
-        if bool(self.flex_window_ok) and flex_count < self.flex_lower:
-            remaining_flex = [
-                o for o in selectable
-                if str(o.source_group_id) not in used_groups
-                and str(o.usage_mode) in {"ordinary_bridge", "ordinary_pair_bridge", "flex_branch"}
-            ]
-            for opt in sorted(remaining_flex, key=self._option_sort_key):
-                if flex_count >= self.flex_lower:
-                    break
-                before = int(flex_count)
-                if try_select(opt) and int(flex_count) > before:
-                    final_repair_flex_count += int(flex_count) - int(before)
+        unresolved_group_ids = [
+            str(gid) for gid in pending_group_ids
+            if str(gid) not in covered_groups
+        ]
+        solver = TopologyAssemblySolver(
+            resource_totals={
+                **{str(k): int(self.resource_totals.get(str(k), 0)) for k in RESOURCE_KEYS},
+                "12": int(self.constraints.get("total_12", self.resource_totals.get("12", 0)) or 0),
+                "13": int(self.constraints.get("total_13", self.resource_totals.get("13", 0)) or 0),
+            },
+            flex_lower=int(self.flex_lower),
+            flex_upper=int(self.flex_upper),
+            ordinary_flex_count=self._ordinary_flex_count(self.ordinary_chains),
+            ordinary_chains=self.ordinary_chains,
+            pending_group_ids=[],
+            option_to_chain=self._chain_from_option,
+            used_source_ids=self._source_ids_for_chains(self.ordinary_chains),
+            used_exclusive_keys=self._exclusive_keys_for_chains(self.ordinary_chains),
+            max_23_per_chain=MAX_23_PER_CHAIN,
+        )
+        solved = solver._finalize_plan(
+            selected_options,
+            demand,
+            flex_count,
+            pre_consumed,
+            allow_conversions=True,
+            phase_name="staged_planner",
+        )
+        if solved is None:
+            plan = TopologyAssemblyPlan(
+                feasible=False,
+                materialized=False,
+                materialization_required=False,
+                selected_option_ids=[str(opt.option_id) for opt in selected_options],
+                residual_remaining={str(k): 0 for k in RESOURCE_KEYS},
+                chain_23_limit_violations=[],
+                reason=(
+                    "flex_window_lower_exceeds_upper"
+                    if int(self.flex_lower) > int(self.flex_upper) else
+                    "staged_finalize_failed"
+                ),
+            )
+            residual_specs_for_apply: List[ChainSpec] = []
+            solved_reason = str(plan.reason)
+        else:
+            plan = solved.plan
+            residual_specs_for_apply = (
+                []
+                if unresolved_group_ids or bool(self.defer_residual_to_extra)
+                else list(solved.residual_specs or [])
+            )
+            solved_reason = str(solved.reason or plan.reason or "ok")
 
-        pending_specs, pending_group_ids = self._pending_specs_with_group_ids()
+        selected_specs = [self._chain_from_option(opt) for opt in selected_options]
+        materialized_base, residual_specs = TopologyAssemblySolver._apply_growth_specs(
+            list(self.ordinary_chains) + list(selected_specs),
+            residual_specs_for_apply,
+        )
+        ordinary_chains = list(materialized_base[:len(self.ordinary_chains)])
+        selected_specs = list(materialized_base[len(self.ordinary_chains):])
+        closed_specs = list(selected_specs) + list(residual_specs)
+
         unclosed_specs: List[ChainSpec] = []
         unclosed_rows: List[Dict[str, Any]] = []
-        disabled_ring_count = 0
-        blocking_unclosed_count = 0
-        blocking_unclosed_rows: List[Dict[str, Any]] = []
+        suppressed_unresolved_rows: List[Dict[str, Any]] = []
+        unresolved_set = {str(gid) for gid in unresolved_group_ids}
         for chain, group_id in zip(pending_specs, pending_group_ids):
-            if str(group_id) in used_groups:
+            gid = str(group_id)
+            if gid not in unresolved_set:
                 continue
-            chain_src = {int(x) for x in list(getattr(chain, "source_ids", []) or []) if int(x) >= 0}
-            if chain_src and chain_src.issubset(used_source_ids):
-                continue
-            row = self._unclosed_row_for_chain(
-                chain,
-                str(group_id),
-                all_options,
-                group_reject_reasons,
-            )
-            if row["reason"] == "ring_option_disabled_pending_ring_builder":
-                disabled_ring_count += 1
+            chain_sources = {int(x) for x in list(getattr(chain, "source_ids", []) or []) if int(x) >= 0}
+            source_overlap = chain_sources & used_source_ids
+            is_branch_alternative = gid.startswith("branch24:") or gid.startswith("like24_bridge:")
+            if chain_sources and (
+                chain_sources.issubset(used_source_ids)
+                or (bool(is_branch_alternative) and bool(source_overlap))
+            ):
+                row = self._unclosed_row_for_chain(chain, gid, all_options, group_reject_reasons)
+                row["reason"] = (
+                    "suppressed_by_selected_source"
+                    if chain_sources.issubset(used_source_ids) else
+                    "suppressed_by_overlapping_selected_source"
+                )
+                row["source_overlap_with_selected"] = [int(x) for x in sorted(source_overlap)]
                 row["deferred_nonblocking"] = True
-            else:
-                blocking_unclosed_count += 1
-                row["deferred_nonblocking"] = False
-                blocking_unclosed_rows.append(row)
+                suppressed_unresolved_rows.append(row)
+                continue
+            row = self._unclosed_row_for_chain(chain, gid, all_options, group_reject_reasons)
+            if not row.get("reason") or str(row.get("reason")) == "no_viable_option":
+                has_any_option = any(gid in _covered(opt) for opt in all_options)
+                row["reason"] = "staged_not_selected" if has_any_option else f"no_options_for_group:{gid}"
+            row["deferred_nonblocking"] = False
             unclosed_rows.append(row)
             pending = copy.deepcopy(chain)
             pending.metadata = dict(pending.metadata or {})
             pending.metadata["unclosed_topology_candidate"] = True
             pending.metadata["unclosed_reason"] = str(row["reason"])
-            pending.metadata["deferred_nonblocking"] = bool(row["deferred_nonblocking"])
-            pending.metadata["ring_builder_deferred"] = bool(row["deferred_nonblocking"])
+            pending.metadata["deferred_nonblocking"] = False
             unclosed_specs.append(pending)
 
-        shortage_before_extra = dict(ledger.shortage)
-        closure_blocked_before_extra = bool(
-            int(blocking_unclosed_count) > 0
-            or any(int(v) > 0 for v in dict(shortage_before_extra or {}).values())
-        )
-        if not closure_blocked_before_extra:
-            extra_specs = self._build_extra_backbone_specs(
-                ledger,
-                start_index=len(closed_specs),
-                flex_count=flex_count,
-            )
-            for chain in extra_specs:
-                option = self._option_from_extra_chain(chain)
-                if not ledger.consume(option):
-                    continue
-                selected_options.append(option)
-                closed_specs.append(chain)
-                if str(chain.chain_type) == "bridge":
-                    flex_count += 1
-                    extra_backbone_flex_count += 1
-                elif str(chain.chain_type) == "side":
-                    side_count += 1
+        residual_remaining = {
+            str(k): max(0, int(dict(plan.residual_remaining or {}).get(str(k), 0)))
+            for k in RESOURCE_KEYS
+        }
+        if (unresolved_group_ids or bool(self.defer_residual_to_extra)) and bool(plan.feasible):
+            consumed_for_branch = _sum_chain_required_resource_counts(list(ordinary_chains) + list(selected_specs))
+            residual_remaining = {
+                str(k): max(0, int(self.resource_totals.get(str(k), 0)) - int(consumed_for_branch.get(str(k), 0)))
+                for k in RESOURCE_KEYS
+            }
 
-        remaining = ledger.remaining()
-        backbone_residual = int(sum(int(remaining.get(k, 0)) for k in ("11", "22", "23")))
+        chain_23_violations = list(plan.chain_23_limit_violations or [])
+        for idx, chain in enumerate(list(ordinary_chains) + list(closed_specs)):
+            if not chain_23_limit_ok(chain, MAX_23_PER_CHAIN):
+                chain_23_violations.append({
+                    "chain_index": int(idx),
+                    "chain_type": str(getattr(chain, "chain_type", "")),
+                    "origin_type": str(getattr(chain, "origin_type", "")),
+                    "count_23": int(chain_23_count(chain)),
+                    "max_23": int(MAX_23_PER_CHAIN),
+                    "composition": [int(x) for x in chain_actual_topology_su(chain)],
+                })
+
+        resource_shortage = {str(k): 0 for k in RESOURCE_KEYS}
+        if not bool(plan.feasible):
+            for key in RESOURCE_KEYS:
+                resource_shortage[str(key)] = max(
+                    0,
+                    int(demand.get(str(key), 0)) - int(self.resource_totals.get(str(key), 0)),
+                )
+        pending_available = {
+            str(k): max(
+                0,
+                int(self.resource_totals.get(str(k), 0))
+                - int(_sum_chain_required_resource_counts(list(ordinary_chains) + list(selected_specs)).get(str(k), 0)),
+            )
+            for k in RESOURCE_KEYS
+        }
         pending_demand_summary = self._pending_closure_demand_summary(
-            blocking_unclosed_rows,
+            unclosed_rows,
             all_options,
             rejected_options,
-            remaining,
+            pending_available,
         )
-        pending_deficit = dict(pending_demand_summary.get("resource_deficit", {}) or {})
-        ledger_shortage = dict(ledger.shortage)
-        shortage = {
-            str(key): max(
-                0,
-                int(ledger_shortage.get(str(key), 0) or 0),
-                int(pending_deficit.get(str(key), 0) or 0),
-            )
-            for key in RESOURCE_KEYS
-        }
+        if unclosed_specs:
+            for key, value in dict(pending_demand_summary.get("resource_deficit", {}) or {}).items():
+                resource_shortage[str(key)] = max(int(resource_shortage.get(str(key), 0)), max(0, int(value)))
+
+        flex_count = int(self._ordinary_flex_count(ordinary_chains))
+        side_count = int(self._ordinary_side_count(ordinary_chains))
+        ring_count = int(self._ordinary_ring_count(ordinary_chains))
+        for opt in selected_options:
+            flex_count += int(getattr(opt, "flex_count_delta", 0) or 0)
+            side_count += int(getattr(opt, "side_count_delta", 0) or 0)
+            ring_count += int(getattr(opt, "ring_count_delta", 0) or 0)
+        for chain in residual_specs:
+            if str(getattr(chain, "chain_type", "")) in {"bridge", "branch_bridge"}:
+                flex_count += 1
+            elif str(getattr(chain, "chain_type", "")) in {"side", "branch_side"}:
+                side_count += 1
+
         flex_short = max(0, int(self.flex_lower) - int(flex_count))
         flex_excess = max(0, int(flex_count) - int(self.flex_upper))
+        materialization_required = bool(plan.materialization_required)
+        materialized_ok = bool(
+            bool(plan.feasible)
+            and bool(self.flex_window_ok)
+            and not bool(materialization_required)
+            and not unclosed_specs
+            and not any(int(v) > 0 for v in resource_shortage.values())
+            and not any(int(v) > 0 for v in residual_remaining.values())
+            and not chain_23_violations
+            and int(flex_short) == 0
+            and int(flex_excess) == 0
+        )
         recommendations = self._recommended_adjustments(
-            shortage,
-            remaining,
+            resource_shortage,
+            residual_remaining,
             flex_count,
             self.flex_lower,
             self.flex_upper,
-            blocking_unclosed_count,
-            disabled_ring_count=disabled_ring_count,
-            backbone_residual=backbone_residual,
-            unclosed_rows=blocking_unclosed_rows,
+            len(unclosed_specs),
+            flex_window_ok=bool(self.flex_window_ok),
+            flex_lower_raw=int(self.flex_lower_raw),
+            flex_upper_raw=int(self.flex_upper_raw),
+            backbone_residual=sum(int(v) for v in residual_remaining.values()),
+            unclosed_rows=unclosed_rows,
             pending_demand_summary=pending_demand_summary,
         )
-        if not bool(self.flex_window_ok):
-            recommendations.insert(0, {
-                "op": "adjust_10_or_12_for_flex_window",
-                "count": max(0, int(self.flex_lower_raw) - int(self.flex_upper_raw)),
-                "reason": "flex_window_lower_exceeds_upper",
-                "X": int(self.constraints.get("X", 0) or 0),
-                "Y": int(self.constraints.get("Y", 0) or 0),
-                "Z": int(self.constraints.get("Z", 0) or 0),
-                "flex_lower_raw": int(self.flex_lower_raw),
-                "flex_upper_raw": int(self.flex_upper_raw),
-                "actionable": True,
-            })
-        generated_flex_count = int(prefill_flex_count) + int(final_repair_flex_count) + int(extra_backbone_flex_count)
+
         selected_ring_plan_counts: Dict[str, int] = {}
         selected_ring_planner_counts: Dict[str, int] = {}
         bridgehead_14_replacement_count = 0
@@ -650,7 +795,7 @@ class BranchTopologyAssembler:
                 continue
             meta = dict(getattr(chain, "metadata", {}) or {})
             ring_type = str(meta.get("ring_type") or getattr(chain, "chain_type", ""))
-            planner = str(meta.get("ring_planner") or "generic_ring_pair")
+            planner = str(meta.get("ring_planner") or "generic_ring")
             selected_ring_plan_counts[ring_type] = int(selected_ring_plan_counts.get(ring_type, 0)) + 1
             selected_ring_planner_counts[planner] = int(selected_ring_planner_counts.get(planner, 0)) + 1
             if bool(meta.get("bridgehead_replace_24c", False)):
@@ -667,177 +812,131 @@ class BranchTopologyAssembler:
                 or meta.get("fused_ring_filler_24_count")
                 or 0
             )
+
         diag = {
-            "ok": bool(
-                bool(self.flex_window_ok)
-                and
-                int(blocking_unclosed_count) == 0
-                and all(int(v) == 0 for v in shortage.values())
-                and int(flex_short) == 0
-                and int(flex_excess) == 0
-            ),
+            "ok": bool(materialized_ok),
+            "topology_plan_feasible": bool(bool(plan.feasible) and not unclosed_specs),
+            "topology_materialized_ok": bool(materialized_ok),
+            "materialization_required": bool(materialization_required),
+            "solver_reason": str(solved_reason),
+            "solver_state_count": int(getattr(solver, "states_seen", 0)),
+            "solver_phase_attempts": [{
+                "phase": "staged_planner",
+                "allow_conversions": True,
+                "states_seen": int(getattr(solver, "states_seen", 0)),
+                "reason": str(solved_reason),
+                "search_strategy": "staged_greedy",
+            }],
+            "solver_pending_group_count": int(len(pending_group_ids)),
+            "optionless_pending_group_count": int(sum(
+                1 for gid in unresolved_group_ids
+                if not any(str(gid) in _covered(opt) for opt in all_options)
+            )),
+            "optionless_pending_group_ids": [
+                str(gid) for gid in unresolved_group_ids
+                if not any(str(gid) in _covered(opt) for opt in all_options)
+            ],
+            "planned_conversions": [conv.to_row() for conv in list(plan.planned_conversions or [])],
+            "planned_conversion_count": int(sum(int(conv.count) for conv in list(plan.planned_conversions or []))),
+            "residual_growth_actions": [act.to_row() for act in list(plan.residual_growth_actions or [])],
+            "residual_chain_actions": [act.to_row() for act in list(plan.residual_chain_actions or [])],
+            "residual_topology_count": int(len(residual_specs)),
+            "defer_residual_to_extra": bool(self.defer_residual_to_extra),
+            "residual_remaining": dict(residual_remaining),
+            "chain_23_limit_violations": list(chain_23_violations),
             "closed_topology_count": int(len(closed_specs)),
-            "unclosed_like24_count": int(blocking_unclosed_count),
-            "deferred_ring_pending_count": int(disabled_ring_count),
+            "unclosed_like24_count": int(len(unclosed_specs)),
+            "suppressed_pending_count": int(len(suppressed_unresolved_rows)),
+            "suppressed_pending_rows": list(suppressed_unresolved_rows),
+            "deferred_ring_pending_count": 0,
             "selected_option_count": int(len(selected_options)),
             "available_option_count": int(len(all_options)),
+            "selected_stage_by_option": dict(selected_stage),
+            "selected_stage_counts": dict(sorted(stage_counts.items())),
+            "selected_stage_flex_delta": dict(sorted(stage_flex_delta.items())),
+            "selected_stage_side_delta": dict(sorted(stage_side_delta.items())),
+            "selected_stage_ring_delta": dict(sorted(stage_ring_delta.items())),
             "flex_count": int(flex_count),
             "fixed_flex_count": int(fixed_flex_count),
             "flex_scenario": str(flex_scenario),
             "explicit_flex_count": int(explicit_flex_count),
             "ordinary_explicit_flex_count": int(ordinary_explicit_flex_count),
-            "mandatory_branch_flex_count": int(mandatory_branch_flex_count),
-            "generated_flex_count": int(generated_flex_count),
-            "prefill_flex_count": int(prefill_flex_count),
-            "final_repair_flex_count": int(final_repair_flex_count),
-            "extra_backbone_flex_count": int(extra_backbone_flex_count),
+            "mandatory_branch_flex_count": int(stage_flex_delta.get("mandatory_flex", 0)),
+            "generated_flex_count": max(0, int(flex_count) - int(fixed_flex_count)),
+            "prefill_flex_count": int(stage_flex_delta.get("prefill_flex", 0)),
+            "final_repair_flex_count": int(stage_flex_delta.get("late_flex", 0)),
+            "extra_backbone_flex_count": int(sum(
+                1 for ch in residual_specs
+                if str(getattr(ch, "chain_type", "")) in {"bridge", "branch_bridge"}
+            )),
             "flex_prefill_target": int(flex_prefill_target),
             "flex_lower": int(self.flex_lower),
             "flex_upper": int(self.flex_upper),
             "flex_lower_raw": int(self.flex_lower_raw),
             "flex_upper_raw": int(self.flex_upper_raw),
             "flex_window_ok": bool(self.flex_window_ok),
+            "flex_window_conflict": bool(not bool(self.flex_window_ok)),
             "flex_upper_adjusted_to_lower": bool(self.flex_upper_adjusted_to_lower),
             "X": int(self.constraints.get("X", 0) or 0),
             "Y": int(self.constraints.get("Y", 0) or 0),
             "Z": int(self.constraints.get("Z", 0) or 0),
-            "flex_window_source": str(self.constraints.get("flex_window_source") or ""),
+            "flex_window_source": str(self.constraints.get("flex_window_source") or "staged_planner"),
             "flex_window_error": str(self.constraints.get("flex_window_error") or ""),
             "bridgehead_info": tuple(int(x) for x in list(self.constraints.get("bridgehead_info", []) or [])),
             "flex_short": int(flex_short),
             "flex_excess": int(flex_excess),
             "side_count": int(side_count),
             "ring_count": int(ring_count),
-            "extra_backbone_topology_count": int(sum(
-                1 for ch in closed_specs
-                if str(getattr(ch, "origin_type", "")).startswith("Extra-backbone")
-            )),
-            "resource_shortage": dict(shortage),
-            "resource_shortage_ledger_max_gap": dict(ledger_shortage),
-            "resource_surplus": dict(remaining),
+            "extra_backbone_topology_count": int(len(residual_specs)),
+            "resource_shortage": dict(resource_shortage),
+            "resource_shortage_ledger_max_gap": dict(resource_shortage),
+            "resource_surplus": dict(residual_remaining),
             "pending_closure_demand_summary": dict(pending_demand_summary),
             "pending_closure_intent_demand": dict(pending_demand_summary.get("intent_demand", {}) or {}),
             "pending_closure_resource_demand": dict(pending_demand_summary.get("resource_demand", {}) or {}),
             "pending_closure_resource_available": dict(pending_demand_summary.get("resource_available", {}) or {}),
             "pending_closure_resource_deficit": dict(pending_demand_summary.get("resource_deficit", {}) or {}),
             "minimum_conversions": list(pending_demand_summary.get("minimum_conversions", []) or []),
-            "abstract_gap_by_kind": (
-                {"pending_closure": int(blocking_unclosed_count)}
-                if int(blocking_unclosed_count) > 0 else
-                {}
-            ),
-            "abstract_gap_total": int(blocking_unclosed_count),
-            "backbone_residual": int(backbone_residual),
-            "backbone_residual_ok": bool(int(backbone_residual) <= int(self.allowed_backbone_residual)),
-            "allowed_backbone_residual": int(self.allowed_backbone_residual),
-            "resource_ledger": dict(ledger.row()),
+            "abstract_gap_by_kind": {"pending_closure": int(len(unclosed_specs))} if unclosed_specs else {},
+            "abstract_gap_total": int(len(unclosed_specs)),
+            "backbone_residual": int(sum(int(v) for v in residual_remaining.values())),
+            "backbone_residual_ok": bool(not any(int(v) > 0 for v in residual_remaining.values())),
+            "allowed_backbone_residual": 0,
+            "resource_ledger": {
+                "total": {str(k): int(self.resource_totals.get(str(k), 0)) for k in RESOURCE_KEYS},
+                "pre_consumed": dict(pre_consumed),
+                "consumed": _sum_chain_required_resource_counts(list(ordinary_chains) + list(closed_specs)),
+                "remaining": dict(residual_remaining),
+                "shortage": dict(resource_shortage),
+                "planned_conversions": [conv.to_row() for conv in list(plan.planned_conversions or [])],
+            },
             "ring_assembly_enabled": True,
-            "ring_option_count": int(sum(1 for opt in all_options if str(opt.usage_mode) == "ring_candidate")),
+            "ring_option_count": int(sum(1 for opt in all_options if str(getattr(opt, "usage_mode", "")) == "ring_candidate")),
             "ring_pair_option_count": int(len(ring_options)),
-            "fused_ring_planner_option_count": int(sum(
-                1 for opt in ring_options
-                if str((opt.constraints or {}).get("ring_planner") or "") == "fused_aliphatic_ring_v1"
-            )),
-            "side_ring_planner_option_count": int(sum(
-                1 for opt in ring_options
-                if str((opt.constraints or {}).get("ring_planner") or "") == "side_aliphatic_ring_v1"
-            )),
-            "vertical_ring_planner_option_count": int(sum(
-                1 for opt in ring_options
-                if str((opt.constraints or {}).get("ring_planner") or "") == "vertical_aliphatic_ring_v1"
-            )),
             "selected_ring_plan_counts_by_type": dict(sorted(selected_ring_plan_counts.items())),
             "selected_ring_planner_counts": dict(sorted(selected_ring_planner_counts.items())),
             "bridgehead_14_replacement_count": int(bridgehead_14_replacement_count),
             "like24_used_by_ring": int(like24_used_by_ring),
             "raw_su24_filler_used": int(raw_su24_filler_used),
-            "disabled_ring_option_count": int(disabled_ring_count),
-            "disabled_ring_options": [
-                row for row in unclosed_rows
-                if row["reason"] == "ring_option_disabled_pending_ring_builder"
-            ],
+            "disabled_ring_option_count": 0,
+            "disabled_ring_options": [],
             "rejected_option_count": int(len(rejected_options)),
             "rejected_options": list(rejected_options),
-            "ordinary_source_ids": sorted(int(x) for x in self._source_ids_for_chains(self.ordinary_chains)),
+            "ordinary_source_ids": sorted(int(x) for x in self._source_ids_for_chains(ordinary_chains)),
             "recommended_adjustments": list(recommendations),
             "closure_engine_removed": False,
         }
         return BranchAssemblyResult(
-            ordinary_chains=list(self.ordinary_chains),
+            ordinary_chains=ordinary_chains,
             closed_topology_specs=closed_specs,
             unclosed_pending_specs=unclosed_specs,
+            residual_topology_specs=residual_specs,
             selected_options=selected_options,
             all_options=all_options,
             unclosed_candidates=unclosed_rows,
-            resource_ledger=ledger.row(),
+            resource_ledger=dict(diag["resource_ledger"]),
             diagnostics=diag,
             recommended_adjustments=list(recommendations),
-        )
-
-    def _build_extra_backbone_specs(
-        self,
-        ledger: ResourceLedger,
-        start_index: int,
-        flex_count: int,
-    ) -> List[ChainSpec]:
-        specs: List[ChainSpec] = []
-        remaining = ledger.remaining()
-        idx = int(start_index)
-        local_flex = int(flex_count)
-
-        while (
-            int(local_flex) < int(self.flex_lower)
-            and int(local_flex) < int(self.flex_upper)
-            and int(remaining.get("11", 0)) >= 2
-            and int(remaining.get("23", 0)) >= 1
-        ):
-            specs.append(self._extra_backbone_chain("bridge", [11, 23, 11], idx))
-            idx += 1
-            local_flex += 1
-            remaining["11"] = int(remaining.get("11", 0)) - 2
-            remaining["23"] = int(remaining.get("23", 0)) - 1
-
-        return specs
-
-    @staticmethod
-    def _extra_backbone_chain(chain_type: str, composition: Sequence[int], idx: int) -> ChainSpec:
-        ctype = str(chain_type)
-        comp = [int(x) for x in list(composition or [])]
-        return ChainSpec(
-            chain_type=ctype,
-            composition=list(comp),
-            origin_type=f"Extra-backbone-{ctype}:{int(idx)}",
-            source_ids=[],
-            metadata={
-                "allocator_mode": "extra_backbone_v1",
-                "topology_state": "closed_extra_backbone_topology",
-                "generated_from_remaining_backbone": True,
-                "resource_requirements_override": _chain_required_resource_counts(
-                    ChainSpec(chain_type=ctype, composition=list(comp), origin_type="extra")
-                ),
-                "main_body_su": [int(x) for x in comp[1:-1]] if ctype == "bridge" else [int(x) for x in comp[1:]],
-            },
-        )
-
-    @staticmethod
-    def _option_from_extra_chain(chain: ChainSpec) -> TopologyAssemblyOption:
-        cost = _chain_required_resource_counts(chain)
-        usage = "extra_bridge" if str(chain.chain_type) == "bridge" else "extra_side"
-        return TopologyAssemblyOption(
-            option_id=f"{usage}:{chain.origin_type}",
-            source_group_id=str(chain.origin_type),
-            source_ids=[],
-            assembly_family=str(usage),
-            usage_mode=str(usage),
-            topology_template="-".join(str(x) for x in list(chain.composition or [])),
-            closure_plan={},
-            resource_cost={key: int(cost.get(key, 0)) for key in RESOURCE_KEYS},
-            base_resource_cost={key: int(cost.get(key, 0)) for key in RESOURCE_KEYS},
-            closure_resource_cost={key: 0 for key in RESOURCE_KEYS},
-            flex_count_delta=1 if str(chain.chain_type) == "bridge" else 0,
-            side_count_delta=1 if str(chain.chain_type) == "side" else 0,
-            priority=0,
-            source_chain=chain,
         )
 
     def _pending_specs_with_group_ids(self) -> Tuple[List[ChainSpec], List[str]]:
@@ -884,6 +983,14 @@ class BranchTopologyAssembler:
             "candidate_group_id": str(group_id),
             "origin_type": str(chain.origin_type),
             "source_ids": [int(x) for x in list(chain.source_ids or [])],
+            "composition": [int(x) for x in list(getattr(chain, "composition", []) or [])],
+            "actual_topology_su": [int(x) for x in chain_actual_topology_su(chain)],
+            "topology_template": str(
+                meta.get("open_topology")
+                or meta.get("display_topology")
+                or meta.get("raw_topology")
+                or "-".join(str(int(x)) for x in chain_actual_topology_su(chain))
+            ),
             "assembly_families": list(meta.get("assembly_families", []) or []),
             "closure_intents": dict(meta.get("closure_intents", {}) or {}),
             "reason": str(reason),
@@ -1500,6 +1607,7 @@ class BranchTopologyAssembler:
         left_meta = dict(getattr(left, "metadata", {}) or {})
         right_meta = dict(getattr(right, "metadata", {}) or {})
         group_id = f"ordinary_pair:{left_idx}+{right_idx}"
+        slot_group_ids = [f"ordinary:{int(left_idx)}", f"ordinary:{int(right_idx)}"]
         source_ids = sorted(set(int(x) for x in list(left.source_ids) + list(right.source_ids) if int(x) >= 0))
         source = ChainSpec(
             chain_type=ctype,
@@ -1537,6 +1645,8 @@ class BranchTopologyAssembler:
                 "ordinary_pair": True,
                 "pair_kind": str(pair_kind),
                 "exclusive_group_key": group_id,
+                "exclusive_group_keys": [str(group_id), *slot_group_ids],
+                "slot_group_ids": list(slot_group_ids),
             },
             candidate_row={
                 "origin_rule": f"{left_meta.get('origin_rule', '')}+{right_meta.get('origin_rule', '')}",
@@ -1841,12 +1951,16 @@ class BranchTopologyAssembler:
         ))
         ab_entries = [entry for entry in entries if self._is_ab_type(str(entry.get("abcd_type") or ""))]
         cd_entries = [entry for entry in entries if self._is_cd_type(str(entry.get("abcd_type") or ""))]
-        if len(entries) != 4 or len(ab_entries) != 2 or len(cd_entries) != 2:
+        if not ab_entries and not cd_entries and bridge_unit is None:
             return None
-        base_upper = ab_entries[0]
-        base_lower = ab_entries[1]
-        outer_upper = cd_entries[0]
-        outer_lower = cd_entries[1]
+        if not ab_entries and bridge_unit is None:
+            return None
+        if not cd_entries and bridge_unit is None:
+            return None
+        base_upper = ab_entries[0] if len(ab_entries) >= 1 else None
+        base_lower = ab_entries[1] if len(ab_entries) >= 2 else None
+        outer_upper = cd_entries[0] if len(cd_entries) >= 1 else None
+        outer_lower = cd_entries[1] if len(cd_entries) >= 2 else None
 
         bridge_su = [14, 14] if bridge_unit is not None else [24, 24]
         base_ring_su = [
@@ -1857,8 +1971,8 @@ class BranchTopologyAssembler:
         ]
         outer_ring_su: List[int] = [
             23,
-            int(outer_upper.get("su_type", 24)),
-            int(outer_lower.get("su_type", 24)),
+            int(outer_upper.get("su_type", 23)) if outer_upper else 23,
+            int(outer_lower.get("su_type", 23)) if outer_lower else 23,
             23,
         ]
         total_like24 = int(sum(1 for su in list(base_ring_su) + list(outer_ring_su) if self._is_like24_ring_su(int(su))))
@@ -1880,7 +1994,15 @@ class BranchTopologyAssembler:
         base_lower_branch = list(slot_branch_su.get("base_lower", []) or [])
         outer_upper_branch = list(slot_branch_su.get("outer_upper", []) or [])
         outer_lower_branch = list(slot_branch_su.get("outer_lower", []) or [])
-        fused_filler_24_count = 0 if bridge_unit is not None else 2
+        fused_filler_24_count = int(sum(1 for su in list(base_ring_su) + list(outer_ring_su) if int(su) == 24))
+        fused_filler_24_count -= int(sum(
+            1
+            for entry in (base_upper, base_lower, outer_upper, outer_lower)
+            if entry is not None and int(entry.get("su_type", 24)) == 24
+        ))
+        fused_filler_24_count = max(0, int(fused_filler_24_count))
+        if int(fused_filler_24_count) > 2:
+            return None
         composition = (
             list(base_ring_su)
             + list(outer_ring_su)
@@ -1947,6 +2069,12 @@ class BranchTopologyAssembler:
             tail_sources.append(str((slot_entries.get(slot) or {}).get("origin_rule") or "") or None)
             if vals:
                 branch_tail_lengths[slot] = int(len(vals))
+        upper_endpoint_entry = base_upper or outer_upper
+        lower_endpoint_entry = base_lower or outer_lower
+        upper_endpoint_su = self._entry_endpoint_su(upper_endpoint_entry, 11)
+        lower_endpoint_su = self._entry_endpoint_su(lower_endpoint_entry, 11)
+        upper_endpoint_source_id = self._entry_endpoint_source_id(upper_endpoint_entry)
+        lower_endpoint_source_id = self._entry_endpoint_source_id(lower_endpoint_entry)
 
         meta = {
             "allocator_mode": "fused_ring_planner_v1",
@@ -1974,6 +2102,10 @@ class BranchTopologyAssembler:
             "fused_ring_filler_24_count": int(fused_filler_24_count),
             "bridgehead_replace_24c": bool(bridge_unit is not None),
             "ring_substitute_types": [14, 14] if bridge_unit is not None else [],
+            "upper_endpoint_su": int(upper_endpoint_su),
+            "lower_endpoint_su": int(lower_endpoint_su),
+            "upper_endpoint_source_id": int(upper_endpoint_source_id),
+            "lower_endpoint_source_id": int(lower_endpoint_source_id),
             "source_candidate_group_ids": list(slot_group_ids),
         }
         chain = ChainSpec(
@@ -2042,10 +2174,10 @@ class BranchTopologyAssembler:
             23,
             int(right.get("su_type", 24)),
             23,
-            int(left.get("su_type", 23)) if left is not None else 23,
+            int(left.get("su_type", 24)) if left is not None else 24,
             23,
         ]
-        vertical_filler_24_count = 1
+        vertical_filler_24_count = 1 + (1 if left is None else 0)
         total_like24 = int(sum(1 for su in vertical_ring_su if self._is_like24_ring_su(int(su))))
         if not (2 <= int(total_like24) <= 3):
             return None
@@ -2097,6 +2229,8 @@ class BranchTopologyAssembler:
             tail_sources.append(str((slot_entries.get(slot) or {}).get("origin_rule") or "") or None)
             if vals:
                 branch_tail_lengths[slot] = int(len(vals))
+        anchor_endpoint_su = self._entry_endpoint_su(right, 11)
+        anchor_endpoint_source_id = self._entry_endpoint_source_id(right)
 
         meta = {
             "allocator_mode": "vertical_ring_planner_v1",
@@ -2121,6 +2255,8 @@ class BranchTopologyAssembler:
             "vertical_ring_like24_min": 2,
             "vertical_ring_like24_max": 3,
             "vertical_ring_filler_24_count": int(vertical_filler_24_count),
+            "anchor_endpoint_su": int(anchor_endpoint_su),
+            "anchor_endpoint_source_id": int(anchor_endpoint_source_id),
             "source_candidate_group_ids": list(slot_group_ids),
         }
         chain = ChainSpec(
@@ -2180,7 +2316,7 @@ class BranchTopologyAssembler:
         units.sort(key=self._side_ring_unit_sort_key)
         configured_pool = self.constraints.get("side_ring_candidate_pool")
         if configured_pool is None:
-            pool_limit = len(units) if len(units) <= 24 else 18
+            pool_limit = min(len(units), 64)
         else:
             pool_limit = max(1, int(configured_pool or 18))
         pool = units[:pool_limit]
@@ -2494,6 +2630,18 @@ class BranchTopologyAssembler:
     ) -> TopologyAssemblyOption:
         slot_names = ["pos1", "pos3", "pos4", "pos2"]
         default_su = {"pos1": 23, "pos3": 23, "pos4": 23, "pos2": 23}
+        existing_like24 = int(sum(
+            1 for entry in dict(slot_entries or {}).values()
+            if self._is_like24_ring_su(int(entry.get("su_type", 23)))
+        ))
+        missing_like24 = max(0, 2 - int(existing_like24))
+        for slot in ["pos1", "pos2", "pos3", "pos4"]:
+            if int(missing_like24) <= 0:
+                break
+            if slot in slot_entries:
+                continue
+            default_su[str(slot)] = 24
+            missing_like24 -= 1
         ring_su = [
             int(slot_entries[slot]["su_type"]) if slot in slot_entries else int(default_su[slot])
             for slot in slot_names
@@ -2549,6 +2697,12 @@ class BranchTopologyAssembler:
             1 for slot in slot_names
             if slot not in slot_entries and int(default_su[slot]) == 24
         ))
+        upper_endpoint_entry = slot_entries.get("pos1") or slot_entries.get("pos3")
+        lower_endpoint_entry = slot_entries.get("pos2") or slot_entries.get("pos4")
+        upper_endpoint_su = self._entry_endpoint_su(upper_endpoint_entry, 11)
+        lower_endpoint_su = self._entry_endpoint_su(lower_endpoint_entry, 11)
+        upper_endpoint_source_id = self._entry_endpoint_source_id(upper_endpoint_entry)
+        lower_endpoint_source_id = self._entry_endpoint_source_id(lower_endpoint_entry)
         meta = {
             "allocator_mode": "side_ring_planner_v1",
             "pending_closure": False,
@@ -2576,6 +2730,10 @@ class BranchTopologyAssembler:
             "side_ring_like24_min": 2,
             "side_ring_like24_max": 4,
             "min_like24_ok": bool(2 <= int(total_like24_count) <= 4),
+            "upper_endpoint_su": int(upper_endpoint_su),
+            "lower_endpoint_su": int(lower_endpoint_su),
+            "upper_endpoint_source_id": int(upper_endpoint_source_id),
+            "lower_endpoint_source_id": int(lower_endpoint_source_id),
             "source_candidate_group_ids": list(slot_group_ids),
         }
         chain = ChainSpec(
@@ -2642,6 +2800,64 @@ class BranchTopologyAssembler:
         return str(abcd_type) in {"24_C", "24_D"}
 
     @staticmethod
+    def _is_ring_endpoint_su(su: int) -> bool:
+        return int(su) in {5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 30}
+
+    @classmethod
+    def _entry_endpoint_su(cls, entry: Optional[Dict[str, Any]], fallback: int = 11) -> int:
+        if entry is None:
+            return int(fallback)
+        profile = dict(entry.get("profile", {}) or {})
+        for key in ("endpoint_su", "left_endpoint_su", "right_endpoint_su", "anchor_su"):
+            if key not in profile:
+                continue
+            try:
+                su = int(profile.get(key))
+            except Exception:
+                continue
+            if cls._is_ring_endpoint_su(su):
+                return int(su)
+        alt = dict(profile.get("alt", {}) or {})
+        for values in (
+            profile.get("actual_used_su"),
+            entry.get("actual_used_su"),
+            alt.get("actual_used_su"),
+        ):
+            if not isinstance(values, (list, tuple)):
+                continue
+            endpoints: List[int] = []
+            for su in list(values or []):
+                try:
+                    su_i = int(su)
+                except Exception:
+                    continue
+                if cls._is_ring_endpoint_su(su_i):
+                    endpoints.append(int(su_i))
+            for su_i in endpoints:
+                if int(su_i) != 11:
+                    return int(su_i)
+            if endpoints:
+                return int(endpoints[0])
+        return int(fallback)
+
+    @staticmethod
+    def _entry_endpoint_source_id(entry: Optional[Dict[str, Any]]) -> int:
+        if entry is None:
+            return -1
+        profile = dict(entry.get("profile", {}) or {})
+        for key in ("endpoint_source_id", "left_endpoint_source_id", "right_endpoint_source_id", "anchor_source_id"):
+            if key not in profile:
+                continue
+            try:
+                gid = int(profile.get(key))
+            except Exception:
+                continue
+            if gid >= 0:
+                return int(gid)
+        source_ids = [int(x) for x in list(entry.get("source_ids", []) or []) if int(x) >= 0]
+        return int(source_ids[0]) if source_ids else -1
+
+    @staticmethod
     def _is_like24_ring_su(su: int) -> bool:
         return int(su) in {14, 19, 20, 21, 24, 25}
 
@@ -2689,6 +2905,14 @@ class BranchTopologyAssembler:
             profile.setdefault("fixed_path_kind", str(alt.get("origin_rule") or ""))
         if alt.get("source_kind") is not None:
             profile.setdefault("source_kind", str(alt.get("source_kind") or ""))
+        profile.setdefault("alt", dict(alt))
+        if alt.get("actual_used_su") is not None:
+            profile.setdefault("actual_used_su", [int(x) for x in list(alt.get("actual_used_su", []) or [])])
+        if alt.get("actual_used_source_ids") is not None:
+            profile.setdefault(
+                "actual_used_source_ids",
+                [int(x) for x in list(alt.get("actual_used_source_ids", []) or []) if int(x) >= 0],
+            )
         return profile
 
     def _ring_tail_su_for_candidate(
@@ -3298,6 +3522,103 @@ class BranchTopologyAssembler:
         return "+".join(f"{k}{'-'.join(str(x) for x in v)}" for k, v in sorted(plan.items()))
 
     @staticmethod
+    def _is_mandatory_flex_option(option: TopologyAssemblyOption) -> bool:
+        role = str(dict(getattr(option, "candidate_row", {}) or {}).get("topology_role") or "")
+        return (
+            str(getattr(option, "usage_mode", "") or "") == "flex_branch"
+            and (
+                str(getattr(option, "assembly_family", "") or "") in MANDATORY_FLEX_FAMILIES
+                or role == "definite_flex"
+            )
+        )
+
+    @staticmethod
+    def _is_mandatory_side_option(option: TopologyAssemblyOption) -> bool:
+        role = str(dict(getattr(option, "candidate_row", {}) or {}).get("topology_role") or "")
+        return (
+            str(getattr(option, "usage_mode", "") or "") == "side_branch"
+            and (
+                str(getattr(option, "assembly_family", "") or "") in MANDATORY_SIDE_FAMILIES
+                or role == "definite_side"
+            )
+        )
+
+    @staticmethod
+    def _is_flex_option(option: TopologyAssemblyOption) -> bool:
+        return str(getattr(option, "usage_mode", "") or "") in FLEX_USAGE_MODES
+
+    @staticmethod
+    def _is_side_option(option: TopologyAssemblyOption) -> bool:
+        return str(getattr(option, "usage_mode", "") or "") in SIDE_USAGE_MODES
+
+    @staticmethod
+    def _staged_mandatory_flex_sort_key(option: TopologyAssemblyOption) -> Tuple[int, int, int, str]:
+        closure = option.closure_resource_cost
+        cost = option.resource_cost
+        closure_total = int(sum(int(closure.get(str(k), 0)) for k in RESOURCE_KEYS))
+        total = int(sum(int(cost.get(str(k), 0)) for k in RESOURCE_KEYS))
+        return (int(closure_total), int(total), -int(option.priority), str(option.option_id))
+
+    @staticmethod
+    def _staged_prefill_flex_sort_key(option: TopologyAssemblyOption) -> Tuple[int, int, int, int, str]:
+        usage = str(getattr(option, "usage_mode", "") or "")
+        usage_rank = {
+            "ordinary_pair_bridge": 0,
+            "ordinary_bridge": 1,
+            "flex_branch": 2,
+        }.get(usage, 9)
+        closure = option.closure_resource_cost
+        cost = option.resource_cost
+        closure_total = int(sum(int(closure.get(str(k), 0)) for k in RESOURCE_KEYS))
+        total = int(sum(int(cost.get(str(k), 0)) for k in RESOURCE_KEYS))
+        return (int(usage_rank), int(closure_total), int(total), -int(option.priority), str(option.option_id))
+
+    @staticmethod
+    def _staged_late_flex_sort_key(option: TopologyAssemblyOption) -> Tuple[int, int, int, int, str]:
+        usage = str(getattr(option, "usage_mode", "") or "")
+        usage_rank = {
+            "ordinary_pair_bridge": 0,
+            "ordinary_bridge": 1,
+            "flex_branch": 2,
+        }.get(usage, 9)
+        closure = option.closure_resource_cost
+        cost = option.resource_cost
+        closure_total = int(sum(int(closure.get(str(k), 0)) for k in RESOURCE_KEYS))
+        total = int(sum(int(cost.get(str(k), 0)) for k in RESOURCE_KEYS))
+        return (int(usage_rank), int(closure_total), int(total), -int(option.priority), str(option.option_id))
+
+    @staticmethod
+    def _staged_ring_sort_key(option: TopologyAssemblyOption) -> Tuple[int, int, int, int, str]:
+        constraints = dict(getattr(option, "constraints", {}) or {})
+        planner = str(constraints.get("ring_planner") or "")
+        ring_type = str(constraints.get("ring_type") or "")
+        text = f"{planner} {ring_type}".lower()
+        if "fused" in text:
+            ring_rank = 0
+        elif "side" in text:
+            ring_rank = 1
+        elif "vertical" in text or "upper" in text:
+            ring_rank = 2
+        else:
+            ring_rank = 3
+        cost = option.resource_cost
+        total = int(sum(int(cost.get(str(k), 0)) for k in RESOURCE_KEYS))
+        filler24 = int(constraints.get("side_ring_filler_24_count", 0) or 0)
+        filler24 += int(constraints.get("vertical_ring_filler_24_count", 0) or 0)
+        filler24 += int(constraints.get("fused_ring_filler_24_count", 0) or 0)
+        return (int(ring_rank), -int(option.priority), int(filler24), int(total), str(option.option_id))
+
+    @classmethod
+    def _staged_side_sort_key(cls, option: TopologyAssemblyOption) -> Tuple[int, int, int, int, str]:
+        mandatory_rank = 0 if cls._is_mandatory_side_option(option) else 1
+        cost = option.resource_cost
+        closure = option.closure_resource_cost
+        closure_total = int(sum(int(closure.get(str(k), 0)) for k in RESOURCE_KEYS))
+        tail_total = int(cost.get("22", 0)) + int(cost.get("23", 0))
+        total = int(sum(int(cost.get(str(k), 0)) for k in RESOURCE_KEYS))
+        return (int(mandatory_rank), int(closure_total), int(tail_total), int(total), str(option.option_id))
+
+    @staticmethod
     def _option_sort_key(option: TopologyAssemblyOption) -> Tuple[int, int, int, int, str]:
         cost = option.resource_cost
         closure = option.closure_resource_cost
@@ -3350,6 +3671,8 @@ class BranchTopologyAssembler:
         base_demand = {str(k): 0 for k in RESOURCE_KEYS}
         closure_demand = {str(k): 0 for k in RESOURCE_KEYS}
         intent_demand: Dict[str, int] = {}
+        closure_slot_demand: Dict[str, int] = {}
+        raw_closure_slot_demand: Dict[str, int] = {}
         usage_mode_demand: Dict[str, int] = {}
         assembly_family_demand: Dict[str, int] = {}
         selected_rows: List[Dict[str, Any]] = []
@@ -3381,6 +3704,47 @@ class BranchTopologyAssembler:
             for key in RESOURCE_KEYS:
                 target[str(key)] = int(target.get(str(key), 0)) + max(0, int((cost or {}).get(str(key), 0) or 0))
 
+        def _normalize_intent_name(value: Any) -> str:
+            text = str(value or "").strip()
+            if text in BRANCH_CLOSURE_INTENTS:
+                return text
+            return ""
+
+        def _add_intent_slot(counter: Dict[str, int], intent: Any, count: int = 1) -> None:
+            name = _normalize_intent_name(intent)
+            if not name:
+                return
+            counter[str(name)] = int(counter.get(str(name), 0)) + max(0, int(count))
+
+        def _collect_intents(obj: Any) -> List[str]:
+            found: List[str] = []
+            if isinstance(obj, dict):
+                for val in obj.values():
+                    found.extend(_collect_intents(val))
+            elif isinstance(obj, (list, tuple, set)):
+                for val in obj:
+                    found.extend(_collect_intents(val))
+            else:
+                name = _normalize_intent_name(obj)
+                if name:
+                    found.append(str(name))
+            return found
+
+        def _slot_for_plan(site: Any, seq: Sequence[int]) -> str:
+            vals = [int(x) for x in list(seq or [])]
+            site_s = str(site or "")
+            if site_s.startswith("main"):
+                if vals and int(vals[-1]) == 11:
+                    return "F1" if 23 in vals else "F1-"
+                if vals and int(vals[-1]) == 22:
+                    return "F2" if 23 in vals else "F2-"
+            if site_s.startswith("branch"):
+                if vals == [22]:
+                    return "H1"
+                if vals and int(vals[-1]) == 22:
+                    return "H"
+            return "-".join(str(x) for x in vals) if vals else "none"
+
         def _fallback_closure_from_row(row: Dict[str, Any]) -> Dict[str, int]:
             cost = {str(k): 0 for k in RESOURCE_KEYS}
             intents_obj = row.get("closure_intents", {}) or {}
@@ -3403,6 +3767,7 @@ class BranchTopologyAssembler:
                 seq = cls._shortest_intent_sequence(str(intent))
                 if not seq:
                     continue
+                _add_intent_slot(closure_slot_demand, intent)
                 _add_counter(intent_demand, f"fallback:{intent}:{'-'.join(str(x) for x in seq)}")
                 _add_cost(cost, cls._cost_for_sequences([seq]))
             return cost
@@ -3411,6 +3776,8 @@ class BranchTopologyAssembler:
             group_id = str(row.get("candidate_group_id", "") or "")
             if not group_id:
                 continue
+            for intent in _collect_intents(row.get("closure_intents", {}) or {}):
+                _add_intent_slot(raw_closure_slot_demand, intent)
             options = [
                 opt for opt in list(options_by_group.get(group_id, []) or [])
                 if str(getattr(opt, "usage_mode", "") or "") != "ring_candidate"
@@ -3426,6 +3793,12 @@ class BranchTopologyAssembler:
                 selected_rows.append({
                     "candidate_group_id": str(group_id),
                     "origin_type": str(row.get("origin_type", "")),
+                    "source_ids": [int(x) for x in list(row.get("source_ids", []) or [])],
+                    "composition": [int(x) for x in list(row.get("composition", []) or [])],
+                    "actual_topology_su": [int(x) for x in list(row.get("actual_topology_su", []) or [])],
+                    "topology_template": str(row.get("topology_template", "") or ""),
+                    "assembly_families": list(row.get("assembly_families", []) or []),
+                    "closure_intents": dict(row.get("closure_intents", {}) or {}),
                     "reason": str(row.get("reason", "")),
                     "best_option_id": "",
                     "usage_mode": "",
@@ -3449,10 +3822,17 @@ class BranchTopologyAssembler:
             for site, seq in sorted(dict(best.closure_plan or {}).items()):
                 seq_vals = [int(x) for x in list(seq or [])]
                 label = "-".join(str(x) for x in seq_vals) if seq_vals else "none"
+                _add_counter(closure_slot_demand, _slot_for_plan(site, seq_vals))
                 _add_counter(intent_demand, f"{site}:{label}")
             selected_rows.append({
                 "candidate_group_id": str(group_id),
                 "origin_type": str(row.get("origin_type", "")),
+                "source_ids": [int(x) for x in list(row.get("source_ids", []) or [])],
+                "composition": [int(x) for x in list(row.get("composition", []) or [])],
+                "actual_topology_su": [int(x) for x in list(row.get("actual_topology_su", []) or [])],
+                "topology_template": str(best.topology_template or row.get("topology_template", "") or ""),
+                "assembly_families": list(row.get("assembly_families", []) or []),
+                "closure_intents": dict(row.get("closure_intents", {}) or {}),
                 "reason": str(row.get("reason", "")),
                 "best_option_id": str(best.option_id),
                 "usage_mode": str(best.usage_mode),
@@ -3485,11 +3865,14 @@ class BranchTopologyAssembler:
         return {
             "pending_group_count": int(len(rows)),
             "intent_demand": dict(sorted(intent_demand.items())),
+            "closure_slot_demand": dict(sorted(closure_slot_demand.items())),
+            "raw_closure_slot_demand": dict(sorted(raw_closure_slot_demand.items())),
             "usage_mode_demand": dict(sorted(usage_mode_demand.items())),
             "assembly_family_demand": dict(sorted(assembly_family_demand.items())),
             "resource_demand": dict(demand),
             "base_resource_demand": dict(base_demand),
             "closure_resource_demand": dict(closure_demand),
+            "minimal_closure_resource_demand": dict(closure_demand),
             "resource_available": dict(available),
             "resource_deficit": dict(deficit),
             "minimum_conversions": list(minimum_conversions),
@@ -3507,6 +3890,9 @@ class BranchTopologyAssembler:
         flex_upper: int,
         unclosed_count: int,
         disabled_ring_count: int = 0,
+        flex_window_ok: bool = True,
+        flex_lower_raw: Optional[int] = None,
+        flex_upper_raw: Optional[int] = None,
         backbone_residual: int = 0,
         unclosed_rows: Optional[Sequence[Dict[str, Any]]] = None,
         pending_demand_summary: Optional[Dict[str, Any]] = None,
@@ -3622,6 +4008,22 @@ class BranchTopologyAssembler:
                     "25",
                     actionable=False,
                 )
+
+        lower_raw_i = int(flex_lower if flex_lower_raw is None else flex_lower_raw)
+        upper_raw_i = int(flex_upper if flex_upper_raw is None else flex_upper_raw)
+        flex_window_conflict = bool((not bool(flex_window_ok)) or int(lower_raw_i) > int(upper_raw_i))
+        if bool(flex_window_conflict):
+            _append(
+                "adjust_10_or_12_for_flex_window",
+                max(0, int(lower_raw_i) - int(upper_raw_i)),
+                "flex_window_lower_exceeds_upper",
+                actionable=True,
+            )
+            if out:
+                out[-1]["flex_lower_raw"] = int(lower_raw_i)
+                out[-1]["flex_upper_raw"] = int(upper_raw_i)
+                out[-1]["flex_count"] = int(flex_count)
+            return out
 
         flex_short = max(0, int(flex_lower) - int(flex_count))
         flex_excess = max(0, int(flex_count) - int(flex_upper))

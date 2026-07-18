@@ -600,6 +600,413 @@ def split_by_su_ppm(
 
     print(f"\n质检完成：正常 {total_ok} 个，错误 {total_bad} 个。")
 
+
+def _unique_ints_preserve_order(values: list[int]) -> list[int]:
+    """Return unique integer values while preserving the user's order."""
+    seen = set()
+    out = []
+    for value in values:
+        value_i = int(value)
+        if value_i in seen:
+            continue
+        seen.add(value_i)
+        out.append(value_i)
+    return out
+
+
+def _load_graph_metadata(pt_files: list[Path]) -> list[dict]:
+    """Load lightweight graph metadata used for split-aware merging."""
+    graph_metadata = []
+    for f_path in tqdm(pt_files, desc="Indexing graphs"):
+        try:
+            data_dict = torch.load(f_path, weights_only=False)
+            data = Data.from_dict(data_dict)
+            su_indices = set(int(v) for v in data.su_type_indices.tolist())
+            su_hist = data_dict.get("su_hist", None)
+            if su_hist is None:
+                su_hist_t = torch.zeros(len(SU_DEFS), dtype=torch.float)
+                for su_idx in su_indices:
+                    if 0 <= int(su_idx) < len(SU_DEFS):
+                        su_hist_t[int(su_idx)] += 1.0
+            else:
+                su_hist_t = torch.as_tensor(su_hist, dtype=torch.float).flatten()
+                if int(su_hist_t.numel()) < len(SU_DEFS):
+                    su_hist_t = torch.cat([
+                        su_hist_t,
+                        torch.zeros(len(SU_DEFS) - int(su_hist_t.numel()), dtype=torch.float),
+                    ])
+                su_hist_t = su_hist_t[:len(SU_DEFS)]
+            atom_counts = data_dict.get("total_atom_counts", None)
+            atom_counts_t = (
+                torch.as_tensor(atom_counts, dtype=torch.float).flatten()[:6]
+                if atom_counts is not None
+                else torch.zeros(6, dtype=torch.float)
+            )
+            if int(atom_counts_t.numel()) < 6:
+                atom_counts_t = torch.cat([atom_counts_t, torch.zeros(6 - int(atom_counts_t.numel()))])
+            graph_metadata.append({
+                "path": Path(f_path),
+                "file": Path(f_path).name,
+                "num_nodes": int(data.num_nodes),
+                "num_edges": int(data.num_edges),
+                "su_indices": su_indices,
+                "su_hist": su_hist_t.cpu(),
+                "atom_counts": atom_counts_t.cpu(),
+            })
+        except Exception as e:
+            print(f"Warning: Skipping file {f_path} due to error: {e}")
+            continue
+    return graph_metadata
+
+
+def _split_graph_metadata(graph_metadata: list[dict],
+                          train_ratio: float,
+                          val_ratio: float,
+                          test_ratio: float,
+                          seed: int) -> dict[str, list[dict]]:
+    """Split source single-molecule graphs before any merge operation."""
+    if not graph_metadata:
+        raise ValueError("No graph metadata available for splitting.")
+
+    total_ratio = float(train_ratio) + float(val_ratio) + float(test_ratio)
+    if total_ratio <= 0:
+        raise ValueError("train_ratio + val_ratio + test_ratio must be positive.")
+
+    train_ratio = float(train_ratio) / total_ratio
+    val_ratio = float(val_ratio) / total_ratio
+
+    rng = random.Random(int(seed))
+    records = list(graph_metadata)
+    rng.shuffle(records)
+
+    n_total = len(records)
+    n_train = int(n_total * train_ratio)
+    n_val = int(n_total * val_ratio)
+
+    if n_total >= 3:
+        n_train = max(1, n_train)
+        n_val = max(1, n_val)
+        if n_train + n_val >= n_total:
+            n_val = max(1, n_total - n_train - 1)
+    n_test = n_total - n_train - n_val
+    if n_total >= 3 and n_test <= 0:
+        n_test = 1
+        if n_train > n_val:
+            n_train -= 1
+        else:
+            n_val -= 1
+
+    return {
+        "train": records[:n_train],
+        "val": records[n_train:n_train + n_val],
+        "test": records[n_train + n_val:],
+    }
+
+
+def _save_split_manifest(splits: dict[str, list[dict]], output_dir: Path) -> Path:
+    rows = []
+    for split_name, records in splits.items():
+        for rec in records:
+            rows.append({
+                "split": split_name,
+                "file": rec["file"],
+                "path": str(rec["path"]),
+                "num_nodes": int(rec["num_nodes"]),
+                "num_edges": int(rec["num_edges"]),
+            })
+    df = pd.DataFrame(rows, columns=["split", "file", "path", "num_nodes", "num_edges"])
+    manifest_path = output_dir / "split_manifest.csv"
+    df.to_csv(manifest_path, index=False)
+    return manifest_path
+
+
+def _copy_single_split_files(splits: dict[str, list[dict]], output_dir: Path):
+    for split_name, records in splits.items():
+        split_dir = output_dir / f"{split_name}_single"
+        split_dir.mkdir(parents=True, exist_ok=True)
+        for rec in tqdm(records, desc=f"Copying {split_name} singles"):
+            dst = split_dir / rec["file"]
+            shutil.copy2(rec["path"], dst)
+
+
+def _upsample_su_ids(upsample_sus: list[str]) -> set[int]:
+    su_name_to_id = {name: i for i, (name, _) in enumerate(SU_DEFS)}
+    missing = [name for name in upsample_sus if name not in su_name_to_id]
+    if missing:
+        print(f"Warning: Unknown SU names ignored for upsampling: {missing}")
+    return {su_name_to_id[name] for name in upsample_sus if name in su_name_to_id}
+
+
+_MERGE_STYLE_SU_GROUPS: dict[str, list[int]] = {
+    "carbonyl": [0, 1, 2, 3, 4],
+    "aromatic": list(range(5, 14)),
+    "unsaturated": list(range(14, 19)),
+    "aliphatic": list(range(19, 26)),
+    "hetero_terminal": list(range(26, 33)),
+    "oxygen": [0, 1, 2, 3, 5, 19, 28, 29],
+    "nitrogen": [0, 4, 6, 20, 26, 27],
+    "sulfur": [7, 30, 31],
+    "halogen": [8, 21, 32],
+}
+
+
+def _style_score_for_record(rec: dict, style: str) -> float:
+    """Return a non-negative score used for controlled merged sampling."""
+    style = str(style).lower()
+    if style in {"random", "default"}:
+        return 1.0
+
+    su_hist = torch.as_tensor(rec.get("su_hist", torch.zeros(len(SU_DEFS))), dtype=torch.float)
+    atom_counts = torch.as_tensor(rec.get("atom_counts", torch.zeros(6)), dtype=torch.float)
+    carbon = float(atom_counts[0].item()) if int(atom_counts.numel()) > 0 else 0.0
+    denom = max(carbon, float(rec.get("num_nodes", 1)), 1.0)
+
+    if style.startswith("high_"):
+        key = style[5:]
+        if key == "hetero":
+            ids = sorted(set(
+                _MERGE_STYLE_SU_GROUPS["oxygen"]
+                + _MERGE_STYLE_SU_GROUPS["nitrogen"]
+                + _MERGE_STYLE_SU_GROUPS["sulfur"]
+                + _MERGE_STYLE_SU_GROUPS["halogen"]
+                + _MERGE_STYLE_SU_GROUPS["hetero_terminal"]
+            ))
+        else:
+            ids = _MERGE_STYLE_SU_GROUPS.get(key)
+        if ids is not None:
+            return float(su_hist[ids].sum().item()) / denom
+
+        elem_col = {"oxygen": 2, "nitrogen": 3, "sulfur": 4, "halogen": 5}.get(key)
+        if elem_col is not None and int(atom_counts.numel()) > elem_col:
+            return float(atom_counts[elem_col].item()) / denom
+
+    if style == "aromatic_rich":
+        return float(su_hist[_MERGE_STYLE_SU_GROUPS["aromatic"]].sum().item()) / denom
+    if style == "aliphatic_rich":
+        return float(su_hist[_MERGE_STYLE_SU_GROUPS["aliphatic"]].sum().item()) / denom
+
+    raise ValueError(
+        f"Unknown merge style '{style}'. Supported examples: random, high_aromatic, "
+        "high_aliphatic, high_oxygen, high_nitrogen, high_sulfur, high_halogen, "
+        "high_hetero, high_carbonyl, high_unsaturated."
+    )
+
+
+def _merge_sampling_weights(records: list[dict],
+                            upsample_su_ids: set[int],
+                            upsample_factor: float,
+                            merge_style: str,
+                            style_strength: float) -> list[float]:
+    base_weights = []
+    style_scores = []
+    for rec in records:
+        base = float(upsample_factor) if upsample_su_ids and upsample_su_ids.intersection(rec["su_indices"]) else 1.0
+        base_weights.append(base)
+        style_scores.append(_style_score_for_record(rec, merge_style))
+
+    if str(merge_style).lower() in {"random", "default"}:
+        return base_weights
+
+    max_score = max(style_scores) if style_scores else 0.0
+    if max_score <= 0:
+        print(f"Warning: merge_style='{merge_style}' has zero score for all records; falling back to random weights.")
+        return base_weights
+
+    strength = max(float(style_strength), 0.0)
+    weights = []
+    for base, score in zip(base_weights, style_scores):
+        normalized = float(score) / max_score
+        # Keep every molecule selectable, but strongly favor style-rich sources.
+        weights.append(base * (0.05 + normalized) ** strength)
+    return weights
+
+
+def _generate_merged_graphs_from_metadata(records: list[dict],
+                                          output_dir: Path,
+                                          target_node_counts: list[int],
+                                          num_per_target: int,
+                                          upsample_su_ids: set[int],
+                                          upsample_factor: float,
+                                          seed: int,
+                                          split_name: str,
+                                          merge_styles: list[str] | None = None,
+                                          style_strength: float = 2.0) -> list[dict]:
+    """Generate merged graphs from one split only, preventing split leakage."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if len(records) < 2:
+        print(f"Warning: Split '{split_name}' has fewer than 2 graphs; skipping merged generation.")
+        return []
+
+    unique_targets = _unique_ints_preserve_order(target_node_counts)
+    if len(unique_targets) != len(target_node_counts):
+        print(
+            f"Warning: duplicate target_node_counts detected for split '{split_name}'. "
+            f"Using unique targets only: {unique_targets}"
+        )
+
+    merge_styles = [str(s).lower() for s in (merge_styles or ["random"])]
+    if not merge_styles:
+        merge_styles = ["random"]
+
+    manifest_rows = []
+    for style_idx, merge_style in enumerate(merge_styles):
+        rng = random.Random(int(seed) + style_idx * 1000000)
+        weights = _merge_sampling_weights(
+            records=records,
+            upsample_su_ids=upsample_su_ids,
+            upsample_factor=upsample_factor,
+            merge_style=merge_style,
+            style_strength=style_strength,
+        )
+        style_label = str(merge_style).lower()
+        for target_size in unique_targets:
+            print(f"\n[{split_name}] Generating {style_label} merged graphs for target size ~{target_size} nodes")
+            for i in range(int(num_per_target)):
+                files_to_merge = []
+                source_names = []
+                current_nodes = 0
+                available_indices = list(range(len(records)))
+
+                while current_nodes < int(target_size) and available_indices:
+                    current_weights = [weights[idx] for idx in available_indices]
+                    chosen_relative_idx = rng.choices(
+                        population=range(len(available_indices)),
+                        weights=current_weights,
+                        k=1,
+                    )[0]
+                    original_idx = available_indices.pop(chosen_relative_idx)
+                    rec = records[original_idx]
+                    files_to_merge.append(Path(rec["path"]))
+                    source_names.append(rec["file"])
+                    current_nodes += int(rec["num_nodes"])
+
+                if len(files_to_merge) < 2:
+                    print(
+                        f"Warning: Split '{split_name}', style {style_label}, target {target_size}, sample {i+1}: "
+                        "not enough source graphs selected; skipping."
+                    )
+                    continue
+
+                suffix = f"{i+1:03d}" if len(merge_styles) == 1 and style_label == "random" else f"{style_label}_{i+1:03d}"
+                output_file = output_dir / f"{target_size}_{suffix}.pt"
+                merge_info = merge_graphs(files_to_merge, output_file, quiet=True)
+                if not merge_info:
+                    continue
+
+                manifest_rows.append({
+                    "split": split_name,
+                    "merge_style": style_label,
+                    "target_node_count": int(target_size),
+                    "output_file": str(output_file),
+                    "output_name": output_file.name,
+                    "actual_num_nodes": int(merge_info["num_nodes"]),
+                    "actual_num_edges": int(merge_info["num_edges"]),
+                    "num_source_graphs": int(merge_info["num_sources"]),
+                    "source_files": ";".join(source_names),
+                })
+
+    return manifest_rows
+
+
+def split_and_batch_merge_graphs(data_dir: Path,
+                                 output_dir: Path,
+                                 target_node_counts: list[int],
+                                 num_per_target: int,
+                                 upsample_sus: list[str],
+                                 upsample_factor: float,
+                                 train_ratio: float = 0.8,
+                                 val_ratio: float = 0.1,
+                                 test_ratio: float = 0.1,
+                                 seed: int = 42,
+                                 val_num_per_target: int | None = None,
+                                 test_num_per_target: int | None = None,
+                                 copy_singles: bool = True,
+                                 merge_styles: list[str] | None = None,
+                                 style_strength: float = 2.0):
+    """
+    Leakage-safe dataset expansion for S2N:
+      1) split source single-molecule graphs into train/val/test,
+      2) generate merged graphs separately within each split,
+      3) save manifests for reproducibility.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print("--- Starting Split-Aware Batch Merge ---")
+    print(f"Source Directory: {data_dir}")
+    print(f"Output Directory: {output_dir}")
+    print(f"Split ratios: train={train_ratio}, val={val_ratio}, test={test_ratio}")
+    print(f"Seed: {seed}")
+    print(f"Merge styles: {merge_styles or ['random']} (style_strength={style_strength})")
+
+    pt_files = sorted(Path(data_dir).glob("*.pt"))
+    if not pt_files:
+        print(f"Error: No .pt files found in '{data_dir}'. Aborting.")
+        return
+
+    graph_metadata = _load_graph_metadata(pt_files)
+    if not graph_metadata:
+        print("Error: No valid graph files could be indexed. Aborting.")
+        return
+
+    splits = _split_graph_metadata(
+        graph_metadata,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+    )
+    for split_name, records in splits.items():
+        print(f"{split_name}: {len(records)} source graphs")
+
+    split_manifest = _save_split_manifest(splits, output_dir)
+    print(f"[✓] Split manifest saved to '{split_manifest}'")
+
+    if copy_singles:
+        _copy_single_split_files(splits, output_dir)
+        print("[✓] Single-molecule split files copied.")
+
+    upsample_ids = _upsample_su_ids(upsample_sus)
+    split_num_per_target = {
+        "train": int(num_per_target),
+        "val": int(val_num_per_target if val_num_per_target is not None else num_per_target),
+        "test": int(test_num_per_target if test_num_per_target is not None else num_per_target),
+    }
+
+    all_merge_rows = []
+    for split_name in ("train", "val", "test"):
+        merged_dir = output_dir / f"{split_name}_merged"
+        rows = _generate_merged_graphs_from_metadata(
+            records=splits[split_name],
+            output_dir=merged_dir,
+            target_node_counts=target_node_counts,
+            num_per_target=split_num_per_target[split_name],
+            upsample_su_ids=upsample_ids,
+            upsample_factor=upsample_factor,
+            seed=int(seed) + {"train": 0, "val": 100000, "test": 200000}[split_name],
+            split_name=split_name,
+            merge_styles=merge_styles,
+            style_strength=style_strength,
+        )
+        all_merge_rows.extend(rows)
+
+    merged_manifest = output_dir / "merged_manifest.csv"
+    pd.DataFrame(
+        all_merge_rows,
+        columns=[
+            "split",
+            "merge_style",
+            "target_node_count",
+            "output_file",
+            "output_name",
+            "actual_num_nodes",
+            "actual_num_edges",
+            "num_source_graphs",
+            "source_files",
+        ],
+    ).to_csv(merged_manifest, index=False)
+    print(f"[✓] Merged manifest saved to '{merged_manifest}'")
+    print("--- Split-aware batch merge complete! ---")
+
+
 def batch_merge_graphs(data_dir: Path, output_dir: Path, target_node_counts: list[int], num_per_target: int, upsample_sus: list[str], upsample_factor: float):
     """
     Automated batch merging of graphs to create larger datasets with specific properties.
@@ -611,6 +1018,8 @@ def batch_merge_graphs(data_dir: Path, output_dir: Path, target_node_counts: lis
     print(f"Target Node Counts: {target_node_counts}")
     print(f"Graphs per Target: {num_per_target}")
     print(f"Upsampling SUs: {upsample_sus} (Factor: {upsample_factor}x)")
+    target_node_counts = _unique_ints_preserve_order(target_node_counts)
+    print(f"Unique target node counts: {target_node_counts}")
 
     # --- 1. Pre-scan and index the dataset ---
     print("\nScanning and indexing dataset...")
@@ -691,27 +1100,31 @@ def batch_merge_graphs(data_dir: Path, output_dir: Path, target_node_counts: lis
     print("\n--- Batch merge complete! ---")
 
 
-def merge_graphs(input_files: list[Path], output_file: Path):
+def merge_graphs(input_files: list[Path], output_file: Path, quiet: bool = False) -> dict | None:
     """
     Merges multiple graph .pt files into a single, larger graph object.
     """
     if len(input_files) < 2:
-        print("Error: Merge command requires at least two input files.")
-        return
+        if not quiet:
+            print("Error: Merge command requires at least two input files.")
+        return None
 
     graphs_to_merge = []
-    print(f"Loading {len(input_files)} graphs to merge...")
+    if not quiet:
+        print(f"Loading {len(input_files)} graphs to merge...")
     for f in input_files:
         try:
             # 修正：加载字典后，将其转换为PyG的Data对象
             data_dict = torch.load(f, weights_only=False)
             graphs_to_merge.append(Data.from_dict(data_dict))
         except Exception as e:
-            print(f"Warning: Could not load file {f}. Skipping. Error: {e}")
+            if not quiet:
+                print(f"Warning: Could not load file {f}. Skipping. Error: {e}")
 
     if len(graphs_to_merge) < 2:
-        print("Error: Not enough valid graphs could be loaded to perform a merge.")
-        return
+        if not quiet:
+            print("Error: Not enough valid graphs could be loaded to perform a merge.")
+        return None
 
     # Initialize the merged graph with the first graph's data
     merged_data = graphs_to_merge[0].clone()
@@ -750,13 +1163,21 @@ def merge_graphs(input_files: list[Path], output_file: Path):
         merged_data.smiles += "." + graph_to_add.smiles
 
     # Ensure output directory exists
-    output_file.parent.mkdir(exist_ok=True)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     # V-Fix: Save as dict to maintain compatibility
     torch.save(merged_data.to_dict(), output_file)
     
-    print(f"  - Total nodes in merged graph: {merged_data.num_nodes}")
-    print(f"  - Total edges in merged graph: {merged_data.num_edges}")
-    print(f"[✓] Merged graph saved to '{output_file}'")
+    if not quiet:
+        print(f"  - Total nodes in merged graph: {merged_data.num_nodes}")
+        print(f"  - Total edges in merged graph: {merged_data.num_edges}")
+        print(f"[✓] Merged graph saved to '{output_file}'")
+
+    return {
+        "num_nodes": int(merged_data.num_nodes),
+        "num_edges": int(merged_data.num_edges),
+        "num_sources": int(len(graphs_to_merge)),
+        "output_file": str(output_file),
+    }
 
 def main():
     parser = argparse.ArgumentParser(
@@ -868,6 +1289,112 @@ def main():
         type=float,
         default=5.0,
         help="How much more likely to pick a graph containing a rare SU."
+    )
+
+    # --- Split-aware Batch Merger Sub-parser ---
+    parser_split_batch = subparsers.add_parser(
+        "split_batch_merge",
+        help=(
+            "Leakage-safe S2N dataset expansion: split source single graphs into "
+            "train/val/test first, then generate merged graphs inside each split."
+        )
+    )
+    parser_split_batch.add_argument(
+        "--data_dir",
+        type=Path,
+        required=True,
+        help="Directory containing source single-molecule .pt graph files."
+    )
+    parser_split_batch.add_argument(
+        "--output_dir",
+        type=Path,
+        required=True,
+        help="Directory to save split singles, merged graphs, and manifests."
+    )
+    parser_split_batch.add_argument(
+        "--target_node_counts",
+        type=int,
+        nargs='+',
+        required=True,
+        help="Target node counts for merged graphs."
+    )
+    parser_split_batch.add_argument(
+        "--num_per_target",
+        type=int,
+        default=100,
+        help="Number of train merged graphs per target size."
+    )
+    parser_split_batch.add_argument(
+        "--val_num_per_target",
+        type=int,
+        default=None,
+        help="Number of validation merged graphs per target size. Defaults to --num_per_target."
+    )
+    parser_split_batch.add_argument(
+        "--test_num_per_target",
+        type=int,
+        default=None,
+        help="Number of test merged graphs per target size. Defaults to --num_per_target."
+    )
+    parser_split_batch.add_argument(
+        "--train_ratio",
+        type=float,
+        default=0.8,
+        help="Source single-graph train split ratio."
+    )
+    parser_split_batch.add_argument(
+        "--val_ratio",
+        type=float,
+        default=0.1,
+        help="Source single-graph validation split ratio."
+    )
+    parser_split_batch.add_argument(
+        "--test_ratio",
+        type=float,
+        default=0.1,
+        help="Source single-graph test split ratio."
+    )
+    parser_split_batch.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for source split and split-local merge sampling."
+    )
+    parser_split_batch.add_argument(
+        "--upsample_sus",
+        type=str,
+        nargs='*',
+        default=['Alkynyl_CH', 'Alkyl_Cq'],
+        help="Rare SU names to upsample during split-local merged graph generation."
+    )
+    parser_split_batch.add_argument(
+        "--upsample_factor",
+        type=float,
+        default=3.0,
+        help="How much more likely to pick a graph containing an upsampled SU."
+    )
+    parser_split_batch.add_argument(
+        "--merge_styles",
+        type=str,
+        nargs='*',
+        default=["random"],
+        help=(
+            "Merged sampling styles. Use random for the original behavior. "
+            "Useful controlled styles include high_aromatic, high_aliphatic, "
+            "high_oxygen, high_nitrogen, high_sulfur, high_halogen, high_hetero, "
+            "high_carbonyl, high_unsaturated."
+        )
+    )
+    parser_split_batch.add_argument(
+        "--style_strength",
+        type=float,
+        default=2.0,
+        help="How strongly controlled merge styles favor style-rich source graphs."
+    )
+    parser_split_batch.add_argument(
+        "--no_copy_singles",
+        action="store_true",
+        help="Do not copy split single .pt files into output_dir/{train,val,test}_single."
     )
 
     # --- SU real PPM stats Sub-parser ---
@@ -993,6 +1520,24 @@ def main():
             args.num_per_target,
             args.upsample_sus,
             args.upsample_factor
+        )
+    elif args.command == "split_batch_merge":
+        split_and_batch_merge_graphs(
+            data_dir=args.data_dir,
+            output_dir=args.output_dir,
+            target_node_counts=args.target_node_counts,
+            num_per_target=args.num_per_target,
+            upsample_sus=args.upsample_sus,
+            upsample_factor=args.upsample_factor,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            test_ratio=args.test_ratio,
+            seed=args.seed,
+            val_num_per_target=args.val_num_per_target,
+            test_num_per_target=args.test_num_per_target,
+            copy_singles=not args.no_copy_singles,
+            merge_styles=args.merge_styles,
+            style_strength=args.style_strength,
         )
     elif args.command == "real_stats":
         su_real_ppm_stats(args.data_dir, args.output_dir)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -73,41 +72,6 @@ class ChainSpec:
         if self.chain_type in {"side", "branch_side"}:
             return list(self.composition[1:])
         return list(self.composition)
-
-
-@dataclass
-class ResourceVector:
-    counts: Dict[str, int] = field(default_factory=dict)
-
-    def __post_init__(self):
-        self.counts = {
-            str(k): max(0, int(dict(self.counts or {}).get(str(k), dict(self.counts or {}).get(int(k), 0)) or 0))
-            for k in CONVERSION_RESOURCE_KEYS
-        }
-
-    def copy(self) -> "ResourceVector":
-        return ResourceVector(dict(self.counts))
-
-    def get(self, key: Any, default: int = 0) -> int:
-        return int(self.counts.get(str(key), int(default)))
-
-    def set(self, key: Any, value: int) -> None:
-        self.counts[str(key)] = max(0, int(value))
-
-    def add(self, key: Any, delta: int) -> None:
-        self.set(str(key), int(self.get(str(key))) + int(delta))
-
-    def to_dict(self, keys: Sequence[str] = CONVERSION_RESOURCE_KEYS) -> Dict[str, int]:
-        return {str(k): int(self.counts.get(str(k), 0)) for k in keys}
-
-
-@dataclass(frozen=True)
-class ConversionRule:
-    op: str
-    consume: Dict[str, int]
-    produce: Dict[str, int]
-    phase: str = "any"
-    cost: int = 1
 
 
 @dataclass
@@ -260,6 +224,8 @@ class AllocationResult:
     catalog_fragment_rows: List[Dict[str, Any]] = field(default_factory=list)
     catalog_summary: Dict[str, int] = field(default_factory=dict)
     closed_topology_specs: List[ChainSpec] = field(default_factory=list)
+    final_topology_specs: List[ChainSpec] = field(default_factory=list)
+    topology_classification_rejects: List[Dict[str, Any]] = field(default_factory=list)
     topology_assembly_diagnostics: Dict[str, Any] = field(default_factory=dict)
     topology_assembly_options: List[Dict[str, Any]] = field(default_factory=list)
     topology_selected_options: List[Dict[str, Any]] = field(default_factory=list)
@@ -353,6 +319,9 @@ class _BranchTopologyCandidate:
     bridgehead_replace_24c_eligible: bool = False
     suppresses_local_candidate_keys: List[str] = field(default_factory=list)
     priority_rank: int = 0
+    topology_role_override: str = ""
+    main_open_class_override: str = ""
+    connector_policy: str = ""
     branch_slots_su: Dict[str, List[int]] = field(default_factory=dict)
     branch_slot_labels: Dict[str, str] = field(default_factory=dict)
     fixed_22_is_abstract: bool = False
@@ -446,6 +415,9 @@ class _BranchTopologyCandidate:
             "bridgehead_replace_24c_eligible": bool(self.bridgehead_replace_24c_eligible),
             "suppresses_local_candidate_keys": list(self.suppresses_local_candidate_keys),
             "priority_rank": int(self.priority_rank),
+            "topology_role_override": str(self.topology_role_override),
+            "main_open_class_override": str(self.main_open_class_override),
+            "connector_policy": str(self.connector_policy),
             "connector_expansions": [
                 {
                     "kind": str(exp.kind),
@@ -555,14 +527,3 @@ def _sum_chain_required_resource_counts(chains: Sequence[ChainSpec]) -> Dict[str
         for key in total:
             total[key] += int(counts.get(key, 0))
     return total
-
-
-def chain_spec_counts_match(chain_spec: ChainSpec, candidate_sus: List[int]) -> bool:
-    target = [int(x) for x in chain_spec.placement_su_sequence()]
-    if chain_spec.chain_type in {"branch_bridge", "branch_side"}:
-        meta = dict(getattr(chain_spec, "metadata", {}) or {})
-        branch_su = meta.get("branch_su")
-        if isinstance(branch_su, (list, tuple)) and branch_su:
-            target.extend(int(x) for x in list(branch_su or []))
-    got = [int(x) for x in list(candidate_sus or [])]
-    return got == target or Counter(got) == Counter(target)

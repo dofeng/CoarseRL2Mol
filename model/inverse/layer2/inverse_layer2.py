@@ -94,12 +94,99 @@ class Layer2Estimator:
             score_components['layer2_template_mu'] = None
             score_components['layer2_template_sample_count'] = 0
             score_components['layer2_sample_idx'] = None
+            score_components['layer2_spectral_source'] = 'unassigned'
+            score_components['layer2_decoder_mu'] = None
+            score_components['layer2_decoder_pi'] = None
+            score_components['layer2_decoder_reject_reason'] = None
+
+    def _model_predicts_intensity(self) -> bool:
+        try:
+            return bool(getattr(self.vae, 'predict_intensity', False))
+        except Exception:
+            return False
+
+    def _valid_mu(self, mu: Optional[float]) -> bool:
+        try:
+            mu_f = float(mu)
+            return bool(np.isfinite(mu_f) and 0.0 < mu_f <= 260.0)
+        except Exception:
+            return False
+
+    def _decoder_candidate_is_usable(self,
+                                     decoded: Optional[Tuple[float, float]],
+                                     reference_mu: Optional[float],
+                                     max_mu_delta: float) -> Tuple[bool, str]:
+        if decoded is None:
+            return False, 'decoder_unavailable'
+        try:
+            mu_dec = float(decoded[0])
+        except Exception:
+            return False, 'decoder_invalid_mu'
+        if not self._valid_mu(mu_dec):
+            return False, 'decoder_mu_out_of_range'
+
+        if reference_mu is not None and self._valid_mu(reference_mu):
+            try:
+                if abs(float(mu_dec) - float(reference_mu)) > float(max_mu_delta):
+                    return False, 'decoder_mu_far_from_library'
+            except Exception:
+                return False, 'decoder_reference_compare_failed'
+        return True, ''
+
+    def _assign_spectral_values(self,
+                                node: _NodeV3,
+                                mu_lib: float,
+                                pi_lib: float,
+                                decoded: Optional[Tuple[float, float]],
+                                source_prefix: str,
+                                max_mu_delta: float,
+                                reference_mu: Optional[float] = None) -> None:
+        ref_mu = reference_mu if reference_mu is not None else mu_lib
+        mu_lib_f = float(mu_lib)
+        pi_lib_f = 1.0 if bool(getattr(self, 'unit_peak_intensity', False)) else float(max(1e-6, pi_lib))
+        ok_dec, reject_reason = self._decoder_candidate_is_usable(decoded, ref_mu, float(max_mu_delta))
+        score_components = getattr(node, 'score_components', None)
+        if isinstance(score_components, dict):
+            score_components['layer2_library_mu'] = float(mu_lib_f)
+            score_components['layer2_library_pi'] = float(pi_lib_f)
+            score_components['layer2_library_source'] = f'library_{source_prefix}'
+        if isinstance(score_components, dict) and decoded is not None:
+            try:
+                score_components['layer2_decoder_mu'] = float(decoded[0])
+                score_components['layer2_decoder_pi'] = float(decoded[1])
+            except Exception:
+                pass
+
+        if ok_dec:
+            node.mu = float(decoded[0])
+            if self._model_predicts_intensity():
+                try:
+                    node.pi = (
+                        1.0 if bool(getattr(self, 'unit_peak_intensity', False))
+                        else float(max(1e-6, decoded[1]))
+                    )
+                except Exception:
+                    node.pi = float(pi_lib_f)
+            else:
+                node.pi = 1.0 if bool(getattr(self, 'unit_peak_intensity', False)) else float(max(1e-6, pi_lib))
+            if isinstance(score_components, dict):
+                score_components['layer2_spectral_source'] = f'decoder_{source_prefix}'
+                score_components['layer2_decoder_reject_reason'] = None
+            return
+
+        node.mu = float(mu_lib)
+        node.pi = float(pi_lib_f)
+        if isinstance(score_components, dict):
+            score_components['layer2_spectral_source'] = f'library_{source_prefix}'
+            score_components['layer2_decoder_reject_reason'] = reject_reason or None
 
     def _assign_diverse_template_samples(
         self,
         nodes: List[_NodeV3],
         templates: Dict,
         g_embed: torch.Tensor,
+        use_g2s_decoder: bool = False,
+        decoder_max_mu_delta: float = 8.0,
     ) -> None:
         """
         对共享同一 template_key 的节点做样本展开，避免所有节点坍缩到同一个 center_z/center_mu。
@@ -155,34 +242,19 @@ class Layer2Estimator:
             if base_count <= 0:
                 continue
 
-            if base_count == 1:
-                desired_positions = [0.5 * float(n_samples - 1)]
-            else:
-                desired_positions = np.linspace(0, n_samples - 1, num=base_count)
-
-            used_positions = set()
-            spread_ids: List[int] = []
-            for pos in desired_positions:
+            mu_cpu = mu_samples.detach().cpu().float().numpy()
+            for node in ordered_nodes:
+                prior = float(_node_order_key(node)[0])
+                if prior <= 0.0:
+                    try:
+                        prior = float(tpl.get('center_mu', 0.0) or 0.0)
+                    except Exception:
+                        prior = 0.0
                 ranked_positions = sorted(
                     range(n_samples),
-                    key=lambda i: (abs(float(i) - float(pos)), int(i)),
+                    key=lambda i: (abs(float(mu_cpu[int(sorted_ids[i])]) - float(prior)), int(i)),
                 )
-                chosen_pos = next((i for i in ranked_positions if i not in used_positions), ranked_positions[0])
-                used_positions.add(int(chosen_pos))
-                spread_ids.append(int(sorted_ids[int(chosen_pos)]))
-
-            cycle_idx = 0
-            while len(chosen_ids) < n_nodes:
-                if len(spread_ids) == 1:
-                    chosen_ids.append(int(spread_ids[0]))
-                    continue
-                rot = int(cycle_idx) % len(spread_ids)
-                block = spread_ids[rot:] + spread_ids[:rot]
-                if int(cycle_idx) % 2 == 1:
-                    block = list(reversed(block))
-                chosen_ids.extend(int(x) for x in block)
-                cycle_idx += 1
-            chosen_ids = chosen_ids[:n_nodes]
+                chosen_ids.append(int(sorted_ids[int(ranked_positions[0])]))
 
             pending_assignments = []
             for node, sample_idx in zip(ordered_nodes, chosen_ids):
@@ -194,19 +266,27 @@ class Layer2Estimator:
                     continue
                 pending_assignments.append((node, int(sample_idx), z_cand, float(mu_lib), float(pi_lib)))
 
-            decoded_batch = self._decode_mu_pi_batch(
-                int(tpl_key[0]),
-                [item[2] for item in pending_assignments],
-                g_embed,
+            decoded_batch = (
+                self._decode_mu_pi_batch(
+                    int(tpl_key[0]),
+                    [item[2] for item in pending_assignments],
+                    g_embed,
+                )
+                if bool(use_g2s_decoder)
+                else None
             )
             for idx, (node, sample_idx, z_cand, mu_lib, pi_lib) in enumerate(pending_assignments):
                 node.z_vec = z_cand
                 decoded = decoded_batch[idx] if decoded_batch is not None and idx < len(decoded_batch) else None
-                if decoded is not None:
-                    node.mu, node.pi = decoded
-                else:
-                    node.mu = float(mu_lib)
-                    node.pi = float(max(1e-6, pi_lib))
+                self._assign_spectral_values(
+                    node=node,
+                    mu_lib=float(mu_lib),
+                    pi_lib=float(pi_lib),
+                    decoded=decoded,
+                    source_prefix='sample',
+                    max_mu_delta=float(decoder_max_mu_delta),
+                    reference_mu=float(mu_lib),
+                )
 
                 try:
                     if isinstance(getattr(node, 'score_components', None), dict):
@@ -275,6 +355,20 @@ class Layer2Estimator:
         priors = self._build_layer1_mu_prior_index(lib)
         val = priors.get((int(center_su), tuple(hop1_ms)))
         return float(val) if val is not None and np.isfinite(float(val)) else None
+
+    def _resolve_layer1_mu_prior(self,
+                                 node: _NodeV3,
+                                 center_su: int,
+                                 hop1_ms: Tuple[int, ...],
+                                 lib: Dict) -> Optional[float]:
+        """Use the node's accepted Layer1 chemical shift before library fallback."""
+        try:
+            node_mu = float(getattr(node, 'mu', 0.0))
+            if self._valid_mu(node_mu):
+                return float(node_mu)
+        except Exception:
+            pass
+        return self._get_layer1_mu_prior(center_su, hop1_ms, lib)
     
     # ========================================================================
     # 主方法
@@ -284,7 +378,10 @@ class Layer2Estimator:
                       S_target: torch.Tensor,
                       E_target: torch.Tensor,
                       output_dir: Optional[str] = None,
-                      hwhm: float = 1.0) -> List[_NodeV3]:
+                      hwhm: float = 1.0,
+                      layer2_max_hop2_diff_nodes: int = 2,
+                      layer2_use_g2s_decoder: bool = False,
+                      layer2_decoder_max_mu_delta: float = 8.0) -> List[_NodeV3]:
         """
         Layer2: 为每个节点分配2-hop邻居和z向量
         
@@ -340,9 +437,12 @@ class Layer2Estimator:
 
             mu_prior_val = None
             try:
-                mu_prior_tmp = self._get_layer1_mu_prior(center_su, hop1_ms, lib)
-                if mu_prior_tmp is None:
-                    mu_prior_tmp = float(getattr(n, 'mu', 0.0))
+                mu_prior_tmp = self._resolve_layer1_mu_prior(
+                    n,
+                    center_su,
+                    hop1_ms,
+                    lib,
+                )
                 if mu_prior_tmp is not None and float(mu_prior_tmp) > 1e-6:
                     mu_prior_val = float(mu_prior_tmp)
             except Exception as e:
@@ -350,13 +450,14 @@ class Layer2Estimator:
                 logging.debug(f"Failed to get mu_prior for node {n.global_id}: {e}")
             
             # 查找最佳模板
-            tpl_key, mode = self._select_template_key(
+            tpl_key, mode, match_meta = self._select_template_key(
                 center_su,
                 hop1_ms,
                 hop2_ms,
                 mu_prior_val,
                 lib,
                 template_use_counter=template_use_counter,
+                max_hop2_diff_nodes=int(layer2_max_hop2_diff_nodes),
             )
             tpl = templates.get(tpl_key, None) if tpl_key else None
             if tpl_key is not None and not isinstance(tpl, dict):
@@ -383,6 +484,9 @@ class Layer2Estimator:
                 if isinstance(getattr(n, 'score_components', None), dict) and isinstance(tpl, dict):
                     n.score_components['layer2_template_mu'] = float(tpl.get('center_mu')) if tpl.get('center_mu') is not None else None
                     n.score_components['layer2_template_sample_count'] = int(tpl.get('sample_count', 0))
+                    n.score_components['layer2_hop2_diff_nodes'] = match_meta.get('hop2_diff_nodes')
+                    n.score_components['layer2_hop2_match_tier'] = match_meta.get('hop2_match_tier')
+                    n.score_components['layer2_mu_diff'] = match_meta.get('mu_diff')
             except Exception as e:
                 import logging
                 logging.debug(f"Failed to save template info for node {n.global_id}: {e}")
@@ -410,24 +514,117 @@ class Layer2Estimator:
 
             decoded = (
                 self._decode_mu_pi_from_z(center_su, n.z_vec, g_embed)
-                if has_center_z and not has_sample_bank
+                if bool(layer2_use_g2s_decoder) and has_center_z and not has_sample_bank
                 else None
             )
-            if decoded is not None:
-                n.mu, n.pi = decoded
-            elif isinstance(tpl, dict):
+            if isinstance(tpl, dict):
                 try:
-                    n.mu = float(tpl.get('center_mu', 0.0) or 0.0)
+                    mu_lib = float(tpl.get('center_mu', 0.0) or 0.0)
                 except Exception:
-                    n.mu = 0.0
+                    mu_lib = 0.0
                 try:
-                    n.pi = float(tpl.get('center_pi', 0.0) or 0.0)
+                    pi_lib = float(tpl.get('center_pi', 0.0) or 0.0)
                 except Exception:
-                    n.pi = 0.0
+                    pi_lib = 0.0
+                self._assign_spectral_values(
+                    node=n,
+                    mu_lib=float(mu_lib),
+                    pi_lib=float(pi_lib if pi_lib > 0.0 else 1.0),
+                    decoded=decoded,
+                    source_prefix='center',
+                    max_mu_delta=float(layer2_decoder_max_mu_delta),
+                    reference_mu=float(mu_prior_val if mu_prior_val is not None else mu_lib),
+                )
+            elif tpl_key is None:
+                # Missing Layer2 templates keep the Layer1-library spectral
+                # estimate if present.  This keeps the node usable without
+                # pretending an unrelated 1-hop template matched.
+                if float(getattr(n, 'mu', 0.0) or 0.0) <= 0.0 and mu_prior_val is not None:
+                    n.mu = float(mu_prior_val)
+                    n.pi = 1.0
+                    if isinstance(getattr(n, 'score_components', None), dict):
+                        n.score_components['layer2_spectral_source'] = 'layer1_prior_missing'
 
-        self._assign_diverse_template_samples(nodes, templates, g_embed)
+        self._assign_diverse_template_samples(
+            nodes,
+            templates,
+            g_embed,
+            use_g2s_decoder=bool(layer2_use_g2s_decoder),
+            decoder_max_mu_delta=float(layer2_decoder_max_mu_delta),
+        )
+
+        library_nodes_for_eval = None
+        library_r2 = None
+        decoder_candidate_r2 = None
+        if bool(layer2_use_g2s_decoder):
+            library_nodes_for_eval = copy_nodes = []
+            for n in nodes:
+                try:
+                    sc = getattr(n, 'score_components', {}) or {}
+                    mu_lib = sc.get('layer2_library_mu', None)
+                    pi_lib = sc.get('layer2_library_pi', None)
+                    if mu_lib is None or pi_lib is None:
+                        copy_nodes.append(n)
+                        continue
+                    n_lib = _NodeV3(
+                        global_id=int(getattr(n, 'global_id', -1)),
+                        su_type=int(getattr(n, 'su_type', 0)),
+                    )
+                    n_lib.hop1_ids = list(getattr(n, 'hop1_ids', []) or [])
+                    n_lib.hop1_su = Counter(getattr(n, 'hop1_su', Counter()) or Counter())
+                    n_lib.hop2_su = Counter(getattr(n, 'hop2_su', Counter()) or Counter())
+                    n_lib.template_key = getattr(n, 'template_key', None)
+                    n_lib.z_vec = getattr(n, 'z_vec', None)
+                    n_lib.mu = float(mu_lib)
+                    n_lib.pi = 1.0 if bool(getattr(self, 'unit_peak_intensity', False)) else float(max(1e-6, pi_lib))
+                    n_lib.score_components = dict(sc)
+                    n_lib.score_components['layer2_spectral_source'] = str(
+                        sc.get('layer2_library_source', 'library')
+                    )
+                    copy_nodes.append(n_lib)
+                except Exception:
+                    copy_nodes.append(n)
+            S_decoder = self.reconstruct_spectrum(nodes, hwhm=hwhm)
+            decoder_eval = evaluate_spectrum_reconstruction(
+                S_target,
+                S_decoder,
+                ppm_axis=PPM_AXIS.to(device),
+                fit_scale=True,
+                nonnegative_alpha=True,
+            )
+            decoder_candidate_r2 = float(decoder_eval.get('r2', 0.0))
+            S_library = self.reconstruct_spectrum(library_nodes_for_eval, hwhm=hwhm)
+            library_eval = evaluate_spectrum_reconstruction(
+                S_target,
+                S_library,
+                ppm_axis=PPM_AXIS.to(device),
+                fit_scale=True,
+                nonnegative_alpha=True,
+            )
+            library_r2 = float(library_eval.get('r2', 0.0))
+            if float(library_r2) > float(decoder_candidate_r2) + 1e-6:
+                for src, dst in zip(library_nodes_for_eval, nodes):
+                    try:
+                        dst.mu = float(getattr(src, 'mu', getattr(dst, 'mu', 0.0)))
+                        dst.pi = float(getattr(src, 'pi', getattr(dst, 'pi', 0.0)))
+                        if isinstance(getattr(dst, 'score_components', None), dict):
+                            dst.score_components['layer2_spectral_source'] = str(
+                                (getattr(src, 'score_components', {}) or {}).get('layer2_spectral_source', 'library')
+                            )
+                            dst.score_components['layer2_decoder_reject_reason'] = (
+                                dst.score_components.get('layer2_decoder_reject_reason')
+                                or 'decoder_spectrum_worse_than_library'
+                            )
+                    except Exception:
+                        continue
         
         print(f"  匹配: 精确={self.stats['exact_match']}, 近似={self.stats['approx_match']}, 未匹配={self.stats['missing']}")
+        if bool(layer2_use_g2s_decoder) and library_r2 is not None and decoder_candidate_r2 is not None:
+            print(
+                "  [Layer2 spectral source] "
+                f"decoder_candidate_r2={float(decoder_candidate_r2):.4f}, "
+                f"library_candidate_r2={float(library_r2):.4f}"
+            )
         
         # NMR评估
         S_recon = self.reconstruct_spectrum(nodes, hwhm=hwhm)
@@ -448,6 +645,12 @@ class Layer2Estimator:
         # 保存结果
         if output_dir:
             self._save_results(nodes, S_target, S_fit, r2, alpha, output_dir, S_recon_raw=S_recon)
+            try:
+                Path(output_dir).mkdir(parents=True, exist_ok=True)
+                match_detail_rows = self._build_match_detail_rows(nodes)
+                pd.DataFrame(match_detail_rows).to_csv(str(Path(output_dir) / 'layer2_template_match_detail.csv'), index=False)
+            except Exception as e:
+                print(f"  [Layer2] 保存模板匹配明细失败: {e}")
         
         print("Layer2 完成\n")
         
@@ -470,6 +673,7 @@ class Layer2Estimator:
         for n in nodes:
             c_id = int(n.global_id)
             hop2 = Counter()
+            hop2_ids = set()
             
             for nb_id in n.hop1_ids:
                 try:
@@ -478,23 +682,36 @@ class Layer2Estimator:
                     continue
                 if nb is None:
                     continue
+                try:
+                    if c_id not in {int(node_id) for node_id in list(nb.hop1_ids or [])}:
+                        continue
+                except Exception:
+                    continue
                 
                 for nb2_id in nb.hop1_ids:
                     nb2_id_i = int(nb2_id)
                     if nb2_id_i == c_id:
+                        continue
+                    if nb2_id_i in hop2_ids:
                         continue
                     
                     try:
                         nb2 = node_map.get(nb2_id_i, None)
                         if nb2 is None:
                             continue
+                        if int(nb.global_id) not in {
+                            int(node_id) for node_id in list(nb2.hop1_ids or [])
+                        }:
+                            continue
                         su2 = int(nb2.su_type)
                     except:
                         continue
                     
                     hop2[su2] += 1
+                    hop2_ids.add(nb2_id_i)
             
             n.hop2_su = hop2
+            n.hop2_ids = sorted(int(node_id) for node_id in hop2_ids)
     
     # ========================================================================
     # 模板检索
@@ -561,14 +778,23 @@ class Layer2Estimator:
                               hop2_ms: Tuple[int, ...],
                               mu_prior: Optional[float],
                               lib: Dict,
-                              template_use_counter: Optional[Counter] = None) -> Tuple[Optional[Tuple], str]:
+                              template_use_counter: Optional[Counter] = None,
+                              max_hop2_diff_nodes: int = 2) -> Tuple[Optional[Tuple], str, Dict[str, object]]:
         """选择最佳模板键"""
         templates = lib.get('templates', {})
         
         # 精确匹配
         key_exact = (int(center_su), tuple(hop1_ms), tuple(hop2_ms))
         if key_exact in templates:
-            return key_exact, 'exact'
+            tpl = templates.get(key_exact, {})
+            return key_exact, 'exact', {
+                'chosen_hop1': tuple(hop1_ms),
+                'chosen_hop2': tuple(hop2_ms),
+                'hop2_diff_nodes': 0,
+                'hop2_match_tier': 0,
+                'template_mu': float(tpl.get('center_mu')) if isinstance(tpl, dict) and tpl.get('center_mu') is not None else None,
+                'mu_diff': 0.0,
+            }
         
         # 近似匹配
         center_hop1_index = lib.get('center_hop1_index', {})
@@ -577,11 +803,10 @@ class Layer2Estimator:
 
         # 优先匹配hop1相同的
         same_h1 = list(center_hop1_index.get((int(center_su), tuple(hop1_ms)), []) or [])
-        mode = 'approx_h2' if same_h1 else 'approx_h1h2'
         if same_h1:
             use_pool = same_h1
         else:
-            use_pool = list(center_degree_index.get((int(center_su), int(target_deg)), []) or [])
+            use_pool = []
         if not use_pool:
             # Compatibility fallback for libraries built without the accelerated indexes.
             center_index = lib.get('center_index', {})
@@ -611,46 +836,57 @@ class Layer2Estimator:
             same_h1 = [it for it in fallback_pool if tuple(it[1]) == tuple(hop1_ms)]
             if same_h1:
                 use_pool = same_h1
-                mode = 'approx_h2'
             else:
-                use_pool = [it for it in fallback_pool if int(len(tuple(it[1]))) == int(target_deg)]
-                mode = 'approx_h1h2'
+                use_pool = []
         if not use_pool:
-            return None, 'missing'
+            return None, 'missing', {
+                'chosen_hop1': (),
+                'chosen_hop2': (),
+                'hop2_diff_nodes': '',
+                'template_mu': '',
+                'mu_diff': '',
+            }
         
         best = None
+        best_meta: Dict[str, object] = {}
         for kt, h1_t, h2_t, sc, mu_tpl in use_pool:
-            hop1_diff = multiset_diff_nodes(tuple(hop1_ms), tuple(h1_t))
             hop2_diff = multiset_diff_nodes(tuple(hop2_ms), tuple(h2_t))
+            if int(hop2_diff) > int(max_hop2_diff_nodes):
+                continue
 
             mu_diff = abs(float(mu_tpl) - float(mu_prior)) if mu_prior is not None and mu_tpl is not None else float('inf')
             mu_missing = int(not (mu_prior is not None and mu_tpl is not None))
 
             use_count = int((template_use_counter or Counter()).get(kt, 0))
 
-            if same_h1:
-                cand = (
-                    int(hop2_diff),
-                    int(mu_missing),
-                    float(mu_diff),
-                    -int(sc),
-                    int(use_count),
-                    kt,
-                )
-            else:
-                cand = (
-                    int(hop1_diff),
-                    int(hop2_diff),
-                    int(mu_missing),
-                    float(mu_diff),
-                    -int(sc),
-                    int(use_count),
-                    kt,
-                )
+            cand = (
+                int(hop2_diff),
+                int(mu_missing),
+                float(mu_diff),
+                -int(sc),
+                int(use_count),
+                kt,
+            )
             if best is None or cand < best:
                 best = cand
+                best_meta = {
+                    'chosen_hop1': tuple(h1_t),
+                    'chosen_hop2': tuple(h2_t),
+                    'hop2_diff_nodes': int(hop2_diff),
+                    'hop2_match_tier': int(hop2_diff),
+                    'template_mu': float(mu_tpl) if mu_tpl is not None else '',
+                    'mu_diff': float(mu_diff) if np.isfinite(float(mu_diff)) else '',
+                }
 
-        return best[-1] if best else None, mode
+        if best is None:
+            return None, 'missing', {
+                'chosen_hop1': (),
+                'chosen_hop2': (),
+                'hop2_diff_nodes': '',
+                'template_mu': '',
+                'mu_diff': '',
+            }
+        return best[-1], 'approx_h2', best_meta
     
     # ========================================================================
     # z 解码
@@ -769,6 +1005,54 @@ class Layer2Estimator:
             device=device,
             unit_peak_intensity=bool(getattr(self, 'unit_peak_intensity', False)),
         )
+
+    def _build_match_detail_rows(self, nodes: List[_NodeV3]) -> List[Dict[str, object]]:
+        rows: List[Dict[str, object]] = []
+        for n in nodes:
+            try:
+                center_su = int(n.su_type)
+                hop1_ms = multiset_from_counter(n.hop1_su)
+                hop2_ms = multiset_from_counter(n.hop2_su)
+            except Exception:
+                continue
+
+            tpl_key = getattr(n, 'template_key', None)
+            chosen_hop1: Tuple[int, ...] = ()
+            chosen_hop2: Tuple[int, ...] = ()
+            if isinstance(tpl_key, tuple) and len(tpl_key) == 3:
+                try:
+                    chosen_hop1 = tuple(int(x) for x in tuple(tpl_key[1]))
+                    chosen_hop2 = tuple(int(x) for x in tuple(tpl_key[2]))
+                except Exception:
+                    chosen_hop1 = ()
+                    chosen_hop2 = ()
+
+            sc = getattr(n, 'score_components', {}) or {}
+            decoder_mu_val = sc.get('layer2_decoder_mu', None)
+            decoder_pi_val = sc.get('layer2_decoder_pi', None)
+            rows.append({
+                'global_id': int(getattr(n, 'global_id', -1)),
+                'center_su': int(center_su),
+                'observed_hop1': str(tuple(hop1_ms)),
+                'observed_hop2': str(tuple(hop2_ms)),
+                'chosen_hop1': str(tuple(chosen_hop1)),
+                'chosen_hop2': str(tuple(chosen_hop2)),
+                'hop2_diff_nodes': sc.get('layer2_hop2_diff_nodes', ''),
+                'layer1_mu_prior': sc.get('layer2_mu_prior', ''),
+                'template_mu': sc.get('layer2_template_mu', ''),
+                'mu_diff': sc.get('layer2_mu_diff', ''),
+                'match_mode': sc.get('layer2_match_mode', ''),
+                'selected_z_source': 'template_z' if tpl_key is not None else '',
+                'selected_spectral_source': sc.get('layer2_spectral_source', ''),
+                'decoder_mu': float(decoder_mu_val) if decoder_mu_val is not None else '',
+                'decoder_pi': float(decoder_pi_val) if decoder_pi_val is not None else '',
+                'decoder_reject_reason': sc.get('layer2_decoder_reject_reason', ''),
+                'final_mu': float(getattr(n, 'mu', 0.0) or 0.0),
+                'final_pi': float(getattr(n, 'pi', 0.0) or 0.0),
+                'sample_idx': sc.get('layer2_sample_idx', ''),
+                'template_key': str(tpl_key) if tpl_key is not None else '',
+            })
+        return rows
     
     # ========================================================================
     # 结果保存
@@ -897,6 +1181,10 @@ class Layer2Estimator:
                     'mu_prior': (getattr(n, 'score_components', {}) or {}).get('layer2_mu_prior', None),
                     'mu_tpl': (getattr(n, 'score_components', {}) or {}).get('layer2_template_mu', None),
                     'match_mode': (getattr(n, 'score_components', {}) or {}).get('layer2_match_mode', None),
+                    'spectral_source': (getattr(n, 'score_components', {}) or {}).get('layer2_spectral_source', None),
+                    'decoder_mu': (getattr(n, 'score_components', {}) or {}).get('layer2_decoder_mu', None),
+                    'decoder_pi': (getattr(n, 'score_components', {}) or {}).get('layer2_decoder_pi', None),
+                    'decoder_reject_reason': (getattr(n, 'score_components', {}) or {}).get('layer2_decoder_reject_reason', None),
                     'sample_count': sample_count,
                     'z_norm': z_norm,
                     'z_head4': z_head,
@@ -922,6 +1210,7 @@ class Layer2Estimator:
                     'hop2_diff_nodes': multiset_diff_nodes(tuple(hop2_ms), tuple(tpl_h2)) if tpl_h2 is not None else '',
                     'mu_prior': (getattr(n, 'score_components', {}) or {}).get('layer2_mu_prior', None),
                     'mu_tpl': (getattr(n, 'score_components', {}) or {}).get('layer2_template_mu', None),
+                    'spectral_source': (getattr(n, 'score_components', {}) or {}).get('layer2_spectral_source', None),
                     'sample_count': sample_count,
                     'mu': float(getattr(n, 'mu', 0.0)),
                     'pi': float(getattr(n, 'pi', 0.0)),

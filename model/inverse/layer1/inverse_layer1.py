@@ -1,4 +1,5 @@
 import copy
+import time
 import numpy as np
 import torch
 import random
@@ -7,14 +8,16 @@ from collections import Counter, defaultdict
 
 from ...shared.coarse_graph import E_SU, NUM_SU_TYPES
 from ...shared.inverse_common import (
-    _NodeV3, HOP1_PORT_COMBINATIONS, SU_FIXED_CONNECTIONS,
+    _NodeV3, HOP1_PORT_COMBINATIONS,
     SPECIAL_DEGREE_PRIORS,
     allocate_special_degree_counts,
     rebuild_su19_partition_meta,
     SU_EXTERNAL_CONNECTIONS,
     format_port_patterns_debug,
     get_effective_nodes_element_vector,
+    has_forbidden_fixed_connector_special_combo,
     is_mode_specific_neighbor_forbidden,
+    is_terminal_port_node,
     select_port_patterns_for_degree,
     validate_connection,
     violates_special_d3_terminal_limit,
@@ -72,10 +75,18 @@ class Layer1Assigner:
         self._port_pattern_cache: Dict[Tuple[int, Optional[int]], Any] = {}
         self._edge_semantics_cache: Dict[Tuple[int, int, Optional[int]], bool] = {}
         self._can_add_hop1_cache: Dict[Tuple[Any, Any], bool] = {}
+        self._graph_edit_version = 0
+        self._last_special_capacity_diagnostics: Dict[str, Any] = {}
 
     def _reset_layer1_search_caches(self) -> None:
         self._edge_semantics_cache = {}
         self._can_add_hop1_cache = {}
+
+    def _bump_graph_edit_version(self) -> None:
+        try:
+            self._graph_edit_version = int(getattr(self, '_graph_edit_version', 0)) + 1
+        except Exception:
+            self._graph_edit_version = 1
 
     def _runtime_index_matches(self, nodes: List[_NodeV3]) -> bool:
         return nodes is self._runtime_nodes_ref
@@ -457,10 +468,17 @@ class Layer1Assigner:
 
     def _can_add_state_signature(self, nodes: List[_NodeV3], node: _NodeV3) -> Tuple[Any, ...]:
         neighbor_ids = tuple(sorted(int(x) for x in list(getattr(node, 'hop1_ids', []) or [])))
-        neighbor_types = []
+        neighbor_states = []
         for nid in neighbor_ids:
             if 0 <= int(nid) < len(nodes):
-                neighbor_types.append(int(getattr(nodes[int(nid)], 'su_type', -1)))
+                nb = nodes[int(nid)]
+                neighbor_states.append((
+                    int(getattr(nb, 'su_type', -1)),
+                    self._node_target_degree(nb),
+                    self._node_anchor_partition(nb),
+                    self._node_fixed_anchor_target(nb),
+                    self._node_anchor_mode(nb),
+                ))
         return (
             int(getattr(node, 'global_id', -1)),
             int(getattr(node, 'su_type', -1)),
@@ -470,7 +488,7 @@ class Layer1Assigner:
             self._node_anchor_mode(node),
             int(node.remaining_hop1_slots()),
             neighbor_ids,
-            tuple(sorted(neighbor_types)),
+            tuple(neighbor_states),
         )
 
     @staticmethod
@@ -524,20 +542,6 @@ class Layer1Assigner:
             return 1
         return 0
 
-    def _count_partition_nodes(self, nodes: List[_NodeV3], su_type: int, partition: Optional[str]) -> int:
-        part_txt = str(partition) if partition is not None else None
-        total = 0
-        for node in nodes:
-            if int(getattr(node, 'su_type', -1)) != int(su_type):
-                continue
-            if part_txt is None:
-                if self._node_anchor_partition(node) is None:
-                    total += 1
-                continue
-            if self._node_anchor_partition(node) == str(part_txt):
-                total += 1
-        return int(total)
-
     def _sort_special_degree_nodes(self, nodes: List[_NodeV3]) -> List[_NodeV3]:
         return sorted(
             list(nodes),
@@ -547,27 +551,6 @@ class Layer1Assigner:
                 int(getattr(n, 'global_id', 0)),
             ),
         )
-
-    def _promote_fixed_anchor_count(self,
-                                    nodes: List[_NodeV3],
-                                    su_type: int,
-                                    node_ids: List[int]) -> None:
-        promote_ids = set(int(x) for x in list(node_ids or []))
-        for node in list(nodes or []):
-            if int(getattr(node, 'global_id', -1)) not in promote_ids:
-                continue
-            if int(getattr(node, 'su_type', -1)) != int(su_type):
-                continue
-            try:
-                node.target_fixed_anchor_count = 2
-                node.init_target_fixed_anchor_count = 2
-                deg_i = int(self._node_target_degree(node) or 0)
-                if int(su_type) == 19:
-                    node.special_anchor_mode = f"double_d{int(deg_i)}" if int(deg_i) in {2, 3} else 'double'
-                elif int(su_type) == 20:
-                    node.special_anchor_mode = f"double_d{int(deg_i)}" if int(deg_i) in {2, 3} else 'double'
-            except Exception:
-                continue
 
     def _required_external_candidates_for_node(self, node: _NodeV3) -> List[int]:
         su_i = int(getattr(node, 'su_type', -1))
@@ -678,6 +661,335 @@ class Layer1Assigner:
             for nid in list(getattr(node, 'hop1_ids', []) or [])
             if 0 <= int(nid) < len(nodes)
         ]
+
+    def _is_su19_partition_compatible(self, node: _NodeV3, neighbor_su: int) -> bool:
+        if int(getattr(node, 'su_type', -1)) != 19:
+            return True
+        part = self._node_anchor_partition(node)
+        if int(neighbor_su) == 31:
+            return str(part) == 'thio'
+        if int(neighbor_su) in {2, 28, 29}:
+            return str(part) == 'ether'
+        return True
+
+    def _violates_mode_specific_rule(self, node: _NodeV3, neighbor_su: int) -> bool:
+        return bool(is_mode_specific_neighbor_forbidden(
+            int(getattr(node, 'su_type', -1)),
+            self._node_target_degree(node),
+            int(neighbor_su),
+        ))
+
+    def _violates_special_d3_terminal_rule(self,
+                                           nodes: List[_NodeV3],
+                                           node: _NodeV3,
+                                           neighbor_su: int) -> bool:
+        target_degree = self._node_target_degree(node)
+        current_neighbors = self._current_neighbor_nodes(nodes, node)
+        proposed_neighbors = list(current_neighbors) + [int(neighbor_su)]
+        return bool(violates_special_d3_terminal_limit(
+            int(getattr(node, 'su_type', -1)),
+            target_degree,
+            proposed_neighbors,
+        ))
+
+    @staticmethod
+    def _is_double_special_d2_node(node: _NodeV3, su_type: Optional[int] = None) -> bool:
+        try:
+            su_i = int(getattr(node, 'su_type', -1))
+        except Exception:
+            return False
+        if int(su_i) not in {19, 20}:
+            return False
+        if su_type is not None and int(su_i) != int(su_type):
+            return False
+        try:
+            if int(getattr(node, 'target_hop1_degree', 0) or 0) != 2:
+                return False
+        except Exception:
+            return False
+        try:
+            fixed_i = int(getattr(node, 'target_fixed_anchor_count', 0) or 0)
+        except Exception:
+            fixed_i = 0
+        try:
+            mode = str(getattr(node, 'special_anchor_mode', '') or '')
+        except Exception:
+            mode = ''
+        return bool(int(fixed_i) >= 2 or str(mode).startswith('double'))
+
+    @staticmethod
+    def _is_double_special_node(node: _NodeV3,
+                                su_type: Optional[int] = None,
+                                allowed_degrees: Optional[Set[int]] = None) -> bool:
+        try:
+            su_i = int(getattr(node, 'su_type', -1))
+        except Exception:
+            return False
+        if int(su_i) not in {19, 20}:
+            return False
+        if su_type is not None and int(su_i) != int(su_type):
+            return False
+        try:
+            deg_i = int(getattr(node, 'target_hop1_degree', 0) or 0)
+        except Exception:
+            deg_i = 0
+        if allowed_degrees is not None and int(deg_i) not in set(int(x) for x in allowed_degrees):
+            return False
+        try:
+            fixed_i = int(getattr(node, 'target_fixed_anchor_count', 0) or 0)
+        except Exception:
+            fixed_i = 0
+        try:
+            mode = str(getattr(node, 'special_anchor_mode', '') or '')
+        except Exception:
+            mode = ''
+        return bool(int(fixed_i) >= 2 or str(mode).startswith('double'))
+
+    @staticmethod
+    def _is_single_special_d1_node(node: _NodeV3, su_type: int) -> bool:
+        try:
+            return bool(
+                int(getattr(node, 'su_type', -1)) == int(su_type)
+                and int(getattr(node, 'target_hop1_degree', 0) or 0) == 1
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_single_special_d3_node(node: _NodeV3, su_type: int) -> bool:
+        try:
+            return bool(
+                int(getattr(node, 'su_type', -1)) == int(su_type)
+                and int(getattr(node, 'target_hop1_degree', 0) or 0) == 3
+                and int(getattr(node, 'target_fixed_anchor_count', 0) or 0) <= 1
+                and not str(getattr(node, 'special_anchor_mode', '') or '').startswith('double')
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_terminal_like_neighbor(node: _NodeV3) -> bool:
+        return bool(is_terminal_port_node(node))
+
+    def _node_has_terminal_neighbor_limit(self, node: _NodeV3) -> bool:
+        return True
+
+    def _terminal_neighbor_count(self,
+                                 nodes: List[_NodeV3],
+                                 node: _NodeV3,
+                                 node1: Optional[_NodeV3] = None,
+                                 node2: Optional[_NodeV3] = None) -> int:
+        return int(sum(
+            1 for nb in self._neighbors_with_proposed_edge(nodes, node, node1, node2)
+            if self._is_terminal_like_neighbor(nb)
+        ))
+
+    def _violates_terminal_neighbor_limit(self,
+                                          nodes: List[_NodeV3],
+                                          node: _NodeV3,
+                                          node1: Optional[_NodeV3] = None,
+                                          node2: Optional[_NodeV3] = None) -> bool:
+        if not self._node_has_terminal_neighbor_limit(node):
+            return False
+        return int(self._terminal_neighbor_count(nodes, node, node1, node2)) >= 2
+
+    def _fixed_connector_special_target_su(self, connector: _NodeV3) -> Optional[int]:
+        su_i = int(getattr(connector, 'su_type', -1))
+        if int(su_i) == 27:
+            return 20
+        if int(su_i) in {29, 31}:
+            return 19
+        return None
+
+    def _violates_fixed_connector_special_end_rules(self,
+                                                    nodes: List[_NodeV3],
+                                                    connector: _NodeV3,
+                                                    node1: Optional[_NodeV3] = None,
+                                                    node2: Optional[_NodeV3] = None) -> bool:
+        target_su = self._fixed_connector_special_target_su(connector)
+        if target_su is None:
+            return False
+        neighbors = self._neighbors_with_proposed_edge(nodes, connector, node1, node2)
+        double_count = int(sum(
+            1 for nb in neighbors
+            if self._is_double_special_node(nb, int(target_su), allowed_degrees={2, 3})
+        ))
+        if int(double_count) >= 2:
+            return True
+        has_single_d3 = any(self._is_single_special_d3_node(nb, int(target_su)) for nb in neighbors)
+        return bool(has_single_d3 and int(double_count) >= 1)
+
+    @staticmethod
+    def _is_p_connector_node(node: _NodeV3) -> bool:
+        try:
+            return int(getattr(node, 'su_type', -1)) in {0, 2, 27, 28, 29, 31}
+        except Exception:
+            return False
+
+    def _neighbors_with_proposed_edge(self,
+                                      nodes: List[_NodeV3],
+                                      node: _NodeV3,
+                                      node1: Optional[_NodeV3] = None,
+                                      node2: Optional[_NodeV3] = None) -> List[_NodeV3]:
+        try:
+            gid = int(getattr(node, 'global_id', -1))
+        except Exception:
+            gid = -1
+        ids = [
+            int(nid)
+            for nid in list(getattr(node, 'hop1_ids', []) or [])
+            if 0 <= int(nid) < len(nodes)
+        ]
+        if node1 is not None and node2 is not None:
+            try:
+                id1 = int(getattr(node1, 'global_id', -1))
+                id2 = int(getattr(node2, 'global_id', -1))
+            except Exception:
+                id1 = id2 = -1
+            if gid == id1 and 0 <= id2 < len(nodes):
+                ids.append(int(id2))
+            elif gid == id2 and 0 <= id1 < len(nodes):
+                ids.append(int(id1))
+        out: List[_NodeV3] = []
+        seen: Set[int] = set()
+        for nid in ids:
+            if int(nid) in seen:
+                continue
+            seen.add(int(nid))
+            out.append(nodes[int(nid)])
+        return out
+
+    def _is_p_connector_topology(self,
+                                 connector: _NodeV3,
+                                 neighbors: List[_NodeV3]) -> bool:
+        su_i = int(getattr(connector, 'su_type', -1))
+        if int(su_i) == 0:
+            return bool(
+                any(int(getattr(nb, 'su_type', -1)) == 22 for nb in list(neighbors or []))
+                and any(self._is_double_special_d2_node(nb, 20) for nb in list(neighbors or []))
+            )
+        if int(su_i) == 2:
+            return bool(
+                any(int(getattr(nb, 'su_type', -1)) == 22 for nb in list(neighbors or []))
+                and any(self._is_double_special_d2_node(nb, 19) for nb in list(neighbors or []))
+            )
+        if int(su_i) == 27:
+            return bool(
+                any(self._is_single_special_d1_node(nb, 20) for nb in list(neighbors or []))
+                and any(self._is_double_special_d2_node(nb, 20) for nb in list(neighbors or []))
+            )
+        if int(su_i) == 28:
+            return bool(any(self._is_double_special_d2_node(nb, 19) for nb in list(neighbors or [])))
+        if int(su_i) in {29, 31}:
+            return bool(
+                any(self._is_single_special_d1_node(nb, 19) for nb in list(neighbors or []))
+                and any(self._is_double_special_d2_node(nb, 19) for nb in list(neighbors or []))
+            )
+        return False
+
+    def _forbidden_p_pair_rows(self,
+                               nodes: List[_NodeV3],
+                               node1: Optional[_NodeV3] = None,
+                               node2: Optional[_NodeV3] = None) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        seen_double_ids: Set[int] = set()
+        for node in list(nodes or []):
+            if not self._is_double_special_d2_node(node):
+                continue
+            gid = int(getattr(node, 'global_id', -1))
+            if gid in seen_double_ids:
+                continue
+            seen_double_ids.add(int(gid))
+            p_connectors: List[_NodeV3] = []
+            for nb in self._neighbors_with_proposed_edge(nodes, node, node1, node2):
+                if not self._is_p_connector_node(nb):
+                    continue
+                nb_neighbors = self._neighbors_with_proposed_edge(nodes, nb, node1, node2)
+                if self._is_p_connector_topology(nb, nb_neighbors):
+                    p_connectors.append(nb)
+            p_ids = sorted(set(int(getattr(nb, 'global_id', -1)) for nb in p_connectors))
+            if len(p_ids) >= 2:
+                rows.append({
+                    'double_id': int(gid),
+                    'double_su': int(getattr(node, 'su_type', -1)),
+                    'p_connector_ids': list(p_ids),
+                    'p_connector_su': [
+                        int(getattr(nodes[int(pid)], 'su_type', -1))
+                        for pid in p_ids
+                        if 0 <= int(pid) < len(nodes)
+                    ],
+                })
+        return rows
+
+    def _p_connector_ids_for_double(self,
+                                    nodes: List[_NodeV3],
+                                    double_node: _NodeV3,
+                                    node1: Optional[_NodeV3] = None,
+                                    node2: Optional[_NodeV3] = None) -> List[int]:
+        p_ids: Set[int] = set()
+        for nb in self._neighbors_with_proposed_edge(nodes, double_node, node1, node2):
+            if not self._is_p_connector_node(nb):
+                continue
+            nb_neighbors = self._neighbors_with_proposed_edge(nodes, nb, node1, node2)
+            if self._is_p_connector_topology(nb, nb_neighbors):
+                p_ids.add(int(getattr(nb, 'global_id', -1)))
+        return sorted(int(x) for x in p_ids if int(x) >= 0)
+
+    def _violates_forbidden_p_pair_connection(self,
+                                              nodes: List[_NodeV3],
+                                              node1: _NodeV3,
+                                              node2: _NodeV3) -> bool:
+        affected_double_ids: Set[int] = set()
+        for endpoint in (node1, node2):
+            if self._is_double_special_d2_node(endpoint):
+                affected_double_ids.add(int(getattr(endpoint, 'global_id', -1)))
+            if self._is_p_connector_node(endpoint):
+                for nb in self._neighbors_with_proposed_edge(nodes, endpoint, node1, node2):
+                    if self._is_double_special_d2_node(nb):
+                        affected_double_ids.add(int(getattr(nb, 'global_id', -1)))
+        if not affected_double_ids:
+            return False
+        for double_id in sorted(int(x) for x in affected_double_ids if 0 <= int(x) < len(nodes)):
+            double_node = nodes[int(double_id)]
+            if len(self._p_connector_ids_for_double(nodes, double_node, node1, node2)) >= 2:
+                return True
+        return False
+
+    def _fixed_connector_assignment_ok(self,
+                                       nodes: List[_NodeV3],
+                                       owner: _NodeV3,
+                                       target: _NodeV3) -> bool:
+        owner_su = int(getattr(owner, 'su_type', -1))
+        target_su = int(getattr(target, 'su_type', -1))
+        if not self._is_su19_partition_compatible(owner, target_su):
+            return False
+        if not self._is_su19_partition_compatible(target, owner_su):
+            return False
+        if self._violates_mode_specific_rule(owner, target_su):
+            return False
+        if self._violates_mode_specific_rule(target, owner_su):
+            return False
+        if self._violates_special_d3_terminal_rule(nodes, owner, target_su):
+            return False
+        if self._violates_special_d3_terminal_rule(nodes, target, owner_su):
+            return False
+        if self._violates_terminal_neighbor_limit(nodes, owner, owner, target):
+            return False
+        if self._violates_terminal_neighbor_limit(nodes, target, owner, target):
+            return False
+        if self._violates_fixed_connector_special_end_rules(nodes, owner, owner, target):
+            return False
+        if self._violates_fixed_connector_special_end_rules(nodes, target, owner, target):
+            return False
+        owner_neighbors = self._current_neighbor_nodes(nodes, owner) + [target]
+        if has_forbidden_fixed_connector_special_combo(owner, owner_neighbors):
+            return False
+        target_neighbors = self._current_neighbor_nodes(nodes, target) + [owner]
+        if has_forbidden_fixed_connector_special_combo(target, target_neighbors):
+            return False
+        if self._violates_forbidden_p_pair_connection(nodes, owner, target):
+            return False
+        return True
 
     def _collect_fixed_connection_markers(self, nodes: List[_NodeV3]) -> Dict[str, Set[int]]:
         markers: Dict[str, Set[Any]] = {
@@ -930,12 +1242,10 @@ class Layer1Assigner:
                                                    owner_slots: List[Dict[str, int]],
                                                    target_demands: List[Dict[str, Any]],
                                                    compat_fn) -> Optional[List[Tuple[int, int]]]:
-        work_nodes = copy.deepcopy(nodes)
-        used_slots = [False] * len(owner_slots)
-        owner_d1_usage: Dict[int, int] = defaultdict(int)
+        base_nodes = copy.deepcopy(nodes)
         demand_indices = [int(i) for i in range(len(target_demands))]
 
-        def _target_priority(demand: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
+        def _target_priority(work_nodes: List[_NodeV3], demand: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
             node = work_nodes[int(demand['target_id'])]
             su_i = int(getattr(node, 'su_type', -1))
             deg_i = int(self._node_target_degree(node) or 0)
@@ -967,7 +1277,9 @@ class Layer1Assigner:
                 int(demand.get('demand_index', 0)),
             )
 
-        def _slot_priority(slot: Dict[str, int]) -> Tuple[int, int, int]:
+        def _slot_priority(work_nodes: List[_NodeV3],
+                           slot: Dict[str, int],
+                           target: Optional[_NodeV3] = None) -> Tuple[int, int, int, int]:
             owner = work_nodes[int(slot['owner_id'])]
             owner_su = int(getattr(owner, 'su_type', -1))
             if int(owner_su) == 28:
@@ -982,9 +1294,26 @@ class Layer1Assigner:
                 rank = 4
             else:
                 rank = 5
-            return (int(rank), int(slot['owner_id']), int(slot.get('slot_index', 0)))
+            p_penalty = 0
+            if target is not None and self._is_double_special_d2_node(target, 19):
+                # SU28 is already a P-type connector once attached to double19d2.
+                # Prefer non-terminal oxygen connectors for double19d2 to avoid
+                # producing 28-double19d2-P motifs that later block closure.
+                if int(owner_su) == 28:
+                    p_penalty = 20
+                elif int(owner_su) in {29, 2}:
+                    p_penalty = 2
+            if target is not None and self._is_double_special_d2_node(target, 20):
+                if int(owner_su) == 27:
+                    p_penalty = 10
+                elif int(owner_su) == 0:
+                    p_penalty = 2
+            return (int(p_penalty), int(rank), int(slot['owner_id']), int(slot.get('slot_index', 0)))
 
-        def _candidate_slots(demand_idx: int) -> List[int]:
+        def _candidate_slots(work_nodes: List[_NodeV3],
+                             used_slots: List[bool],
+                             owner_d1_usage: Dict[int, int],
+                             demand_idx: int) -> List[int]:
             demand = dict(target_demands[int(demand_idx)] or {})
             target = work_nodes[int(demand['target_id'])]
             out: List[int] = []
@@ -995,17 +1324,126 @@ class Layer1Assigner:
                 if not compat_fn(work_nodes, owner, target, slot, owner_d1_usage, demand):
                     continue
                 out.append(int(slot_idx))
-            out.sort(key=lambda idx: _slot_priority(owner_slots[int(idx)]))
+            out.sort(key=lambda idx: _slot_priority(work_nodes, owner_slots[int(idx)], target))
             return out
 
+        def _extract_edges(work_nodes: List[_NodeV3]) -> List[Tuple[int, int]]:
+            target_id_set = set(int(d.get('target_id', -1)) for d in list(target_demands or []))
+            owner_id_set = set(int(slot['owner_id']) for slot in list(owner_slots or []))
+            edges: Set[Tuple[int, int]] = set()
+            for owner_id in sorted(owner_id_set):
+                owner = work_nodes[int(owner_id)]
+                for nb_id in list(getattr(owner, 'hop1_ids', []) or []):
+                    nb_i = int(nb_id)
+                    if nb_i not in target_id_set:
+                        continue
+                    edges.add(tuple(sorted((int(owner_id), int(nb_i)))))
+            return list(sorted(edges))
+
+        def _apply_slot(work_nodes: List[_NodeV3],
+                        used_slots: List[bool],
+                        owner_d1_usage: Dict[int, int],
+                        demand_idx: int,
+                        slot_idx: int) -> Tuple[bool, bool]:
+            demand = dict(target_demands[int(demand_idx)] or {})
+            target = work_nodes[int(demand['target_id'])]
+            target_deg = int(self._node_target_degree(target) or 0)
+            slot = owner_slots[int(slot_idx)]
+            owner_id = int(slot['owner_id'])
+            owner = work_nodes[int(owner_id)]
+            if not self._can_add_hop1_connection(work_nodes, owner, target):
+                return False, False
+            self._add_bidirectional_hop1(work_nodes, int(owner_id), int(demand['target_id']), lock=True)
+            if int(demand['target_id']) not in set(int(x) for x in list(getattr(work_nodes[int(owner_id)], 'hop1_ids', []) or [])):
+                return False, False
+            used_slots[int(slot_idx)] = True
+            inc_d1 = (
+                int(getattr(owner, 'su_type', -1)) == 29 and
+                int(getattr(target, 'su_type', -1)) == 19 and
+                int(target_deg) == 1
+            )
+            if bool(inc_d1):
+                owner_d1_usage[int(owner_id)] += 1
+            return True, bool(inc_d1)
+
+        def _undo_slot(work_nodes: List[_NodeV3],
+                       used_slots: List[bool],
+                       owner_d1_usage: Dict[int, int],
+                       demand_idx: int,
+                       slot_idx: int,
+                       inc_d1: bool) -> None:
+            demand = dict(target_demands[int(demand_idx)] or {})
+            slot = owner_slots[int(slot_idx)]
+            owner_id = int(slot['owner_id'])
+            if bool(inc_d1):
+                owner_d1_usage[int(owner_id)] -= 1
+                if int(owner_d1_usage[int(owner_id)]) <= 0:
+                    owner_d1_usage.pop(int(owner_id), None)
+            self._remove_bidirectional_hop1_with_force(
+                work_nodes,
+                int(owner_id),
+                int(demand['target_id']),
+                force=True,
+            )
+            used_slots[int(slot_idx)] = False
+
+        def _solve_greedy() -> Optional[List[Tuple[int, int]]]:
+            work_nodes = copy.deepcopy(base_nodes)
+            used_slots = [False] * len(owner_slots)
+            owner_d1_usage: Dict[int, int] = defaultdict(int)
+            ordered = sorted(
+                list(demand_indices),
+                key=lambda x: _target_priority(work_nodes, target_demands[int(x)]),
+            )
+            for demand_idx in ordered:
+                options = _candidate_slots(work_nodes, used_slots, owner_d1_usage, int(demand_idx))
+                if not options:
+                    return None
+                applied = False
+                for slot_idx in list(options):
+                    ok, _inc_d1 = _apply_slot(
+                        work_nodes,
+                        used_slots,
+                        owner_d1_usage,
+                        int(demand_idx),
+                        int(slot_idx),
+                    )
+                    if bool(ok):
+                        applied = True
+                        break
+                if not bool(applied):
+                    return None
+            return _extract_edges(work_nodes)
+
+        greedy_edges = _solve_greedy()
+        if greedy_edges is not None:
+            return list(greedy_edges)
+
+        # Large fixed-anchor pools are intentionally generated so that the
+        # deterministic greedy order is feasible. If greedy cannot complete one
+        # of these pools, the mode metadata is inconsistent with the hard Layer1
+        # rules; exhaustive DFS only turns that into a multi-minute stall.
+        if int(len(demand_indices)) > 64 or int(len(owner_slots)) > 64:
+            return None
+
+        work_nodes = copy.deepcopy(base_nodes)
+        used_slots = [False] * len(owner_slots)
+        owner_d1_usage: Dict[int, int] = defaultdict(int)
+        max_states = max(200, min(5000, int(len(demand_indices) * 40)))
+        states_seen = 0
+
         def _dfs(remaining_demand_indices: List[int]) -> bool:
+            nonlocal states_seen
+            states_seen += 1
+            if int(states_seen) > int(max_states):
+                return False
             if not remaining_demand_indices:
                 return True
 
             best_demand_idx: Optional[int] = None
             best_options: Optional[List[int]] = None
-            for idx in sorted(remaining_demand_indices, key=lambda x: _target_priority(target_demands[int(x)])):
-                options = _candidate_slots(int(idx))
+            for idx in sorted(remaining_demand_indices, key=lambda x: _target_priority(work_nodes, target_demands[int(x)])):
+                options = _candidate_slots(work_nodes, used_slots, owner_d1_usage, int(idx))
                 if not options:
                     return False
                 if best_options is None or len(options) < len(best_options):
@@ -1018,56 +1456,32 @@ class Layer1Assigner:
                 return False
 
             next_remaining = [int(idx) for idx in remaining_demand_indices if int(idx) != int(best_demand_idx)]
-            demand = dict(target_demands[int(best_demand_idx)] or {})
-            target = work_nodes[int(demand['target_id'])]
-            target_deg = int(self._node_target_degree(target) or 0)
             for slot_idx in list(best_options):
-                slot = owner_slots[int(slot_idx)]
-                owner_id = int(slot['owner_id'])
-                owner = work_nodes[int(owner_id)]
-                if not self._can_add_hop1_connection(work_nodes, owner, target):
-                    continue
-                self._add_bidirectional_hop1(work_nodes, int(owner_id), int(demand['target_id']), lock=True)
-                if int(demand['target_id']) not in set(int(x) for x in list(getattr(work_nodes[int(owner_id)], 'hop1_ids', []) or [])):
-                    continue
-                used_slots[int(slot_idx)] = True
-                inc_d1 = (
-                    int(getattr(owner, 'su_type', -1)) == 29 and
-                    int(getattr(target, 'su_type', -1)) == 19 and
-                    int(target_deg) == 1
+                ok, inc_d1 = _apply_slot(
+                    work_nodes,
+                    used_slots,
+                    owner_d1_usage,
+                    int(best_demand_idx),
+                    int(slot_idx),
                 )
-                if bool(inc_d1):
-                    owner_d1_usage[int(owner_id)] += 1
+                if not bool(ok):
+                    continue
                 if _dfs(next_remaining):
                     return True
-                if bool(inc_d1):
-                    owner_d1_usage[int(owner_id)] -= 1
-                    if int(owner_d1_usage[int(owner_id)]) <= 0:
-                        owner_d1_usage.pop(int(owner_id), None)
-                self._remove_bidirectional_hop1_with_force(
+                _undo_slot(
                     work_nodes,
-                    int(owner_id),
-                    int(demand['target_id']),
-                    force=True,
+                    used_slots,
+                    owner_d1_usage,
+                    int(best_demand_idx),
+                    int(slot_idx),
+                    bool(inc_d1),
                 )
-                used_slots[int(slot_idx)] = False
             return False
 
         ok = _dfs(list(demand_indices))
         if not ok:
             return None
-
-        target_id_set = set(int(d.get('target_id', -1)) for d in list(target_demands or []))
-        owner_id_set = set(int(slot['owner_id']) for slot in list(owner_slots or []))
-        edges: Set[Tuple[int, int]] = set()
-        for owner_id in sorted(owner_id_set):
-            owner = work_nodes[int(owner_id)]
-            for nb_id in list(getattr(owner, 'hop1_ids', []) or []):
-                nb_i = int(nb_id)
-                if nb_i not in target_id_set:
-                    continue
-                edges.add(tuple(sorted((int(owner_id), int(nb_i)))))
-        return list(sorted(edges))
+        return _extract_edges(work_nodes)
 
     def _bridge_candidate_bias(self, center_su: int, current_neighbors: List[int], cand_su: int) -> float:
         center_su = int(center_su)
@@ -1270,11 +1684,56 @@ class Layer1Assigner:
                 continue
             neighbor_types = [int(nodes[nid].su_type) for nid in n.hop1_ids if nid < len(nodes)]
             neighbor_nodes = self._current_neighbor_nodes(nodes, n)
-            if n.is_hop1_complete() and not can_match_ports_exact(neighbor_nodes, port_sets, center_node=n):
+            if not can_match_ports_partial(neighbor_nodes, port_sets, center_node=n):
+                errors.append(
+                    f"节点{n.global_id}(SU{n.su_type}): partial hop1={sorted(neighbor_types)} 不满足端口规则 "
+                    f"{format_port_patterns_debug(port_sets)}"
+                )
+            elif n.is_hop1_complete() and not can_match_ports_exact(neighbor_nodes, port_sets, center_node=n):
                 errors.append(
                     f"节点{n.global_id}(SU{n.su_type}): hop1={sorted(neighbor_types)} 不满足端口规则 "
                     f"{format_port_patterns_debug(port_sets)}"
                 )
+
+            su_i = int(getattr(n, 'su_type', -1))
+            if su_i in {14, 15, 16}:
+                unsaturated_pair_neighbors = [
+                    int(x)
+                    for x in neighbor_types
+                    if int(x) in {14, 15, 16}
+                ]
+                if len(unsaturated_pair_neighbors) != 1:
+                    errors.append(
+                        f"节点{n.global_id}(SU{n.su_type}): 14/15/16固定配对必须恰好一个, "
+                        f"pair_neighbors={sorted(unsaturated_pair_neighbors)}"
+                    )
+                if su_i == 16 and 16 in unsaturated_pair_neighbors:
+                    errors.append(f"节点{n.global_id}(SU16): 禁止16-16固定配对")
+                aromatic_neighbors = [
+                    int(x)
+                    for x in neighbor_types
+                    if 5 <= int(x) <= 13 and not (su_i == 15 and int(x) == 11)
+                ]
+                if aromatic_neighbors:
+                    errors.append(
+                        f"节点{n.global_id}(SU{n.su_type}): 14/16 不允许连接芳香5-13，"
+                        f"15只允许11作为骨架端口, "
+                        f"aromatic_neighbors={sorted(aromatic_neighbors)}"
+                    )
+
+            if su_i in {17, 18}:
+                triple_pair_neighbors = [
+                    int(x)
+                    for x in neighbor_types
+                    if int(x) in {17, 18}
+                ]
+                if len(triple_pair_neighbors) != 1:
+                    errors.append(
+                        f"节点{n.global_id}(SU{n.su_type}): 17/18固定配对必须恰好一个, "
+                        f"pair_neighbors={sorted(triple_pair_neighbors)}"
+                    )
+                if su_i == 18 and 18 in triple_pair_neighbors:
+                    errors.append(f"节点{n.global_id}(SU18): 禁止18-18固定配对")
 
         # 27/29/31 fixed connectors may have two special partners, but not two
         # double-d3 partners at the same connector.
@@ -1292,6 +1751,40 @@ class Layer1Assigner:
                     f"节点{n.global_id}(SU{n.su_type}): fixed connector 不能同时连接两个 double d3 special, "
                     f"neighbors={labels}"
                 )
+            if self._violates_fixed_connector_special_end_rules(nodes, n):
+                labels = [
+                    f"{int(getattr(nb, 'global_id', -1))}(SU{int(getattr(nb, 'su_type', -1))},"
+                    f"deg={self._node_target_degree(nb)},mode={self._node_anchor_mode(nb)},"
+                    f"fixed={self._node_fixed_anchor_target(nb)})"
+                    for nb in list(neighbor_nodes)
+                ]
+                errors.append(
+                    f"节点{n.global_id}(SU{n.su_type}): SU27/29/31不能同时连接两个double d2/d3，"
+                    f"也不能同时连接single d3和double d2/d3, neighbors={labels}"
+                )
+
+        for n in nodes:
+            if self._violates_terminal_neighbor_limit(nodes, n):
+                neighbor_nodes = self._current_neighbor_nodes(nodes, n)
+                terminal_labels = [
+                    f"{int(getattr(nb, 'global_id', -1))}(SU{int(getattr(nb, 'su_type', -1))},"
+                    f"deg={self._node_target_degree(nb)},mode={self._node_anchor_mode(nb)})"
+                    for nb in list(neighbor_nodes)
+                    if self._is_terminal_like_neighbor(nb)
+                ]
+                errors.append(
+                    f"节点{n.global_id}(SU{n.su_type}): 结构单元最多只能连接一个端基结构, "
+                    f"terminal_neighbors={terminal_labels}"
+                )
+
+        forbidden_p_rows = self._forbidden_p_pair_rows(nodes)
+        for row in forbidden_p_rows:
+            errors.append(
+                "P+P固定锚点非法连接: "
+                f"double_id={int(row.get('double_id', -1))}(SU{int(row.get('double_su', -1))}) "
+                f"p_connectors={list(row.get('p_connector_ids', []) or [])} "
+                f"p_su={list(row.get('p_connector_su', []) or [])}"
+            )
 
         # 6.5 检查外接结构要求（即使节点未满度，也不能缺失必须存在的外接锚点）
         for n in nodes:
@@ -1436,205 +1929,6 @@ class Layer1Assigner:
         
         return nodes
 
-    def _initialize_node_pool_from_seed(self,
-                                        H_init: torch.Tensor,
-                                        seed_nodes: Optional[List[_NodeV3]]) -> Optional[List[_NodeV3]]:
-        """Initialize a clean Layer1 node pool while preserving seed global IDs.
-
-        Block-C unit conversions mutate concrete node identities.  Rebuilding
-        Layer1 from histogram order alone renumbers nodes by SU type, which can
-        make the next Block-C step act on a different logical node.  This helper
-        keeps the converted node IDs stable, clears topology, and lets the normal
-        warm-start restore/repair step rebuild edges.
-        """
-        if not seed_nodes:
-            return None
-
-        try:
-            expected_H = H_init.detach().cpu().to(dtype=torch.long)
-            expected_total = int(expected_H.sum().item())
-        except Exception:
-            return None
-        if int(len(seed_nodes)) != int(expected_total):
-            return None
-
-        ids: List[int] = []
-        hist = torch.zeros(NUM_SU_TYPES, dtype=torch.long)
-        for node in list(seed_nodes or []):
-            try:
-                gid = int(getattr(node, 'global_id'))
-                su_i = int(getattr(node, 'su_type'))
-            except Exception:
-                return None
-            if gid < 0 or gid >= len(seed_nodes) or su_i < 0 or su_i >= NUM_SU_TYPES:
-                return None
-            ids.append(int(gid))
-            hist[int(su_i)] += 1
-        if sorted(ids) != list(range(len(seed_nodes))):
-            return None
-        if int(expected_H.numel()) != int(hist.numel()) or not bool(torch.equal(hist, expected_H)):
-            return None
-
-        nodes: List[_NodeV3] = []
-        for old_node in sorted(seed_nodes, key=lambda n: int(getattr(n, 'global_id', -1))):
-            new_node = copy.deepcopy(old_node)
-            try:
-                new_node.global_id = int(getattr(old_node, 'global_id'))
-                new_node.su_type = int(getattr(old_node, 'su_type'))
-            except Exception:
-                return None
-
-            new_node.hop1_su = Counter()
-            new_node.hop2_su = Counter()
-            new_node.hop1_ids = []
-            new_node.fixed_hop1_ids = set()
-            new_node.constraint_violations = set()
-            try:
-                old_z = getattr(old_node, 'z_vec', None)
-                new_node.z_vec = old_z.detach().clone() if isinstance(old_z, torch.Tensor) else torch.zeros(16)
-            except Exception:
-                new_node.z_vec = torch.zeros(16)
-            try:
-                old_hist = getattr(old_node, 'z_history', None)
-                new_node.z_history = [
-                    z.detach().clone() if isinstance(z, torch.Tensor) else copy.deepcopy(z)
-                    for z in list(old_hist or [])
-                ]
-            except Exception:
-                new_node.z_history = []
-            try:
-                old_scores = getattr(old_node, 'score_components', None)
-                new_node.score_components = dict(old_scores) if isinstance(old_scores, dict) else {}
-            except Exception:
-                new_node.score_components = {}
-            nodes.append(new_node)
-
-        return nodes
-
-    def _restore_seed_topology(self, nodes: List[_NodeV3], seed_nodes: Optional[List[_NodeV3]]) -> None:
-        """Best-effort warm start from a previous node list with a nearby histogram.
-
-        Mapping is done within stable structural buckets instead of raw SU type only.
-        This avoids assigning an old SU19(d2/ether) topology onto a new SU19(d3/ether)
-        node after Layer4 changes special-degree metadata while keeping the histogram
-        unchanged.
-
-        Edges are restored only when both endpoints still exist after remapping and the
-        edge still satisfies the incremental per-port validation on both sides.
-        """
-        if not seed_nodes:
-            return
-
-        def _seed_bucket_key(node: _NodeV3) -> Tuple[int, Optional[str], Optional[int], int, Optional[str]]:
-            try:
-                su_type = int(getattr(node, 'su_type', -1))
-            except Exception:
-                su_type = -1
-            part = self._node_anchor_partition(node)
-            degree = self._node_target_degree(node)
-            fixed_cnt = self._node_fixed_anchor_target(node)
-            mode = self._node_anchor_mode(node)
-            return (
-                int(su_type),
-                (str(part) if part is not None else None),
-                (int(degree) if degree is not None else None),
-                int(fixed_cnt),
-                (str(mode) if mode is not None else None),
-            )
-
-        new_by_bucket: Dict[Tuple[int, Optional[str], Optional[int]], List[_NodeV3]] = defaultdict(list)
-        for node in nodes:
-            new_by_bucket[_seed_bucket_key(node)].append(node)
-        for bucket in list(new_by_bucket.keys()):
-            new_by_bucket[bucket].sort(key=lambda n: int(n.global_id))
-
-        seed_by_bucket: Dict[Tuple[int, Optional[str], Optional[int]], List[_NodeV3]] = defaultdict(list)
-        seed_lookup: Dict[int, _NodeV3] = {}
-        for node in seed_nodes:
-            try:
-                bucket = _seed_bucket_key(node)
-                seed_by_bucket[bucket].append(node)
-                seed_lookup[int(node.global_id)] = node
-            except Exception:
-                continue
-        for bucket in list(seed_by_bucket.keys()):
-            seed_by_bucket[bucket].sort(key=lambda n: int(n.global_id))
-
-        old_to_new: Dict[int, _NodeV3] = {}
-        for bucket, new_group in new_by_bucket.items():
-            old_group = seed_by_bucket.get(bucket, [])
-            for old_node, new_node in zip(old_group, new_group):
-                try:
-                    old_to_new[int(old_node.global_id)] = new_node
-                except Exception:
-                    continue
-                try:
-                    new_node.mu = float(getattr(old_node, 'mu', 0.0))
-                    new_node.pi = float(getattr(old_node, 'pi', 1.0))
-                except Exception:
-                    pass
-                try:
-                    old_z = getattr(old_node, 'z_vec', None)
-                    if isinstance(old_z, torch.Tensor):
-                        new_node.z_vec = old_z.detach().clone()
-                except Exception:
-                    pass
-                try:
-                    old_hist = getattr(old_node, 'z_history', None)
-                    if isinstance(old_hist, list):
-                        new_node.z_history = [
-                            z.detach().clone() if isinstance(z, torch.Tensor) else z
-                            for z in old_hist
-                        ]
-                except Exception:
-                    pass
-                try:
-                    old_sc = getattr(old_node, 'score_components', None)
-                    if isinstance(old_sc, dict):
-                        new_node.score_components = dict(old_sc)
-                except Exception:
-                    pass
-                try:
-                    new_node.template_key = getattr(old_node, 'template_key', None)
-                except Exception:
-                    pass
-
-        seen_edges: Set[Tuple[int, int]] = set()
-        for old_id, new_u in old_to_new.items():
-            old_u = seed_lookup.get(int(old_id))
-            if old_u is None:
-                continue
-            for old_v_id in list(getattr(old_u, 'hop1_ids', []) or []):
-                try:
-                    old_v_id_i = int(old_v_id)
-                except Exception:
-                    continue
-                new_v = old_to_new.get(old_v_id_i)
-                if new_v is None:
-                    continue
-                edge = tuple(sorted((int(new_u.global_id), int(new_v.global_id))))
-                if edge in seen_edges:
-                    continue
-                seen_edges.add(edge)
-                if int(new_v.global_id) in new_u.hop1_ids:
-                    continue
-                if int(new_u.remaining_hop1_slots()) <= 0 or int(new_v.remaining_hop1_slots()) <= 0:
-                    continue
-                if not self._can_add_hop1_connection(nodes, new_u, new_v):
-                    continue
-                is_fixed = False
-                try:
-                    is_fixed = int(old_v_id_i) in set(getattr(old_u, 'fixed_hop1_ids', set()) or set())
-                except Exception:
-                    is_fixed = False
-                self._add_bidirectional_hop1(
-                    nodes,
-                    int(new_u.global_id),
-                    int(new_v.global_id),
-                    lock=bool(is_fixed),
-                )
-
-    @staticmethod
     def _edge_is_fixed(node1: _NodeV3, node2: _NodeV3) -> bool:
         return bool(
             int(node2.global_id) in set(getattr(node1, 'fixed_hop1_ids', set()) or set())
@@ -1656,9 +1950,21 @@ class Layer1Assigner:
         
         if id2 in node1.hop1_ids or id1 in node2.hop1_ids:
             return False
+        if not self._can_add_hop1_connection(nodes, node1, node2):
+            return False
         if self._violates_special_d3_terminal_rule(nodes, node1, int(node2.su_type)):
             return False
         if self._violates_special_d3_terminal_rule(nodes, node2, int(node1.su_type)):
+            return False
+        if self._violates_terminal_neighbor_limit(nodes, node1, node1, node2):
+            return False
+        if self._violates_terminal_neighbor_limit(nodes, node2, node1, node2):
+            return False
+        if self._violates_fixed_connector_special_end_rules(nodes, node1, node1, node2):
+            return False
+        if self._violates_fixed_connector_special_end_rules(nodes, node2, node1, node2):
+            return False
+        if self._violates_forbidden_p_pair_connection(nodes, node1, node2):
             return False
         
         # 添加互为1-hop（SU类型计数）
@@ -1671,6 +1977,7 @@ class Layer1Assigner:
         if bool(lock):
             node1.fixed_hop1_ids.add(int(id2))
             node2.fixed_hop1_ids.add(int(id1))
+        self._bump_graph_edit_version()
         self._refresh_runtime_node_entry(nodes, int(id1))
         self._refresh_runtime_node_entry(nodes, int(id2))
         # Cache keys include each endpoint's neighbor ids/types and remaining
@@ -1712,15 +2019,10 @@ class Layer1Assigner:
         node2.hop1_ids.remove(id1)
         node1.fixed_hop1_ids.discard(int(id2))
         node2.fixed_hop1_ids.discard(int(id1))
+        self._bump_graph_edit_version()
         self._refresh_runtime_node_entry(nodes, int(id1))
         self._refresh_runtime_node_entry(nodes, int(id2))
         return True
-
-    def _get_allowed_neighbor_types(self, su_type: int) -> List[int]:
-        allowed = SU_FIXED_CONNECTIONS.get(su_type)
-        if allowed is None:
-            return list(range(NUM_SU_TYPES))
-        return list(allowed)
 
     def _edge_semantics_ok(self,
                            su1: int,
@@ -1760,6 +2062,7 @@ class Layer1Assigner:
 
     def _can_add_hop1_connection(self, nodes: List[_NodeV3], node1: _NodeV3, node2: _NodeV3) -> bool:
         key = (
+            int(getattr(self, '_graph_edit_version', 0)),
             self._can_add_state_signature(nodes, node1),
             self._can_add_state_signature(nodes, node2),
         )
@@ -1808,6 +2111,16 @@ class Layer1Assigner:
             return False
         if self._violates_special_d3_terminal_rule(nodes, node2, int(node1.su_type)):
             return False
+        if self._violates_terminal_neighbor_limit(nodes, node1, node1, node2):
+            return False
+        if self._violates_terminal_neighbor_limit(nodes, node2, node1, node2):
+            return False
+        if self._violates_fixed_connector_special_end_rules(nodes, node1, node1, node2):
+            return False
+        if self._violates_fixed_connector_special_end_rules(nodes, node2, node1, node2):
+            return False
+        if self._violates_forbidden_p_pair_connection(nodes, node1, node2):
+            return False
 
         required1 = set(int(x) for x in self._required_external_candidates_for_node(node1))
         target_req1 = int(self._node_fixed_anchor_target(node1))
@@ -1829,26 +2142,148 @@ class Layer1Assigner:
         # 检查 node1 侧
         port_sets1 = self._port_sets_for_node(node1)
         if port_sets1:
-            current_neighbors1 = [int(nodes[nid].su_type) for nid in node1.hop1_ids]
-            proposed1 = current_neighbors1 + [int(node2.su_type)]
-            if not can_match_ports_partial(proposed1, port_sets1):
+            current_neighbors1 = self._current_neighbor_nodes(nodes, node1)
+            proposed1 = current_neighbors1 + [node2]
+            if not can_match_ports_partial(proposed1, port_sets1, center_node=node1):
                 return False
 
         # 检查 node2 侧
         port_sets2 = self._port_sets_for_node(node2)
         if port_sets2:
-            current_neighbors2 = [int(nodes[nid].su_type) for nid in node2.hop1_ids]
-            proposed2 = current_neighbors2 + [int(node1.su_type)]
-            if not can_match_ports_partial(proposed2, port_sets2):
+            current_neighbors2 = self._current_neighbor_nodes(nodes, node2)
+            proposed2 = current_neighbors2 + [node1]
+            if not can_match_ports_partial(proposed2, port_sets2, center_node=node2):
                 return False
 
         return True
 
-    def _repair_remaining_hop1_slots(self, nodes: List[_NodeV3]) -> None:
+    def _repair_remaining_hop1_slots(self,
+                                     nodes: List[_NodeV3],
+                                     max_iters: Optional[int] = 64) -> None:
         self._refiner.repair_remaining_hop1_slots(
             assigner=self,
             nodes=nodes,
+            max_iters=max_iters,
         )
+
+    def _special_capacity_snapshot(self, nodes: List[_NodeV3]) -> Dict[str, Any]:
+        rows: List[Dict[str, Any]] = []
+        unique_capacity: Dict[int, int] = {}
+        rejection_counts: Counter = Counter()
+        for center in nodes:
+            if int(getattr(center, 'su_type', -1)) not in {19, 20, 21}:
+                continue
+            gap = max(0, int(center.remaining_hop1_slots()))
+            if gap <= 0:
+                continue
+            candidate_ids: List[int] = []
+            for candidate in nodes:
+                if int(candidate.global_id) == int(center.global_id):
+                    continue
+                if int(candidate.remaining_hop1_slots()) <= 0:
+                    rejection_counts['no_remaining_slot'] += 1
+                    continue
+                if not self._can_add_hop1_connection(nodes, center, candidate):
+                    rejection_counts['connection_rule'] += 1
+                    continue
+                candidate_ids.append(int(candidate.global_id))
+                unique_capacity[int(candidate.global_id)] = max(
+                    int(unique_capacity.get(int(candidate.global_id), 0)),
+                    int(candidate.remaining_hop1_slots()),
+                )
+            rows.append({
+                'node_id': int(center.global_id),
+                'su_type': int(center.su_type),
+                'subtype': str(getattr(center, 'special_degree_source', '') or ''),
+                'degree_gap': int(gap),
+                'candidate_count': int(len(candidate_ids)),
+                'candidate_ids': candidate_ids,
+                'target_degree': int(getattr(center, 'target_hop1_degree', 0) or 0),
+                'anchor_mode': str(getattr(center, 'special_anchor_mode', '') or ''),
+            })
+        total_gap = int(sum(int(row['degree_gap']) for row in rows))
+        total_capacity = int(sum(int(value) for value in unique_capacity.values()))
+        return {
+            'variant': int(getattr(self, '_build_variant', 0)),
+            'nodes': rows,
+            'total_degree_gap': total_gap,
+            'unique_candidate_capacity': total_capacity,
+            'rejection_counts': dict(rejection_counts),
+        }
+
+    @staticmethod
+    def _special_mrv_key(row: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
+        subtype = str(row.get('subtype', '') or '')
+        degree = int(row.get('target_degree', 0) or 0)
+        mode = str(row.get('anchor_mode', '') or '')
+        return (
+            int(row.get('candidate_count', 0)),
+            -int(row.get('degree_gap', 0)),
+            -int(degree >= 3),
+            -int(mode.startswith('double')),
+            int(row.get('node_id', -1)),
+        )
+
+    def _raise_special_capacity_infeasible(self, snapshot: Dict[str, Any], reason: str) -> None:
+        diagnostics = dict(snapshot or {})
+        diagnostics['reason'] = str(reason)
+        self._last_special_capacity_diagnostics = diagnostics
+        compact = {
+            'reason': str(reason),
+            'variant': int(diagnostics.get('variant', 0)),
+            'total_degree_gap': int(diagnostics.get('total_degree_gap', 0)),
+            'unique_candidate_capacity': int(diagnostics.get('unique_candidate_capacity', 0)),
+            'nodes': list(diagnostics.get('nodes', []) or []),
+            'rejection_counts': dict(diagnostics.get('rejection_counts', {}) or {}),
+        }
+        raise RuntimeError(f"special_port_capacity_infeasible: {compact}")
+
+    def _complete_special_nodes_mrv(self, nodes: List[_NodeV3]) -> None:
+        while True:
+            snapshot = self._special_capacity_snapshot(nodes)
+            rows = list(snapshot.get('nodes', []) or [])
+            if not rows:
+                self._last_special_capacity_diagnostics = snapshot
+                return
+            impossible = [row for row in rows if int(row['candidate_count']) < int(row['degree_gap'])]
+            if impossible:
+                snapshot['nodes'] = impossible
+                self._raise_special_capacity_infeasible(snapshot, 'per_node_candidate_shortage')
+            if int(snapshot['unique_candidate_capacity']) < int(snapshot['total_degree_gap']):
+                self._raise_special_capacity_infeasible(snapshot, 'global_unique_slot_shortage')
+
+            row = sorted(rows, key=self._special_mrv_key)[0]
+            center = nodes[int(row['node_id'])]
+            candidates = [nodes[int(node_id)] for node_id in list(row['candidate_ids'])]
+            candidates = sorted(
+                candidates,
+                key=lambda node: (
+                    -int(node.remaining_hop1_slots()),
+                    int(node.su_type),
+                    (int(node.global_id) + int(self._build_variant)) % max(1, len(nodes)),
+                ),
+            )
+            committed = False
+            for candidate in candidates:
+                if not self._add_bidirectional_hop1(nodes, int(center.global_id), int(candidate.global_id)):
+                    continue
+                after = self._special_capacity_snapshot(nodes)
+                after_rows = list(after.get('nodes', []) or [])
+                feasible = (
+                    all(int(item['candidate_count']) >= int(item['degree_gap']) for item in after_rows)
+                    and int(after.get('unique_candidate_capacity', 0)) >= int(after.get('total_degree_gap', 0))
+                )
+                if feasible:
+                    committed = True
+                    break
+                self._remove_bidirectional_hop1_with_force(
+                    nodes,
+                    int(center.global_id),
+                    int(candidate.global_id),
+                    force=True,
+                )
+            if not committed:
+                self._raise_special_capacity_infeasible(snapshot, 'no_capacity_preserving_edge')
     
     def _get_nodes_by_su_type(self, nodes: List[_NodeV3], su_type: int) -> List[_NodeV3]:
         """获取指定SU类型的所有节点"""
@@ -2467,16 +2902,6 @@ class Layer1Assigner:
         su3_nodes = self._get_nodes_by_su_type(nodes, 3)
         su9_nodes = [n for n in self._get_nodes_by_su_type(nodes, 9) if n.remaining_hop1_slots() > 0]
         
-        def _can_pair(center_su: int, neigh_su: int) -> bool:
-            try:
-                c_allowed = set(self._get_allowed_neighbor_types(int(center_su)))
-                n_allowed = set(self._get_allowed_neighbor_types(int(neigh_su)))
-                return (int(neigh_su) in c_allowed) and (int(center_su) in n_allowed)
-            except Exception as e:
-                import logging
-                logging.debug(f"Exception in _both_allowed check: {e}")
-                return True
-
         def _available_by_types(center: _NodeV3, types: List[int]) -> List[_NodeV3]:
             out = []
             for n in nodes:
@@ -2487,8 +2912,6 @@ class Layer1Assigner:
                 if int(n.global_id) in center.hop1_ids:
                     continue
                 if int(n.remaining_hop1_slots()) <= 0:
-                    continue
-                if not _can_pair(int(center.su_type), int(n.su_type)):
                     continue
                 if not self._can_add_hop1_connection(nodes, center, n):
                     continue
@@ -2579,41 +3002,51 @@ class Layer1Assigner:
         su15_nodes = self._get_nodes_by_su_type(nodes, 15)
         su16_nodes = self._get_nodes_by_su_type(nodes, 16)
         
-        # 按优先级15>16>14构建池，并随机打乱
-        double_bond_pool = self._maybe_shuffle_nodes(list(su15_nodes) + list(su16_nodes) + list(su14_nodes), salt=503)
-        
-        # 两两配对：每个节点的不饱和端连接度=1，只能配对一次
+        # SU16 是只能和 SU15 配对的端基，不能参与 SU16-SU16。
+        # 先完成这类强约束配对，再处理其余双键节点，避免普通贪心
+        # 先消耗掉 SU15 后遗留孤立 SU16。
         paired = set()
-        while len(double_bond_pool) >= 2:
-            # 取出第一个未配对的节点
-            node1 = None
-            for n in double_bond_pool:
-                if n.global_id not in paired:
-                    node1 = n
-                    break
+
+        def pair_from_pools(left_pool, right_pool) -> None:
+            for left in self._maybe_shuffle_nodes(list(left_pool), salt=503 + len(paired)):
+                if left.global_id in paired:
+                    continue
+                candidates = [
+                    right for right in self._maybe_shuffle_nodes(list(right_pool), salt=509 + left.global_id)
+                    if right.global_id not in paired
+                    and self._can_add_hop1_connection(nodes, left, right)
+                ]
+                if candidates:
+                    right = candidates[0]
+                    paired.update((left.global_id, right.global_id))
+                    self._add_bidirectional_hop1(nodes, left.global_id, right.global_id)
+
+        pair_from_pools(su16_nodes, su15_nodes)
+        pair_from_pools(su15_nodes, su16_nodes)
+
+        remaining_double_bond_pool = [
+            node for node in list(su14_nodes) + list(su15_nodes)
+            if node.global_id not in paired
+        ]
+        remaining_double_bond_pool = self._maybe_shuffle_nodes(remaining_double_bond_pool, salt=517)
+        while True:
+            node1 = next((node for node in remaining_double_bond_pool if node.global_id not in paired), None)
             if node1 is None:
                 break
-            
-            # 找一个可配对的伙伴（优先选择15>16>14，且未配对）
-            partner = None
-            priority_order = [15, 16, 14]
-            for su_type in priority_order:
-                for n in double_bond_pool:
-                    if n.global_id != node1.global_id and n.global_id not in paired and n.su_type == su_type:
-                        if not self._can_add_hop1_connection(nodes, node1, n):
-                            continue
-                        partner = n
-                        break
-                if partner:
-                    break
-            
-            if partner:
+            partner = next(
+                (
+                    node for node in remaining_double_bond_pool
+                    if node.global_id != node1.global_id
+                    and node.global_id not in paired
+                    and self._can_add_hop1_connection(nodes, node1, node)
+                ),
+                None,
+            )
+            if partner is None:
                 paired.add(node1.global_id)
-                paired.add(partner.global_id)
-                self._add_bidirectional_hop1(nodes, node1.global_id, partner.global_id)
-            else:
-                # 没有可配对的伙伴，跳过
-                paired.add(node1.global_id)
+                continue
+            paired.update((node1.global_id, partner.global_id))
+            self._add_bidirectional_hop1(nodes, node1.global_id, partner.global_id)
         
         # 三键配对 (17, 18) - 17的不饱和端连接度=1，18的连接度=1
         su17_nodes = self._get_nodes_by_su_type(nodes, 17)
@@ -2754,20 +3187,47 @@ class Layer1Assigner:
         # 再次补齐必需固定锚点，避免 19/20/21 被普通脂肪/芳香连接提前占满。
         self._complete_required_external_anchors(nodes, [19, 20, 21])
         
-        # 处理 21/20/19 号未满节点。
-        # 这些节点的 fixed-anchor single/double 模式由 metadata 决定：
-        #   target_hop1_degree
-        #   target_fixed_anchor_count
-        #   special_anchor_mode
-        for su_type in [21, 20, 19]:
-            incomplete_nodes = self._get_incomplete_hop1_nodes(nodes, [su_type])
-            self._complete_nodes_round_robin(
-                nodes,
-                incomplete_nodes,
+        # 对严格 special 节点使用 MRV：每次优先处理合法候选最少的节点，
+        # 避免普通 round-robin 提前消耗最后的兼容端口。
+        while True:
+            incomplete_nodes = [
+                node for node in nodes
+                if int(getattr(node, 'su_type', -1)) in {19, 20, 21}
+                and int(node.remaining_hop1_slots()) > 0
+            ]
+            if not incomplete_nodes:
+                break
+
+            ranked = []
+            for node in incomplete_nodes:
+                candidates = [
+                    candidate for candidate in self._get_available_nodes(nodes, priority_list)
+                    if int(candidate.global_id) != int(node.global_id)
+                    and self._can_add_hop1_connection(nodes, node, candidate)
+                ]
+                target_degree = int(getattr(node, 'target_hop1_degree', 0) or 0)
+                is_double = int(str(getattr(node, 'special_anchor_mode', '') or '').startswith('double'))
+                ranked.append((
+                    len(candidates),
+                    -int(node.remaining_hop1_slots()),
+                    -int(target_degree),
+                    -int(is_double),
+                    int(node.global_id),
+                    node,
+                    candidates,
+                ))
+            ranked.sort(key=lambda item: item[:5])
+            _, _, _, _, _, node, candidates = ranked[0]
+            if not candidates:
+                break
+            target = self._choose_weighted_candidate(
+                node,
+                candidates,
                 priority_list,
-                priority_list,
-                salt=760 + int(su_type),
+                nodes=nodes,
             )
+            if target is None or not self._add_bidirectional_hop1(nodes, node.global_id, target.global_id):
+                break
     
     def _complete_unsaturated_saturated_end(self, nodes: List[_NodeV3]):
         """h) 完成不饱和结构的饱和端和4号腈"""
@@ -2834,6 +3294,24 @@ class Layer1Assigner:
     
     def _complete_remaining_aliphatic_aromatic(self, nodes: List[_NodeV3]):
         """i) 完成剩余脂肪碳(22-25)和芳香碳(10-13)"""
+        for terminal_su, partner_su in ((16, 15), (18, 17)):
+            terminal_nodes = [
+                node for node in nodes
+                if int(node.su_type) == int(terminal_su) and int(node.remaining_hop1_slots()) > 0
+            ]
+            for node in terminal_nodes:
+                candidates = [
+                    candidate for candidate in nodes
+                    if int(candidate.su_type) == int(partner_su)
+                    and int(candidate.global_id) != int(node.global_id)
+                    and int(candidate.remaining_hop1_slots()) > 0
+                    and self._can_add_hop1_connection(nodes, node, candidate)
+                ]
+                if not candidates:
+                    continue
+                candidates.sort(key=lambda candidate: (int(candidate.get_hop1_degree()), int(candidate.global_id)))
+                self._add_bidirectional_hop1(nodes, int(node.global_id), int(candidates[0].global_id))
+
         # 先强制补全 11 号的外接脂肪/不饱和端口，避免 19/20/21 与 22/23/24/25
         # 在后续普通补全中被早早占满，导致 SU11 长期停在无外接锚点状态。
         self._complete_required_external_anchors(nodes, [11])
@@ -2910,7 +3388,6 @@ class Layer1Assigner:
                       eval_hwhm: float = 1.0,
                       eval_allow_approx: bool = True,
                       build_variant: int = 0,
-                      seed_nodes: Optional[List[_NodeV3]] = None,
                       enable_carbonyl_joint_adjust: bool = True,
                       carbonyl_joint_iterations: int = 3,
                       carbonyl_joint_max_adjustments: int = 3,
@@ -2920,7 +3397,17 @@ class Layer1Assigner:
                       hop1_adjust_iterations: int = 3,
                       hop1_neg_threshold: float = -0.5,
                       hop1_pos_threshold: float = 0.5,
-                      preserve_seed_node_ids: bool = False) -> List[_NodeV3]:
+                      hop1_adjust_max_candidate_trials: int = 240,
+                      hop1_adjust_max_candidate_nodes_per_su: int = 24,
+                      hop1_adjust_max_alternatives_per_node: int = 4,
+                      hop1_adjust_region_order: Optional[List[str]] = None,
+                      hop1_adjust_max_moves_per_region: int = 8,
+                      hop1_adjust_max_full_evals: int = 32,
+                      profile: str = 'initial',
+                      local_swap_max_attempts: int = 64,
+                      initial_enable_spectral_refine: bool = True,
+                      initial_hop1_adjust_iterations: int = 6,
+                      initial_hop1_adjust_max_candidate_trials: int = 240) -> List[_NodeV3]:
         """
         Layer1: 为每个中心SU分配1-hop邻居
         
@@ -2951,7 +3438,8 @@ class Layer1Assigner:
             hop1_adjust_iterations: 1-hop调整最大迭代次数
             hop1_neg_threshold: 负峰阈值
             hop1_pos_threshold: 正峰阈值
-            preserve_seed_node_ids: 保留seed_nodes中的global_id，用于Block-C逐步结构单元转换
+            profile: initial执行谱图细化；rebuild只执行结构构图。
+            local_swap_max_attempts: 特殊节点局部换边修复预算。
         """
         device = self.device
         H_init = H_init.to(device)
@@ -2959,75 +3447,66 @@ class Layer1Assigner:
         E_target = E_target.to(device)
         self._current_E_target = E_target
         self._build_variant = int(build_variant)
+        profile = str(profile or 'initial').strip().lower()
+        if profile not in {'initial', 'rebuild'}:
+            raise ValueError(f"unsupported Layer1 profile: {profile}")
+        spectral_refine_enabled = bool(profile == 'initial' and initial_enable_spectral_refine)
+        enable_carbonyl_joint_adjust = bool(enable_carbonyl_joint_adjust and spectral_refine_enabled)
+        enable_hop1_adjust = bool(enable_hop1_adjust and spectral_refine_enabled)
+        hop1_adjust_iterations = int(initial_hop1_adjust_iterations)
+        hop1_adjust_max_candidate_trials = int(initial_hop1_adjust_max_candidate_trials)
     
         # 初始化全局节点池
-        nodes = (
-            self._initialize_node_pool_from_seed(H_init, seed_nodes)
-            if bool(preserve_seed_node_ids) and seed_nodes is not None else
-            None
-        )
-        if nodes is None:
-            nodes = self._initialize_node_pool(H_init)
+        nodes = self._initialize_node_pool(H_init)
         self._init_runtime_node_index(nodes)
         print("\n" + "="*60)
         print(f"Layer1: 1-hop分配 ({len(nodes)}个节点)")
         print("="*60)
-        self._restore_seed_topology(nodes, seed_nodes)
-        self._init_runtime_node_index(nodes)
-    
-        # a) 32号X -> 8号/21号
-        self._assign_fixed_halogen_X(nodes)
-        self._init_runtime_node_index(nodes)
-    
-        # b) 31号硫醚 -> 7号/19号
-        self._assign_fixed_thioether_S(nodes)
-        self._init_runtime_node_index(nodes)
-    
-        # c) 0号氨基端、27号 -> 6号/20号
-        self._assign_fixed_amine_N(nodes)
-        self._init_runtime_node_index(nodes)
-    
-        # d) 2号醚端、28号、29号 -> 5号/19号
-        self._assign_fixed_ether_O(nodes)
-        self._init_runtime_node_index(nodes)
-    
-        # e) 0/1/2/3羰基端 -> 9/22/23/24/25/14/15/17
-        self._assign_fixed_carbonyl(nodes)
-        self._init_runtime_node_index(nodes)
-    
-        # f) 14/15/16双键配对，17/18三键配对
-        self._assign_unsaturated_pairs(nodes)
-        self._init_runtime_node_index(nodes)
-    
-        # f2) 26号杂环N和30号杂环S分配
-        self._assign_heterocyclic_NS(nodes)
-        self._init_runtime_node_index(nodes)
-    
-        # f3) 10号芳基取代碳的port3={10}分配
-        self._assign_aryl_connections(nodes)
-    
-        # g) 完成固定连接结构的互为1-hop（芳香结构）
-        self._complete_aromatic_hop1(nodes)
-    
-        # g2) 完成19/20/21号脂肪杂原子碳的剩余1-hop
-        self._complete_aliphatic_hetero_hop1(nodes)
-    
-        # h) 完成不饱和结构的饱和端
-        self._complete_unsaturated_saturated_end(nodes)
-    
-        # i) 完成剩余脂肪碳和芳香碳
-        self._complete_remaining_aliphatic_aromatic(nodes)
 
-        # i2) 兜底修复：尽量补全所有剩余的1-hop槽位
-        self._repair_remaining_hop1_slots(nodes)
+        layer1_t0 = time.perf_counter()
+
+        def _timed_step(label: str, fn, rebuild_index: bool = True) -> None:
+            step_t0 = time.perf_counter()
+            fn()
+            if bool(rebuild_index):
+                self._init_runtime_node_index(nodes)
+            elapsed = time.perf_counter() - step_t0
+            if float(elapsed) >= 0.05:
+                print(f"  [Layer1 Timing] {label}: {elapsed:.2f}s")
+
+        _timed_step("a fixed_halogen_X", lambda: self._assign_fixed_halogen_X(nodes))
+        _timed_step("b fixed_thioether_S", lambda: self._assign_fixed_thioether_S(nodes))
+        _timed_step("c fixed_amine_N", lambda: self._assign_fixed_amine_N(nodes))
+        _timed_step("d fixed_ether_O", lambda: self._assign_fixed_ether_O(nodes))
+        _timed_step("e fixed_carbonyl", lambda: self._assign_fixed_carbonyl(nodes))
+        _timed_step("e2 special_mrv_capacity", lambda: self._complete_special_nodes_mrv(nodes))
+        _timed_step("f unsaturated_pairs", lambda: self._assign_unsaturated_pairs(nodes))
+        _timed_step("f2 heterocyclic_NS", lambda: self._assign_heterocyclic_NS(nodes))
+        _timed_step("f3 aryl_connections", lambda: self._assign_aryl_connections(nodes), rebuild_index=False)
+        _timed_step("g aromatic_hop1", lambda: self._complete_aromatic_hop1(nodes), rebuild_index=False)
+        _timed_step("g2 aliphatic_hetero_hop1", lambda: self._complete_aliphatic_hetero_hop1(nodes), rebuild_index=False)
+        _timed_step("h unsaturated_saturated_end", lambda: self._complete_unsaturated_saturated_end(nodes), rebuild_index=False)
+        _timed_step("i remaining_aliphatic_aromatic", lambda: self._complete_remaining_aliphatic_aromatic(nodes), rebuild_index=False)
+        _timed_step(
+            "i2 repair_remaining_hop1_slots",
+            lambda: self._repair_remaining_hop1_slots(
+                nodes,
+                max_iters=local_swap_max_attempts,
+            ),
+            rebuild_index=False,
+        )
     
         # 一致性验证
+        check_t0 = time.perf_counter()
         is_valid, errors = self.validate_graph_consistency(
             nodes=nodes, 
             H=H_init, 
             E_target=E_target,
             verbose=False
         )
+        check_elapsed = time.perf_counter() - check_t0
+        if float(check_elapsed) >= 0.05:
+            print(f"  [Layer1 Timing] consistency_check: {check_elapsed:.2f}s")
         accept_ok, accept_meta = self.assess_consistency_acceptance(
             errors,
             max_soft_errors=DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS,
@@ -3042,8 +3521,13 @@ class Layer1Assigner:
             )
         hard_structure_invalid = bool(int(accept_meta.get('n_hard', 0)) > 0)
 
-        if eval_lib_path and bool(enable_carbonyl_joint_adjust) and not bool(hard_structure_invalid):
+        if (
+            eval_lib_path
+            and bool(enable_carbonyl_joint_adjust)
+            and not bool(hard_structure_invalid)
+        ):
             try:
+                joint_t0 = time.perf_counter()
                 pre_joint_nodes = copy.deepcopy(nodes)
                 nodes, joint_summary = self.adjust_carbonyl_anchor_jointly(
                     nodes=nodes,
@@ -3058,6 +3542,9 @@ class Layer1Assigner:
                     neg_rel_threshold=float(carbonyl_joint_neg_threshold),
                 )
                 n_joint = int(joint_summary.get('adjustments', 0))
+                joint_elapsed = time.perf_counter() - joint_t0
+                if float(joint_elapsed) >= 0.05:
+                    print(f"  [Layer1 Timing] carbonyl_joint_adjust: {joint_elapsed:.2f}s")
                 if n_joint > 0:
                     print(f"  Carbonyl联合调整: {n_joint}次")
                 joint_ok, joint_errors = self.validate_graph_consistency(
@@ -3085,7 +3572,7 @@ class Layer1Assigner:
             print("  [Carbonyl联合调整跳过] 当前Layer1图仍存在硬结构约束缺口")
         
         # NMR评估
-        if eval_nmr and eval_lib_path:
+        if eval_nmr and eval_lib_path and spectral_refine_enabled:
             round_metrics = {
                 'r2': 0.0,
                 'r2_carbonyl': 0.0,
@@ -3094,6 +3581,7 @@ class Layer1Assigner:
                 'matched_ratio': 0.0,
             }
             try:
+                nmr_t0 = time.perf_counter()
                 round_metrics = self.evaluate_layer1_nmr_with_library(
                     nodes=nodes,
                     S_target=S_target,
@@ -3102,11 +3590,15 @@ class Layer1Assigner:
                     hwhm=eval_hwhm,
                     allow_approx=eval_allow_approx,
                 )
+                nmr_elapsed = time.perf_counter() - nmr_t0
+                if float(nmr_elapsed) >= 0.05:
+                    print(f"  [Layer1 Timing] layer1_nmr_eval: {nmr_elapsed:.2f}s")
             except Exception as e:
                 print(f"  [NMR评估失败] {e}")
         # 可选的1-hop调整（基于差谱分析，Layer1.5）
         if enable_hop1_adjust and not bool(hard_structure_invalid):
             try:
+                hop1_t0 = time.perf_counter()
                 pre_adjust_nodes = copy.deepcopy(nodes)
                 nodes, adjust_summary = self.adjust_hop1_based_on_spectrum(
                     nodes=nodes,
@@ -3119,10 +3611,25 @@ class Layer1Assigner:
                     neg_threshold=hop1_neg_threshold,
                     pos_threshold=hop1_pos_threshold,
                     max_iterations=hop1_adjust_iterations,
+                    max_candidate_trials=hop1_adjust_max_candidate_trials,
+                    max_candidate_nodes_per_su=hop1_adjust_max_candidate_nodes_per_su,
+                    max_alternatives_per_node=hop1_adjust_max_alternatives_per_node,
+                    adjustment_groups=hop1_adjust_region_order,
+                    max_moves_per_region=hop1_adjust_max_moves_per_region,
+                    max_full_evals=hop1_adjust_max_full_evals,
                 )
+                hop1_elapsed = time.perf_counter() - hop1_t0
+                if float(hop1_elapsed) >= 0.05:
+                    print(f"  [Layer1 Timing] hop1_spectrum_adjust: {hop1_elapsed:.2f}s")
                 total_adj = adjust_summary.get('total_adjustments', 0)
                 if total_adj > 0:
                     print(f"  Hop1调整: {total_adj}次")
+                if bool(adjust_summary.get('budget_exhausted', False)):
+                    print(
+                        "  [Hop1调整] 已达到候选评估预算，停止继续尝试: "
+                        f"{int(adjust_summary.get('candidate_trials', 0))}/"
+                        f"{int(adjust_summary.get('candidate_trial_budget', 0))}"
+                    )
                 adjust_ok, adjust_errors = self.validate_graph_consistency(
                     nodes=nodes,
                     H=H_init,
@@ -3147,35 +3654,22 @@ class Layer1Assigner:
         elif bool(enable_hop1_adjust) and bool(hard_structure_invalid):
             print("  [Hop1调整跳过] 当前Layer1图仍存在硬结构约束缺口")
 
+        final_check_t0 = time.perf_counter()
         final_ok, final_errors = self.validate_graph_consistency(
             nodes=nodes,
             H=H_init,
             E_target=E_target,
             verbose=False,
         )
+        final_check_elapsed = time.perf_counter() - final_check_t0
+        if float(final_check_elapsed) >= 0.05:
+            print(f"  [Layer1 Timing] final_consistency_check: {final_check_elapsed:.2f}s")
         final_accept_ok, final_accept_meta = self.assess_consistency_acceptance(
             final_errors,
             max_soft_errors=DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS,
         )
         final_hard_gap = bool(int(final_accept_meta.get('n_hard', 0)) > 0)
         final_soft_overflow = bool(int(final_accept_meta.get('n_soft', 0)) > int(final_accept_meta.get('max_soft_errors', 0)))
-        if (not bool(final_accept_ok)) and (bool(final_hard_gap) or bool(final_soft_overflow)):
-            try:
-                print("  [Layer1 Final Repair] 检测到剩余1-hop缺口，执行最终结构修复")
-                self._complete_required_external_anchors(nodes, [11, 19, 20, 21, 5, 6, 7, 8, 9])
-                self._repair_remaining_hop1_slots(nodes)
-                final_ok, final_errors = self.validate_graph_consistency(
-                    nodes=nodes,
-                    H=H_init,
-                    E_target=E_target,
-                    verbose=False,
-                )
-                final_accept_ok, final_accept_meta = self.assess_consistency_acceptance(
-                    final_errors,
-                    max_soft_errors=DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS,
-                )
-            except Exception as e:
-                print(f"  [Layer1 Final Repair失败] {e}")
         if not final_accept_ok:
             print(f"  [Layer1 Final Check] 仍存在{len(final_errors)}个不一致")
             self._print_consistency_errors(final_errors, prefix='Final')
@@ -3185,9 +3679,34 @@ class Layer1Assigner:
                 f"soft={int(final_accept_meta.get('n_soft', 0))}/{int(final_accept_meta.get('max_soft_errors', 0))}"
             )
 
-        print("Layer1 完成\n")
+        print(f"Layer1 完成 ({time.perf_counter() - layer1_t0:.2f}s)\n")
         
         return nodes
+
+    def precheck_fixed_assignment_feasibility(self,
+                                              H_init: torch.Tensor,
+                                              E_target: torch.Tensor,
+                                              build_variant: int = 0) -> Tuple[bool, str]:
+        """Cheaply reject histogram candidates whose fixed anchors cannot be matched."""
+        H_local = H_init.to(self.device)
+        self._current_E_target = E_target.to(self.device)
+        self._build_variant = int(build_variant)
+        nodes = self._initialize_node_pool(H_local)
+        self._init_runtime_node_index(nodes)
+        steps = (
+            ('halogen', self._assign_fixed_halogen_X),
+            ('thioether', self._assign_fixed_thioether_S),
+            ('amine', self._assign_fixed_amine_N),
+            ('ether', self._assign_fixed_ether_O),
+            ('carbonyl', self._assign_fixed_carbonyl),
+        )
+        for label, fn in steps:
+            try:
+                fn(nodes)
+                self._init_runtime_node_index(nodes)
+            except Exception as exc:
+                return False, f'fixed_assignment_infeasible:{label}:{exc}'
+        return True, 'ok'
 
     def _compute_layer1_difference_spectrum(self,
                                            nodes: List[_NodeV3],
@@ -3281,7 +3800,12 @@ class Layer1Assigner:
                                        neg_threshold: float = -0.5,
                                        pos_threshold: float = 0.5,
                                        max_iterations: int = 3,
-                                       adjustment_groups: Optional[List[str]] = None) -> Tuple[List[_NodeV3], Dict]:
+                                       adjustment_groups: Optional[List[str]] = None,
+                                       max_candidate_trials: int = 240,
+                                       max_candidate_nodes_per_su: int = 24,
+                                       max_alternatives_per_node: int = 4,
+                                       max_moves_per_region: int = 8,
+                                       max_full_evals: int = 32) -> Tuple[List[_NodeV3], Dict]:
         """
         基于差谱分析调整1-hop连接
         
@@ -3318,5 +3842,10 @@ class Layer1Assigner:
             neg_threshold=neg_threshold,
             pos_threshold=pos_threshold,
             max_iterations=max_iterations,
+            max_candidate_trials=max_candidate_trials,
+            max_candidate_nodes_per_su=max_candidate_nodes_per_su,
+            max_alternatives_per_node=max_alternatives_per_node,
+            max_moves_per_region=max_moves_per_region,
+            max_full_evals=max_full_evals,
             adjustment_groups=adjustment_groups,
         )

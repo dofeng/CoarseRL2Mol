@@ -1,17 +1,14 @@
 import torch
 import numpy as np
 import pandas as pd
-import json
 from typing import Tuple, Dict, Optional, List, Any
 from pathlib import Path
 from collections import Counter
 import math
-import io
-from contextlib import redirect_stdout
 
 from ...paths import Z_LIBRARY_DIR
 from ...shared.inverse_common import (
-    SU_ALIPHATIC, E_SU, _NodeV3,
+    E_SU, _NodeV3,
     TERMINAL_PORT_BASE_SU,
     SPECIAL_DEGREE_PRIORS,
     get_aliphatic_carbon_policy,
@@ -20,10 +17,13 @@ from ...shared.inverse_common import (
     normalize_special_degree_meta,
     rebuild_su19_partition_meta,
 )
-from RL_MTCS.RL_allocator import FlexAllocator
-from RL_MTCS.allocator_models import chain_23_count
-from RL_MTCS.RL_init import ClusterGenerator
 from ..layer0.inverse_layer0 import Layer0Estimator
+from ..topology import (
+    apply_stage3_node_adjustments,
+    assemble_topology_units,
+    classify_topology_units,
+    plan_stage3_resource_adjustments,
+)
 from .inverse_layer4_block_a import (
     adjust_block_a_carbonyl_anchor_impl,
 )
@@ -31,35 +31,12 @@ from .inverse_layer4_block_b import (
     adjust_block_b_hetero_anchor_impl,
 )
 from .inverse_layer4_block_c import (
-    adjust_block_c_aliphatic_tail_impl,
-    adjust_block_c_branch_phase_impl,
-    adjust_block_c_extra_phase_impl,
-    run_block_c_topology_closure_loop_impl,
+    adjust_block_b_tail_spectrum_impl,
+    run_block_c_resource_adjustment_loop_impl,
 )
 
 class Layer4Adjuster:
-    """
-    Layer4: 基于差谱的多阶段SU直方图调整器
 
-    当前正式主流程只保留以下阶段：
-    1. block_a: 羰基/锚点修正
-    2. block_b: 异原子锚点修正
-    3. block_c:
-       - tail_diff
-       - branch_topology
-       - extra_global
-
-    Layer4 只负责基于差谱/资源分配做 SU 计数与拓扑修正；
-    Layer0 修正仅用于初始化阶段，不在 Layer4 中重复调用。
-
-    调用侧约定（见 InversePipelineV3.infer）：
-    - block_c / tail_diff 作为候选微调阶段，是否采纳由调用侧的
-      Layer2 improvement gate 决定。
-    - block_c_branch / block_c_extra 是结构与资源修复阶段；
-      只要调用侧完成重跑，就直接采纳该阶段结果，不与 A/B/tail
-      共用 improvement gate。
-    """
-    
     def __init__(self, 
                  device: torch.device = None,
                  layer0_estimator: Optional[Layer0Estimator] = None,
@@ -89,11 +66,8 @@ class Layer4Adjuster:
             self.su_special_degree_ranges_path = su_special_degree_ranges_path
         self._su_common_stats_cache = None
         self._su_special_degree_stats_cache = None
-        # Persist H-adjust rotation state across repeated block_c branch/extra calls.
-        self._h_rotation_state = 0
-        self._rigid10_rotation_state = 0
-        self._h_rotation_aliphatic_cap: Optional[int] = None
-        self._h_rotation_ordinary_aliphatic_cap: Optional[int] = None
+        self._stage3_su11_rotation_index = 0
+        self.fixed_assignment_precheck = None
         self._h_tolerance: float = 0.08
         self._current_S_target: Optional[torch.Tensor] = None
 
@@ -820,7 +794,10 @@ class Layer4Adjuster:
                                      max_moves_mode: Optional[int] = None,
                                      peak_rel_threshold: float = 0.01,
                                      substage: Optional[str] = None,
-                                     nodes: Optional[List[_NodeV3]] = None) -> Tuple[torch.Tensor, List[Dict], Dict]:
+                                     nodes: Optional[List[_NodeV3]] = None,
+                                     tail_spectrum_max_moves: int = 5,
+                                     tail_spectrum_aromatic_couple: bool = True,
+                                     tail_spectrum_h_tolerance: float = 0.08) -> Tuple[torch.Tensor, List[Dict], Dict]:
         return adjust_block_b_hetero_anchor_impl(
             self,
             H,
@@ -833,9 +810,12 @@ class Layer4Adjuster:
             peak_rel_threshold=peak_rel_threshold,
             substage=substage,
             nodes=nodes,
+            tail_spectrum_max_moves=tail_spectrum_max_moves,
+            tail_spectrum_aromatic_couple=tail_spectrum_aromatic_couple,
+            tail_spectrum_h_tolerance=tail_spectrum_h_tolerance,
         )
 
-    def adjust_block_c_aliphatic_tail(self,
+    def adjust_block_b_tail_spectrum(self,
                                       H: torch.Tensor,
                                       ppm: Optional[np.ndarray],
                                       diff: Optional[np.ndarray],
@@ -845,9 +825,9 @@ class Layer4Adjuster:
                                       min_keep_22: int = 1,
                                       min_keep_23: int = 0,
                                       min_keep_24: int = 0,
-                                      carbonyl_couple: bool = True,
+                                      aromatic_couple: bool = True,
                                       h_tolerance: float = 0.08) -> Tuple[torch.Tensor, List[Dict], Dict]:
-        return adjust_block_c_aliphatic_tail_impl(
+        return adjust_block_b_tail_spectrum_impl(
             self,
             H,
             ppm,
@@ -858,304 +838,14 @@ class Layer4Adjuster:
             min_keep_22=min_keep_22,
             min_keep_23=min_keep_23,
             min_keep_24=min_keep_24,
-            carbonyl_couple=carbonyl_couple,
+            aromatic_couple=aromatic_couple,
             h_tolerance=h_tolerance,
         )
 
     # ========================================================================
-    # 辅助方法
-    # ========================================================================
-    
-    # ========================================================================
     # 分阶段调整接口
     # ========================================================================
     
-    def _make_h_helpers(self):
-        def _current_h(tmp: torch.Tensor):
-            meta = self._get_special_degree_meta(tmp)
-            eff = get_effective_hist_element_vector(tmp, special_degree_meta=meta, E_SU_tensor=self.E_SU.cpu())
-            return float(eff[1].item())
-            
-        def _h_ratio(tmp: torch.Tensor):
-            target_H = float(self.E_target[1].item())
-            if target_H <= 0: return 0.0
-            return (_current_h(tmp) - target_H) / target_H
-            
-        def _check_h(tmp: torch.Tensor, tol: float = 0.08):
-            return abs(_h_ratio(tmp)) <= tol
-            
-        def _ali_total(tmp: torch.Tensor):
-            return int(sum(tmp[i].item() for i in SU_ALIPHATIC))
-            
-        return _current_h, _h_ratio, _check_h, _ali_total
-
-    @staticmethod
-    def _can_increase_su12(H_work: torch.Tensor, inc12: int = 1, dec13: int = 0) -> bool:
-        try:
-            n12 = int(H_work[12].item())
-            n13 = int(H_work[13].item())
-        except Exception:
-            return True
-        n12_new = int(n12 + int(inc12))
-        n13_new = int(n13 - int(dec13))
-        return int(n12_new) <= int(max(n13_new, 0))
-
-    @staticmethod
-    def _h_rotation_adjust(tmp_nodes,
-                           H_work,
-                           h_ratio_fn,
-                           rot_idx,
-                           max_ops: Optional[int] = None,
-                           max_aliphatic_total: Optional[int] = None,
-                           max_ordinary_aliphatic_total: Optional[int] = None,
-                           h_tolerance: float = 0.08):
-        ops = []
-        failed_steps = 0
-        max_ops_i = None if max_ops is None else max(0, int(max_ops))
-
-        def _aliphatic_total() -> int:
-            return int(sum(int(H_work[i].item()) for i in SU_ALIPHATIC))
-
-        def _ordinary_aliphatic_total() -> int:
-            return int(sum(int(H_work[i].item()) for i in (22, 23, 24, 25)))
-        
-        tol = max(0.0, float(h_tolerance))
-        while abs(h_ratio_fn(H_work)) > float(tol):
-            if max_ops_i is not None and len(ops) >= int(max_ops_i):
-                break
-            ratio = h_ratio_fn(H_work)
-            step_type = rot_idx % 5
-            success = False
-            
-            if ratio > float(tol):
-                if step_type in [0, 2]:
-                    if not Layer4Adjuster._can_increase_su12(H_work, inc12=1, dec13=1):
-                        rot_idx += 1
-                        failed_steps += 1
-                        if failed_steps >= 5:
-                            print("    [H调整] 连续5步轮转失败，无法继续调H")
-                            break
-                        continue
-                    for n in tmp_nodes:
-                        if n.su_type == 13:
-                            n.su_type = 12
-                            H_work[13] -= 1; H_work[12] += 1
-                            ops.append('H:13->12')
-                            success = True
-                            break
-                elif step_type in [1, 3]:
-                    for n in tmp_nodes:
-                        if n.su_type == 23:
-                            n.su_type = 13
-                            H_work[23] -= 1; H_work[13] += 1
-                            ops.append('H:23->13')
-                            success = True
-                            break
-                elif step_type == 4:
-                    n13 = int(H_work[13].item())
-                    n14 = int(H_work[14].item())
-                    n15 = int(H_work[15].item())
-                    n16 = int(H_work[16].item())
-                    total_unsat = int(n14 + n15 + n16)
-                    min_unsat_pool = 0.05 * float(max(n13, 1))
-                    if float(total_unsat) >= float(min_unsat_pool) and Layer4Adjuster._can_increase_su12(H_work, inc12=1, dec13=0):
-                        pairs = []
-                        if int(n15) >= 1 and int(n16) >= 1 and int(n16 - 1) <= int(n14 + n15 - 1):
-                            pairs.append((15, 16))
-                        if int(n15) >= 2:
-                            pairs.append((15, 15))
-                        if int(n14) >= 1 and int(n15) >= 1 and int(n14) <= int(n15):
-                            pairs.append((14, 15))
-                        for p in pairs:
-                            n_a, n_b = None, None
-                            for n in tmp_nodes:
-                                if n.su_type == p[0] and n_a is None: n_a = n
-                                elif n.su_type == p[1] and n_a != n and n_b is None: n_b = n
-                            if n_a and n_b:
-                                n_a.su_type = 12
-                                n_b.su_type = 13
-                                H_work[p[0]] -= 1; H_work[12] += 1
-                                H_work[p[1]] -= 1; H_work[13] += 1
-                                ops.append(f'H:{p[0]}+{p[1]}->12+13')
-                                success = True
-                                break
-
-            elif ratio < -float(tol):
-                if step_type in [0, 2]:
-                    for n in tmp_nodes:
-                        if n.su_type == 12:
-                            n.su_type = 13
-                            H_work[12] -= 1; H_work[13] += 1
-                            ops.append('H:12->13')
-                            success = True
-                            break
-                elif step_type in [1, 3]:
-                    can_grow_aliphatic = True
-                    if max_aliphatic_total is not None:
-                        can_grow_aliphatic = bool(int(_aliphatic_total()) < int(max_aliphatic_total))
-                    if max_ordinary_aliphatic_total is not None:
-                        can_grow_aliphatic = bool(
-                            can_grow_aliphatic and
-                            int(_ordinary_aliphatic_total()) < int(max_ordinary_aliphatic_total)
-                        )
-                    if can_grow_aliphatic:
-                        for n in tmp_nodes:
-                            if n.su_type == 13:
-                                n.su_type = 23
-                                H_work[13] -= 1; H_work[23] += 1
-                                ops.append('H:13->23')
-                                success = True
-                                break
-                elif step_type == 4:
-                    n12 = int(H_work[12].item())
-                    n13 = int(H_work[13].item())
-                    n14 = int(H_work[14].item())
-                    n15 = int(H_work[15].item())
-                    n16 = int(H_work[16].item())
-                    aro_5_13 = int(sum(int(H_work[i].item()) for i in range(5, 14)))
-                    next_aro_5_13 = max(0, int(aro_5_13 - 2))
-                    unsat_cap = max(0, int(math.floor(0.07 * float(max(next_aro_5_13, 1)))))
-
-                    def _pair_allowed(add14: int, add15: int, add16: int) -> bool:
-                        new14 = int(n14 + add14)
-                        new15 = int(n15 + add15)
-                        new16 = int(n16 + add16)
-                        new_total = int(new14 + new15 + new16)
-                        if int(new_total) > int(unsat_cap):
-                            return False
-                        if int(new14) > int(new15):
-                            return False
-                        if int(new16) > int(new14 + new15):
-                            return False
-                        return True
-
-                    if int(n12) >= 1 and int(n13) >= 1:
-                        pairs = []
-                        if _pair_allowed(0, 2, 0):
-                            pairs.append(((15, 15), 'H:12+13->15+15'))
-                        if _pair_allowed(0, 1, 1):
-                            pairs.append(((15, 16), 'H:12+13->15+16'))
-                        if _pair_allowed(1, 1, 0):
-                            pairs.append(((14, 15), 'H:12+13->14+15'))
-
-                        for (dst_a, dst_b), op_name in pairs:
-                            n_12, n_13 = None, None
-                            for n in tmp_nodes:
-                                if n.su_type == 12 and n_12 is None:
-                                    n_12 = n
-                                elif n.su_type == 13 and n_13 is None:
-                                    n_13 = n
-                                if n_12 is not None and n_13 is not None:
-                                    break
-                            if n_12 is None or n_13 is None:
-                                break
-                            n_12.su_type = int(dst_a)
-                            n_13.su_type = int(dst_b)
-                            H_work[12] -= 1; H_work[int(dst_a)] += 1
-                            H_work[13] -= 1; H_work[int(dst_b)] += 1
-                            ops.append(str(op_name))
-                            success = True
-                            break
-                    
-            rot_idx += 1
-            if success:
-                failed_steps = 0
-            else:
-                failed_steps += 1
-                if failed_steps >= 5:
-                    print("    [H调整] 连续5步轮转失败，无法继续调H")
-                    break
-        return ops, rot_idx
-
-    def _apply_h_rotation_to_counts(self,
-                                    H: torch.Tensor,
-                                    E_target: Optional[torch.Tensor],
-                                    max_ops: Optional[int] = None) -> Tuple[torch.Tensor, List[Dict[str, Any]], Dict[str, Any]]:
-        H_work = torch.clamp(H, min=0).long().clone().cpu()
-        if E_target is None:
-            return H_work.to(H.device), [], {'applied': False, 'reason': 'missing_E_target'}
-
-        self.E_target = E_target.detach().cpu() if hasattr(E_target, 'detach') else E_target
-        tmp_nodes: List[_NodeV3] = []
-        gid = 0
-        for su_idx in range(int(H_work.numel())):
-            count = int(H_work[su_idx].item())
-            for _ in range(max(0, count)):
-                tmp_nodes.append(_NodeV3(gid, int(su_idx)))
-                gid += 1
-
-        _, h_ratio_fn, _, _ = self._make_h_helpers()
-        before_ratio = float(h_ratio_fn(H_work))
-        rot_ops, rot_idx = self._h_rotation_adjust(
-            tmp_nodes,
-            H_work,
-            h_ratio_fn,
-            int(self._h_rotation_state),
-            max_ops=max_ops,
-            max_aliphatic_total=getattr(self, '_h_rotation_aliphatic_cap', None),
-            max_ordinary_aliphatic_total=getattr(self, '_h_rotation_ordinary_aliphatic_cap', None),
-            h_tolerance=float(getattr(self, '_h_tolerance', 0.08)),
-        )
-        self._h_rotation_state = int(rot_idx)
-        after_ratio = float(h_ratio_fn(H_work))
-
-        moves = [{'stage': 'h_rotation', 'op': str(op)} for op in rot_ops]
-        meta = {
-            'applied': bool(rot_ops),
-            'ops': list(rot_ops),
-            'before_ratio': float(before_ratio),
-            'after_ratio': float(after_ratio),
-            'rotation_state': int(self._h_rotation_state),
-            'max_ops': (None if max_ops is None else int(max_ops)),
-        }
-        return H_work.to(H.device), moves, meta
-
-    def _derive_bridgehead_info_from_nodes(self, nodes: List[_NodeV3]) -> Tuple[int, int, int]:
-        node_lookup = self._build_node_lookup(nodes)
-        m, n, p = 0, 0, 0
-        any_hop2 = False
-        for node in nodes:
-            if int(getattr(node, 'su_type', -1)) != 12:
-                continue
-            hop2_counter = self._current_hop2_counter(node, nodes, node_lookup=node_lookup)
-            count_12 = int(hop2_counter.get(12, 0))
-            if int(sum(hop2_counter.values())) > 0:
-                any_hop2 = True
-            if count_12 >= 2:
-                m += 1
-            elif count_12 == 1:
-                n += 1
-            else:
-                p += 1
-        if not any_hop2:
-            p = sum(1 for node in nodes if int(getattr(node, 'su_type', -1)) == 12)
-        return int(m), int(n), int(p)
-
-    def _compute_aromatic_cluster_metrics(self, nodes: List[_NodeV3]) -> Dict[str, Any]:
-        su_counts = Counter()
-        for node in nodes:
-            try:
-                su_counts[int(node.su_type)] += 1
-            except Exception:
-                continue
-        bridgehead_info = self._derive_bridgehead_info_from_nodes(nodes)
-        gen = ClusterGenerator(dict(su_counts), bridgehead_info=bridgehead_info)
-        clusters = gen.generate()
-        kind_counts = Counter(getattr(c, 'kind', 'unknown') for c in clusters)
-        return {
-            'cluster_count': int(len(clusters)),
-            'bridgehead_info': tuple(int(x) for x in bridgehead_info),
-            'converted_13': float(gen.n13),
-            'converted_12': int(gen.n12),
-            'remaining_12': int(gen.remaining_12),
-            'remaining_13': float(gen.remaining_13),
-            'original_12': int(getattr(gen, 'original_12', 0)),
-            'used_12_to_13': int(getattr(gen, 'used_12_to_13', 0)),
-            'used_13_to_12': int(getattr(gen, 'used_13_to_12', 0)),
-            'synthetic_13_topup_used': int(getattr(gen, 'synthetic_13_topup_used', 0)),
-            'cluster_kind_counts': {str(k): int(v) for k, v in sorted(kind_counts.items())},
-        }
-
     def _estimate_aliphatic_upper_bound(self,
                                         S_target: Optional[torch.Tensor],
                                         E_target: Optional[torch.Tensor]) -> Optional[int]:
@@ -1251,13 +941,11 @@ class Layer4Adjuster:
         n12 = int(H_cpu[12].item()) if int(H_cpu.numel()) > 12 else 0
         n13 = int(H_cpu[13].item()) if int(H_cpu.numel()) > 13 else 0
         aromatic_ch_target = int(self._estimate_aromatic_ch_target(S_target, E_target, H_cpu))
-        min13 = max(1 if int(n12 + n13) > 0 else 0, int(math.ceil(0.20 * float(aromatic_ch_target))))
+        min13 = 0
         max12 = int(math.floor(2.5 * float(max(1, int(n13)))))
-        su13_ok = bool(int(n13) >= int(min13))
+        su13_ok = True
         su12_ok = bool(int(n12) <= int(max12))
         reasons: List[str] = []
-        if not bool(su13_ok):
-            reasons.append(f"su13_below_min(count={int(n13)},min={int(min13)},target={int(aromatic_ch_target)})")
         if not bool(su12_ok):
             reasons.append(f"su12_exceeds_ratio(count={int(n12)},max={int(max12)},su13={int(n13)})")
         return {
@@ -1335,7 +1023,9 @@ class Layer4Adjuster:
             n15 + n17 + n22 + 2 * n23 + 3 * n24 + 4 * n25 +
             donor_slots_19a + donor_slots_19b + donor_slots_20 + donor_slots_21
         )
-        su11_external_ok = bool(int(su11_external_slots) >= int(n11))
+        max_supportable_11 = int(su11_external_slots)
+        additional_11_headroom = int(max_supportable_11 - int(n11))
+        su11_external_ok = bool(int(max_supportable_11) >= int(n11))
 
         special_generic_demand = int(donor_slots_19a + donor_slots_19b + donor_slots_20 + donor_slots_21)
         n14 = int(H_cpu[14].item()) if int(H_cpu.numel()) > 14 else 0
@@ -1351,6 +1041,9 @@ class Layer4Adjuster:
             'su11_required': int(n11),
             'su11_external_nodes': int(su11_external_nodes),
             'su11_external_slots': int(su11_external_slots),
+            'max_supportable_11': int(max_supportable_11),
+            'projected_n11_after_delta': int(n11),
+            'additional_11_headroom': int(additional_11_headroom),
             'su11_external_ok': bool(su11_external_ok),
             'special_generic_demand': int(special_generic_demand),
             'special_generic_partner_slots': int(generic_partner_slots),
@@ -1424,12 +1117,14 @@ class Layer4Adjuster:
     def _evaluate_required_hist_constraints(self,
                                             H: torch.Tensor,
                                             E_target: Optional[torch.Tensor],
-                                            S_target: Optional[torch.Tensor] = None) -> Dict[str, Any]:
+                                            S_target: Optional[torch.Tensor] = None,
+                                            enforce_h_rel: bool = True) -> Dict[str, Any]:
         H_cpu = torch.clamp(H, min=0).long().detach().cpu()
         if E_target is None:
             return {
                 'ok': True,
                 'h_ok': True,
+                'h_rel_enforced': bool(enforce_h_rel),
                 'h_rel': 0.0,
                 'h_tol': float(getattr(self, '_h_tolerance', 0.08)),
                 'su22_ok': True,
@@ -1447,15 +1142,11 @@ class Layer4Adjuster:
         E_target_cpu = E_target.detach().cpu().float() if hasattr(E_target, 'detach') else torch.tensor(E_target, dtype=torch.float)
         special_degree_meta = self._get_special_degree_meta(H_cpu)
         E_pred = get_effective_hist_element_vector(H_cpu, special_degree_meta=special_degree_meta, E_SU_tensor=self.E_SU.cpu())
-        target_h = float(E_target_cpu[1].item()) if int(E_target_cpu.numel()) > 1 else 0.0
         current_h = float(E_pred[1].item()) if int(E_pred.numel()) > 1 else 0.0
+        target_h = float(E_target_cpu[1].item()) if int(E_target_cpu.numel()) > 1 else 0.0
         h_tol = float(getattr(self, '_h_tolerance', 0.08))
-        if target_h > 1e-8:
-            h_rel = abs(float(current_h - target_h)) / float(target_h)
-            h_ok = bool(h_rel <= float(h_tol) + 1e-9)
-        else:
-            h_rel = 0.0
-            h_ok = True
+        h_rel = float(abs(float(current_h) - float(target_h)) / max(abs(float(target_h)), 1.0))
+        h_ok = bool(float(h_rel) <= float(h_tol))
 
         n22 = int(H_cpu[22].item()) if int(H_cpu.numel()) > 22 else 0
         n23 = int(H_cpu[23].item()) if int(H_cpu.numel()) > 23 else 0
@@ -1549,7 +1240,12 @@ class Layer4Adjuster:
         ether_ok = bool(int(ether_total) == int(w_ether))
 
         ether_single_d1 = int(ether_single_19.get(1, ether_single_19.get('1', 0)) or 0)
-        ether_single_d1_cap = int(n2 + n29)
+        ether_double_d2 = int(ether_double_19.get(2, ether_double_19.get('2', 0)) or 0)
+        ether_single_d1_raw_cap = int(n2 + n29)
+        ether_single_d1_cap = max(
+            0,
+            int(ether_single_d1_raw_cap) - min(max(0, int(ether_single_d1_raw_cap)), max(0, int(ether_double_d2))),
+        )
         ether_d1_pool_ok = bool(int(ether_single_d1) <= int(ether_single_d1_cap))
         def _nonterminal_anchor_capacity(anchor_types: List[int]) -> int:
             terminal_set = set(int(x) for x in TERMINAL_PORT_BASE_SU)
@@ -1570,7 +1266,12 @@ class Layer4Adjuster:
         amine_single_20 = dict(amine_mode.get('single', {}) or {})
         amine_double_20 = dict(amine_mode.get('double', {}) or {})
         amine_single_d1 = int(amine_single_20.get(1, amine_single_20.get('1', 0)) or 0)
-        amine_single_d1_cap = int(n0 + 2 * n27)
+        amine_double_d2 = int(amine_double_20.get(2, amine_double_20.get('2', 0)) or 0)
+        amine_single_d1_raw_cap = int(n0 + 2 * n27)
+        amine_single_d1_cap = max(
+            0,
+            int(amine_single_d1_raw_cap) - min(max(0, int(amine_single_d1_raw_cap)), max(0, int(amine_double_d2))),
+        )
         amine_d1_pool_ok = bool(int(amine_single_d1) <= int(amine_single_d1_cap))
         amine_double_d3 = int(amine_double_20.get(3, amine_double_20.get('3', 0)) or 0)
         amine_double_d3_cap = int(_nonterminal_anchor_capacity([0, 27]))
@@ -1593,8 +1294,12 @@ class Layer4Adjuster:
         special_generic_ok = bool(layer1_hist_proxy.get('special_generic_ok', True))
 
         reasons: List[str] = []
-        if not bool(h_ok):
-            reasons.append(f"h_rel_exceeds_tol({float(h_rel):.4f}>{float(h_tol):.4f})")
+        h_rel_enforced = bool(enforce_h_rel)
+        if bool(h_rel_enforced) and not bool(h_ok):
+            reasons.append(
+                f"元素H误差过大(预测={float(current_h):.3f},目标={float(target_h):.3f},"
+                f"相对误差={float(h_rel):.6f},容差={float(h_tol):.6f})"
+            )
         if not bool(even10_ok):
             reasons.append("su10_odd")
         if not bool(unsat_even_ok):
@@ -1605,7 +1310,7 @@ class Layer4Adjuster:
             reasons.append(f"ether_fixed_pool_mismatch(total={int(ether_total)},required={int(w_ether)},su19_edges={int(ether_19_edges)})")
         if not bool(ether_d1_pool_ok):
             reasons.append(
-                f"ether_single_d1_pool_exceeded(count={int(ether_single_d1)},cap={int(ether_single_d1_cap)})"
+                f"ether_single_d1_pool_exceeded(count={int(ether_single_d1)},cap={int(ether_single_d1_cap)},raw_cap={int(ether_single_d1_raw_cap)},double_d2={int(ether_double_d2)})"
             )
         if not bool(ether_double_d3_ok):
             reasons.append(
@@ -1621,7 +1326,7 @@ class Layer4Adjuster:
             reasons.append(f"halogen_fixed_pool_mismatch(total={int(halogen_total)},required={int(w_halogen)},su21_edges={int(halogen_21_edges)})")
         if not bool(amine_d1_pool_ok):
             reasons.append(
-                f"amine_single_d1_pool_exceeded(count={int(amine_single_d1)},cap={int(amine_single_d1_cap)})"
+                f"amine_single_d1_pool_exceeded(count={int(amine_single_d1)},cap={int(amine_single_d1_cap)},raw_cap={int(amine_single_d1_raw_cap)},double_d2={int(amine_double_d2)})"
             )
         if not bool(amine_double_d3_ok):
             reasons.append(
@@ -1634,7 +1339,9 @@ class Layer4Adjuster:
         if not bool(su11_external_ok):
             reasons.append(
                 f"su11_external_capacity_short(required={int(layer1_hist_proxy.get('su11_required', 0))},"
-                f"slots={int(layer1_hist_proxy.get('su11_external_slots', 0))})"
+                f"slots={int(layer1_hist_proxy.get('su11_external_slots', 0))},"
+                f"max_supportable_11={int(layer1_hist_proxy.get('max_supportable_11', 0))},"
+                f"projected_n11_after_delta={int(layer1_hist_proxy.get('projected_n11_after_delta', 0))})"
             )
         if not bool(special_generic_ok):
             reasons.append(
@@ -1645,12 +1352,17 @@ class Layer4Adjuster:
 
         return {
             'ok': bool(
-                h_ok and even10_ok and unsat_even_ok and fixed_connection_ok and
+                even10_ok and unsat_even_ok and fixed_connection_ok and
                 su11_external_ok and special_generic_ok and bool(aromatic_balance.get('ok', True))
+                and (bool(h_ok) or not bool(h_rel_enforced))
             ),
             'h_ok': bool(h_ok),
+            'h_rel_enforced': bool(h_rel_enforced),
+            'h_rel_exceeds_tolerance': bool(not bool(h_ok)),
             'h_rel': float(h_rel),
             'h_tol': float(h_tol),
+            'current_h': float(current_h),
+            'target_h': float(target_h),
             'su22_ok': bool(su22_ok),
             'req22': int(req22),
             'n22': int(n22),
@@ -1670,6 +1382,8 @@ class Layer4Adjuster:
             'ether_single_d1_pool_ok': bool(ether_d1_pool_ok),
             'ether_single_d1': int(ether_single_d1),
             'ether_single_d1_cap': int(ether_single_d1_cap),
+            'ether_single_d1_raw_cap': int(ether_single_d1_raw_cap),
+            'ether_double_d2': int(ether_double_d2),
             'ether_double_d3_ok': bool(ether_double_d3_ok),
             'ether_double_d3': int(ether_double_d3),
             'ether_double_d3_cap': int(ether_double_d3_cap),
@@ -1687,6 +1401,8 @@ class Layer4Adjuster:
             'amine_single_d1_pool_ok': bool(amine_d1_pool_ok),
             'amine_single_d1': int(amine_single_d1),
             'amine_single_d1_cap': int(amine_single_d1_cap),
+            'amine_single_d1_raw_cap': int(amine_single_d1_raw_cap),
+            'amine_double_d2': int(amine_double_d2),
             'amine_double_d3_ok': bool(amine_double_d3_ok),
             'amine_double_d3': int(amine_double_d3),
             'amine_double_d3_cap': int(amine_double_d3_cap),
@@ -1699,6 +1415,9 @@ class Layer4Adjuster:
             'su11_required': int(layer1_hist_proxy.get('su11_required', 0)),
             'su11_external_nodes': int(layer1_hist_proxy.get('su11_external_nodes', 0)),
             'su11_external_slots': int(layer1_hist_proxy.get('su11_external_slots', 0)),
+            'max_supportable_11': int(layer1_hist_proxy.get('max_supportable_11', 0)),
+            'projected_n11_after_delta': int(layer1_hist_proxy.get('projected_n11_after_delta', 0)),
+            'su11_headroom': int(layer1_hist_proxy.get('additional_11_headroom', 0)),
             'special_generic_ok': bool(special_generic_ok),
             'special_generic_demand': int(layer1_hist_proxy.get('special_generic_demand', 0)),
             'special_generic_partner_slots': int(layer1_hist_proxy.get('special_generic_partner_slots', 0)),
@@ -1706,1060 +1425,190 @@ class Layer4Adjuster:
             'reasons': list(reasons),
         }
 
-    @staticmethod
-    def _pick_nodes_by_type(nodes: List[_NodeV3], su_type: int, count: int) -> List[_NodeV3]:
-        picked = [n for n in nodes if int(getattr(n, 'su_type', -1)) == int(su_type)]
-        picked.sort(key=lambda n: (int(getattr(n, 'global_id', 0))))
-        return picked[:max(0, int(count))]
-
-    def _apply_node_type_conversion(self,
-                                    nodes: List[_NodeV3],
-                                    src_type: int,
-                                    dst_type: int,
-                                    count: int = 1) -> int:
-        if int(dst_type) < 0:
-            return 0
-        picked = self._pick_nodes_by_type(nodes, int(src_type), int(count))
-        for node in picked:
-            node.su_type = int(dst_type)
-        if picked:
-            self._refresh_node_counters(nodes)
-        return int(len(picked))
-
-    def _apply_post_moves_to_nodes(self,
-                                   nodes: Optional[List[_NodeV3]],
-                                   moves: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if nodes is None:
-            return []
-        synced: List[Dict[str, Any]] = []
-        for mv in list(moves or []):
-            applied = 0
-            if isinstance(mv, dict) and 'from' in mv and 'to' in mv:
-                try:
-                    src = int(mv['from'])
-                    dst = int(mv['to'])
-                except Exception:
-                    src = dst = -999
-                if int(dst) >= 0:
-                    applied = self._apply_node_type_conversion(nodes, src, dst, 1)
-            elif isinstance(mv, dict) and 'op' in mv:
-                op = str(mv.get('op', ''))
-                if op.startswith('H:') and '->' in op:
-                    left, right = op[2:].split('->', 1)
-                    src_parts = [p for p in left.split('+') if p]
-                    dst_parts = [p for p in right.split('+') if p]
-                    if len(src_parts) == len(dst_parts):
-                        ok = True
-                        total = 0
-                        for src_txt, dst_txt in zip(src_parts, dst_parts):
-                            try:
-                                src = int(src_txt)
-                                dst = int(dst_txt)
-                            except Exception:
-                                ok = False
-                                break
-                            n_applied = self._apply_node_type_conversion(nodes, src, dst, 1)
-                            if n_applied <= 0:
-                                ok = False
-                                break
-                            total += int(n_applied)
-                        applied = int(total) if ok else 0
-            if applied > 0:
-                rec = dict(mv)
-                rec['node_sync_applied'] = int(applied)
-                synced.append(rec)
-        return synced
-
-    def _apply_aromatic_cluster_alignment(self,
-                                          nodes: Optional[List[_NodeV3]],
-                                          H_work: torch.Tensor,
-                                          protect_11: bool = False) -> Tuple[torch.Tensor, List[Dict[str, Any]], Dict[str, Any]]:
-        """
-        Materialize ClusterGenerator's 12<->13 balancing on the current node list.
-
-        This keeps the block_c third-phase SU counts closer to the aromatic-cluster model,
-        reducing the need for RL_init.py to silently perform the same conversion later.
-        """
-        H_new = torch.clamp(H_work, min=0).long().clone().cpu()
-        if nodes is None:
-            return H_new.to(H_work.device), [], {'applied': False, 'reason': 'missing_nodes'}
-
-        before = self._compute_aromatic_cluster_metrics(nodes)
-        need_to13 = max(0, int(before.get('used_12_to_13', 0)))
-        need_to12 = max(0, int(before.get('used_13_to_12', 0)))
-        if need_to13 <= 0 and need_to12 <= 0:
-            return H_new.to(H_work.device), [], {
-                'applied': False,
-                'before': before,
-                'after': before,
-                'requested_12_to_13': 0,
-                'requested_13_to_12': 0,
-                'applied_12_to_13': 0,
-                'applied_13_to_12': 0,
-            }
-
-        moves: List[Dict[str, Any]] = []
-
-        def _pick_nodes(src_types: List[int], count: int) -> List[_NodeV3]:
-            picked: List[_NodeV3] = []
-            seen: set[int] = set()
-            for src in src_types:
-                cands = [n for n in nodes if int(getattr(n, 'su_type', -1)) == int(src)]
-                cands.sort(key=lambda n: int(getattr(n, 'global_id', 0)))
-                for node in cands:
-                    gid = int(getattr(node, 'global_id', -1))
-                    if gid in seen:
-                        continue
-                    picked.append(node)
-                    seen.add(gid)
-                    if len(picked) >= int(count):
-                        return picked
-            return picked
-
-        def _convert(node: _NodeV3, dst_su: int) -> bool:
-            src_su = int(getattr(node, 'su_type', -1))
-            dst_su_i = int(dst_su)
-            if int(src_su) == int(dst_su_i):
-                return False
-            if not (0 <= int(src_su) < int(H_new.numel()) and 0 <= int(dst_su_i) < int(H_new.numel())):
-                return False
-            if int(H_new[src_su].item()) <= 0:
-                return False
-            if int(dst_su_i) == 12:
-                dec13 = 1 if int(src_su) == 13 else 0
-                if not self._can_increase_su12(H_new, inc12=1, dec13=int(dec13)):
-                    return False
-            H_new[src_su] -= 1
-            node.su_type = int(dst_su_i)
-            H_new[dst_su_i] += 1
-            return True
-
-        applied_to13 = 0
-        for node in _pick_nodes([12], need_to13):
-            if _convert(node, 13):
-                applied_to13 += 1
-                moves.append({
-                    'stage': 'skeleton_align',
-                    'op': 'ALIGN_12->13',
-                    'from': 12,
-                    'to': 13,
-                    'global_id': int(getattr(node, 'global_id', -1)),
-                })
-
-        applied_to12 = 0
-        src_pool = [13] if bool(protect_11) else [13, 11]
-        for node in _pick_nodes(src_pool, need_to12):
-            src_su = int(getattr(node, 'su_type', -1))
-            if _convert(node, 12):
-                applied_to12 += 1
-                moves.append({
-                    'stage': 'skeleton_align',
-                    'op': f'ALIGN_{src_su}->12',
-                    'from': int(src_su),
-                    'to': 12,
-                    'global_id': int(getattr(node, 'global_id', -1)),
-                })
-
-        self._refresh_node_counters(nodes)
-        after = self._compute_aromatic_cluster_metrics(nodes)
-        return H_new.to(H_work.device), moves, {
-            'applied': bool(moves),
-            'before': before,
-            'after': after,
-            'requested_12_to_13': int(need_to13),
-            'requested_13_to_12': int(need_to12),
-            'applied_12_to_13': int(applied_to13),
-            'applied_13_to_12': int(applied_to12),
-            'protect_11': bool(protect_11),
-        }
-
-    @staticmethod
-    def _compute_flexible_window(cluster_count: int,
-                                 rigid_pairs: int,
-                                 flex_ratio: float,
-                                 flex_lower_extra: int = 1) -> Tuple[int, int, int]:
-        cluster_count_i = max(0, int(cluster_count))
-        rigid_pairs_i = max(0, int(rigid_pairs))
-        z_clusters = max(1, int(cluster_count_i - rigid_pairs_i))
-        flex_lower = max(0, int(z_clusters + int(flex_lower_extra)))
-        flex_upper = max(int(flex_lower), int(math.floor(float(cluster_count_i) * float(flex_ratio))))
-        return int(z_clusters), int(flex_lower), int(flex_upper)
-
-    @staticmethod
-    def _format_chain_spec(chain: Any) -> str:
-        comp = "-".join(str(int(x)) for x in list(getattr(chain, 'composition', []) or []))
-        ctype = str(getattr(chain, 'chain_type', '?'))
-        origin = str(getattr(chain, 'origin_type', '?'))
-        src = list(getattr(chain, 'source_ids', []) or [])
-        meta = getattr(chain, 'metadata', {}) or {}
-        meta_brief = []
-        src_su = list(meta.get('source_su_types', []) or [])
-        src_hop1 = list(meta.get('source_hop1', []) or [])
-        src_eff = list(meta.get('source_effective_kinds', []) or [])
-        src_deg = list(meta.get('source_target_degrees', []) or [])
-        src_modes = list(meta.get('source_anchor_modes', []) or [])
-        actual_topology = [
-            int(x) for x in list(
-                meta.get('actual_topology_su')
-                or meta.get('actual_used_su')
-                or []
-            )
-        ]
-
-        def _raw_node_label(idx: int, su_type: Any, hop1_vals: Any) -> str:
-            try:
-                su_i = int(su_type)
-            except Exception:
-                return str(su_type)
-            try:
-                neighbors = [int(x) for x in list(hop1_vals or [])]
-            except Exception:
-                neighbors = []
-            degree = None
-            if int(idx) < len(src_deg):
-                try:
-                    degree = int(src_deg[int(idx)]) if src_deg[int(idx)] is not None else None
-                except Exception:
-                    degree = None
-            mode = None
-            if int(idx) < len(src_modes):
-                mode_raw = src_modes[int(idx)]
-                mode = str(mode_raw) if mode_raw is not None and str(mode_raw) != 'None' else None
-            center = f"{su_i}d{degree}" if su_i in {19, 20, 21} and degree is not None else str(su_i)
-            if mode:
-                center = f"{center}:{mode}"
-            if len(neighbors) == 2 and su_i in {0, 2, 3, 27, 29, 31}:
-                return f"{neighbors[0]}-{su_i}-{neighbors[1]}"
-            if len(neighbors) == 1 and su_i in {1, 4, 16, 18, 28, 32}:
-                return f"{neighbors[0]}-{su_i}"
-            if neighbors:
-                return f"{center}({','.join(str(x) for x in neighbors)})"
-            return center
-
-        raw_topology = str(meta.get('raw_topology', '') or meta.get('display_topology', '') or '')
-        if not raw_topology and src_su:
-            raw_parts = []
-            for i, su_i in enumerate(src_su):
-                hop1_i = src_hop1[i] if i < len(src_hop1) else []
-                raw_parts.append(_raw_node_label(i, su_i, hop1_i))
-            raw_topology = " + ".join(raw_parts)
-        if not raw_topology:
-            raw_topology = "?"
-        if meta:
-            if 'branch_type' in meta:
-                meta_brief.append(f"branch_type={meta['branch_type']}")
-            if 'tail_source' in meta:
-                meta_brief.append(f"tail={meta['tail_source']}")
-            if 'tail_sources' in meta:
-                meta_brief.append(f"tails={meta['tail_sources']}")
-            if actual_topology:
-                meta_brief.append(f"actual={'-'.join(str(int(x)) for x in actual_topology)}")
-            signature = list(meta.get('chain_port_signature', []) or [])
-            if signature:
-                meta_brief.append(f"signature={'-'.join(str(int(x)) for x in signature)}")
-            if src_su:
-                meta_brief.append(f"src_su={src_su}")
-            if src_eff:
-                meta_brief.append(f"src_eff={src_eff}")
-            if src_deg:
-                meta_brief.append(f"src_deg={src_deg}")
-            if src_modes:
-                meta_brief.append(f"src_mode={src_modes}")
-            if src_hop1:
-                meta_brief.append(f"src_hop1={src_hop1}")
-            usage_exact = bool(meta.get('usage_is_exact', False))
-            gap = dict(meta.get('abstract_resource_gap', {}) or {})
-            consumed_ids = dict(meta.get('consumed_resource_ids', {}) or {})
-            if gap:
-                meta_brief.append(f"trace=gap:{gap}")
-            else:
-                meta_brief.append(f"trace={'exact' if usage_exact else 'unknown'}")
-            if consumed_ids:
-                meta_brief.append(f"used={consumed_ids}")
-            fragment_brief = Layer4Adjuster._format_chain_fragment_brief(meta)
-            if fragment_brief:
-                meta_brief.append(fragment_brief)
-        meta_txt = f" | {', '.join(meta_brief)}" if meta_brief else ""
-        return f"{ctype}/{origin}: effective={comp} | raw={raw_topology} | src={src}{meta_txt}"
-
-    @staticmethod
-    def _compact_count_map(raw: Any) -> Dict[str, int]:
-        return {
-            str(k): int(v)
-            for k, v in dict(raw or {}).items()
-            if int(v) != 0
-        }
-
-    @staticmethod
-    def _fragment_label(fragment: Any) -> str:
-        frag = dict(fragment or {})
-        comp = "-".join(str(int(x)) for x in list(frag.get('composition', []) or []))
-        tag = str(frag.get('source_tag', frag.get('kind', '?')))
-        trace_ids = list(frag.get('trace_ids', []) or [])
-        abstract_counts = Layer4Adjuster._compact_count_map(frag.get('abstract_required_counts', {}) or {})
-        trace_counts = Layer4Adjuster._compact_count_map(frag.get('trace_required_counts', {}) or {})
-        gap_txt = f",abs={abstract_counts}" if abstract_counts else ""
-        trace_txt = f",trace={trace_counts}" if trace_counts else ""
-        ids_txt = f",ids={trace_ids}" if trace_ids else ""
-        return f"{tag}:{comp}{ids_txt}{trace_txt}{gap_txt}"
-
-    @staticmethod
-    def _chain_fragments_from_meta(meta: Dict[str, Any]) -> List[Dict[str, Any]]:
-        fragments: List[Dict[str, Any]] = []
-
-        def _add_fragment(frag: Any, slot_name: Optional[str] = None, branch_type: Optional[str] = None) -> None:
-            if not isinstance(frag, dict):
-                return
-            rec = dict(frag)
-            if slot_name is not None and 'slot_name' not in rec:
-                rec['slot_name'] = str(slot_name)
-            if branch_type is not None and 'branch_type' not in rec:
-                rec['branch_type'] = str(branch_type)
-            fragments.append(rec)
-
-        for frag in list(meta.get('branch_tail_fragments', []) or []):
-            _add_fragment(frag)
-
-        for bf in list(meta.get('branch_fragments', []) or []):
-            if not isinstance(bf, dict):
-                continue
-            slot_name = bf.get('slot_name')
-            branch_type = bf.get('branch_type')
-            tail = bf.get('tail')
-            _add_fragment(tail, slot_name=slot_name, branch_type=branch_type)
-
-        # Keep order but remove exact duplicate JSON records. This prevents the
-        # same TailFragment appearing once in branch_tail_fragments and once
-        # nested under branch_fragments from cluttering final CSVs.
-        out: List[Dict[str, Any]] = []
-        seen = set()
-        for frag in fragments:
-            key = json.dumps(frag, sort_keys=True, ensure_ascii=True, default=str)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(frag)
-        return out
-
-    @staticmethod
-    def _format_chain_fragment_brief(meta: Dict[str, Any], limit: int = 4) -> str:
-        fragments = Layer4Adjuster._chain_fragments_from_meta(dict(meta or {}))
-        if not fragments:
-            return ''
-        shown = [Layer4Adjuster._fragment_label(frag) for frag in fragments[:max(0, int(limit))]]
-        extra = len(fragments) - len(shown)
-        suffix = f";...+{extra}" if extra > 0 else ""
-        return f"fragments=[{';'.join(shown)}{suffix}]"
-
-    @staticmethod
-    def _extract_chain_fragment_rows(chain: Any, section: str, chain_index: int) -> List[Dict[str, Any]]:
-        meta = dict(getattr(chain, 'metadata', {}) or {})
-        rows: List[Dict[str, Any]] = []
-        for frag_idx, frag in enumerate(Layer4Adjuster._chain_fragments_from_meta(meta)):
-            frag = dict(frag or {})
-            rows.append({
-                'section': str(section),
-                'chain_index': int(chain_index),
-                'fragment_index': int(frag_idx),
-                'chain_type': str(getattr(chain, 'chain_type', '')),
-                'origin_type': str(getattr(chain, 'origin_type', '')),
-                'slot_name': str(frag.get('slot_name', '')),
-                'branch_type': str(frag.get('branch_type', '')),
-                'fragment_kind': str(frag.get('kind', '')),
-                'source_tag': str(frag.get('source_tag', '')),
-                'endpoint_role': str(frag.get('endpoint_role', '')),
-                'composition': "-".join(str(int(x)) for x in list(frag.get('composition', []) or [])),
-                'source_ids': json.dumps(list(frag.get('source_ids', []) or []), ensure_ascii=True),
-                'trace_ids': json.dumps(list(frag.get('trace_ids', []) or []), ensure_ascii=True),
-                'trace_required_counts': json.dumps(
-                    Layer4Adjuster._compact_count_map(frag.get('trace_required_counts', {}) or {}),
-                    sort_keys=True,
-                    ensure_ascii=True,
-                ),
-                'abstract_required_counts': json.dumps(
-                    Layer4Adjuster._compact_count_map(frag.get('abstract_required_counts', {}) or {}),
-                    sort_keys=True,
-                    ensure_ascii=True,
-                ),
-                'raw_topology': str(frag.get('raw_topology', '')),
-                'metadata': json.dumps(dict(frag.get('metadata', {}) or {}), sort_keys=True, ensure_ascii=True, default=str),
-            })
-        return rows
-
-    def _extract_allocation_details(self, alloc_res: Any) -> Dict[str, Any]:
-        def _rows(chains: List[Any]) -> List[str]:
-            return [self._format_chain_spec(ch) for ch in list(chains or [])]
-
-        bridge_rows = _rows(getattr(alloc_res, 'bridge_chains', []))
-        side_rows = _rows(getattr(alloc_res, 'side_chains', []))
-        branch_rows = _rows(getattr(alloc_res, 'branch_chains', []))
-        pending_chains = list(getattr(alloc_res, 'pending_closure_topologies', []) or [])
-        pending_rows = _rows(pending_chains)
-
-        def _is_blocking_pending(chain: Any) -> bool:
-            meta = dict(getattr(chain, 'metadata', {}) or {})
-
-            def _flag_true(key: str) -> bool:
-                value = meta.get(str(key))
-                if isinstance(value, str):
-                    return value.strip().lower() in {'1', 'true', 'yes', 'y'}
-                return bool(value)
-
-            if _flag_true('deferred_nonblocking') or _flag_true('ring_builder_deferred'):
-                return False
-            if str(meta.get('unclosed_reason') or '') == 'ring_option_disabled_pending_ring_builder':
-                return False
-            return True
-
-        fallback_blocking_count = sum(1 for chain in pending_chains if _is_blocking_pending(chain))
-        pending_blocking_count = int(getattr(alloc_res, 'pending_closure_count', fallback_blocking_count))
-        pending_total_count = int(getattr(alloc_res, 'pending_closure_total_count', len(pending_rows)))
-        pending_deferred_count = int(getattr(
-            alloc_res,
-            'pending_closure_deferred_count',
-            max(0, pending_total_count - pending_blocking_count),
-        ))
-        fragment_rows: List[Dict[str, Any]] = []
-        for section, chains in (
-            ('bridge', getattr(alloc_res, 'bridge_chains', [])),
-            ('side', getattr(alloc_res, 'side_chains', [])),
-            ('branch', getattr(alloc_res, 'branch_chains', [])),
-            ('pending_closure', getattr(alloc_res, 'pending_closure_topologies', [])),
-        ):
-            for idx, chain in enumerate(list(chains or [])):
-                fragment_rows.extend(self._extract_chain_fragment_rows(chain, section, int(idx)))
-        return {
-            'bridge_count': int(len(bridge_rows)),
-            'side_count': int(len(side_rows)),
-            'branch_count': int(len(branch_rows)),
-            'pending_closure_count': int(pending_blocking_count),
-            'pending_closure_blocking_count': int(pending_blocking_count),
-            'pending_closure_total_count': int(pending_total_count),
-            'pending_closure_deferred_count': int(pending_deferred_count),
-            'bridge_rows': bridge_rows,
-            'side_rows': side_rows,
-            'branch_rows': branch_rows,
-            'pending_closure_rows': pending_rows,
-            'fragment_rows': fragment_rows,
-            'pending_closure_fragment_rows': list(getattr(alloc_res, 'pending_closure_rows', []) or []),
-            'catalog_fragment_rows': list(getattr(alloc_res, 'catalog_fragment_rows', []) or []),
-            'catalog_summary': dict(getattr(alloc_res, 'catalog_summary', {}) or {}),
-        }
-
     def _print_allocation_details(self, alloc_res: Any, header: str = "候选完整资源分配结果（未验收）") -> None:
-        details = self._extract_allocation_details(alloc_res)
-        print(f"\n  [Skeleton-Alloc] {header}")
-        print(
-            f"    Bridge chains: {details['bridge_count']} | "
-            f"Side chains: {details['side_count']} | "
-            f"Branch structures: {details['branch_count']} | "
-            f"Pending closures(blocking/total/deferred): "
-            f"{details['pending_closure_count']}/"
-            f"{details['pending_closure_total_count']}/"
-            f"{details['pending_closure_deferred_count']}"
-        )
-        if details['bridge_rows']:
-            print("    [Bridge]")
-            for idx, row in enumerate(details['bridge_rows']):
-                print(f"      [{idx}] {row}")
-        if details['side_rows']:
-            print("    [Side]")
-            for idx, row in enumerate(details['side_rows']):
-                print(f"      [{idx}] {row}")
-        if details['branch_rows']:
-            print("    [Branch]")
-            for idx, row in enumerate(details['branch_rows']):
-                print(f"      [{idx}] {row}")
-        if details['pending_closure_rows']:
-            print("    [Pending Closure]")
-            for idx, row in enumerate(details['pending_closure_rows']):
-                print(f"      [{idx}] {row}")
-
-    @staticmethod
-    def _extract_resource_ledger(alloc_res: Any) -> Dict[str, Dict[str, int]]:
-        keys = ('11', '22', '23', '24', '25')
-
-        def _get_map(attr_name: str) -> Dict[str, int]:
-            raw = getattr(alloc_res, attr_name, {}) or {}
-            return {
-                str(k): int(raw.get(k, 0))
-                for k in keys
-            }
-
-        return {
-            'native_total': _get_map('native_total_by_kind'),
-            'proxy_total': _get_map('proxy_total_by_kind'),
-            'native_consumed': _get_map('native_consumed_by_kind'),
-            'proxy_consumed': _get_map('proxy_consumed_by_kind'),
-            'native_remaining': _get_map('native_remaining_by_kind'),
-            'proxy_remaining': _get_map('proxy_remaining_by_kind'),
-        }
-
-    @staticmethod
-    def _extract_allocation_usage_ledgers(alloc_res: Any) -> Dict[str, Dict[Any, Any]]:
-        su_keys = sorted(
-            set((getattr(alloc_res, 'source_su_total_counts', {}) or {}).keys()) |
-            set((getattr(alloc_res, 'source_su_consumed_counts', {}) or {}).keys()) |
-            set((getattr(alloc_res, 'source_su_remaining_counts', {}) or {}).keys())
-        )
-        su_ledger = {
-            int(k): {
-                'total': int((getattr(alloc_res, 'source_su_total_counts', {}) or {}).get(k, 0)),
-                'consumed': int((getattr(alloc_res, 'source_su_consumed_counts', {}) or {}).get(k, 0)),
-                'remaining': int((getattr(alloc_res, 'source_su_remaining_counts', {}) or {}).get(k, 0)),
-            }
-            for k in su_keys
-        }
-        return {
-            'source_su_ledger': su_ledger,
-            'section_consumed_by_kind': {
-                str(section): {
-                    str(kind): int(vals.get(kind, 0))
-                    for kind in ('11', '22', '23', '24', '25')
-                }
-                for section, vals in dict(getattr(alloc_res, 'section_consumed_by_kind', {}) or {}).items()
-            },
-            'origin_consumed_by_kind': {
-                str(origin): {
-                    str(kind): int(vals.get(kind, 0))
-                    for kind in ('11', '22', '23', '24', '25')
-                }
-                for origin, vals in dict(getattr(alloc_res, 'origin_consumed_by_kind', {}) or {}).items()
-            },
-            'trace_consumed_by_section_kind': {
-                str(section): {
-                    str(kind): int(vals.get(kind, 0))
-                    for kind in ('11', '22', '23', '24', '25')
-                }
-                for section, vals in dict(getattr(alloc_res, 'trace_consumed_by_section_kind', {}) or {}).items()
-            },
-            'trace_consumed_by_origin_kind': {
-                str(origin): {
-                    str(kind): int(vals.get(kind, 0))
-                    for kind in ('11', '22', '23', '24', '25')
-                }
-                for origin, vals in dict(getattr(alloc_res, 'trace_consumed_by_origin_kind', {}) or {}).items()
-            },
-            'abstract_gap_by_kind': {
-                str(kind): int(value)
-                for kind, value in dict(getattr(alloc_res, 'abstract_gap_by_kind', {}) or {}).items()
-            },
-            'abstract_gap_audit_by_kind': {
-                str(kind): int(value)
-                for kind, value in dict(getattr(alloc_res, 'abstract_gap_audit_by_kind', {}) or {}).items()
-            },
-            'catalog_summary': {
-                str(kind): int(value)
-                for kind, value in dict(getattr(alloc_res, 'catalog_summary', {}) or {}).items()
-            },
-            'trace_exact_chain_count': int(getattr(alloc_res, 'trace_exact_chain_count', 0)),
-            'trace_inexact_chain_count': int(getattr(alloc_res, 'trace_inexact_chain_count', 0)),
-        }
+        print(f"\n  [Topology-Alloc] {header}: 详见新的 final_topology_summary/specs/unclosed_candidates/resource diagnostics")
 
     def _evaluate_full_allocation_balance(self,
                                           nodes: List[_NodeV3],
-                                          flex_ratio: float = 0.80,
-                                          flex_lower_extra: int = 1,
                                           S_target: Optional[torch.Tensor] = None,
                                           E_target: Optional[torch.Tensor] = None) -> Dict[str, Any]:
-        cluster_meta = self._compute_aromatic_cluster_metrics(nodes)
-        cluster_count = int(cluster_meta.get('cluster_count', 0))
-        rigid_pairs = max(0, sum(1 for n in nodes if int(getattr(n, 'su_type', -1)) == 10) // 2)
-        z_clusters, flex_lower, flex_upper = self._compute_flexible_window(
-            cluster_count=cluster_count,
-            rigid_pairs=rigid_pairs,
-            flex_ratio=float(flex_ratio),
-            flex_lower_extra=int(flex_lower_extra),
+        nodes_local = list(nodes or [])
+        classification = classify_topology_units(
+            nodes_local,
+            fixed_partition_meta=getattr(self, "fixed_partition_meta", {}) or {},
         )
-        allocator = FlexAllocator(
-            nodes=nodes,
-            topology_constraints={
-                'flex_lower': int(flex_lower),
-                'flex_upper': int(flex_upper),
-                'flexible_bridge_min': int(flex_lower),
-                'flexible_bridge_limit': int(flex_upper),
-            },
+        assembly = assemble_topology_units(
+            nodes=nodes_local,
+            classification=classification,
+            fixed_partition_meta=getattr(self, "fixed_partition_meta", {}) or {},
+            S_target=S_target,
+            E_target=E_target,
         )
-        with redirect_stdout(io.StringIO()):
-            alloc_res = allocator.allocate()
-        topology_diag = dict(getattr(alloc_res, 'topology_assembly_diagnostics', {}) or {})
-        def _is_flexible_bridge(ch) -> bool:
-            comp = list(getattr(ch, 'composition', []) or [])
-            return len(comp) >= 3 and int(comp[0]) == 11 and int(comp[-1]) == 11 and int(chain_23_count(ch)) >= 1
+        classification_dict = classification.to_dict()
+        assembly_dict = assembly.to_dict()
+        assembly_public = assembly.to_public_dict() if hasattr(assembly, "to_public_dict") else dict(assembly_dict)
+        cls_summary = dict(classification_dict.get("summary", {}) or {})
+        resource_pool = dict(classification_dict.get("resource_pool", {}) or {})
+        assembly_ledger = dict(assembly_public.get("resource_ledger", {}) or {})
+        assembly_remaining = {
+            str(k): int(v)
+            for k, v in dict(assembly_ledger.get("remaining_counts", {}) or {}).items()
+        }
+        assembly_shortage = {
+            str(k): int(v)
+            for k, v in dict(assembly_ledger.get("shortage_counts", {}) or {}).items()
+        }
+        remaining_counts = {
+            str(k): int(v)
+            for k, v in dict(resource_pool.get("remaining_counts", {}) or {}).items()
+        }
+        shortages = list(resource_pool.get("shortages", []) or [])
 
-        def _is_aliphatic_side_to_22(ch) -> bool:
-            comp = list(getattr(ch, 'composition', []) or [])
-            if len(comp) < 3:
-                return False
-            if int(chain_23_count(ch)) < 1:
-                return False
-            return {int(comp[0]), int(comp[-1])} == {11, 22}
+        def _shortage_count(su_type: int) -> int:
+            return int(sum(1 for item in shortages if int(dict(item).get("su_type", -1)) == int(su_type)))
 
-        flexible_bridge_chains = [ch for ch in getattr(alloc_res, 'bridge_chains', []) if _is_flexible_bridge(ch)]
-        flexible_bridge_chains = [
-            ch for ch in flexible_bridge_chains
-            if not dict(getattr(ch, 'metadata', {}) or {}).get('abstract_resource_gap')
+        unclassified_nodes = list(classification_dict.get("unclassified_nodes", []) or [])
+        unclassified_non_resource = [
+            rec for rec in unclassified_nodes
+            if not bool(dict(rec).get("resource_pool_member", False))
         ]
-        branch_flex_count = int(topology_diag.get('flex_count', 0))
-        branch_bridge_in_pool = sum(
-            1 for ch in flexible_bridge_chains
-            if str(getattr(ch, 'chain_type', '')) == 'branch_bridge'
-        )
-        flexible_bridge_count = int(len(flexible_bridge_chains)) + max(
-            0,
-            int(branch_flex_count) - int(branch_bridge_in_pool),
-        )
-        extra_flexible_bridge_count = int(sum(1 for ch in flexible_bridge_chains if str(getattr(ch, 'origin_type', '')) == 'extra'))
-        fixed_flexible_bridge_count = int(max(0, flexible_bridge_count - extra_flexible_bridge_count))
-        side_to_22_count = sum(1 for ch in getattr(alloc_res, 'side_chains', []) if _is_aliphatic_side_to_22(ch))
-        aliphatic_total = int(sum(1 for n in nodes if 19 <= int(getattr(n, 'su_type', -1)) <= 25))
-        oxygenated_aliphatic_total = int(sum(1 for n in nodes if int(getattr(n, 'su_type', -1)) in {19, 20, 21}))
-        ordinary_aliphatic_total = int(sum(1 for n in nodes if int(getattr(n, 'su_type', -1)) in {22, 23, 24, 25}))
-        effective_cluster_count = max(1, int(cluster_count))
-        unallocated_bridge = int(getattr(alloc_res, 'unallocated_bridge', 0))
-        unallocated_branch = int(getattr(alloc_res, 'unallocated_branch', 0))
-        topology_shortage = dict(topology_diag.get('resource_shortage', {}) or {})
-        required_extra_11 = max(int(getattr(alloc_res, 'required_extra_11', 0)), int(topology_shortage.get('11', 0)))
-        required_extra_22 = max(int(getattr(alloc_res, 'required_extra_22', 0)), int(topology_shortage.get('22', 0)))
-        required_extra_23 = max(int(getattr(alloc_res, 'required_extra_23', 0)), int(topology_shortage.get('23', 0)))
-        required_extra_24 = max(int(getattr(alloc_res, 'required_extra_24', 0)), int(topology_shortage.get('24', 0)))
-        required_extra_25 = max(int(getattr(alloc_res, 'required_extra_25', 0)), int(topology_shortage.get('25', 0)))
-        resource_ledger = self._extract_resource_ledger(alloc_res)
-        usage_ledgers = self._extract_allocation_usage_ledgers(alloc_res)
-        allocation_details = self._extract_allocation_details(alloc_res)
-        pending_closure_blocking_count = int(allocation_details.get('pending_closure_count', 0))
-        pending_closure_total_count = int(
-            allocation_details.get('pending_closure_total_count', pending_closure_blocking_count)
-        )
-        abstract_gap_by_kind = {
-            str(k): int(v)
-            for k, v in dict(usage_ledgers.get('abstract_gap_by_kind', {}) or {}).items()
-            if int(v) != 0
-        }
-        abstract_gap_audit_by_kind = {
-            str(k): int(v)
-            for k, v in dict(usage_ledgers.get('abstract_gap_audit_by_kind', {}) or {}).items()
-            if int(v) != 0
-        }
-        trace_inexact_chain_count = int(usage_ledgers.get('trace_inexact_chain_count', 0))
-        trace_exact_ok = not abstract_gap_by_kind and int(trace_inexact_chain_count) == 0
-
-        bounds = self._estimate_aliphatic_region_bounds(S_target, E_target)
-        aliphatic_min = int(bounds.get('total_min', 0))
-        aliphatic_max = int(bounds.get('total_max', 10**9))
-        ordinary_aliphatic_min = int(bounds.get('ordinary_min', 0))
-        ordinary_aliphatic_max = int(bounds.get('ordinary_max', 10**9))
-        oxygenated_aliphatic_min = int(bounds.get('oxygenated_min', 0))
-        oxygenated_aliphatic_max = int(bounds.get('oxygenated_max', 10**9))
-
-        rigid_ok = int(rigid_pairs) < int(effective_cluster_count)
-        flex_hi_ok = int(flexible_bridge_count) <= int(flex_upper)
-        flex_lo_ok = int(flexible_bridge_count) >= int(flex_lower)
-        aliphatic_ok = int(aliphatic_total) >= int(aliphatic_min)
-        aliphatic_hi_ok = int(aliphatic_total) <= int(aliphatic_max)
-        ordinary_aliphatic_ok = int(ordinary_aliphatic_total) >= int(ordinary_aliphatic_min)
-        ordinary_aliphatic_hi_ok = int(ordinary_aliphatic_total) <= int(ordinary_aliphatic_max)
-        oxygenated_aliphatic_ok = int(oxygenated_aliphatic_total) >= int(oxygenated_aliphatic_min)
-        oxygenated_aliphatic_hi_ok = int(oxygenated_aliphatic_total) <= int(oxygenated_aliphatic_max)
-        branch_alloc_ok = int(unallocated_branch) == 0
-        bridge_alloc_ok = int(unallocated_bridge) == 0
-        extra_resource_ok = (
-            int(required_extra_11) == 0 and
-            int(required_extra_22) == 0 and
-            int(required_extra_23) == 0 and
-            int(required_extra_24) == 0 and
-            int(required_extra_25) == 0
-        )
-        topology_ok = bool(topology_diag.get('ok', False))
-        topology_plan_feasible = bool(topology_diag.get('topology_plan_feasible', topology_ok))
-        topology_materialized_ok = bool(topology_diag.get('topology_materialized_ok', topology_ok))
-        materialization_required = bool(topology_diag.get('materialization_required', False))
-        planned_conversions = list(topology_diag.get('planned_conversions', []) or [])
-        planned_conversion_count = int(topology_diag.get('planned_conversion_count', 0) or 0)
-        residual_remaining_by_kind = dict(topology_diag.get('residual_remaining', {}) or {})
-        chain_23_limit_violations = list(topology_diag.get('chain_23_limit_violations', []) or [])
-        backbone_residual = int(getattr(alloc_res, 'remaining_11', 0)) + int(getattr(alloc_res, 'remaining_22', 0)) + int(getattr(alloc_res, 'remaining_23', 0))
-        allowed_backbone_residual = int(topology_diag.get('allowed_backbone_residual', 0))
-        residual_total = int(sum(max(0, int(residual_remaining_by_kind.get(str(k), 0))) for k in ('11', '22', '23', '24', '25')))
-        backbone_residual_ok = int(residual_total if residual_remaining_by_kind else backbone_residual) <= int(allowed_backbone_residual)
-        pending_closure_ok = int(pending_closure_total_count) == 0
-
-        reasons = []
-        warnings = []
-        if not topology_plan_feasible:
-            reasons.append('topology_assembly_failed')
-        if not topology_materialized_ok:
-            reasons.append('topology_not_materialized')
-        if materialization_required:
-            reasons.append('planned_conversion_required')
-        if not bridge_alloc_ok:
-            reasons.append('bridge_unallocated')
-        if not branch_alloc_ok:
-            reasons.append('branch_unallocated')
-        if not pending_closure_ok:
-            reasons.append('pending_closure')
-            warnings.append('pending_closure')
-        if not extra_resource_ok:
-            reasons.append('resource_shortage')
-        if not backbone_residual_ok:
-            reasons.append('backbone_resource_residual')
-        if chain_23_limit_violations:
-            reasons.append('chain_23_limit_violation')
-        if not trace_exact_ok:
-            reasons.append('abstract_topology_gap')
-            warnings.append('abstract_topology_gap')
-        if not rigid_ok:
-            reasons.append('rigid_excess')
-        if not flex_lo_ok:
-            reasons.append('flex_shortage')
-        if not aliphatic_ok:
-            reasons.append('aliphatic_shortage')
-        if not aliphatic_hi_ok:
-            reasons.append('aliphatic_excess')
-        if not ordinary_aliphatic_ok:
-            reasons.append('ordinary_aliphatic_shortage')
-        if not ordinary_aliphatic_hi_ok:
-            reasons.append('ordinary_aliphatic_excess')
-        if not oxygenated_aliphatic_ok:
-            reasons.append('oxygenated_aliphatic_shortage')
-        if not oxygenated_aliphatic_hi_ok:
-            reasons.append('oxygenated_aliphatic_excess')
-        if not flex_hi_ok:
-            reasons.append('flex_excess')
-            warnings.append('flex_excess')
-        reason = 'ok' if not reasons else '+'.join(reasons)
-
+        pending_units = list(assembly_dict.get("pending_units", []) or [])
+        assembly_diag = dict(assembly_dict.get("diagnostics", {}) or {})
         return {
-            'ok': bool(
-                bridge_alloc_ok and
-                branch_alloc_ok and
-                topology_plan_feasible and
-                topology_materialized_ok and
-                not materialization_required and
-                pending_closure_ok and
-                extra_resource_ok and
-                backbone_residual_ok and
-                not chain_23_limit_violations and
-                trace_exact_ok and
-                rigid_ok and
-                flex_hi_ok and
-                flex_lo_ok and
-                aliphatic_ok and
-                aliphatic_hi_ok and
-                ordinary_aliphatic_ok and
-                ordinary_aliphatic_hi_ok and
-                oxygenated_aliphatic_ok and
-                oxygenated_aliphatic_hi_ok
-            ),
-            'reason': str(reason),
-            'warnings': [str(x) for x in warnings],
-            'trace_exact_ok': bool(trace_exact_ok),
-            'topology_assembly_ok': bool(topology_materialized_ok),
-            'topology_plan_feasible': bool(topology_plan_feasible),
-            'topology_materialized_ok': bool(topology_materialized_ok),
-            'materialization_required': bool(materialization_required),
-            'planned_conversions': list(planned_conversions),
-            'planned_conversion_count': int(planned_conversion_count),
-            'residual_growth_actions': list(topology_diag.get('residual_growth_actions', []) or []),
-            'residual_chain_actions': list(topology_diag.get('residual_chain_actions', []) or []),
-            'residual_remaining': dict(residual_remaining_by_kind),
-            'chain_23_limit_violations': list(chain_23_limit_violations),
-            'pending_closure_count': int(pending_closure_blocking_count),
-            'pending_closure_total_count': int(pending_closure_total_count),
-            'pending_closure_blocking_count': int(pending_closure_blocking_count),
-            'pending_closure_deferred_count': int(allocation_details.get('pending_closure_deferred_count', 0)),
-            'pending_closure_ok': bool(pending_closure_ok),
-            'backbone_residual': int(backbone_residual),
-            'backbone_residual_ok': bool(backbone_residual_ok),
-            'allowed_backbone_residual': int(allowed_backbone_residual),
-            'cluster_count': int(cluster_count),
-            'effective_cluster_count': int(effective_cluster_count),
-            'rigid_pairs': int(rigid_pairs),
-            'rigid_cluster_count': int(z_clusters),
-            'rigid_min_flex': int(flex_lower),
-            'flexible_bridge_min': int(flex_lower),
-            'flex_ratio': float(flex_ratio),
-            'flex_lower_extra': int(flex_lower_extra),
-            'flexible_bridge_count': int(flexible_bridge_count),
-            'flex_hi_ok': bool(flex_hi_ok),
-            'flex_lo_ok': bool(flex_lo_ok),
-            'fixed_flexible_bridge_count': int(fixed_flexible_bridge_count),
-            'extra_flexible_bridge_count': int(extra_flexible_bridge_count),
-            'flexible_bridge_limit': int(flex_upper),
-            'side_to_22_count': int(side_to_22_count),
-            'aliphatic_total': int(aliphatic_total),
-            'aliphatic_min_total': int(aliphatic_min),
-            'aliphatic_max_total': int(aliphatic_max),
-            'ordinary_aliphatic_total': int(ordinary_aliphatic_total),
-            'ordinary_aliphatic_min_total': int(ordinary_aliphatic_min),
-            'ordinary_aliphatic_max_total': int(ordinary_aliphatic_max),
-            'oxygenated_aliphatic_total': int(oxygenated_aliphatic_total),
-            'oxygenated_aliphatic_min_total': int(oxygenated_aliphatic_min),
-            'oxygenated_aliphatic_max_total': int(oxygenated_aliphatic_max),
-            'aliphatic_region_bounds': dict(bounds),
-            'cluster_meta': cluster_meta,
-            'allocation_result': alloc_res,
-            'allocation_details': allocation_details,
-            'topology_assembly_diagnostics': dict(topology_diag),
-            'closed_topology_count': int(topology_diag.get('closed_topology_count', 0)),
-            'unclosed_like24_count': int(topology_diag.get('unclosed_like24_count', 0)),
-            'topology_selected_options': list(getattr(alloc_res, 'topology_selected_options', []) or []),
-            'topology_unclosed_candidates': list(getattr(alloc_res, 'topology_unclosed_candidates', []) or []),
-            'recommended_adjustments': list(topology_diag.get('recommended_adjustments', []) or []),
-            'resource_ledger': resource_ledger,
-            'allocation_usage_ledgers': usage_ledgers,
-            'source_su_ledger': dict(usage_ledgers.get('source_su_ledger', {}) or {}),
-            'section_consumed_by_kind': dict(usage_ledgers.get('section_consumed_by_kind', {}) or {}),
-            'origin_consumed_by_kind': dict(usage_ledgers.get('origin_consumed_by_kind', {}) or {}),
-            'trace_consumed_by_section_kind': dict(usage_ledgers.get('trace_consumed_by_section_kind', {}) or {}),
-            'trace_consumed_by_origin_kind': dict(usage_ledgers.get('trace_consumed_by_origin_kind', {}) or {}),
-            'abstract_gap_by_kind': dict(abstract_gap_by_kind),
-            'abstract_gap_audit_by_kind': dict(abstract_gap_audit_by_kind),
-            'catalog_summary': dict(usage_ledgers.get('catalog_summary', {}) or {}),
-            'trace_exact_chain_count': int(usage_ledgers.get('trace_exact_chain_count', 0)),
-            'trace_inexact_chain_count': int(trace_inexact_chain_count),
-            'unallocated_bridge': int(unallocated_bridge),
-            'unallocated_branch': int(unallocated_branch),
-            'required_extra_11': int(required_extra_11),
-            'required_extra_22': int(required_extra_22),
-            'required_extra_23': int(required_extra_23),
-            'required_extra_24': int(required_extra_24),
-            'required_extra_25': int(required_extra_25),
-            'remaining': {
-                '11': int(getattr(alloc_res, 'remaining_11', 0)),
-                '22': int(getattr(alloc_res, 'remaining_22', 0)),
-                '23': int(getattr(alloc_res, 'remaining_23', 0)),
-                '24': int(getattr(alloc_res, 'remaining_24', 0)),
-                '25': int(getattr(alloc_res, 'remaining_25', 0)),
+            "ok": bool(assembly.ok),
+            "reason": str(assembly.reason),
+            "warnings": [] if bool(assembly.ok) else [str(assembly.reason)],
+            "topology_assembly_ok": bool(assembly.ok),
+            "topology_plan_feasible": bool(assembly.feasible),
+            "unrecognized_topology_node_count": int(cls_summary.get("unclassified_non_resource_count", len(unclassified_non_resource)) or 0),
+            "unrecognized_topology_nodes": list(unclassified_non_resource),
+            "pending_closure_total_count": int(len(pending_units)),
+            "required_extra_11": int(assembly_shortage.get("11", _shortage_count(11))),
+            "required_extra_22": int(assembly_shortage.get("22", _shortage_count(22))),
+            "required_extra_23": int(assembly_shortage.get("23", _shortage_count(23))),
+            "required_extra_24": 0,
+            "required_extra_25": 0,
+            "remaining": {
+                "11": int(assembly_remaining.get("11", remaining_counts.get("11", 0))),
+                "22": int(assembly_remaining.get("22", remaining_counts.get("22", 0))),
+                "23": int(assembly_remaining.get("23", remaining_counts.get("23", 0))),
+                "24": int(assembly_remaining.get("24", 0)),
+                "25": 0,
             },
-            'native_remaining': dict(resource_ledger.get('native_remaining', {}) or {}),
-            'proxy_remaining': dict(resource_ledger.get('proxy_remaining', {}) or {}),
-            'native_total': dict(resource_ledger.get('native_total', {}) or {}),
-            'proxy_total': dict(resource_ledger.get('proxy_total', {}) or {}),
-            'native_consumed': dict(resource_ledger.get('native_consumed', {}) or {}),
-            'proxy_consumed': dict(resource_ledger.get('proxy_consumed', {}) or {}),
-        }
-
-    def _adjust_skeleton_branch_allocation(
-        self,
-        H: torch.Tensor,
-        E_target: Optional[torch.Tensor],
-        S_target: Optional[torch.Tensor] = None,
-        ppm: Optional[np.ndarray] = None,
-        diff: Optional[np.ndarray] = None,
-        max_steps: int = 50,
-        nodes: Optional[List[_NodeV3]] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, List[Dict], Dict]:
-        return adjust_block_c_branch_phase_impl(
-            self,
-            H,
-            E_target,
-            S_target=S_target,
-            ppm=ppm,
-            diff=diff,
-            max_steps=max_steps,
-            nodes=nodes,
-            **kwargs,
-        )
-
-    def _adjust_skeleton_extra_allocation(
-        self,
-        H: torch.Tensor,
-        E_target: Optional[torch.Tensor],
-        S_target: Optional[torch.Tensor] = None,
-        ppm: Optional[np.ndarray] = None,
-        diff: Optional[np.ndarray] = None,
-        guided_max_steps: int = 150,
-        relaxed_flexible_ratio: float = 0.82,
-        nodes: Optional[List[_NodeV3]] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, List[Dict], Dict]:
-        return adjust_block_c_extra_phase_impl(
-            self,
-            H,
-            E_target,
-            S_target=S_target,
-            ppm=ppm,
-            diff=diff,
-            guided_max_steps=guided_max_steps,
-            relaxed_flexible_ratio=relaxed_flexible_ratio,
-            nodes=nodes,
-            **kwargs,
-        )
-
-    def _adjust_skeleton_by_allocation(
-        self,
-        H: torch.Tensor,
-        E_target: Optional[torch.Tensor],
-        S_target: Optional[torch.Tensor] = None,
-        ppm: Optional[np.ndarray] = None,
-        diff: Optional[np.ndarray] = None,
-        max_steps: int = 50,
-        nodes: Optional[List[_NodeV3]] = None,
-        phase: str = 'full',
-        **kwargs,
-    ) -> Tuple[torch.Tensor, List[Dict], Dict]:
-        phase_name = str(phase or 'full').strip().lower()
-        H_input = torch.clamp(H, min=0).long().clone().cpu()
-        H_work = H_input.detach().clone()
-        branch_moves: List[Dict[str, Any]] = []
-        branch_meta: Dict[str, Any] = {
-            'n_moves': 0,
-            'ok': True if phase_name == 'extra' else False,
-            'records': [],
-            'phase': 'branch',
-            'skipped': bool(phase_name == 'extra'),
-            'reason': 'phase_extra_only' if phase_name == 'extra' else 'not_run',
-            'final_diag': {},
-            'final_scenario': 'phase_extra_only' if phase_name == 'extra' else 'not_run',
-        }
-
-        if phase_name in ('full', 'branch'):
-            H_work, branch_moves, branch_meta = self._adjust_skeleton_branch_allocation(
-                H=H,
-                E_target=E_target,
-                S_target=S_target,
-                ppm=ppm,
-                diff=diff,
-                max_steps=max_steps,
-                nodes=nodes,
-                **kwargs,
-            )
-
-        all_moves = list(branch_moves)
-        phase_moves: Dict[str, List[Dict[str, Any]]] = {
-            'branch': list(branch_moves),
-            'extra': [],
-            'align': [],
-            'post': [],
-        }
-        H_after_branch = H_work.detach().clone().cpu()
-        final_h_ratio = float(branch_meta.get('final_h_ratio', 0.0))
-
-        if phase_name == 'branch':
-            return H_work, all_moves, {
-                'n_moves': len(all_moves),
-                'ok': bool(branch_meta.get('ok', False)),
-                'branch_ok': bool(branch_meta.get('ok', False)),
-                'extra_ok': True,
-                'partial_progress': bool(branch_meta.get('partial_progress', False)),
-                'initial_penalty': tuple(branch_meta.get('initial_penalty', ()) or ()),
-                'best_penalty': tuple(branch_meta.get('best_penalty', ()) or ()),
-                'final_penalty': tuple(branch_meta.get('final_penalty', ()) or ()),
-                'final_h_ratio': float(final_h_ratio),
-                'records': all_moves,
-                'branch_meta': branch_meta,
-                'extra_meta': {
-                    'n_moves': 0,
-                    'ok': True,
-                    'records': [],
-                    'phase': 'extra',
-                    'skipped': True,
-                    'reason': 'phase_branch_only',
-                },
-                'align_meta': {'applied': False, 'reason': 'phase_branch_only'},
-                'final_diag': dict((branch_meta or {}).get('final_diag', {}) or {}),
-                'final_allocation': {},
-                'post_meta': {'post_changed': False, 'recheck_completed': False},
-                'phase_hists': {
-                    'input': H_input,
-                    'after_branch': H_after_branch,
-                },
-                'phase_moves': phase_moves,
-                'recheck_required': False,
-                'post_changed': False,
-                'phase': 'branch',
-                'final_scenario': str(branch_meta.get('final_scenario', 'branch')),
-            }
-
-        extra_meta: Dict[str, Any] = {
-            'n_moves': 0,
-            'ok': False,
-            'records': [],
-            'phase': 'extra',
-            'skipped': True,
-            'reason': 'branch_not_ok',
-        }
-
-        can_run_extra = bool(phase_name == 'extra' or bool(branch_meta.get('ok', False)))
-        if can_run_extra:
-            extra_kwargs = dict(kwargs)
-            guided_max_steps = int(extra_kwargs.pop('guided_max_steps', max(12, int(max_steps) * 3)))
-            relaxed_flexible_ratio = float(extra_kwargs.pop('relaxed_flexible_ratio', 0.82))
-            H_work, extra_moves, extra_meta = self._adjust_skeleton_extra_allocation(
-                H=H_work,
-                E_target=E_target,
-                S_target=S_target,
-                ppm=ppm,
-                diff=diff,
-                guided_max_steps=guided_max_steps,
-                relaxed_flexible_ratio=relaxed_flexible_ratio,
-                nodes=nodes,
-                **extra_kwargs,
-            )
-            all_moves.extend(extra_moves)
-            extra_phase_moves = dict(extra_meta.get('phase_moves', {}) or {})
-            if extra_phase_moves:
-                phase_moves['extra'].extend(list(extra_phase_moves.get('extra', []) or []))
-                phase_moves['align'].extend(list(extra_phase_moves.get('align', []) or []))
-                phase_moves['post'].extend(list(extra_phase_moves.get('post', []) or []))
-            else:
-                phase_moves['extra'].extend(list(extra_moves))
-        else:
-            print("  [Skeleton-Alloc] 分支资源分配尚未通过，跳过 extra 阶段")
-        extra_phase_hists = dict(extra_meta.get('phase_hists', {}) or {})
-        H_after_extra = extra_phase_hists.get('after_extra', H_work.detach().clone().cpu())
-        H_after_align = extra_phase_hists.get('after_align', H_after_extra)
-        H_after_post = extra_phase_hists.get('after_post', H_after_align)
-
-        if 'final_h_ratio' in extra_meta:
-            final_h_ratio = float(extra_meta['final_h_ratio'])
-
-        branch_ok_for_phase = True if phase_name == 'extra' else bool(branch_meta.get('ok', False))
-        overall_ok = bool(branch_ok_for_phase) and bool(extra_meta.get('ok', False))
-        final_diag = extra_meta.get('final_diag') if bool(can_run_extra) else branch_meta.get('final_diag')
-        align_meta: Dict[str, Any] = dict(extra_meta.get('align_meta', {}) or {})
-        post_meta: Dict[str, Any] = dict(extra_meta.get('post_meta', {}) or {})
-        final_alloc_diag = dict(extra_meta.get('final_allocation', {}) or {})
-        recheck_required = bool(extra_meta.get('recheck_required', False))
-        post_changed = bool(extra_meta.get('post_changed', False))
-        recheck_completed = bool(post_meta.get('recheck_completed', False))
-        final_alloc_ok = bool(final_alloc_diag.get('ok', not bool(post_changed)))
-        overall_ok = bool(overall_ok) and (not bool(recheck_required)) and bool(final_alloc_ok)
-        return H_work, all_moves, {
-            'n_moves': len(all_moves),
-            'ok': overall_ok,
-            'branch_ok': bool(branch_ok_for_phase),
-            'extra_ok': bool(extra_meta.get('ok', False)),
-            'final_h_ratio': final_h_ratio,
-            'records': all_moves,
-            'branch_meta': branch_meta,
-            'extra_meta': extra_meta,
-            'align_meta': align_meta,
-            'final_diag': final_diag,
-            'final_allocation': final_alloc_diag,
-            'post_meta': post_meta,
-            'phase_hists': {
-                'input': H_input,
-                'after_branch': H_after_branch,
-                'after_extra': H_after_extra,
-                'after_align': H_after_align,
-                'after_post': H_after_post,
+            "resource_ledger": assembly_ledger,
+            "topology_assembly_diagnostics": {
+                "fragment_count": int(cls_summary.get("fragment_count", 0) or 0),
+                "closed_fragment_count": int(cls_summary.get("closed_fragment_count", 0) or 0),
+                "open_fragment_count": int(cls_summary.get("open_fragment_count", 0) or 0),
+                "unrecognized_topology_node_count": int(cls_summary.get("unclassified_non_resource_count", len(unclassified_non_resource)) or 0),
+                "class_counts": dict(cls_summary.get("class_counts", {}) or {}),
+                "family_counts": dict(cls_summary.get("family_counts", {}) or {}),
+                "resource_pool": resource_pool,
+                "assembly_reason": str(assembly.reason),
+                "assembly_feasible": bool(assembly.feasible),
+                "flex_bounds": dict(assembly_dict.get("flex_bounds", {}) or {}),
+                "flex_counts": dict(assembly_dict.get("flex_counts", {}) or {}),
+                "product_count": int(len(assembly_dict.get("products", []) or [])),
+                "pending_unit_count": int(len(pending_units)),
+                "assembly": assembly_diag,
             },
-            'phase_moves': phase_moves,
-            'recheck_required': bool(recheck_required),
-            'post_changed': bool(post_changed),
-            'phase': str(phase_name),
-            'final_scenario': (
-                'ok'
-                if overall_ok else (
-                    'branch_not_ok'
-                    if not bool(branch_ok_for_phase)
-                    else str(final_alloc_diag.get('reason', extra_meta.get('reason', 'extra_not_ok')))
-                )
-            ),
+            "planned_conversion_count": int(len(assembly_dict.get("planned_conversions", []) or [])),
+            "closed_topology_count": int(len(assembly_dict.get("products", []) or [])),
         }
+
+    def plan_topology_resource_adjustments(self,
+                                           H: torch.Tensor,
+                                           nodes: List[_NodeV3],
+                                           S_target: Optional[torch.Tensor] = None,
+                                           E_target: Optional[torch.Tensor] = None,
+                                           max_primary_adjustments_per_stage: int = 10,
+                                           max_h_compensation_ops_per_adjustment: int = 8,
+                                           chain_23_limit: int = 6,
+                                           h_tolerance: float = 0.06) -> Any:
+        nodes_local = list(nodes or [])
+        plan = plan_stage3_resource_adjustments(
+            H=H,
+            nodes=nodes_local,
+            fixed_partition_meta=getattr(self, "fixed_partition_meta", {}) or {},
+            S_target=S_target,
+            E_target=E_target,
+            max_primary_adjustments_per_stage=max_primary_adjustments_per_stage,
+            max_h_compensation_ops_per_adjustment=max_h_compensation_ops_per_adjustment,
+            chain_23_limit=chain_23_limit,
+            h_tolerance=h_tolerance,
+            special_degree_meta=self._get_special_degree_meta(H.detach().cpu() if hasattr(H, "detach") else None),
+            su11_rotation_index=int(getattr(self, "_stage3_su11_rotation_index", 0) or 0),
+        )
+        return plan
+
+    def apply_topology_resource_adjustments(self,
+                                            nodes: List[_NodeV3],
+                                            H: torch.Tensor,
+                                            plan: Any) -> Tuple[List[_NodeV3], torch.Tensor]:
+        plan_obj = plan
+        if isinstance(plan, dict):
+            from ..topology.stage3_models import Stage3AdjustmentPlan
+            plan_obj = Stage3AdjustmentPlan(
+                ok=bool(dict(plan).get("ok", False)),
+                reason=str(dict(plan).get("reason", "")),
+                phase=str(dict(plan).get("phase", "")),
+                plan_kind=str(dict(plan).get("plan_kind", "")),
+                pre_assembly_gate=str(dict(plan).get("pre_assembly_gate", "")),
+                active_subphase=str(dict(plan).get("active_subphase", "")),
+                flex_gap=int(dict(plan).get("flex_gap", 0) or 0),
+                resource_deficit={
+                    int(k): int(v)
+                    for k, v in dict(dict(plan).get("resource_deficit", {}) or {}).items()
+                },
+                resource_surplus={
+                    int(k): int(v)
+                    for k, v in dict(dict(plan).get("resource_surplus", {}) or {}).items()
+                },
+                requirement_contracts=list(dict(plan).get("requirement_contracts", []) or []),
+                pending_contracts=list(dict(plan).get("pending_contracts", []) or []),
+                resource_request_breakdown=dict(dict(plan).get("resource_request_breakdown", {}) or {}),
+                minimum_resource_request=dict(dict(plan).get("minimum_resource_request", {}) or {}),
+                contracts_by_contract_kind=dict(dict(plan).get("contracts_by_contract_kind", {}) or {}),
+                blockers_by_kind=dict(dict(plan).get("blockers_by_kind", {}) or {}),
+                resource_request_by_phase=dict(dict(plan).get("resource_request_by_phase", {}) or {}),
+                resource_request_by_pending_kind=dict(dict(plan).get("resource_request_by_pending_kind", {}) or {}),
+                resource_request_by_contract_kind=dict(dict(plan).get("resource_request_by_contract_kind", {}) or {}),
+                resource_request_by_closure_tactic=dict(dict(plan).get("resource_request_by_closure_tactic", {}) or {}),
+                minimum_resource_request_by_contract_kind=dict(dict(plan).get("minimum_resource_request_by_contract_kind", {}) or {}),
+                minimum_resource_request_by_subphase=dict(dict(plan).get("minimum_resource_request_by_subphase", {}) or {}),
+                true_deficit_by_pending_kind=dict(dict(plan).get("true_deficit_by_pending_kind", {}) or {}),
+                true_deficit_by_subphase=dict(dict(plan).get("true_deficit_by_subphase", {}) or {}),
+                true_deficit_by_closure_tactic=dict(dict(plan).get("true_deficit_by_closure_tactic", {}) or {}),
+                partner_request_summary=dict(dict(plan).get("partner_request_summary", {}) or {}),
+                pending_contracts_by_pending_kind=dict(dict(plan).get("pending_contracts_by_pending_kind", {}) or {}),
+                pending_contracts_by_closure_tactic=dict(dict(plan).get("pending_contracts_by_closure_tactic", {}) or {}),
+                resource_rebalance_by_pending_kind=dict(dict(plan).get("resource_rebalance_by_pending_kind", {}) or {}),
+                resource_rebalance_by_closure_tactic=dict(dict(plan).get("resource_rebalance_by_closure_tactic", {}) or {}),
+                resource_rebalance_trace_by_subphase=dict(dict(plan).get("resource_rebalance_trace_by_subphase", {}) or {}),
+                partner_match_requests=dict(dict(plan).get("partner_match_requests", {}) or {}),
+                remaining_external_requirements_by_pending_kind=dict(dict(plan).get("remaining_external_requirements_by_pending_kind", {}) or {}),
+                post_rebalance_remaining_counts=dict(dict(plan).get("post_rebalance_remaining_counts", {}) or {}),
+                resource_rebalance_trace=list(dict(plan).get("resource_rebalance_trace", []) or []),
+                inactive_phases=list(dict(plan).get("inactive_phases", []) or []),
+                dormant_phase_reasons=dict(dict(plan).get("dormant_phase_reasons", {}) or {}),
+                planned_conversions=[],
+                adjustment_bundles=list(dict(plan).get("adjustment_bundles", []) or []),
+                diagnostics=dict(dict(plan).get("diagnostics", {}) or {}),
+                runtime=dict(dict(plan).get("runtime", {}) or {}),
+                requested_counts=dict(dict(plan).get("requested_counts", {}) or {}),
+                unresolved_counts=dict(dict(plan).get("unresolved_counts", {}) or {}),
+                blocked_reason=str(dict(plan).get("blocked_reason", "") or ""),
+            )
+        result = apply_stage3_node_adjustments(nodes=nodes, H=H, plan=plan_obj)
+        if bool(getattr(result, "changed", False)) and list(getattr(result, "applied_ops", []) or []):
+            diagnostics = dict(getattr(plan_obj, "diagnostics", {}) or {})
+            self._stage3_su11_rotation_index = int(
+                diagnostics.get(
+                    "su11_rotation_index_after",
+                    getattr(self, "_stage3_su11_rotation_index", 0),
+                ) or 0
+            )
+        return result
 
     def adjust_by_stage(self,
                        H: torch.Tensor,
@@ -2782,14 +1631,9 @@ class Layer4Adjuster:
                 正式主流程推荐使用:
                 - 'block_a'
                 - 'block_b'
-                - 'block_c'        -> block_c_tail / tail_diff
-                - 'block_c_branch' -> branch_topology
-                - 'block_c_extra'  -> extra_global
+                - 'block_c_resource' -> Stage3 resource-pool conversion plan
             **kwargs:
-                各阶段附加参数。对于 block_c:
-                - block_c_tail: max_moves, peak_rel_threshold, carbonyl_couple, h_tolerance
-                - block_c_branch: max_steps
-                - block_c_extra: guided_max_steps, relaxed_flexible_ratio
+                各阶段附加参数。
                 阶段结果是否采纳由调用侧决定；Layer4 这里只负责生成候选 H 与诊断信息。
         
         Returns:
@@ -2805,16 +1649,14 @@ class Layer4Adjuster:
         H_work = H.clone()
         moves = []
         meta = {}
-        self.E_target = E_target.detach().cpu() if hasattr(E_target, 'detach') else E_target
+        self.E_target = E_target.detach().clone() if hasattr(E_target, 'detach') else E_target
         self._current_S_target = S_target.detach().cpu() if hasattr(S_target, 'detach') else S_target
         if self.layer0_estimator is not None:
             try:
                 self.layer0_estimator._current_S_target = self._current_S_target
             except Exception:
                 pass
-        self._h_rotation_aliphatic_cap = self._estimate_aliphatic_upper_bound(S_target, E_target)
         region_bounds = self._estimate_aliphatic_region_bounds(S_target, E_target)
-        self._h_rotation_ordinary_aliphatic_cap = int(region_bounds.get('ordinary_max', 10**9))
         
         # 1. 执行对应阶段的调整
         if stage == 'block_a':
@@ -2827,6 +1669,7 @@ class Layer4Adjuster:
                 min_keep=kwargs.get('min_keep', 0),
             )
         elif stage == 'block_b':
+            self._h_tolerance = float(kwargs.get('tail_spectrum_h_tolerance', self._h_tolerance))
             H_work, moves, meta = self.adjust_block_b_hetero_anchor(
                 H_work, ppm, diff,
                 max_moves_each=kwargs.get('max_moves_each', 3),
@@ -2836,118 +1679,81 @@ class Layer4Adjuster:
                 peak_rel_threshold=kwargs.get('peak_rel_threshold', 0.01),
                 substage=kwargs.get('block_b_substage'),
                 nodes=kwargs.get('nodes'),
+                tail_spectrum_max_moves=kwargs.get('tail_spectrum_max_moves', 5),
+                tail_spectrum_aromatic_couple=kwargs.get('tail_spectrum_aromatic_couple', True),
+                tail_spectrum_h_tolerance=kwargs.get('tail_spectrum_h_tolerance', 0.08),
             )
-        elif stage == 'block_c':
-            H_work, moves, meta = self.adjust_block_c_aliphatic_tail(
-                H_work, ppm, diff,
-                E_target=E_target,
-                max_moves=kwargs.get('max_moves', 6),
-                peak_rel_threshold=kwargs.get('peak_rel_threshold', 0.01),
-                min_keep_22=kwargs.get('min_keep_22', 1),
-                min_keep_23=kwargs.get('min_keep_23', 0),
-                min_keep_24=kwargs.get('min_keep_24', 0),
-                carbonyl_couple=kwargs.get('carbonyl_couple', True),
-                h_tolerance=kwargs.get('h_tolerance', float(getattr(self, '_h_tolerance', 0.08))),
-            )
-        elif stage in ('block_c_branch', 'block_c_extra'):
-            phase_name = 'branch' if stage == 'block_c_branch' else 'extra'
-            skeleton_kwargs = dict(kwargs)
-            skeleton_max_steps = skeleton_kwargs.pop('max_steps', 40)
-            skeleton_nodes = skeleton_kwargs.pop('nodes', None)
-            H_work, moves, meta = self._adjust_skeleton_by_allocation(
+        elif stage == 'block_c_resource':
+            workflow_result = run_block_c_resource_adjustment_loop_impl(
+                self,
                 H_work,
+                nodes=kwargs.get('nodes'),
                 E_target=E_target,
                 S_target=S_target,
-                ppm=ppm,
-                diff=diff,
-                max_steps=skeleton_max_steps,
-                nodes=skeleton_nodes,
-                phase=phase_name,
-                **skeleton_kwargs,
+                rebuild_fn=kwargs.get('rebuild_fn'),
+                validate_fn=kwargs.get('validate_fn'),
+                output_dir=kwargs.get('output_dir'),
+                max_stage3_iterations=kwargs.get('max_stage3_iterations', 8),
+                max_primary_adjustments_per_stage=kwargs.get('max_primary_adjustments_per_stage', 10),
             )
+            H_work = torch.clamp(getattr(workflow_result, 'H', H_work).detach().clone(), min=0).long()
+            meta = workflow_result.to_dict()
+            moves = []
+            for cycle in list(getattr(workflow_result, 'cycles', []) or []):
+                diag = dict(getattr(cycle, 'diagnostics', {}) or {})
+                moves.extend(list(diag.get('planned_conversions', []) or []))
             meta['h_rotation_meta'] = {
                 'applied': False,
-                'reason': 'handled_inside_block_c_skeleton',
+                'reason': 'stage3_resource_adjustment_only',
             }
-            summary_label = 'BLOCK_C-BRANCH' if phase_name == 'branch' else 'BLOCK_C-EXTRA'
-            self._print_hist_change_summary(summary_label, H_input, torch.clamp(H_work, min=0).long().cpu())
-            self._print_move_summary(summary_label, moves)
-            self._print_stage_distribution_summary(f"{summary_label} final_literal_vs_effective", torch.clamp(H_work, min=0).long().cpu())
-            phase_hists = meta.get('phase_hists', {}) or {}
-            phase_moves = meta.get('phase_moves', {}) or {}
-            if phase_hists:
-                for label, before_key, after_key in (
-                    ('BLOCK_C-BRANCH', 'input', 'after_branch'),
-                    ('BLOCK_C-EXTRA', 'after_branch', 'after_extra'),
-                    ('BLOCK_C-ALIGN', 'after_extra', 'after_align'),
-                    ('BLOCK_C-POST', 'after_align', 'after_post'),
-                ):
-                    before = phase_hists.get(before_key)
-                    after = phase_hists.get(after_key)
-                    if before is None or after is None:
-                        continue
-                    self._print_hist_change_summary(str(label), before, after)
-                    self._print_stage_distribution_summary(f"{str(label)} after_literal_vs_effective", after)
-            for label, key in (
-                ('BLOCK_C-BRANCH', 'branch'),
-                ('BLOCK_C-EXTRA', 'extra'),
-                ('BLOCK_C-ALIGN', 'align'),
-                ('BLOCK_C-POST', 'post'),
-            ):
-                self._print_move_summary(str(label), list(phase_moves.get(key, []) or []))
-            print(f"\n{summary_label}候选调整完成: 共{len(moves)}次变更")
+            self._print_hist_change_summary('BLOCK_C-RESOURCE', H_input, torch.clamp(H_work, min=0).long().cpu())
+            self._print_move_summary('BLOCK_C-RESOURCE', moves)
+            self._print_stage_distribution_summary('BLOCK_C-RESOURCE final_literal_vs_effective', torch.clamp(H_work, min=0).long().cpu())
+            print(f"\nBLOCK_C-RESOURCE候选调整完成: 共{len(moves)}次变更")
             return H_work, moves, meta
 
         else:
             print(f"  [警告] 未知的调整阶段: {stage}")
             return H_work, moves, meta
 
-        try:
-            H_work, hrot_moves, hrot_meta = self._apply_h_rotation_to_counts(H_work, E_target, max_ops=None)
-            if hrot_moves:
-                moves.extend(hrot_moves)
-            meta['h_rotation_meta'] = hrot_meta
-        except Exception:
-            pass
-        
         self._print_hist_change_summary(stage.upper(), H_input, torch.clamp(H_work, min=0).long().cpu())
         self._print_move_summary(stage.upper(), moves)
         self._print_stage_distribution_summary(f"{stage.upper()} final_literal_vs_effective", torch.clamp(H_work, min=0).long().cpu())
         print(f"\n{stage.upper()}阶段调整完成: 共{len(moves)}次变更")
         return H_work, moves, meta
 
-    def run_block_c_topology_closure_loop(
+    def run_block_c_resource_adjustment_loop(
         self,
-        nodes: List[_NodeV3],
+        H: torch.Tensor,
+        nodes: Optional[List[_NodeV3]],
         E_target: Optional[torch.Tensor],
         S_target: Optional[torch.Tensor] = None,
-        ppm: Optional[np.ndarray] = None,
-        diff: Optional[np.ndarray] = None,
-        max_steps: int = 8,
-        phase: str = 'branch',
-        rebuild_callback=None,
-        keep_unimproved: bool = True,
-        stop_on_cycle: bool = True,
-        show_log: bool = False,
-        return_best_on_exhaustion: bool = True,
-        units_per_step: int = 1,
-        apply_recommendation_count: bool = False,
-    ) -> Tuple[torch.Tensor, List[Dict], Dict]:
-        return run_block_c_topology_closure_loop_impl(
+        rebuild_fn: Any = None,
+        validate_fn: Any = None,
+        output_dir: Optional[str] = None,
+        max_stage3_iterations: int = 8,
+        max_primary_adjustments_per_stage: int = 10,
+        max_h_compensation_ops_per_adjustment: int = 8,
+        chain_23_limit: int = 6,
+        h_tolerance: float = 0.06,
+        outer_cycle: int = 0,
+        iteration_offset: int = 0,
+    ) -> Any:
+        return run_block_c_resource_adjustment_loop_impl(
             self,
+            H=H,
             nodes=nodes,
             E_target=E_target,
             S_target=S_target,
-            ppm=ppm,
-            diff=diff,
-            max_steps=max_steps,
-            phase=phase,
-            rebuild_callback=rebuild_callback,
-            keep_unimproved=keep_unimproved,
-            stop_on_cycle=stop_on_cycle,
-            show_log=show_log,
-            return_best_on_exhaustion=return_best_on_exhaustion,
-            units_per_step=units_per_step,
-            apply_recommendation_count=apply_recommendation_count,
+            rebuild_fn=rebuild_fn,
+            validate_fn=validate_fn,
+            output_dir=output_dir,
+            max_stage3_iterations=max_stage3_iterations,
+            max_primary_adjustments_per_stage=int(max_primary_adjustments_per_stage),
+            max_h_compensation_ops_per_adjustment=int(max_h_compensation_ops_per_adjustment),
+            chain_23_limit=int(chain_23_limit),
+            h_tolerance=float(h_tolerance),
+            outer_cycle=int(outer_cycle),
+            iteration_offset=max(0, int(iteration_offset)),
         )
     

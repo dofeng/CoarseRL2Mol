@@ -262,6 +262,8 @@ class Layer3Estimator:
         approx_hop2_max_iters: Optional[int] = None,
         approx_hop2_max_diff_nodes: int = 5,
         approx_hop2_top_k_templates: int = 80,
+        use_g2s_decoder: bool = False,
+        verbose: bool = True,
     ) -> Tuple[List[_NodeV3], float]:
         lib = self._get_template_library()
         templates = (lib or {}).get('templates', {}) if isinstance(lib, dict) else {}
@@ -277,6 +279,18 @@ class Layer3Estimator:
         total_z_moves = 0
         total_template_moves = 0
 
+        if bool(verbose):
+            print("\n" + "=" * 60)
+            print("Layer3: 潜变量z与模板优化")
+            print("=" * 60)
+            print(
+                "  [Layer3 start] "
+                f"nodes={len(nodes)}, max_iters={int(max_iters)}, "
+                f"approx_template_adjust={bool(enable_approx_hop2_template_adjust)}, "
+                f"approx_iters={approx_hop2_max_iters}, "
+                f"use_g2s_decoder={bool(use_g2s_decoder)}"
+            )
+
         regions = [
             (0.0, 90.0, [22, 23, 24, 25, 19, 20, 21]),
             (90.0, 160.0, [13, 12, 11, 10, 9, 5, 6, 7, 8, 14, 15, 16, 17, 18, 4]),
@@ -284,6 +298,8 @@ class Layer3Estimator:
         ]
 
         for region_lo, region_hi, pri_su in regions:
+            if bool(verbose):
+                print(f"  [Layer3 region] {float(region_lo):.1f}-{float(region_hi):.1f} ppm 开始")
             region_z_moves = 0
             region_tpl_moves = 0
             region_stop_reason = 'completed'
@@ -362,11 +378,17 @@ class Layer3Estimator:
                                 except Exception:
                                     continue
 
-                                decoded = self._decode_mu_pi_from_z(int(n.su_type), z_cand, g_embed)
+                                decoded = (
+                                    self._decode_mu_pi_from_z(int(n.su_type), z_cand, g_embed)
+                                    if bool(use_g2s_decoder)
+                                    else None
+                                )
                                 if decoded is not None:
                                     mu_new, pi_new = decoded
                                 else:
                                     mu_new, pi_new = mu_lib, max(1e-6, pi_lib)
+                                if bool(getattr(self, 'unit_peak_intensity', False)):
+                                    pi_new = 1.0
 
                                 pk_new = self._peak(mu_new, pi_new, ppm_axis, hwhm=float(hwhm))
                                 recon_try = recon
@@ -565,11 +587,17 @@ class Layer3Estimator:
                                     except Exception:
                                         continue
 
-                                    decoded = self._decode_mu_pi_from_z(int(n.su_type), z_cand, g_embed)
+                                    decoded = (
+                                        self._decode_mu_pi_from_z(int(n.su_type), z_cand, g_embed)
+                                        if bool(use_g2s_decoder)
+                                        else None
+                                    )
                                     if decoded is not None:
                                         mu_new, pi_new = decoded
                                     else:
                                         mu_new, pi_new = mu_lib, max(1e-6, pi_lib)
+                                    if bool(getattr(self, 'unit_peak_intensity', False)):
+                                        pi_new = 1.0
 
                                     pk_new = self._peak(mu_new, pi_new, ppm_axis, hwhm=float(hwhm))
                                     recon_try = recon
@@ -649,6 +677,12 @@ class Layer3Estimator:
 
             total_z_moves += int(region_z_moves)
             total_template_moves += int(region_tpl_moves)
+            if bool(verbose):
+                print(
+                    f"  [Layer3 region] {float(region_lo):.1f}-{float(region_hi):.1f} ppm 完成: "
+                    f"z_moves={int(region_z_moves)}, template_moves={int(region_tpl_moves)}, "
+                    f"stop={region_stop_reason}"
+                )
 
         eval_info = evaluate_spectrum_reconstruction(
             S_t,
@@ -675,9 +709,6 @@ class Layer3Estimator:
             })
             df_spec.to_csv(str(out / 'layer3_spectrum.csv'), index=False)
 
-        print("\n" + "=" * 60)
-        print("Layer3: 潜变量z与模板优化")
-        print("=" * 60)
         print(
             f"  最终调整结果: z_moves={int(total_z_moves)}, "
             f"template_moves={int(total_template_moves)}, R²={r2:.4f}, α={alpha:.4f}"

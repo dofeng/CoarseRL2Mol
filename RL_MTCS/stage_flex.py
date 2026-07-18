@@ -1968,12 +1968,11 @@ class FlexStage:
             self._translate_single_cluster(cluster_b, tq, tr)
 
         # 4. 更新节点状态
-        # Mark source and target sites as 11
         site_a = cluster_a.sites[site_a_idx]
         site_b = cluster_b.sites[site_b_idx]
-        site_a.su_type = 11
+        site_a.su_type = self._bridge_endpoint_su(chain_spec, left=True)
         site_a.occupied = True
-        site_b.su_type = 11
+        site_b.su_type = self._bridge_endpoint_su(chain_spec, left=False)
         site_b.occupied = True
 
         # Track flex-used sites for min_gap enforcement
@@ -2086,6 +2085,16 @@ class FlexStage:
 
         self.state.step_count += 1
         return True
+
+    @staticmethod
+    def _bridge_endpoint_su(chain_spec, *, left: bool) -> int:
+        if chain_spec is None:
+            return 11
+        comp = [int(x) for x in list(getattr(chain_spec, "composition", []) or [])]
+        if not comp:
+            return 11
+        su = int(comp[0] if bool(left) else comp[-1])
+        return su if su in {5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 30} else 11
 
     # ==================== Done Check ====================
 

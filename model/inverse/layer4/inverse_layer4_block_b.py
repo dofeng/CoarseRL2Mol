@@ -6,6 +6,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
 from ...shared.inverse_common import TERMINAL_PORT_BASE_SU, terminal_neighbor_count
+from ..special_anchor_evidence import (
+    SU19_DOUBLE_EVIDENCE_WINDOWS,
+    SU19_DOUBLE_SUPPORT_WEIGHT,
+    weighted_su19_double_area,
+)
+from .inverse_layer4_block_c import adjust_block_b_tail_spectrum_impl
 
 
 AROMATIC_ANCHOR_WINDOWS: Dict[int, Tuple[float, float, float]] = {
@@ -21,8 +27,6 @@ MANUAL_SPECIAL_ANCHOR_MODE_WINDOWS: Dict[int, Dict[str, Tuple[float, float, floa
         'single_d1': (50.0, 60.0, 55.0),
         'single_d2': (60.0, 70.0, 65.0),
         'single_d3': (70.0, 90.0, 80.0),
-        'double_d2': (90.0, 100.0, 95.0),
-        'double_d3': (90.0, 100.0, 97.5),
     },
     20: {
         'single_d1': (38.0, 45.0, 41.5),
@@ -634,6 +638,53 @@ def _special_anchor_mode_scores(adjuster: Any,
     manual_by_mode = dict(MANUAL_SPECIAL_ANCHOR_MODE_WINDOWS.get(int(su_type), {}) or {})
     out: Dict[str, Dict[str, float]] = {}
     for mode_name in ('single_d1', 'single_d2', 'single_d3', 'double_d2', 'double_d3'):
+        if int(su_type) == 19 and str(mode_name) in SU19_DOUBLE_EVIDENCE_WINDOWS:
+            spec = dict(SU19_DOUBLE_EVIDENCE_WINDOWS[str(mode_name)])
+            core_lo, core_hi = spec['core']
+            support_lo, support_hi = spec['support']
+            mu = float(spec['mu'])
+            stats_cache: Dict[Tuple[float, float], Dict[str, float]] = {}
+
+            def _stats(lo: float, hi: float) -> Dict[str, float]:
+                key = (float(lo), float(hi))
+                if key not in stats_cache:
+                    stats_cache[key] = _window_score(
+                        adjuster,
+                        ppm_arr,
+                        diff_arr,
+                        float(lo),
+                        float(hi),
+                        mu,
+                    )
+                return stats_cache[key]
+
+            pos = weighted_su19_double_area(
+                lambda lo, hi: float(_stats(lo, hi)['pos']),
+                str(mode_name),
+            )
+            neg_abs = weighted_su19_double_area(
+                lambda lo, hi: float(_stats(lo, hi)['neg_abs']),
+                str(mode_name),
+            )
+            abs_area = weighted_su19_double_area(
+                lambda lo, hi: float(_stats(lo, hi)['abs']),
+                str(mode_name),
+            )
+            out[str(mode_name)] = {
+                'lo': float(support_lo),
+                'hi': float(support_hi),
+                'mu': float(mu),
+                'pos': float(pos),
+                'neg': float(-neg_abs),
+                'neg_abs': float(neg_abs),
+                'score': float(pos - neg_abs),
+                'abs': float(abs_area),
+                'source': 'canonical_core_support',
+                'core_lo': float(core_lo),
+                'core_hi': float(core_hi),
+                'support_weight': float(SU19_DOUBLE_SUPPORT_WEIGHT),
+            }
+            continue
         base = dict(stats_by_mode.get(str(mode_name), {}) or {})
         manual = manual_by_mode.get(str(mode_name))
         if manual is None and not base:
@@ -894,16 +945,34 @@ def _special_mode_fixed_anchor_pool_violation(H: torch.Tensor,
     su_i = int(su_type)
     bucket_txt = str(bucket)
     deg_i = int(degree_i)
+
+    if int(su_i) == 19:
+        ether_single_d1 = int(_mode_bucket_count(anchor_mode_meta, 19, 'ether_single', 1))
+        ether_double_d2 = int(_mode_bucket_count(anchor_mode_meta, 19, 'ether_double', 2))
+        raw_cap = int(H_cpu[2].item()) + int(H_cpu[29].item())
+        cap = max(0, int(raw_cap) - min(max(0, int(raw_cap)), max(0, int(ether_double_d2))))
+        if int(ether_single_d1) > int(cap):
+            return (
+                f"ether_single_d1_pool_exceeded(count={int(ether_single_d1)},cap={int(cap)},"
+                f"raw_cap={int(raw_cap)},double_d2={int(ether_double_d2)})"
+            )
+
+    if int(su_i) == 20:
+        amine_single_d1 = int(_mode_bucket_count(anchor_mode_meta, 20, 'single', 1))
+        amine_double_d2 = int(_mode_bucket_count(anchor_mode_meta, 20, 'double', 2))
+        raw_cap = int(H_cpu[0].item()) + 2 * int(H_cpu[27].item())
+        cap = max(0, int(raw_cap) - min(max(0, int(raw_cap)), max(0, int(amine_double_d2))))
+        if int(amine_single_d1) > int(cap):
+            return (
+                f"amine_single_d1_pool_exceeded(count={int(amine_single_d1)},cap={int(cap)},"
+                f"raw_cap={int(raw_cap)},double_d2={int(amine_double_d2)})"
+            )
+
     count_i = int(_mode_bucket_count(anchor_mode_meta, int(su_i), bucket_txt, int(deg_i)))
     if int(count_i) <= 0:
         return None
 
-    if int(su_i) == 19 and bucket_txt == 'ether_single' and int(deg_i) == 1:
-        cap = int(H_cpu[2].item()) + int(H_cpu[29].item())
-        if int(count_i) > int(cap):
-            return f"ether_single_d1_pool_exceeded(count={int(count_i)},cap={int(cap)})"
-
-    if int(su_i) == 19 and int(deg_i) == 3 and bucket_txt in {'ether_double', 'thio_double'}:
+    if int(su_i) == 19 and int(deg_i) in {2, 3} and bucket_txt in {'ether_double', 'thio_double'}:
         anchor_types = [31] if bucket_txt == 'thio_double' else [2, 28, 29]
         nonterminal_cap = _count_nonterminal_fixed_anchor_capacity(H_cpu, anchor_types)
         if int(count_i) > int(nonterminal_cap):
@@ -912,12 +981,7 @@ def _special_mode_fixed_anchor_pool_violation(H: torch.Tensor,
                 f"su={int(su_i)},bucket={bucket_txt},count={int(count_i)},cap={int(nonterminal_cap)})"
             )
 
-    if int(su_i) == 20 and bucket_txt == 'single' and int(deg_i) == 1:
-        cap = int(H_cpu[0].item()) + 2 * int(H_cpu[27].item())
-        if int(count_i) > int(cap):
-            return f"amine_single_d1_pool_exceeded(count={int(count_i)},cap={int(cap)})"
-
-    if int(su_i) == 20 and int(deg_i) == 3 and bucket_txt == 'double':
+    if int(su_i) == 20 and int(deg_i) in {2, 3} and bucket_txt == 'double':
         nonterminal_cap = _count_nonterminal_fixed_anchor_capacity(H_cpu, [0, 27])
         if int(count_i) > int(nonterminal_cap):
             return (
@@ -1460,6 +1524,7 @@ def adjust_special_anchor_count_impl(
 
     move_specs = [
         ('single_d2', 'single_d2', 'double_d2', 23, 'forward_sd2_sd2_to_dd2'),
+        ('single_d3', 'single_d3', 'double_d3', 24, 'forward_sd3_sd3_to_dd3'),
     ]
 
     def _mode_count(meta_local: Dict[int, Dict[str, Dict[int, int]]], mode_name: str) -> int:
@@ -1633,6 +1698,9 @@ def adjust_special_anchor_count_impl(
         _, direction, (mode_a, mode_b, mode_t, tail_su, op_name) = best
         counts_before = dict(_current_counts_view())
         degree_before = {int(k): int(v) for k, v in dict(degree_meta.get(int(su_type), {}) or {}).items()}
+        H_before = H_new.clone()
+        degree_meta_before = _clone_special_degree_meta(degree_meta)
+        anchor_mode_meta_before = _clone_special_anchor_mode_meta(anchor_mode_meta)
 
         if str(direction) == 'forward':
             _apply_mode_delta(anchor_mode_meta, str(mode_a), -1)
@@ -1654,6 +1722,37 @@ def adjust_special_anchor_count_impl(
                 _apply_degree_delta(degree_meta, 2, +1)
             elif str(mode_a) == 'single_d3' and str(mode_b) == 'single_d3':
                 _apply_degree_delta(degree_meta, 3, +1)
+
+        violation = _special_mode_fixed_anchor_pool_violation(
+            H_new,
+            anchor_mode_meta,
+            int(su_type),
+            'ether_single' if int(su_type) == 19 and str(partition_name) != 'thio' else ('single' if int(su_type) != 19 else 'thio_single'),
+            1,
+        )
+        if violation is not None:
+            H_new = H_before
+            degree_meta = degree_meta_before
+            anchor_mode_meta = anchor_mode_meta_before
+            break
+        target_bucket = (
+            'thio_double'
+            if int(su_type) == 19 and str(partition_name) == 'thio'
+            else ('ether_double' if int(su_type) == 19 else 'double')
+        )
+        target_degree = int(str(mode_t).split('d')[-1])
+        target_violation = _special_mode_fixed_anchor_pool_violation(
+            H_new,
+            anchor_mode_meta,
+            int(su_type),
+            str(target_bucket),
+            int(target_degree),
+        )
+        if target_violation is not None:
+            H_new = H_before
+            degree_meta = degree_meta_before
+            anchor_mode_meta = anchor_mode_meta_before
+            break
 
         _sync_fixed_meta()
         counts_after = dict(_current_counts_view())
@@ -1693,6 +1792,9 @@ def adjust_block_b_hetero_anchor_impl(
     peak_rel_threshold: float = 0.01,
     substage: Optional[str] = None,
     nodes: Optional[List[Any]] = None,
+    tail_spectrum_max_moves: int = 5,
+    tail_spectrum_aromatic_couple: bool = True,
+    tail_spectrum_h_tolerance: float = 0.08,
 ) -> Tuple[torch.Tensor, List[Dict[str, Any]], Dict[str, Any]]:
     print("\n[Block B] 异原子锚点联合调整")
     H_work = torch.clamp(H, min=0).long().clone()
@@ -1778,18 +1880,30 @@ def adjust_block_b_hetero_anchor_impl(
             "max_moves": int(mode_stage_moves),
             "peak_rel_threshold": float(peak_rel_threshold),
         }),
+        ("tail_spectrum", adjust_block_b_tail_spectrum_impl, {
+            "E_target": getattr(adjuster, "E_target", None),
+            "max_moves": int(max(0, min(int(tail_spectrum_max_moves), 5))),
+            "peak_rel_threshold": float(peak_rel_threshold),
+            "min_keep_22": 1,
+            "min_keep_23": 0,
+            "min_keep_24": 0,
+            "aromatic_couple": bool(tail_spectrum_aromatic_couple),
+            "h_tolerance": float(tail_spectrum_h_tolerance),
+        }),
     ]
     for name, fn, kwargs in subcalls:
         if substage_name is not None and str(name) != str(substage_name):
             continue
         partition_meta = dict(getattr(adjuster, 'fixed_partition_meta', {}) or {})
+        H_before_substage = H_work.detach().clone()
         before_balance = _summarize_block_b_balance(H_work, fixed_partition_meta=partition_meta)
-        _print_anchor_mode_snapshot(
-            H_work,
-            fixed_partition_meta=partition_meta,
-            header=f"[Block B/{name}] 模式快照(调整前)",
-            indent="  ",
-        )
+        if str(name) != "tail_spectrum":
+            _print_anchor_mode_snapshot(
+                H_work,
+                fixed_partition_meta=partition_meta,
+                header=f"[Block B/{name}] 模式快照(调整前)",
+                indent="  ",
+            )
         H_work, moves, submeta = fn(
             adjuster,
             H_work,
@@ -1861,13 +1975,32 @@ def adjust_block_b_hetero_anchor_impl(
         except Exception:
             pass
         after_partition_meta = dict(getattr(adjuster, 'fixed_partition_meta', {}) or after_partition_meta)
+        precheck = getattr(adjuster, 'fixed_assignment_precheck', None)
+        if callable(precheck) and (moves or not torch.equal(H_work.detach().cpu(), H_before_substage.detach().cpu())):
+            try:
+                precheck_ok, precheck_reason = precheck(H_work)
+            except Exception as exc:
+                precheck_ok, precheck_reason = False, f"fixed_precheck_exception:{exc}"
+            if not bool(precheck_ok):
+                H_work = H_before_substage
+                moves = []
+                submeta = {
+                    "rejected": True,
+                    "rejection_reason": str(precheck_reason),
+                }
+                after_partition_meta = dict(partition_meta)
+                adjuster.fixed_partition_meta = dict(partition_meta)
+                if getattr(adjuster, 'layer0_estimator', None) is not None:
+                    adjuster.layer0_estimator.fixed_partition_meta = dict(partition_meta)
+                print(f"  [Block B/{name}] 固定连接可行性预检拒绝并回滚: {precheck_reason}")
         after_balance = _summarize_block_b_balance(H_work, fixed_partition_meta=after_partition_meta)
-        _print_anchor_mode_snapshot(
-            H_work,
-            fixed_partition_meta=after_partition_meta,
-            header=f"[Block B/{name}] 模式快照(调整后)",
-            indent="  ",
-        )
+        if str(name) != "tail_spectrum":
+            _print_anchor_mode_snapshot(
+                H_work,
+                fixed_partition_meta=after_partition_meta,
+                header=f"[Block B/{name}] 模式快照(调整后)",
+                indent="  ",
+            )
         meta[name] = submeta
         if isinstance(meta[name], dict):
             meta[name]["balance_before"] = dict(before_balance)
@@ -2136,6 +2269,9 @@ def adjust_ether_2829_conversion_impl(
                 if not branch_moves:
                     continue
                 step_moves.extend(branch_moves)
+            violation = _special_mode_fixed_anchor_pool_violation(H_try, mode_try, 19, 'ether_single', 1)
+            if violation is not None:
+                continue
 
             H_new = H_try
             special_meta = degree_try
@@ -2466,6 +2602,9 @@ def adjust_ether_519_by_difference_impl(
             break
         if int(_ether_edge_total(mode_try, H_try)) != int(W_ether):
             break
+        violation = _special_mode_fixed_anchor_pool_violation(H_try, mode_try, 19, 'ether_single', 1)
+        if violation is not None:
+            break
 
         H_new = H_try
         special_meta = degree_try
@@ -2764,6 +2903,9 @@ def adjust_amine_620_by_difference_impl(
         if not step_moves:
             break
         if int(H_try[6].item()) + int(_fixed_anchor_edge_count(mode_try, 20)) != int(W):
+            break
+        violation = _special_mode_fixed_anchor_pool_violation(H_try, mode_try, 20, 'single', 1)
+        if violation is not None:
             break
         H_new = H_try
         special_meta = degree_try

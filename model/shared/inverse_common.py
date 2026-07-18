@@ -37,6 +37,10 @@ SPECIAL_DEGREE_PRIORS: Dict[int, Dict[int, float]] = {
     21: {2: 0.90, 3: 0.10},
 }
 
+SPECIAL_MODE_FORBIDDEN_NEIGHBORS: Dict[Tuple[int, int], Set[int]] = {
+    (19, 1): {28},
+}
+
 TERMINAL_PORT_BASE_SU: Set[int] = {1, 4, 16, 18, 22, 28, 32}
 
 
@@ -231,6 +235,20 @@ def is_terminal_port_node(node_or_su: Any) -> bool:
 
 def terminal_neighbor_count(neighbors: Iterable[Any]) -> int:
     return int(sum(1 for nb in list(neighbors or []) if is_terminal_port_node(nb)))
+
+
+def violates_special_d3_terminal_limit(su_type: int,
+                                       target_degree: Optional[int],
+                                       neighbors: Iterable[Any]) -> bool:
+    """Return whether a d3 special center would be capped by too many terminals."""
+    try:
+        if int(su_type) not in {19, 20}:
+            return False
+        if target_degree is None or int(target_degree) != 3:
+            return False
+    except Exception:
+        return False
+    return bool(terminal_neighbor_count(neighbors) > 1)
 
 
 def is_single_special_d3_port_node(node_or_su: Any, su_type: Optional[int] = None) -> bool:
@@ -593,6 +611,18 @@ def select_port_patterns_for_degree(port_patterns: Any, degree: Optional[int]) -
         return port_patterns
     signatures = [sig for sig in iter_port_signature_objects(port_patterns) if int(len(sig.ports)) == int(degree)]
     return signatures
+
+
+def get_mode_forbidden_neighbors(su_type: int, target_degree: Optional[int]) -> Set[int]:
+    if target_degree is None:
+        return set()
+    return set(SPECIAL_MODE_FORBIDDEN_NEIGHBORS.get((int(su_type), int(target_degree)), set()))
+
+
+def is_mode_specific_neighbor_forbidden(su_type: int,
+                                        target_degree: Optional[int],
+                                        neighbor_su: int) -> bool:
+    return int(neighbor_su) in get_mode_forbidden_neighbors(int(su_type), target_degree)
 
 
 def get_special_hydrogen_count(su_type: int, degree: Optional[int]) -> Optional[float]:
@@ -1006,8 +1036,22 @@ def validate_connection(center_su: int,
     状态感知的合法性由端口 matcher 负责；这里仅保留类型并集
     和元素预算这类低成本检查，供旧调用点快速剪枝。
     """
-    allowed = SU_FIXED_CONNECTIONS.get(center_su)
-    if allowed is not None and neighbor_su not in allowed:
+    center_i = int(center_su)
+    neighbor_i = int(neighbor_su)
+
+    # 14/15/16 are unsaturated non-aromatic units.  SU15 may use SU11 as a
+    # backbone port; the other aromatic 5-13 ports are forbidden here.
+    if center_i in {14, 16} and 5 <= neighbor_i <= 13:
+        return False
+    if neighbor_i in {14, 16} and 5 <= center_i <= 13:
+        return False
+    if center_i == 15 and 5 <= neighbor_i <= 13 and neighbor_i != 11:
+        return False
+    if neighbor_i == 15 and 5 <= center_i <= 13 and center_i != 11:
+        return False
+
+    allowed = SU_FIXED_CONNECTIONS.get(center_i)
+    if allowed is not None and neighbor_i not in allowed:
         return False
 
     if E_target is not None:
@@ -1433,14 +1477,16 @@ class _NodeV3:
     """
     改进的节点类，存储结构单元节点的完整信息
     """
-    __slots__ = ['global_id', 'su_type', 'hop1_su', 'hop2_su', 'hop1_ids',
+    __slots__ = ['global_id', 'su_type', 'hop1_su', 'hop2_su', 'hop1_ids', 'hop2_ids',
                  'fixed_hop1_ids',
                  'z_vec', 'mu', 'pi', 'z_history', 
                  'constraint_violations', 'score_components', 'template_key',
                  'target_hop1_degree', 'init_target_hop1_degree', 'special_degree_source',
                  'special_anchor_partition',
                  'target_fixed_anchor_count', 'init_target_fixed_anchor_count',
-                 'special_anchor_mode']
+                 'special_anchor_mode', 'stage3_conversion_history',
+                 'stage3_topology_owner_id', 'stage3_topology_role',
+                 'stage3_locked_neighbor_ids', 'stage3_resource_claimed']
     
     def __init__(self, global_id: int, su_type: int,
                  hop1_su: Optional[Counter] = None, 
@@ -1457,6 +1503,7 @@ class _NodeV3:
         self.hop1_su = hop1_su if hop1_su is not None else Counter()
         self.hop2_su = hop2_su if hop2_su is not None else Counter()
         self.hop1_ids = []  # 存储1-hop邻居的全局ID
+        self.hop2_ids = []  # 存储去重后的2-hop邻居全局ID
         self.fixed_hop1_ids = set()  # 存储不可拆除的固定1-hop邻居ID
         self.z_vec = z_vec if z_vec is not None else torch.zeros(16)
         self.mu = mu
@@ -1480,6 +1527,11 @@ class _NodeV3:
         self.special_anchor_mode = (
             str(special_anchor_mode) if special_anchor_mode is not None else None
         )
+        self.stage3_conversion_history = []
+        self.stage3_topology_owner_id = None
+        self.stage3_topology_role = None
+        self.stage3_locked_neighbor_ids = set()
+        self.stage3_resource_claimed = False
     
     @property
     def center_su(self):

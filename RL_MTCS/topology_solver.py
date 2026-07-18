@@ -67,6 +67,12 @@ class ConversionPlanner:
         "23->24": ("23", "24"),
         "23->22": ("23", "22"),
         "23->11": ("23", "11"),
+        "22->11": ("22", "11"),
+        "24->11": ("24", "11"),
+        "11->22": ("11", "22"),
+        "24->22": ("24", "22"),
+        "22->24": ("22", "24"),
+        "11->24": ("11", "24"),
         "12->11": ("12", "11"),
         "13->11": ("13", "11"),
     }
@@ -150,11 +156,11 @@ class ConversionPlanner:
             if deficits["23"] > 0:
                 paths = (("22->23",), ("24->23",), ("11->23",), ("12->11", "11->23"), ("13->11", "11->23"))
             elif deficits["11"] > 0:
-                paths = (("23->11",), ("22->23", "23->11"), ("24->23", "23->11"), ("12->11",), ("13->11",))
+                paths = (("23->11",), ("22->11",), ("24->11",), ("12->11",), ("13->11",))
             elif deficits["22"] > 0:
-                paths = (("23->22",), ("24->23", "23->22"), ("11->23", "23->22"))
+                paths = (("23->22",), ("24->22",), ("11->22",))
             elif deficits["24"] > 0:
-                paths = (("23->24",), ("25->24",), ("22->23", "23->24"), ("11->23", "23->24"))
+                paths = (("23->24",), ("25->24",), ("22->24",), ("11->24",))
             else:
                 return ConversionPlanResult(False, inv, self._merge_conversions(conversions), "25_shortage")
 
@@ -181,9 +187,15 @@ class ResidualPlanResult:
 
 
 class ResidualPlanner:
-    def __init__(self, max_23_per_chain: int = MAX_23_PER_CHAIN, prefer_bridge: bool = False):
+    def __init__(
+        self,
+        max_23_per_chain: int = MAX_23_PER_CHAIN,
+        prefer_bridge: bool = False,
+        allow_conversions: bool = True,
+    ):
         self.max_23_per_chain = max(1, int(max_23_per_chain))
         self.prefer_bridge = bool(prefer_bridge)
+        self.allow_conversions = bool(allow_conversions)
         self.converter = ConversionPlanner()
 
     def plan(self, remaining: Dict[str, int], closed_specs: Sequence[ChainSpec]) -> ResidualPlanResult:
@@ -360,13 +372,24 @@ class ResidualPlanner:
             templates = self._candidate_residual_templates(state)
             for comp in templates:
                 demand = _sequence_cost(comp)
-                cover = self.converter.plan_to_cover(
-                    state,
-                    demand,
-                    phase="residual",
-                    reason="residual_chain_endpoint_or_body",
-                    max_steps=64,
-                )
+                if bool(self.allow_conversions):
+                    cover = self.converter.plan_to_cover(
+                        state,
+                        demand,
+                        phase="residual",
+                        reason="residual_chain_endpoint_or_body",
+                        max_steps=64,
+                    )
+                else:
+                    cover = ConversionPlanResult(
+                        feasible=not any(
+                            int(state.get(str(k), 0)) < int(demand.get(str(k), 0))
+                            for k in RESOURCE_KEYS
+                        ),
+                        inventory=dict(state),
+                        conversions=[],
+                        reason="native_resource_shortage",
+                    )
                 if not bool(cover.feasible):
                     continue
                 next_state = dict(cover.inventory)
@@ -470,8 +493,31 @@ class TopologyAssemblySolver:
         self.converter = ConversionPlanner()
         self.residual = ResidualPlanner(max_23_per_chain=self.max_23_per_chain)
         self.states_seen = 0
+        self.phase_attempts: List[Dict[str, Any]] = []
 
     def solve(self, options: Sequence[Any], pre_consumed: Dict[str, int]) -> SolverResult:
+        self.phase_attempts = []
+        if int(self.flex_lower) > int(self.flex_upper):
+            reason = "flex_window_lower_exceeds_upper"
+            self.phase_attempts.append({
+                "phase": "bounds",
+                "allow_conversions": False,
+                "states_seen": 0,
+                "reason": reason,
+            })
+            return SolverResult(
+                TopologyAssemblyPlan(
+                    feasible=False,
+                    materialized=False,
+                    materialization_required=False,
+                    residual_remaining={str(k): 0 for k in RESOURCE_KEYS},
+                    reason=reason,
+                ),
+                [],
+                [],
+                [gid for gid in self.pending_group_ids],
+                reason,
+            )
         usable_options = [
             opt for opt in list(options or [])
             if str(getattr(opt, "usage_mode", "") or "") != "ring_candidate"
@@ -486,6 +532,12 @@ class TopologyAssemblySolver:
         for gid in self.pending_group_ids:
             opts = options_by_group.get(str(gid), [])
             if not opts:
+                self.phase_attempts.append({
+                    "phase": "option_expansion",
+                    "allow_conversions": False,
+                    "states_seen": 0,
+                    "reason": f"no_options_for_group:{gid}",
+                })
                 return SolverResult(
                     TopologyAssemblyPlan(False, False, False, reason=f"no_options_for_group:{gid}"),
                     [],
@@ -495,7 +547,57 @@ class TopologyAssemblySolver:
                 )
             options_by_group[gid] = sorted(opts, key=self._option_rank)
 
+        initial_demand = {str(k): int((pre_consumed or {}).get(str(k), 0)) for k in RESOURCE_KEYS}
+        option_count_total = int(sum(len(options_by_group.get(gid, []) or []) for gid in self.pending_group_ids))
+        search_space_cap = int(self.max_states) + 1
+        search_space_estimate = 1
+        for gid in self.pending_group_ids:
+            search_space_estimate *= max(1, int(len(options_by_group.get(gid, []) or [])))
+            if int(search_space_estimate) > int(search_space_cap):
+                break
+        large_search = bool(
+            len(self.pending_group_ids) > 24
+            or int(option_count_total) > 400
+            or int(search_space_estimate) > int(self.max_states)
+        )
+        phases = (
+            ("native_materialized", False),
+            ("conversion_planned", True),
+        )
+        if bool(large_search):
+            best_failure = "greedy_large_search_failed"
+            for phase_name, allow_conversions in phases:
+                result = self._solve_greedy_phase(
+                    options_by_group,
+                    initial_demand,
+                    pre_consumed,
+                    allow_conversions=bool(allow_conversions),
+                    phase_name=str(phase_name),
+                )
+                self.phase_attempts.append({
+                    "phase": str(phase_name),
+                    "allow_conversions": bool(allow_conversions),
+                    "states_seen": int(getattr(result, "states_seen", 0) or 0),
+                    "reason": "ok:greedy_large_search" if bool(result.plan.feasible) else str(result.reason),
+                    "search_strategy": "greedy_large_search",
+                    "pending_group_count": int(len(self.pending_group_ids)),
+                    "option_count": int(option_count_total),
+                })
+                if bool(result.plan.feasible):
+                    result.plan.reason = f"ok:{phase_name}:greedy_large_search"
+                    return result
+                best_failure = str(result.reason or best_failure)
+            return SolverResult(
+                TopologyAssemblyPlan(False, False, False, reason=best_failure),
+                [],
+                [],
+                [gid for gid in self.pending_group_ids],
+                str(best_failure),
+            )
+
         best_failure = "search_exhausted"
+        phase_failure = "search_exhausted"
+        phase_state_count = 0
 
         def choose_group(covered: set[str]) -> Optional[str]:
             remaining = [gid for gid in self.pending_group_ids if gid not in covered]
@@ -513,15 +615,26 @@ class TopologyAssemblySolver:
             used_excl: set[str],
             demand: Dict[str, int],
             flex_count: int,
+            *,
+            allow_conversions: bool,
+            phase_name: str,
         ) -> Optional[SolverResult]:
-            nonlocal best_failure
+            nonlocal phase_failure, phase_state_count
+            phase_state_count += 1
             self.states_seen += 1
-            if int(self.states_seen) > int(self.max_states):
-                best_failure = "solver_state_limit"
+            if int(phase_state_count) > int(self.max_states):
+                phase_failure = "solver_state_limit"
                 return None
             group_id = choose_group(covered)
             if group_id is None:
-                return self._finalize_plan(selected, demand, flex_count, pre_consumed)
+                return self._finalize_plan(
+                    selected,
+                    demand,
+                    flex_count,
+                    pre_consumed,
+                    allow_conversions=allow_conversions,
+                    phase_name=phase_name,
+                )
 
             for opt in options_by_group.get(str(group_id), []):
                 covers = self._covered_groups(opt)
@@ -529,19 +642,19 @@ class TopologyAssemblySolver:
                     continue
                 src = {int(x) for x in list(getattr(opt, "source_ids", []) or []) if int(x) >= 0}
                 if src & used_src:
-                    best_failure = "source_id_conflict"
+                    phase_failure = "source_id_conflict"
                     continue
                 excl = self._exclusive_keys(opt)
                 if excl & used_excl:
-                    best_failure = "exclusive_group_conflict"
+                    phase_failure = "exclusive_group_conflict"
                     continue
                 try:
                     chain = self.option_to_chain(opt)
                     if not chain_23_limit_ok(chain, self.max_23_per_chain):
-                        best_failure = "chain_23_limit"
+                        phase_failure = "chain_23_limit"
                         continue
                 except Exception:
-                    best_failure = "option_chain_materialization_failed"
+                    phase_failure = "option_chain_materialization_failed"
                     continue
                 next_demand = dict(demand)
                 _add_counts(next_demand, {str(k): int((getattr(opt, "resource_cost", {}) or {}).get(str(k), 0)) for k in RESOURCE_KEYS})
@@ -552,15 +665,49 @@ class TopologyAssemblySolver:
                     set(used_excl) | excl,
                     next_demand,
                     int(flex_count) + int(getattr(opt, "flex_count_delta", 0) or 0),
+                    allow_conversions=allow_conversions,
+                    phase_name=phase_name,
                 )
                 if found is not None and bool(found.plan.feasible):
                     return found
             return None
 
-        initial_demand = {str(k): int((pre_consumed or {}).get(str(k), 0)) for k in RESOURCE_KEYS}
-        result = dfs(set(), [], set(self.used_source_ids), set(self.used_exclusive_keys), initial_demand, self.ordinary_flex_count)
-        if result is not None:
-            return result
+        for phase_name, allow_conversions in phases:
+            phase_failure = "search_exhausted"
+            phase_state_count = 0
+            result = dfs(
+                set(),
+                [],
+                set(self.used_source_ids),
+                set(self.used_exclusive_keys),
+                initial_demand,
+                self.ordinary_flex_count,
+                allow_conversions=bool(allow_conversions),
+                phase_name=str(phase_name),
+            )
+            if (result is None or not bool(result.plan.feasible)) and str(phase_failure) == "solver_state_limit":
+                greedy_result = self._solve_greedy_phase(
+                    options_by_group,
+                    initial_demand,
+                    pre_consumed,
+                    allow_conversions=bool(allow_conversions),
+                    phase_name=str(phase_name),
+                )
+                if bool(greedy_result.plan.feasible):
+                    result = greedy_result
+                    phase_failure = "ok:greedy_state_limit_fallback"
+                elif str(greedy_result.reason):
+                    phase_failure = f"solver_state_limit+{greedy_result.reason}"
+            self.phase_attempts.append({
+                "phase": str(phase_name),
+                "allow_conversions": bool(allow_conversions),
+                "states_seen": int(phase_state_count),
+                "reason": "ok" if result is not None and bool(result.plan.feasible) else str(phase_failure),
+            })
+            if result is not None and bool(result.plan.feasible):
+                result.plan.reason = f"ok:{phase_name}"
+                return result
+            best_failure = str(phase_failure)
         return SolverResult(
             TopologyAssemblyPlan(False, False, False, reason=best_failure),
             [],
@@ -569,20 +716,144 @@ class TopologyAssemblySolver:
             str(best_failure),
         )
 
+    def _solve_greedy_phase(
+        self,
+        options_by_group: Dict[str, List[Any]],
+        initial_demand: Dict[str, int],
+        pre_consumed: Dict[str, int],
+        *,
+        allow_conversions: bool,
+        phase_name: str,
+    ) -> SolverResult:
+        covered: set[str] = set()
+        selected: List[Any] = []
+        used_src = set(self.used_source_ids)
+        used_excl = set(self.used_exclusive_keys)
+        demand = {str(k): int((initial_demand or {}).get(str(k), 0)) for k in RESOURCE_KEYS}
+        flex_count = int(self.ordinary_flex_count)
+        states_seen = 0
+
+        def _remaining_groups() -> List[str]:
+            return [str(gid) for gid in self.pending_group_ids if str(gid) not in covered]
+
+        def _available_options(group_id: str) -> List[Any]:
+            out = []
+            for opt in list(options_by_group.get(str(group_id), []) or []):
+                covers = self._covered_groups(opt)
+                if not covers or bool(covers & covered):
+                    continue
+                out.append(opt)
+            return out
+
+        while True:
+            remaining = _remaining_groups()
+            if not remaining:
+                finalized = self._finalize_plan(
+                    selected,
+                    demand,
+                    flex_count,
+                    pre_consumed,
+                    allow_conversions=bool(allow_conversions),
+                    phase_name=str(phase_name),
+                )
+                if finalized is None:
+                    result = SolverResult(
+                        TopologyAssemblyPlan(False, False, False, reason="greedy_finalize_failed"),
+                        list(selected),
+                        [],
+                        [],
+                        "greedy_finalize_failed",
+                    )
+                    setattr(result, "states_seen", int(states_seen))
+                    return result
+                setattr(finalized, "states_seen", int(states_seen))
+                return finalized
+
+            group_id = min(
+                remaining,
+                key=lambda gid: (
+                    len(_available_options(str(gid))) or 10**9,
+                    str(gid),
+                ),
+            )
+            chosen = None
+            reject_reason = "no_selectable_option"
+            for opt in _available_options(str(group_id)):
+                states_seen += 1
+                src = {int(x) for x in list(getattr(opt, "source_ids", []) or []) if int(x) >= 0}
+                if src & used_src:
+                    reject_reason = "source_id_conflict"
+                    continue
+                excl = self._exclusive_keys(opt)
+                if excl & used_excl:
+                    reject_reason = "exclusive_group_conflict"
+                    continue
+                try:
+                    chain = self.option_to_chain(opt)
+                    if not chain_23_limit_ok(chain, self.max_23_per_chain):
+                        reject_reason = "chain_23_limit"
+                        continue
+                except Exception:
+                    reject_reason = "option_chain_materialization_failed"
+                    continue
+                chosen = opt
+                break
+
+            if chosen is None:
+                result = SolverResult(
+                    TopologyAssemblyPlan(False, False, False, reason=f"greedy_{reject_reason}:{group_id}"),
+                    list(selected),
+                    [],
+                    list(remaining),
+                    f"greedy_{reject_reason}:{group_id}",
+                )
+                setattr(result, "states_seen", int(states_seen))
+                return result
+
+            covers = self._covered_groups(chosen)
+            covered.update(covers)
+            selected.append(chosen)
+            used_src.update(int(x) for x in list(getattr(chosen, "source_ids", []) or []) if int(x) >= 0)
+            used_excl.update(self._exclusive_keys(chosen))
+            _add_counts(
+                demand,
+                {
+                    str(k): int((getattr(chosen, "resource_cost", {}) or {}).get(str(k), 0))
+                    for k in RESOURCE_KEYS
+                },
+            )
+            flex_count += int(getattr(chosen, "flex_count_delta", 0) or 0)
+
     def _finalize_plan(
         self,
         selected: Sequence[Any],
         demand: Dict[str, int],
         flex_count: int,
         pre_consumed: Dict[str, int],
+        *,
+        allow_conversions: bool = True,
+        phase_name: str = "conversion_planned",
     ) -> Optional[SolverResult]:
-        cover = self.converter.plan_to_cover(
-            self.resource_totals,
-            demand,
-            phase="closure",
-            reason="pending_closure",
-            max_steps=512,
-        )
+        if bool(allow_conversions):
+            cover = self.converter.plan_to_cover(
+                self.resource_totals,
+                demand,
+                phase="closure",
+                reason="pending_closure",
+                max_steps=512,
+            )
+        else:
+            inv = _norm_counts(self.resource_totals)
+            demand_i = {str(k): max(0, int((demand or {}).get(str(k), 0) or 0)) for k in RESOURCE_KEYS}
+            cover = ConversionPlanResult(
+                feasible=not any(
+                    int(inv.get(str(k), 0)) < int(demand_i.get(str(k), 0))
+                    for k in RESOURCE_KEYS
+                ),
+                inventory=inv,
+                conversions=[],
+                reason="native_resource_shortage",
+            )
         if not bool(cover.feasible):
             return None
         remaining = dict(cover.inventory)
@@ -596,6 +867,7 @@ class TopologyAssemblySolver:
         residual_planner = ResidualPlanner(
             max_23_per_chain=self.max_23_per_chain,
             prefer_bridge=bool(int(flex_count) < int(self.flex_lower)),
+            allow_conversions=bool(allow_conversions),
         )
         residual_plan = residual_planner.plan(remaining, list(self.ordinary_chains) + list(selected_chains))
         if not bool(residual_plan.feasible):
@@ -628,7 +900,7 @@ class TopologyAssemblySolver:
             residual_chain_actions=list(residual_plan.chain_actions),
             residual_remaining={str(k): int(residual_plan.remaining.get(str(k), 0)) for k in RESOURCE_KEYS},
             chain_23_limit_violations=list(violations),
-            reason="ok",
+            reason=f"ok:{phase_name}",
         )
         return SolverResult(plan, list(selected), list(residual_plan.specs), [], "ok")
 
@@ -691,7 +963,22 @@ class TopologyAssemblySolver:
         closure = dict(getattr(option, "closure_resource_cost", {}) or {})
         closure_total = sum(int(closure.get(str(k), 0)) for k in RESOURCE_KEYS)
         total = sum(int(cost.get(str(k), 0)) for k in RESOURCE_KEYS)
-        return (-int(getattr(option, "priority", 0) or 0), int(closure_total), int(total), str(getattr(option, "option_id", "")))
+        usage = str(getattr(option, "usage_mode", "") or "")
+        if usage in {"flex_branch", "ordinary_bridge", "ordinary_pair_bridge"}:
+            usage_rank = 0
+        elif usage == "ring":
+            usage_rank = 1
+        elif usage in {"side_branch", "ordinary_side", "ordinary_pair_side"}:
+            usage_rank = 2
+        else:
+            usage_rank = 3
+        return (
+            int(usage_rank),
+            -int(getattr(option, "priority", 0) or 0),
+            int(closure_total),
+            int(total),
+            str(getattr(option, "option_id", "")),
+        )
 
     def _chain_limit_violations(self, chains: Sequence[ChainSpec]) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []

@@ -12,14 +12,18 @@ from ...shared.inverse_common import (
     get_effective_hist_element_vector,
     estimate_region_carbon_budgets,
 )
+from ..special_anchor_evidence import (
+    SU19_DOUBLE_EVIDENCE_WINDOWS,
+    split_su19_double_area,
+)
 
 LAYER0_SPECIAL_MODE_WINDOWS: Dict[int, Dict[str, Tuple[float, float]]] = {
     19: {
         'single_d1': (50.0, 60.0),
         'single_d2': (60.0, 70.0),
         'single_d3': (70.0, 90.0),
-        'double_d2': (90.0, 100.0),
-        'double_d3': (90.0, 100.0),
+        'double_d2': tuple(SU19_DOUBLE_EVIDENCE_WINDOWS['double_d2']['support']),
+        'double_d3': tuple(SU19_DOUBLE_EVIDENCE_WINDOWS['double_d3']['support']),
     },
     20: {
         'single_d1': (38.0, 45.0),
@@ -358,8 +362,16 @@ class Layer0Estimator:
             counts[str(src)] = int(counts.get(str(src), 0)) - int(take)
             counts[str(dst)] = int(counts.get(str(dst), 0)) + int(take)
 
+        def _d1_cap_after_double_d2_reserve(raw_cap: int, double_d2_count: int) -> int:
+            # Each double19/20d2 needs at least one connector that is not already
+            # made P-type by a d1 special anchor; otherwise Layer1 is forced into
+            # a forbidden P+P match or a huge backtracking search.
+            reserve = min(max(0, int(raw_cap)), max(0, int(double_d2_count)))
+            return max(0, int(raw_cap) - int(reserve))
+
         if int(su_i) == 19 and str(partition or 'ether') == 'ether':
             d1_cap = int(H_cpu[2].item()) + int(H_cpu[29].item())
+            d1_cap = _d1_cap_after_double_d2_reserve(d1_cap, int(counts.get('double_d2', 0)))
             _move('single_d1', 'single_d2', max(0, int(counts.get('single_d1', 0)) - int(d1_cap)))
             d3_cap = self._nonterminal_fixed_anchor_slot_capacity(H_cpu, (2, 28, 29))
             _move('double_d3', 'single_d3', max(0, int(counts.get('double_d3', 0)) - int(d3_cap)))
@@ -368,6 +380,7 @@ class Layer0Estimator:
             _move('double_d3', 'single_d3', max(0, int(counts.get('double_d3', 0)) - int(d3_cap)))
         elif int(su_i) == 20:
             d1_cap = int(H_cpu[0].item()) + 2 * int(H_cpu[27].item())
+            d1_cap = _d1_cap_after_double_d2_reserve(d1_cap, int(counts.get('double_d2', 0)))
             _move('single_d1', 'single_d2', max(0, int(counts.get('single_d1', 0)) - int(d1_cap)))
             d3_cap = self._nonterminal_fixed_anchor_slot_capacity(H_cpu, (0, 27))
             _move('double_d3', 'single_d3', max(0, int(counts.get('double_d3', 0)) - int(d3_cap)))
@@ -389,17 +402,16 @@ class Layer0Estimator:
         weights: Dict[str, float] = {}
 
         if int(su_i) == 19:
-            # 19 double_d2/d3 are both observed in the 90-100 ppm band; split
-            # that band instead of double-counting it.
             for mode_name in ('single_d1', 'single_d2', 'single_d3'):
                 if str(mode_name) in allowed:
                     lo, hi = windows[str(mode_name)]
                     weights[str(mode_name)] = self._window_area_from_spectrum(S_target, float(lo), float(hi))
-            double_area = self._window_area_from_spectrum(S_target, 90.0, 100.0)
-            if 'double_d2' in allowed:
-                weights['double_d2'] = 0.5 * float(double_area)
-            if 'double_d3' in allowed:
-                weights['double_d3'] = 0.5 * float(double_area)
+            double_weights = split_su19_double_area(
+                lambda lo, hi: self._window_area_from_spectrum(S_target, float(lo), float(hi))
+            )
+            for mode_name, value in double_weights.items():
+                if str(mode_name) in allowed:
+                    weights[str(mode_name)] = float(value)
         else:
             for mode_name in allowed:
                 lo, hi = windows[str(mode_name)]
@@ -535,7 +547,11 @@ class Layer0Estimator:
         """最终修正C总量，只在纯碳结构单元中调节，避免破坏 O/N/S/X 守恒。"""
         H_new = H.clone()
         try:
-            E_curr = torch.matmul(H_new.float(), self.E_SU.to(H_new.device))
+            E_curr = get_effective_hist_element_vector(
+                H_new.detach().cpu().long(),
+                E_SU_tensor=self.E_SU.detach().cpu(),
+                device=torch.device('cpu'),
+            )
             target_C = int(E_target[0].item())
             current_C = int(round(float(E_curr[0].item())))
         except Exception:
@@ -1196,7 +1212,7 @@ class Layer0Estimator:
         """
         Estimate the initial 28/29 split from mode-specific oxygenated-carbon
         evidence. 28 contributes one O edge, while 29 contributes two; the
-        90-100 ppm SU19 double/anomeric band therefore increases the 29 prior.
+        Weighted SU19 double/anomeric evidence therefore increases the 29 prior.
         """
         W = max(0, int(oxygen_atoms))
         if int(W) <= 0:
@@ -1207,7 +1223,10 @@ class Layer0Estimator:
             + self._window_area_from_spectrum(S_target, 60.0, 70.0)
             + self._window_area_from_spectrum(S_target, 70.0, 90.0)
         )
-        area_double = self._window_area_from_spectrum(S_target, 90.0, 100.0)
+        double_weights = split_su19_double_area(
+            lambda lo, hi: self._window_area_from_spectrum(S_target, float(lo), float(hi))
+        )
+        area_double = float(sum(double_weights.values()))
         area_aromatic_o = self._window_area_from_spectrum(S_target, 145.0, 165.0)
         total = float(area_single + area_double + area_aromatic_o)
 
@@ -1234,7 +1253,7 @@ class Layer0Estimator:
             'oxygen_atoms': int(W),
             'n2_ether_edges': int(n_2),
             'area_su19_single_50_90': float(area_single),
-            'area_su19_double_90_100': float(area_double),
+            'area_su19_double_weighted': float(area_double),
             'area_su5_145_165': float(area_aromatic_o),
             'target_28': int(target_28),
             'target_29': int(target_29),

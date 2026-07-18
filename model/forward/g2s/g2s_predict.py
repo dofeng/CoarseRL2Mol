@@ -1,212 +1,196 @@
-import argparse
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-import os
-import glob
-import random
-from pathlib import Path
-from tqdm import tqdm
-import pandas as pd
-from sklearn.metrics import r2_score, mean_absolute_error
+"""Predict center-node chemical shifts with a trained G2S checkpoint."""
 
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import pandas as pd
+import torch
 from torch_geometric.loader import DataLoader
 
 try:
-    from .g2s_model import NMR_VAE, LocalNMRDataset, load_raw_data
-    from ...shared.inverse_common import lorentzian_spectrum
-    from ...shared.coarse_graph import PPM_AXIS
+    from .g2s_model import LocalNMRDataset, load_raw_data
+    from .g2s_utils import (
+        compute_g2s_metrics,
+        load_g2s_checkpoint,
+        plot_error_histogram,
+        plot_group_mae,
+        plot_shift_regression,
+        predict_loader,
+        save_g2s_plot_data,
+        save_json,
+        save_prediction_points,
+    )
+    from ...shared.inverse_common import PPM_AXIS, lorentzian_spectrum, compute_r2_score
 except ImportError:
-    from model.forward.g2s.g2s_model import NMR_VAE, LocalNMRDataset, load_raw_data
-    from model.shared.inverse_common import lorentzian_spectrum
-    from model.shared.coarse_graph import PPM_AXIS
+    from model.forward.g2s.g2s_model import LocalNMRDataset, load_raw_data
+    from model.forward.g2s.g2s_utils import (
+        compute_g2s_metrics,
+        load_g2s_checkpoint,
+        plot_error_histogram,
+        plot_group_mae,
+        plot_shift_regression,
+        predict_loader,
+        save_g2s_plot_data,
+        save_json,
+        save_prediction_points,
+    )
+    from model.shared.inverse_common import PPM_AXIS, lorentzian_spectrum, compute_r2_score
 
-def validate_g2s_model(model_path: Path, input_path: Path, num_samples: int, hid: int = 384, latent_dim: int = 16, k_hop: int = 3):
-    """
-    加载G2S VAE模型，对测试样本进行前向预测，并生成详细的可视化验证结果。
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"使用设备: {device}")
 
-    # 1. 加载训练好的VAE模型
-    print("正在加载G2S VAE模型...")
-    model = NMR_VAE(hid=hid, latent_dim=latent_dim).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
-    model.eval()
-    print("模型加载成功。")
+def _mol_get(mol, key: str, default=None):
+    if isinstance(mol, dict):
+        return mol.get(key, default)
+    return getattr(mol, key, default)
 
-    # 2. 加载测试数据
-    try:
-        raw_list = load_raw_data(str(input_path))
-    except (FileNotFoundError, ValueError) as e:
-        print(f"错误: {e}")
+
+def _plot_single_molecule_spectrum(ppm_axis: torch.Tensor,
+                                   true_spec: torch.Tensor,
+                                   pred_spec: torch.Tensor,
+                                   output_png: Path,
+                                   title: str):
+    import matplotlib.pyplot as plt
+
+    ppm = ppm_axis.detach().cpu().numpy()
+    true_np = true_spec.detach().cpu().numpy()
+    pred_np = pred_spec.detach().cpu().numpy()
+    diff_np = true_np - pred_np
+
+    plt.rcParams["font.family"] = "DejaVu Sans"
+    plt.rcParams["axes.linewidth"] = 1.2
+    fig, axes = plt.subplots(2, 1, figsize=(8.2, 5.6), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
+    axes[0].plot(ppm, true_np, color="#2878B5", linewidth=1.5, label="True")
+    axes[0].plot(ppm, pred_np, color="#D55E00", linewidth=1.3, linestyle="--", label="Predicted")
+    axes[0].set_ylabel("Intensity", fontsize=11)
+    axes[0].set_title(title, fontsize=12)
+    axes[0].legend(frameon=False, fontsize=10)
+    axes[0].tick_params(direction="in", width=1.0)
+    axes[1].plot(ppm, diff_np, color="#444444", linewidth=1.0)
+    axes[1].axhline(0.0, color="black", linewidth=0.8)
+    axes[1].set_xlabel("Chemical shift (ppm)", fontsize=11)
+    axes[1].set_ylabel("Diff.", fontsize=10)
+    axes[1].tick_params(direction="in", width=1.0)
+    for ax in axes:
+        ax.set_xlim(float(ppm.max()), float(ppm.min()))
+    fig.tight_layout()
+    fig.savefig(output_png, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_single_molecule_outputs(raw_list: list,
+                                 prediction_data: dict,
+                                 output_dir: Path,
+                                 hwhm: float,
+                                 intensity_mode: str):
+    """Save molecule-level true/predicted spectra when a single .pt graph is used."""
+    if len(raw_list) != 1:
+        return
+    mol = raw_list[0]
+    y_true = _mol_get(mol, "y_spectrum", _mol_get(mol, "y_mol", None))
+    real_intensity = _mol_get(mol, "real_intensity", None)
+    if y_true is None or real_intensity is None:
         return
 
-    if len(raw_list) > num_samples:
-        print(f"共找到 {len(raw_list)} 个分子，将随机抽取 {num_samples} 个进行分析。")
-        raw_list = random.sample(raw_list, num_samples)
-    
-    output_dir = Path("g2s_validation_results")
-    output_dir.mkdir(exist_ok=True)
-    print(f"验证结果将保存在 '{output_dir}' 目录中。")
+    center_ids = prediction_data["original_center_id"].detach().cpu().long()
+    pred_mu = prediction_data["pred"].detach().cpu().float()
+    true_mu = prediction_data["true"].detach().cpu().float()
+    intensity_all = torch.as_tensor(real_intensity, dtype=torch.float).flatten()
+    if str(intensity_mode).lower() == "ones":
+        pi = torch.ones_like(pred_mu)
+    else:
+        pi = intensity_all[center_ids].float()
 
-    # 统一绘图风格
-    plt.rcParams['font.family'] = 'Times New Roman'
-    plt.rcParams['axes.linewidth'] = 1.2
+    pred_spec = lorentzian_spectrum(pred_mu, pi, PPM_AXIS.cpu(), hwhm=float(hwhm)).cpu()
+    true_node_spec = lorentzian_spectrum(true_mu, pi, PPM_AXIS.cpu(), hwhm=float(hwhm)).cpu()
+    y_true = torch.as_tensor(y_true, dtype=torch.float).flatten().cpu()
+    n = min(int(y_true.numel()), int(pred_spec.numel()), int(true_node_spec.numel()), int(PPM_AXIS.numel()))
+    y_true = y_true[:n]
+    pred_spec = pred_spec[:n]
+    true_node_spec = true_node_spec[:n]
+    ppm_axis = PPM_AXIS.cpu()[:n]
 
-    # 收集每个分子的定量指标，最终汇总为 CSV
-    metrics_rows = []
+    spectrum_r2 = compute_r2_score(y_true, pred_spec)
+    node_spectrum_r2 = compute_r2_score(true_node_spec, pred_spec)
+    spectrum_mae = float(torch.mean(torch.abs(y_true - pred_spec)).item())
+    node_spectrum_mae = float(torch.mean(torch.abs(true_node_spec - pred_spec)).item())
 
-    # 3. 遍历每个抽样的分子进行验证
-    for i, mol_data in enumerate(tqdm(raw_list, desc="Validating Molecules")):
-        basename = mol_data.get('smiles', f'molecule_{i}')
-        
-        # 将单个分子包装成list以供LocalNMRDataset使用
-        dataset = LocalNMRDataset([mol_data], k=k_hop)
-        loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
-        batch = next(iter(loader)).to(device)
+    pd.DataFrame({
+        "ppm": ppm_axis.numpy(),
+        "true_spectrum": y_true.numpy(),
+        "true_node_spectrum": true_node_spec.numpy(),
+        "predicted_spectrum": pred_spec.numpy(),
+        "diff_true_minus_pred": (y_true - pred_spec).numpy(),
+        "diff_true_node_minus_pred": (true_node_spec - pred_spec).numpy(),
+    }).to_csv(output_dir / "single_molecule_spectrum.csv", index=False)
+    pd.DataFrame([{
+        "n_centers": int(pred_mu.numel()),
+        "shift_mae_ppm": float(torch.mean(torch.abs(pred_mu - true_mu)).item()),
+        "shift_rmse_ppm": float(torch.sqrt(torch.mean((pred_mu - true_mu) ** 2)).item()),
+        "spectrum_r2_vs_y_spectrum": float(spectrum_r2),
+        "spectrum_mae_vs_y_spectrum": spectrum_mae,
+        "spectrum_r2_vs_true_node_spectrum": float(node_spectrum_r2),
+        "spectrum_mae_vs_true_node_spectrum": node_spectrum_mae,
+        "hwhm": float(hwhm),
+        "intensity_mode": str(intensity_mode),
+    }]).to_csv(output_dir / "single_molecule_summary.csv", index=False)
 
-        with torch.no_grad():
-            (mu_pred, pi_pred), _ = model(batch)
+    _plot_single_molecule_spectrum(
+        ppm_axis,
+        y_true,
+        pred_spec,
+        output_dir / "single_molecule_spectrum.png",
+        title="G2S single molecule spectrum",
+    )
 
-        # 聚合所有节点的预测，重构最终的分子谱图（直接使用模型 μ/π，不做区间映射/夹逼）
-        S_reconstructed = lorentzian_spectrum(mu_pred, pi_pred, PPM_AXIS.to(device))
-        
-        # 获取真实谱图和节点级真值
-        S_true = batch.y_mol.view(-1, len(PPM_AXIS))[0]  # 取第一个即可
-        ppm_true = batch.real_ppm.squeeze()
-        pi_true = batch.real_intensity.squeeze()
-        is_carbon_mask = batch.is_carbon.squeeze() & (pi_true > 0)
 
-        # ---- 计算定量指标 ----
-        S_true_np = S_true.detach().cpu().numpy()
-        S_recon_np = S_reconstructed.detach().cpu().numpy()
-        try:
-            r2_spectrum = float(r2_score(S_true_np, S_recon_np))
-            mae_spectrum = float(mean_absolute_error(S_true_np, S_recon_np))
-        except Exception:
-            r2_spectrum, mae_spectrum = float("nan"), float("nan")
+def parse_args():
+    parser = argparse.ArgumentParser("G2S chemical-shift prediction")
+    parser.add_argument("--model_path", type=Path, required=True)
+    parser.add_argument("--input_path", type=Path, required=True, help="Directory or .pt molecular graph file.")
+    parser.add_argument("--output_dir", type=Path, default=Path("g2s_prediction_results"))
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--k_hop", type=int, default=None, help="Override checkpoint k_hop.")
+    parser.add_argument("--hwhm", type=float, default=1.0, help="Lorentzian HWHM used for single-molecule spectrum reconstruction.")
+    parser.add_argument(
+        "--intensity_mode",
+        choices=["real", "ones"],
+        default="real",
+        help="Intensity used for single-molecule spectrum reconstruction. G2S itself predicts shifts only.",
+    )
+    return parser.parse_args()
 
-        if is_carbon_mask.any():
-            ppm_true_valid = ppm_true[is_carbon_mask].detach().cpu().numpy()
-            mu_pred_valid = mu_pred[is_carbon_mask].detach().cpu().numpy()
-            pi_true_valid = pi_true[is_carbon_mask].detach().cpu().numpy()
-            pi_pred_valid = pi_pred[is_carbon_mask].detach().cpu().numpy()
-            try:
-                r2_mu = float(r2_score(ppm_true_valid, mu_pred_valid))
-                mae_mu = float(mean_absolute_error(ppm_true_valid, mu_pred_valid))
-            except Exception:
-                r2_mu, mae_mu = float("nan"), float("nan")
-            try:
-                r2_pi = float(r2_score(pi_true_valid, pi_pred_valid))
-                mae_pi = float(mean_absolute_error(pi_true_valid, pi_pred_valid))
-            except Exception:
-                r2_pi, mae_pi = float("nan"), float("nan")
-            num_peaks = int(is_carbon_mask.sum().item())
-        else:
-            r2_mu = mae_mu = r2_pi = mae_pi = float("nan")
-            num_peaks = 0
 
-        metrics_rows.append({
-            "molecule": basename,
-            "num_peaks": num_peaks,
-            "r2_spectrum": r2_spectrum,
-            "mae_spectrum": mae_spectrum,
-            "r2_mu": r2_mu,
-            "mae_mu": mae_mu,
-            "r2_pi": r2_pi,
-            "mae_pi": mae_pi,
-        })
+def main():
+    args = parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, config, _ = load_g2s_checkpoint(args.model_path, device=device)
+    k_hop = int(args.k_hop) if args.k_hop is not None else int(config.k_hop)
 
-        # --- 分别创建三张独立的图片进行可视化 ---
-        sanitized_basename = "".join([c if c.isalnum() else "_" for c in basename])
+    raw = load_raw_data(args.input_path)
+    dataset = LocalNMRDataset(raw, k=k_hop)
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+    data = predict_loader(model, loader, device)
+    metrics = compute_g2s_metrics(data["pred"], data["true"], data["center_su"])
+    save_json(args.output_dir / "metrics.json", metrics)
+    pd.DataFrame([metrics]).to_csv(args.output_dir / "metrics.csv", index=False)
+    save_prediction_points(data, args.output_dir / "prediction_points.csv")
+    save_g2s_plot_data(data, args.output_dir / "plot_data", prefix="prediction")
+    plot_shift_regression(data["pred"], data["true"], args.output_dir / "regression.png", title=f"G2S prediction, k={k_hop}")
+    plot_error_histogram(data["pred"], data["true"], args.output_dir / "error_histogram.png", title=f"G2S prediction errors, k={k_hop}")
+    plot_group_mae(metrics, args.output_dir / "group_mae.png")
+    save_single_molecule_outputs(raw, data, args.output_dir, hwhm=float(args.hwhm), intensity_mode=args.intensity_mode)
+    print(pd.DataFrame([metrics])[["n", "mae", "rmse", "r2", "p95_ae"]].to_string(index=False))
+    print(f"[done] prediction outputs written to {args.output_dir}")
 
-        # 统一美化函数
-        def _beautify_axis(ax):
-            ax.tick_params(direction='in', width=1.5, labelsize=14)
-            for spine in ax.spines.values():
-                spine.set_linewidth(1.5)
-
-        # ========== 图1: 全谱对比 ==========
-        fig1, ax1 = plt.subplots(figsize=(10, 6))
-        ax1.plot(PPM_AXIS.numpy(), S_true_np, label='True Spectrum', color='#1f77b4', lw=2.0)
-        ax1.plot(PPM_AXIS.numpy(), S_recon_np, label='Reconstructed', color='#ff7f0e', linestyle='--', lw=2.0)
-        ax1.set_xlabel('Chemical Shift (ppm)', fontsize=18)
-        ax1.set_ylabel('Absolute Intensity', fontsize=18)
-        ax1.invert_xaxis()
-        ax1.legend(frameon=False, fontsize=16)
-        _beautify_axis(ax1)
-        text_spec = f"R$^2$={r2_spectrum:.4f}\nMAE={mae_spectrum:.4f}"
-        ax1.text(0.02, 0.98, text_spec, transform=ax1.transAxes,
-                 va='top', ha='left', fontsize=16,
-                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='none'))
-        fig1.tight_layout()
-        fig1.savefig(output_dir / f"{sanitized_basename}_spectrum.png", dpi=300, bbox_inches='tight')
-        plt.close(fig1)
-
-        # ========== 图2: 化学位移 (μ) 对比 ==========
-        fig2, ax2 = plt.subplots(figsize=(7, 7))
-        if num_peaks > 0:
-            ax2.scatter(ppm_true_valid, mu_pred_valid, alpha=0.6, s=50, color='#1f77b4', edgecolors='white', linewidths=0.5)
-        ax2.plot([0, 250], [0, 250], color='red', linestyle='--', linewidth=1.5)
-        ax2.set_xlabel('True Chemical Shift (ppm)', fontsize=18)
-        ax2.set_ylabel('Predicted Chemical Shift (ppm)', fontsize=18)
-        ax2.set_xlim(0, 250)
-        ax2.set_ylim(0, 250)
-        ax2.set_aspect('equal', adjustable='box')
-        _beautify_axis(ax2)
-        text_mu = f"R$^2$={r2_mu:.4f}\nMAE={mae_mu:.4f}"
-        ax2.text(0.02, 0.98, text_mu, transform=ax2.transAxes,
-                 va='top', ha='left', fontsize=16,
-                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='none'))
-        fig2.tight_layout()
-        fig2.savefig(output_dir / f"{sanitized_basename}_mu.png", dpi=300, bbox_inches='tight')
-        plt.close(fig2)
-
-        # ========== 图3: 峰强度 (π) 对比 ==========
-        fig3, ax3 = plt.subplots(figsize=(7, 7))
-        if num_peaks > 0:
-            ax3.scatter(pi_true_valid, pi_pred_valid, alpha=0.6, s=50, color='#1f77b4', edgecolors='white', linewidths=0.5)
-        max_val = max(float(pi_true.max().item()), float(pi_pred.max().item())) * 1.1 if pi_true.numel() > 0 and pi_pred.numel() > 0 else 1.0
-        ax3.plot([0, max_val], [0, max_val], color='red', linestyle='--', linewidth=1.5)
-        ax3.set_xlabel('True Intensity', fontsize=18)
-        ax3.set_ylabel('Predicted Intensity', fontsize=18)
-        ax3.set_xlim(0, max_val)
-        ax3.set_ylim(0, max_val)
-        ax3.set_aspect('equal', adjustable='box')
-        _beautify_axis(ax3)
-        text_pi = f"R$^2$={r2_pi:.4f}\nMAE={mae_pi:.4f}"
-        ax3.text(0.02, 0.98, text_pi, transform=ax3.transAxes,
-                 va='top', ha='left', fontsize=16,
-                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='none'))
-        fig3.tight_layout()
-        fig3.savefig(output_dir / f"{sanitized_basename}_pi.png", dpi=300, bbox_inches='tight')
-        plt.close(fig3)
-
-    # 汇总保存所有分子的定量指标
-    if metrics_rows:
-        df_metrics = pd.DataFrame(metrics_rows)
-        metrics_path = output_dir / "validation_metrics.csv"
-        df_metrics.to_csv(metrics_path, index=False)
-        print(f"定量验证指标已保存至: {metrics_path}")
-
-    print(f"\n--- 验证完成 ---")
-    print(f"已在 {len(raw_list)} 个样本上生成验证图。")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="G2S VAE Model Validation Script")
-    parser.add_argument('--model_path', type=Path, required=True, help='训练好的G2S VAE模型权重路径')
-    parser.add_argument('--input_path', type=Path, required=True, help='包含测试.pt文件的目录或单个.pt文件路径')
-    parser.add_argument('--num_samples', type=int, default=10, help='如果输入是目录，则随机抽样的最大样本数')
-    parser.add_argument('--hid', type=int, default=384, help='隐藏层维度，需与训练时一致')
-    parser.add_argument('--latent_dim', type=int, default=16, help='潜变量维度，需与训练时一致')
-    parser.add_argument('--k_hop', type=int, default=3, help='子图的 hop 数，与模型训练保持一致')
-    
-    args = parser.parse_args()
-    
-    validate_g2s_model(model_path=args.model_path,
-                       input_path=args.input_path,
-                       num_samples=args.num_samples,
-                       hid=args.hid,
-                       latent_dim=args.latent_dim,
-                       k_hop=args.k_hop) 
+    main()

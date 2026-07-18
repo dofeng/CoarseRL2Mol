@@ -5,11 +5,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 AROMATIC_SU = {5, 6, 7, 8, 9, 11}
-AROMATIC_ALL_SU = {5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 30}
 TERMINAL_BASE_SU = {1, 4, 16, 18, 22, 28, 32}
 CHAIN_BASE_SU = {14, 15, 17, 23, 24, 25}
-BRIDGE_CENTER_SU = {0, 2, 3, 27, 29, 31}
-PLACEHOLDER_CHAIN_SU = {11, 23, 22}
 ABSTRACT_CHAIN_PORT_SU = {0, 2, 3, 14, 15, 17, 23, 24, 25}
 
 
@@ -181,12 +178,6 @@ def is_double_special_d3(state: NodeState, su: Optional[int] = None) -> bool:
     return int(state.su) in {19, 20} and int(state.degree or 0) == 3 and (
         int(state.fixed_anchor_count) >= 2 or mode == "double"
     )
-
-
-def is_double_special_d23(state: NodeState, su: Optional[int] = None) -> bool:
-    if su is not None and int(state.su) != int(su):
-        return False
-    return is_double_special_d2(state, su) or is_double_special_d3(state, su)
 
 
 def is_special_d3(state: NodeState, su: Optional[int] = None) -> bool:

@@ -2,6 +2,8 @@ import numpy as np
 import torch
 from typing import Any, Dict, List, Optional, Tuple
 
+from ...shared.inverse_common import get_effective_hist_element_vector
+
 
 def adjust_carbonyl_by_difference_impl(
     adjuster: Any,
@@ -142,8 +144,60 @@ def adjust_block_a_carbonyl_anchor_impl(
     H_work = torch.clamp(H, min=0).long().clone()
     all_moves: List[Dict[str, Any]] = []
     meta: Dict[str, Any] = {}
-    max_moves = min(int(max_moves), 3)
-    carbonyl_max_moves = min(int(carbonyl_max_moves), 3)
+    max_moves = max(0, int(max_moves))
+    carbonyl_max_moves = max(0, int(carbonyl_max_moves))
+    rejected_bundles: List[Dict[str, Any]] = []
+
+    def _audit_candidate(H_before: torch.Tensor,
+                         H_after: torch.Tensor,
+                         special_degree_meta: Optional[Dict[int, Dict[int, int]]] = None,
+                         enforce_fixed_elements: bool = True) -> Tuple[bool, Dict[str, Any]]:
+        before = H_before.detach().cpu().long()
+        after = H_after.detach().cpu().long()
+        if bool(torch.any(after < 0)):
+            return False, {'reason': 'negative_histogram'}
+        if int(before.sum().item()) != int(after.sum().item()):
+            return False, {'reason': 'su_total_not_conserved'}
+        before_meta = adjuster._get_special_degree_meta(before)
+        after_meta = special_degree_meta if special_degree_meta is not None else adjuster._get_special_degree_meta(after)
+        before_elements = get_effective_hist_element_vector(
+            before,
+            special_degree_meta=before_meta,
+            E_SU_tensor=adjuster.E_SU.detach().cpu(),
+        ).detach().cpu().float()
+        after_elements = get_effective_hist_element_vector(
+            after,
+            special_degree_meta=after_meta,
+            E_SU_tensor=adjuster.E_SU.detach().cpu(),
+        ).detach().cpu().float()
+        copied = min(int(before_elements.numel()), int(after_elements.numel()))
+        fixed_mismatch = {
+            int(idx): float(after_elements[idx].item() - before_elements[idx].item())
+            for idx in range(copied)
+            if int(idx) != 1 and abs(float(after_elements[idx].item() - before_elements[idx].item())) > 1e-6
+        }
+        if enforce_fixed_elements and fixed_mismatch:
+            return False, {'reason': 'fixed_elements_not_conserved', 'fixed_element_delta': fixed_mismatch}
+        E_target = getattr(adjuster, 'E_target', None)
+        if E_target is not None and int(after_elements.numel()) > 1:
+            target = E_target.detach().cpu().float() if hasattr(E_target, 'detach') else torch.tensor(E_target, dtype=torch.float)
+            target_h = float(target[1].item()) if int(target.numel()) > 1 else 0.0
+            h_after = float(after_elements[1].item())
+            h_rel = abs(h_after - target_h) / max(abs(target_h), 1.0)
+            h_tol = float(getattr(adjuster, '_h_tolerance', 0.08))
+            if float(h_rel) > float(h_tol):
+                return False, {
+                    'reason': 'block_a_h_out_of_tolerance',
+                    'h_after': h_after,
+                    'target_h': target_h,
+                    'h_rel': float(h_rel),
+                    'h_tolerance': float(h_tol),
+                }
+        return True, {
+            'reason': 'ok',
+            'h_before': float(before_elements[1].item()) if int(before_elements.numel()) > 1 else 0.0,
+            'h_after': float(after_elements[1].item()) if int(after_elements.numel()) > 1 else 0.0,
+        }
 
     def _rebalance_oxygen_related(reason: str) -> None:
         nonlocal H_work, all_moves, meta
@@ -320,6 +374,15 @@ def adjust_block_a_carbonyl_anchor_impl(
 
             special_meta[19] = {int(deg): int(cur19_meta.get(int(deg), 0)) for deg in (1, 2, 3)}
 
+            audit_ok, audit = _audit_candidate(H_before, H_new, special_degree_meta=special_meta)
+            if not audit_ok:
+                rejected_bundles.append({
+                    'op': f'A_recompute_carbonyl_O_fixed_links_by_conversion[{reason}]',
+                    **dict(audit),
+                })
+                meta['rejected_bundles'] = list(rejected_bundles)
+                return
+
             if target_fixed_meta:
                 fixed_meta_seed = dict(target_fixed_meta)
             else:
@@ -382,7 +445,8 @@ def adjust_block_a_carbonyl_anchor_impl(
     # 注意：11 号与脂肪碳数量高度关联，Block A 不再把 11 作为可随意增减的缓冲池。
     center_moves: List[Dict[str, Any]] = []
     if int(max_moves) > 0 and int(carbonyl_max_moves) > 0:
-        H_work, center_moves, center_meta = adjust_carbonyl_by_difference_impl(
+        H_center_before = H_work.detach().clone()
+        H_center_candidate, center_moves, center_meta = adjust_carbonyl_by_difference_impl(
             adjuster,
             H_work,
             ppm,
@@ -391,11 +455,26 @@ def adjust_block_a_carbonyl_anchor_impl(
             max_moves=min(int(max_moves), int(carbonyl_max_moves)),
             min_keep=int(min_keep),
         )
-        for mv in center_moves:
-            tagged = dict(mv)
-            tagged["block"] = "A_center"
-            all_moves.append(tagged)
         meta["center_meta"] = center_meta
+        center_ok, center_audit = _audit_candidate(
+            H_center_before,
+            H_center_candidate,
+            enforce_fixed_elements=False,
+        )
+        if not center_ok:
+            rejected_bundles.append({
+                'op': 'A_center_bundle',
+                'moves': list(center_moves),
+                **dict(center_audit),
+            })
+            center_moves = []
+            H_work = H_center_before
+        else:
+            H_work = H_center_candidate
+            for mv in center_moves:
+                tagged = dict(mv)
+                tagged["block"] = "A_center"
+                all_moves.append(tagged)
         if center_moves:
             _rebalance_oxygen_related(reason='after_center_moves')
 
@@ -469,6 +548,14 @@ def adjust_block_a_carbonyl_anchor_impl(
             H_try = adjuster._apply_count_delta(H_work, delta, min_keep=keep)
             if H_try is None:
                 continue
+            audit_ok, audit = _audit_candidate(
+                H_work,
+                H_try,
+                enforce_fixed_elements=not any(int(key) in {1, 2, 3} for key in delta.keys()),
+            )
+            if not audit_ok:
+                rejected_bundles.append({'op': str(name), **dict(audit)})
+                continue
             H_work = H_try
             all_moves.append({"block": "A_joint", "op": name, "delta": dict(delta)})
             if any(int(k) in {1, 2, 3} for k in delta.keys()):
@@ -480,5 +567,8 @@ def adjust_block_a_carbonyl_anchor_impl(
 
     if all_moves:
         _rebalance_oxygen_related(reason='final_block_a_sync')
+
+    if rejected_bundles:
+        meta['rejected_bundles'] = list(rejected_bundles)
 
     return H_work, all_moves, meta

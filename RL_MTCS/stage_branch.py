@@ -947,6 +947,31 @@ class BranchStage:
             return self._step_side_ring(action)
         return False
 
+    @staticmethod
+    def _ring_anchor_su(spec, role: str) -> int:
+        meta = dict(getattr(spec, "metadata", {}) or {})
+        role_s = str(role or "")
+        keys = [
+            f"{role_s}_endpoint_su",
+            f"{role_s}_anchor_su",
+            "endpoint_su",
+            "anchor_su",
+        ]
+        if role_s == "upper":
+            keys.extend(["left_endpoint_su", "upper_site_su"])
+        elif role_s == "lower":
+            keys.extend(["right_endpoint_su", "lower_site_su"])
+        for key in keys:
+            if key not in meta:
+                continue
+            try:
+                su = int(meta.get(key))
+            except Exception:
+                continue
+            if su in {5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 30}:
+                return su
+        return 11
+
     def _step_vertical_ring(self, action: Dict) -> bool:
         """Execute vertical ring placement.
 
@@ -966,9 +991,8 @@ class BranchStage:
         il_is_24 = action['il_is_24']
         inter_types = action['inter_types']
 
-        # Mark anchor SU13 → SU11
         site.occupied = True
-        site.su_type = 11
+        site.su_type = self._ring_anchor_su(spec, "anchor")
 
         uid_prefix = f"VR-{cluster.id}-{action['site_idx']}"
 
@@ -1065,11 +1089,10 @@ class BranchStage:
         ring_su = action['ring_su']  # [pos1_su, pos3_su, pos4_su, pos2_su]
         node_types = action['node_types']
 
-        # Mark both sites as occupied, convert to 11
         upper_site.occupied = True
-        upper_site.su_type = 11
+        upper_site.su_type = self._ring_anchor_su(spec, "upper")
         lower_site.occupied = True
-        lower_site.su_type = 11
+        lower_site.su_type = self._ring_anchor_su(spec, "lower")
 
         uid_prefix = f"SR-{cluster.id}-{action['upper_idx']}-{action['lower_idx']}"
 
@@ -1254,9 +1277,9 @@ class BranchStage:
         has_outer = action['has_outer']
 
         upper_site.occupied = True
-        upper_site.su_type = 11
+        upper_site.su_type = self._ring_anchor_su(spec, "upper")
         lower_site.occupied = True
-        lower_site.su_type = 11
+        lower_site.su_type = self._ring_anchor_su(spec, "lower")
 
         uid_prefix = f"FSR-{cluster.id}-{action['upper_idx']}-{action['lower_idx']}"
 
