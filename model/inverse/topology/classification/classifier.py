@@ -144,10 +144,12 @@ def _build_resource_pool(
     consumed: Set[int],
     *,
     excluded_ids: Optional[Iterable[int]] = None,
+    deferred_ids: Optional[Iterable[int]] = None,
 ) -> Dict[str, Any]:
     remaining_ids_by_su: Dict[str, List[int]] = {str(su): [] for su in sorted(RESOURCE_POOL_SU_TYPES)}
     su11_donor_ids_by_su: Dict[str, List[int]] = {str(su): [] for su in sorted(SU11_DONOR_SU_TYPES)}
     excluded = {int(node_id) for node_id in list(excluded_ids or [])}
+    deferred = {int(node_id) for node_id in list(deferred_ids or [])}
     for token in list(tokens or []):
         if int(token.node_id) in consumed:
             continue
@@ -157,6 +159,8 @@ def _build_resource_pool(
             remaining_ids_by_su.setdefault(str(token.su_type), []).append(int(token.node_id))
         elif int(token.su_type) in SU11_DONOR_SU_TYPES:
             su11_donor_ids_by_su.setdefault(str(token.su_type), []).append(int(token.node_id))
+    for values in list(remaining_ids_by_su.values()) + list(su11_donor_ids_by_su.values()):
+        values.sort(key=lambda node_id: (int(node_id) in deferred, int(node_id)))
     remaining_counts = {str(k): int(len(v or [])) for k, v in remaining_ids_by_su.items()}
     return {
         "remaining_ids_by_su": remaining_ids_by_su,
@@ -3979,16 +3983,18 @@ def classify_topology_units(
             int(node_id)
             for node_id in list(getattr(fragment, "source_node_ids", []) or [])
         )
-    reusable_abstract_su23_ids = {
+    reusable_abstract_resource_ids = {
         int(node_id)
         for node_id in referenced_source_ids
-        if int(getattr(token_lookup.get(int(node_id)), "su_type", -1)) == 23
+        if int(getattr(token_lookup.get(int(node_id)), "su_type", -1))
+        in set(RESOURCE_POOL_SU_TYPES) | set(SU11_DONOR_SU_TYPES)
         and is_abstract_open_nonfixed_semantic(token_lookup.get(int(node_id)))
     }
     resource_pool = _build_resource_pool(
         tokens,
-        consumed,
-        excluded_ids=referenced_source_ids - reusable_abstract_su23_ids,
+        consumed - reusable_abstract_resource_ids,
+        excluded_ids=referenced_source_ids - reusable_abstract_resource_ids,
+        deferred_ids=reusable_abstract_resource_ids,
     )
     rejected_node_ids = {int(item.get("node_id", -1)) for item in list(classification_rejects or [])}
     conflict_node_ids = {int(item.get("node_id", -1)) for item in list(claim_conflicts or [])}

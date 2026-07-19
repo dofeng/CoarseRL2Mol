@@ -16,7 +16,7 @@ def _call_name(node: ast.Call) -> str:
     return ""
 
 
-def test_final_outer_cycle_rechecks_block_c_after_mandatory_layer12_rebuild() -> None:
+def test_outer_cycle_runs_single_authoritative_block_c_after_layer12() -> None:
     source = textwrap.dedent(inspect.getsource(InversePipelineV3.infer))
     tree = ast.parse(source)
     outer_loop = next(
@@ -39,12 +39,11 @@ def test_final_outer_cycle_rechecks_block_c_after_mandatory_layer12_rebuild() ->
     layer12_lines = sorted(layer12_lines)
     layer3_lines = sorted(layer3_lines)
 
-    assert len(block_c_lines) == 2
+    assert len(block_c_lines) == 1
     assert layer12_lines
     assert layer3_lines
-    assert block_c_lines[0] < max(layer12_lines) < block_c_lines[1] < max(layer3_lines)
-    assert "int(outer_idx) + 1 == int(outer_cycle_count)" in source
-    assert "iteration_offset=int(resource_cfg.get('max_stage3_iterations', 20))" in source
+    assert max(layer12_lines) < block_c_lines[0] < max(layer3_lines)
+    assert "iteration_offset=int(resource_cfg.get('max_stage3_iterations', 20))" not in source
 
     all_block_c_calls = [
         node
@@ -52,7 +51,7 @@ def test_final_outer_cycle_rechecks_block_c_after_mandatory_layer12_rebuild() ->
         if isinstance(node, ast.Call)
         and _call_name(node) == "_run_topology_stage3_resource_cycles"
     ]
-    assert len(all_block_c_calls) == 2
+    assert len(all_block_c_calls) == 1
 
 
 def test_pipeline_does_not_rebuild_layer12_after_final_outer_layer3() -> None:

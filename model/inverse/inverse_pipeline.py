@@ -31,6 +31,7 @@ from .layer2.inverse_layer2 import Layer2Estimator
 from .layer3.inverse_layer3 import Layer3Estimator
 from .layer4.inverse_layer4 import Layer4Adjuster
 from .topology import assemble_topology_units, classify_topology_units
+from .topology.round_context import normalize_stage3_product
 # ============================================================================
 # 主推理类
 # ============================================================================
@@ -745,6 +746,154 @@ class InversePipelineV3:
             print(f"[Stage3:topology] 保存诊断失败: {e}")
 
     @staticmethod
+    def _symbolic_product_node_ids(product: Dict[str, Any]) -> List[int]:
+        row = dict(product or {})
+        return sorted({
+            int(value)
+            for value in list(row.get('fixed_source_node_ids', []) or [])
+            + [
+                int(value)
+                for values in dict(row.get('claimed_resource_ids_by_su', {}) or {}).values()
+                for value in list(values or [])
+            ]
+        })
+
+    @staticmethod
+    def _stage3_node_state_signature(nodes: Sequence[_NodeV3]) -> List[Dict[str, Any]]:
+        return [
+            {
+                'node_id': int(getattr(node, 'global_id', -1)),
+                'su_type': int(getattr(node, 'su_type', -1)),
+                'hop1_ids': sorted(int(value) for value in list(getattr(node, 'hop1_ids', []) or [])),
+                'fixed_hop1_ids': sorted(
+                    int(value) for value in list(getattr(node, 'fixed_hop1_ids', []) or [])
+                ),
+                'target_hop1_degree': getattr(node, 'target_hop1_degree', None),
+                'target_fixed_anchor_count': getattr(node, 'target_fixed_anchor_count', None),
+                'special_anchor_mode': str(getattr(node, 'special_anchor_mode', '') or ''),
+                'special_anchor_partition': str(
+                    getattr(node, 'special_anchor_partition', '') or ''
+                ),
+            }
+            for node in sorted(
+                list(nodes or []),
+                key=lambda item: int(getattr(item, 'global_id', -1)),
+            )
+        ]
+
+    @staticmethod
+    def _stage3_completion_ownership(ledger: Dict[str, Any]) -> Dict[str, Any]:
+        ownership_states = [
+            'fixed_topology_core',
+            'pending_topology',
+            'completed_topology',
+            'claimed_closure_resource',
+            'remaining_closure_resource',
+            'remaining_aromatic_donor',
+            'support_context',
+            'unclassified_or_conflict',
+        ]
+        states = {state: [] for state in ownership_states}
+        for raw in dict(ledger.get('ownership_by_node_id', {}) or {}).values():
+            owner = dict(raw or {})
+            state = str(owner.get('state', 'unclassified_or_conflict') or 'unclassified_or_conflict')
+            states.setdefault(state, []).append(int(owner.get('node_id', -1)))
+        states = {key: sorted(set(values)) for key, values in states.items()}
+        available = {
+            str(key): sorted({int(value) for value in list(values or [])})
+            for key, values in dict(ledger.get('available_ids_by_su', {}) or {}).items()
+        }
+        return {
+            'states': states,
+            'closure_pool_ids_by_su': {
+                str(su_type): list(available.get(str(su_type), []))
+                for su_type in (11, 22, 23, 24)
+            },
+            'aromatic_donor_ids_by_su': {
+                str(su_type): list(available.get(str(su_type), []))
+                for su_type in (10, 12, 13)
+            },
+            'invariant_errors': [
+                dict(item or {}) for item in list(ledger.get('conflicts', []) or [])
+            ],
+        }
+
+    @staticmethod
+    def _stage3_completion_resource_ledger(
+        classification: Dict[str, Any],
+        products: Sequence[Dict[str, Any]],
+        ownership: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        pool = dict(classification.get('resource_pool', {}) or {})
+        initial: Dict[str, set[int]] = {}
+        for raw_pool in (
+            dict(pool.get('initial_ids_by_su', {}) or {}),
+            dict(pool.get('su11_donor_ids_by_su', {}) or {}),
+        ):
+            for key, values in raw_pool.items():
+                initial.setdefault(str(key), set()).update(
+                    int(value) for value in list(values or [])
+                )
+        available: Dict[str, set[int]] = {}
+        for raw_pool in (
+            dict(ownership.get('closure_pool_ids_by_su', {}) or {}),
+            dict(ownership.get('aromatic_donor_ids_by_su', {}) or {}),
+        ):
+            for key, values in raw_pool.items():
+                available.setdefault(str(key), set()).update(
+                    int(value) for value in list(values or [])
+                )
+        residual_claimed: Dict[str, set[int]] = {}
+        for product in list(products or []):
+            row = dict(product or {})
+            product_type = str(row.get('product_type', row.get('target_role', '')) or '')
+            for key, values in dict(row.get('claimed_resource_ids_by_su', {}) or {}).items():
+                claimed_ids = {int(value) for value in list(values or [])}
+                initial.setdefault(str(key), set()).update(claimed_ids)
+                if product_type.startswith('residual_'):
+                    residual_claimed.setdefault(str(key), set()).update(claimed_ids)
+        for key, values in available.items():
+            initial.setdefault(str(key), set()).update(values)
+        keys = sorted(
+            set(initial) | set(available),
+            key=lambda value: (
+                (0, int(value))
+                if str(value).lstrip('-').isdigit()
+                else (1, str(value))
+            ),
+        )
+        consumed = {
+            str(key): sorted(initial.get(str(key), set()) - available.get(str(key), set()))
+            for key in keys
+        }
+        residual = {
+            str(key): sorted(set(consumed.get(str(key), [])) & residual_claimed.get(str(key), set()))
+            for key in keys
+        }
+        topology = {
+            str(key): sorted(set(consumed.get(str(key), [])) - set(residual.get(str(key), [])))
+            for key in keys
+        }
+        return {
+            'initial_ids_by_su': {str(key): sorted(initial.get(str(key), set())) for key in keys},
+            'consumed_ids_by_su': consumed,
+            'remaining_ids_by_su': {
+                str(key): sorted(available.get(str(key), set())) for key in keys
+            },
+            'initial_counts': {str(key): len(initial.get(str(key), set())) for key in keys},
+            'consumed_counts': {str(key): len(consumed.get(str(key), [])) for key in keys},
+            'topology_consumed_counts': {
+                str(key): len(topology.get(str(key), [])) for key in keys
+            },
+            'residual_consumed_counts': {
+                str(key): len(residual.get(str(key), [])) for key in keys
+            },
+            'remaining_counts': {str(key): len(available.get(str(key), set())) for key in keys},
+            'shortage_counts': {},
+            'snapshot_stage': 'stage3_complete_generation_ledger',
+        }
+
+    @staticmethod
     def _public_topology_rows_from_assembly(assembly_result: Any) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
         if hasattr(assembly_result, "to_public_dict"):
             public = assembly_result.to_public_dict()
@@ -793,25 +942,113 @@ class InversePipelineV3:
         completion_diagnostics = dict(
             getattr(self, '_final_stage3_completion_diagnostics', {}) or {}
         )
+        terminal_diagnostics = dict(
+            getattr(self, '_final_stage3_terminal_diagnostics', {}) or {}
+        )
         residual_infeasibility_proof = dict(
             completion_diagnostics.get('residual_infeasibility_proof', {}) or {}
         )
+        current_node_state_signature = self._stage3_node_state_signature(nodes)
+        completion_matches = bool(
+            completion_diagnostics.get('stage3_complete', False)
+            and list(completion_diagnostics.get('node_state_signature', []) or [])
+            == current_node_state_signature
+        )
+        terminal_matches = bool(
+            terminal_diagnostics.get('stop_reason') == 'phase_resource_infeasible'
+            and list(terminal_diagnostics.get('node_state_signature', []) or [])
+            == current_node_state_signature
+        )
+        infeasibility_proof = (
+            dict(terminal_diagnostics.get('infeasibility_proof', {}) or {})
+            if terminal_matches else {}
+        )
+        completion_ownership: Dict[str, Any] = {}
+        completion_coverage: Dict[str, Any] = {}
+        if completion_matches:
+            public_rows = [
+                dict(item or {})
+                for item in list(completion_diagnostics.get('products', []) or [])
+            ]
+            public_pending = []
+            completion_ownership = dict(
+                completion_diagnostics.get('ownership_ledger', {}) or {}
+            )
+            completion_resource_ledger = self._stage3_completion_resource_ledger(
+                classification_dict,
+                public_rows,
+                completion_ownership,
+            )
+            public_summary.update({
+                'ok': True,
+                'reason': 'stage3_complete',
+                'topology_plan_feasible': True,
+                'closed_topology_count': int(len(public_rows)),
+                'final_topology_count': int(len(public_rows)),
+                'pending_closure_total_count': 0,
+                'unclosed_candidates': [],
+                'resource_ledger': completion_resource_ledger,
+            })
+            states = dict(completion_ownership.get('states', {}) or {})
+            all_ids = {int(getattr(node, 'global_id', -1)) for node in list(nodes or [])}
+            completed_ids_for_coverage = {
+                int(value)
+                for state in ('completed_topology', 'claimed_closure_resource')
+                for value in list(states.get(state, []) or [])
+            }
+            pending_ids_for_coverage = {
+                int(value) for value in list(states.get('pending_topology', []) or [])
+            }
+            resource_ids_for_coverage = {
+                int(value)
+                for state in ('remaining_closure_resource', 'remaining_aromatic_donor')
+                for value in list(states.get(state, []) or [])
+            }
+            conflict_ids_for_coverage = {
+                int(value)
+                for value in list(states.get('unclassified_or_conflict', []) or [])
+            }
+            completion_coverage = {
+                'total_node_count': int(len(all_ids)),
+                'completed_node_count': int(len(completed_ids_for_coverage)),
+                'pending_node_count': int(len(pending_ids_for_coverage)),
+                'remaining_pool_node_count': int(len(resource_ids_for_coverage)),
+                'conflict_node_count': int(len(conflict_ids_for_coverage)),
+                'conflict_node_ids': sorted(conflict_ids_for_coverage),
+                'covered_node_count': int(sum(len(list(values or [])) for values in states.values())),
+                'uncovered_node_ids': sorted(
+                    all_ids
+                    - completed_ids_for_coverage
+                    - pending_ids_for_coverage
+                    - resource_ids_for_coverage
+                    - conflict_ids_for_coverage
+                    - {int(value) for value in list(states.get('support_context', []) or [])}
+                    - {int(value) for value in list(states.get('fixed_topology_core', []) or [])}
+                ),
+            }
         terminal_residual_complete = bool(
-            not public_pending
-            and bool(public_summary.get('topology_plan_feasible', False))
-            and residual_infeasibility_proof
-            and residual_infeasibility_proof.get('executable') is False
+            completion_matches
+            or (
+                not public_pending
+                and bool(public_summary.get('topology_plan_feasible', False))
+                and residual_infeasibility_proof
+                and residual_infeasibility_proof.get('executable') is False
+            )
         )
         final_reason = (
             'stage3_complete'
             if terminal_residual_complete
-            else str(public_summary.get('reason', 'assembly_pending'))
+            else (
+                'phase_resource_infeasible'
+                if infeasibility_proof
+                else str(public_summary.get('reason', 'assembly_pending'))
+            )
         )
         cls_summary = dict(classification_dict.get('summary', {}) or {})
         covered_product_node_ids = {
             int(node_id)
             for product in list(public_rows or [])
-            for node_id in list(dict(product or {}).get('source_node_ids', []) or [])
+            for node_id in InversePipelineV3._symbolic_product_node_ids(dict(product or {}))
         }
         rejects = [
             dict(record or {})
@@ -829,8 +1066,14 @@ class InversePipelineV3:
         for rec in unclassified_non_resource:
             rec.setdefault('reason', 'unclassified_non_resource')
         summary = {
-            'ok': bool(public_summary.get('ok', False) or terminal_residual_complete),
-            'topology_plan_feasible': bool(public_summary.get('topology_plan_feasible', False)),
+            'ok': bool(
+                terminal_residual_complete
+                or (not infeasibility_proof and public_summary.get('ok', False))
+            ),
+            'topology_plan_feasible': bool(
+                not infeasibility_proof
+                and public_summary.get('topology_plan_feasible', False)
+            ),
             'closed_topology_count': int(public_summary.get('closed_topology_count', 0)),
             'final_topology_count': int(public_summary.get('final_topology_count', 0)),
             'pending_closure_total_count': int(public_summary.get('pending_closure_total_count', 0)),
@@ -839,6 +1082,7 @@ class InversePipelineV3:
             'diagnostics': {
                 'reason': str(final_reason),
                 'solver_reason': str(final_reason),
+                'infeasibility_proof': dict(infeasibility_proof),
                 'residual_infeasibility_proof': dict(residual_infeasibility_proof),
                 'class_counts': dict(cls_summary.get('class_counts', {}) or {}),
                 'family_counts': dict(cls_summary.get('family_counts', {}) or {}),
@@ -851,8 +1095,28 @@ class InversePipelineV3:
                 'resource_demand': dict(assembly_dict.get('resource_demand', {}) or {}),
                 'protected_resource_counts': dict(assembly_dict.get('protected_resource_counts', {}) or {}),
                 'referenced_resource_counts': dict(assembly_dict.get('referenced_resource_counts', {}) or {}),
-                'node_coverage': dict(dict(assembly_dict.get('diagnostics', {}) or {}).get('node_coverage', {}) or {}),
-                'ownership_ledger': dict(dict(assembly_dict.get('diagnostics', {}) or {}).get('ownership_ledger', {}) or {}),
+                'node_coverage': (
+                    dict(completion_coverage)
+                    if completion_matches
+                    else dict(dict(assembly_dict.get('diagnostics', {}) or {}).get('node_coverage', {}) or {})
+                ),
+                'ownership_ledger': (
+                    dict(completion_ownership)
+                    if completion_matches
+                    else dict(dict(assembly_dict.get('diagnostics', {}) or {}).get('ownership_ledger', {}) or {})
+                ),
+                'stage3_generation_id': int(
+                    completion_diagnostics.get('generation_id', 0) or 0
+                ) if completion_matches else int(
+                    terminal_diagnostics.get('generation_id', 0) or 0
+                ) if terminal_matches else 0,
+                'stage3_terminal_stop_reason': str(
+                    terminal_diagnostics.get('stop_reason', '') or ''
+                ),
+                'stage3_terminal_phase': str(
+                    terminal_diagnostics.get('phase', '') or ''
+                ),
+                'stage3_terminal_snapshot_match': bool(terminal_matches),
             },
         }
         coverage = dict(summary['diagnostics'].get('node_coverage', {}) or {})
@@ -860,7 +1124,7 @@ class InversePipelineV3:
             completed_ids = {
                 int(node_id)
                 for row in public_rows
-                for node_id in list(dict(row or {}).get('source_node_ids', []) or [])
+                for node_id in InversePipelineV3._symbolic_product_node_ids(dict(row or {}))
             }
             pending_ids = {
                 int(node_id)
@@ -868,28 +1132,31 @@ class InversePipelineV3:
                 for node_id in list(dict(row or {}).get('source_node_ids', []) or [])
             }
             resource_ledger = dict(summary['diagnostics'].get('resource_ledger', {}) or {})
+            ownership_states = dict(
+                dict(summary['diagnostics'].get('ownership_ledger', {}) or {}).get('states', {}) or {}
+            )
             resource_ids = {
                 int(node_id)
-                for values in dict(resource_ledger.get('remaining_ids_by_su', {}) or {}).values()
-                for node_id in list(values or [])
+                for state in ('remaining_closure_resource', 'remaining_aromatic_donor')
+                for node_id in list(ownership_states.get(state, []) or [])
             }
             all_ids = {int(getattr(node, 'global_id', -1)) for node in list(nodes or [])}
             coverage = {
                 'total_node_count': int(len(all_ids)),
                 'completed_node_count': int(len(completed_ids)),
                 'pending_node_count': int(len(pending_ids)),
-                'remaining_resource_node_count': int(len(resource_ids)),
+                'remaining_pool_node_count': int(len(resource_ids)),
                 'uncovered_node_ids': sorted(all_ids - completed_ids - pending_ids - resource_ids),
             }
             summary['diagnostics']['node_coverage'] = coverage
         summary['coverage_valid'] = not bool(list(coverage.get('uncovered_node_ids', []) or []))
         summary['classification_coverage_valid'] = not bool(
-            list(coverage.get('unassigned_nonresource_node_ids', []) or [])
+            list(coverage.get('conflict_node_ids', []) or [])
         )
         completed_ids = {
             int(node_id)
             for row in public_rows
-            for node_id in list(dict(row or {}).get('source_node_ids', []) or [])
+            for node_id in InversePipelineV3._symbolic_product_node_ids(dict(row or {}))
         }
         pending_ids = {
             int(node_id)
@@ -901,16 +1168,19 @@ class InversePipelineV3:
             )
         }
         resource_ledger = dict(summary['diagnostics'].get('resource_ledger', {}) or {})
+        ownership_states = dict(
+            dict(summary['diagnostics'].get('ownership_ledger', {}) or {}).get('states', {}) or {}
+        )
         resource_ids = {
             int(node_id)
-            for values in dict(resource_ledger.get('remaining_ids_by_su', {}) or {}).values()
-            for node_id in list(values or [])
+            for state in ('remaining_closure_resource', 'remaining_aromatic_donor')
+            for node_id in list(ownership_states.get(state, []) or [])
         }
         invariant_conflicts: List[Dict[str, Any]] = []
         for left_name, left_ids, right_name, right_ids in (
             ('completed_topology', completed_ids, 'pending_topology', pending_ids),
-            ('completed_topology', completed_ids, 'remaining_resource', resource_ids),
-            ('pending_topology', pending_ids, 'remaining_resource', resource_ids),
+            ('completed_topology', completed_ids, 'available_resource', resource_ids),
+            ('pending_topology', pending_ids, 'available_resource', resource_ids),
         ):
             overlap = sorted(set(left_ids) & set(right_ids))
             if overlap:
@@ -920,26 +1190,48 @@ class InversePipelineV3:
                     'node_ids': overlap,
                 })
         for row in public_rows:
-            source_ids = sorted({int(value) for value in list(dict(row or {}).get('source_node_ids', []) or [])})
-            gid_ids = sorted({int(value) for value in re.findall(r'\d+', str(dict(row or {}).get('gid', '') or ''))})
+            source_ids = InversePipelineV3._symbolic_product_node_ids(dict(row or {}))
+            gid_ids = sorted({
+                int(value)
+                for value in re.findall(r'\d+', str(dict(row or {}).get('node_id_notation', '') or ''))
+            })
             if source_ids != gid_ids:
                 invariant_conflicts.append({
-                    'reason': 'product_gid_source_mismatch',
-                    'gid': str(dict(row or {}).get('gid', '')),
+                    'reason': 'product_notation_source_mismatch',
+                    'node_id_notation': str(dict(row or {}).get('node_id_notation', '')),
                     'source_node_ids': source_ids,
                     'gid_node_ids': gid_ids,
                 })
-            assigned_ids = [
+            product_claimed_ids = {
                 int(value)
-                for slot in list(dict(row or {}).get('slot_assignments', []) or [])
-                for value in list(dict(slot or {}).get('assigned_resource_ids', []) or [])
-            ]
-            if len(assigned_ids) != len(set(assigned_ids)):
-                invariant_conflicts.append({
-                    'reason': 'duplicate_slot_resource_claim',
-                    'gid': str(dict(row or {}).get('gid', '')),
-                    'node_ids': assigned_ids,
-                })
+                for values in dict(
+                    dict(row or {}).get('claimed_resource_ids_by_su', {}) or {}
+                ).values()
+                for value in list(values or [])
+            }
+            for slot in (
+                list(dict(row or {}).get('mainline_slots', []) or [])
+                + list(dict(row or {}).get('branch_slots', []) or [])
+            ):
+                assigned_ids = [
+                    int(value)
+                    for value in list(dict(slot or {}).get('assigned_resource_ids', []) or [])
+                ]
+                if len(assigned_ids) != len(set(assigned_ids)):
+                    invariant_conflicts.append({
+                        'reason': 'duplicate_resource_within_slot',
+                        'node_id_notation': str(dict(row or {}).get('node_id_notation', '')),
+                        'slot_id': str(dict(slot or {}).get('slot_id', '')),
+                        'node_ids': assigned_ids,
+                    })
+                unexpected_ids = sorted(set(assigned_ids) - product_claimed_ids)
+                if unexpected_ids:
+                    invariant_conflicts.append({
+                        'reason': 'slot_resource_outside_product_ownership',
+                        'node_id_notation': str(dict(row or {}).get('node_id_notation', '')),
+                        'slot_id': str(dict(slot or {}).get('slot_id', '')),
+                        'node_ids': unexpected_ids,
+                    })
         for row in public_pending:
             source_ids = sorted({
                 int(value)
@@ -972,7 +1264,7 @@ class InversePipelineV3:
         identity_by_node = {
             **{int(value): 'completed_topology' for value in completed_ids},
             **{int(value): 'pending_topology' for value in pending_ids},
-            **{int(value): 'remaining_resource' for value in resource_ids},
+            **{int(value): 'available_resource' for value in resource_ids},
         }
         for group in list(classification_dict.get('atomic_groups', []) or []):
             group_ids = [int(value) for value in list(dict(group or {}).get('node_ids', []) or [])]
@@ -988,8 +1280,66 @@ class InversePipelineV3:
         if invariant_conflicts:
             summary['ok'] = False
             summary['coverage_valid'] = False
-            summary['diagnostics']['solver_reason'] = 'topology_invariant_violation'
+            if not dict(summary['diagnostics'].get('infeasibility_proof', {}) or {}):
+                summary['diagnostics']['solver_reason'] = 'topology_invariant_violation'
         return public_rows, summary
+
+    @staticmethod
+    def _compact_topology_export_rows(
+        topology_rows: Sequence[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        return [
+            {
+                'actual_su': str(row.get('topology_notation', '')),
+                'gid': str(row.get('node_id_notation', '')),
+                'product_type': str(row.get('product_type', '')),
+                'required_slots_satisfied': bool(row.get('closed', False)),
+                'source_fragment_ids': json.dumps(
+                    row.get('source_fragment_ids', []), ensure_ascii=False
+                ),
+                'fixed_source_node_ids': json.dumps(
+                    row.get('fixed_source_node_ids', []), ensure_ascii=False
+                ),
+                'claimed_resource_ids': json.dumps(
+                    row.get('claimed_resource_ids_by_su', {}),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            }
+            for row in (dict(item or {}) for item in list(topology_rows or []))
+        ]
+
+    @staticmethod
+    def _compact_pending_export_rows(
+        pending_rows: Sequence[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        compact_rows: List[Dict[str, Any]] = []
+        for row in (dict(item or {}) for item in list(pending_rows or [])):
+            fixed_ids = (
+                row.get('claimed_source_node_ids', [])
+                or row.get('core_node_ids', [])
+                or row.get('source_node_ids', [])
+                or []
+            )
+            compact_rows.append({
+                'actual_su': str(row.get('real', '')),
+                'gid': str(row.get('real_gid', '')),
+                'pending_kind': str(row.get('pending_kind', '')),
+                'phase': str(row.get('phase', '')),
+                'contract_id': int(row.get('contract_id', -1) or -1),
+                'source_fragment_ids': json.dumps(
+                    row.get('source_fragment_ids', []), ensure_ascii=False
+                ),
+                'fixed_source_node_ids': json.dumps(fixed_ids, ensure_ascii=False),
+                'required_counts': json.dumps(
+                    row.get('required_counts', {}), ensure_ascii=False, sort_keys=True
+                ),
+                'available_counts': json.dumps(
+                    row.get('available_counts', {}), ensure_ascii=False, sort_keys=True
+                ),
+                'reason': str(row.get('reason', '')),
+            })
+        return compact_rows
 
     @staticmethod
     def _topology_ownership_rows(
@@ -1001,12 +1351,13 @@ class InversePipelineV3:
         completed_by_node: Dict[int, Dict[str, Any]] = {}
         pending_by_node: Dict[int, Dict[str, Any]] = {}
         for row in list(topology_rows or []):
-            for node_id in list(dict(row or {}).get('source_node_ids', []) or []):
+            product = dict(row or {})
+            for node_id in InversePipelineV3._symbolic_product_node_ids(product):
                 completed_by_node[int(node_id)] = {
-                    'topology_id': str(dict(row or {}).get('gid', '')),
+                    'topology_id': str(product.get('node_id_notation', '')),
                     'contract_id': '',
-                    'fragment_id': str(dict(row or {}).get('source_fragment_ids', '')),
-                    'fragment_class': str(dict(row or {}).get('source_fragment_classes', '')),
+                    'fragment_id': str(product.get('source_fragment_ids', '')),
+                    'fragment_class': str(product.get('product_type', '')),
                     'role': 'completed_topology',
                 }
         for row in list(pending_rows or []):
@@ -1027,30 +1378,25 @@ class InversePipelineV3:
                 }
         diagnostics = dict(summary.get('diagnostics', {}) or {})
         ownership = dict(diagnostics.get('ownership_ledger', {}) or {})
-        completed_ids = {int(value) for value in list(ownership.get('completed_topology_node_ids', []) or [])}
-        pending_ids = {int(value) for value in list(ownership.get('pending_topology_node_ids', []) or [])}
-        support_ids = {int(value) for value in list(ownership.get('support_only_node_ids', []) or [])}
-        unassigned_ids = {int(value) for value in list(ownership.get('unassigned_nonresource_node_ids', []) or [])}
-        resource_ids = {
-            int(node_id)
-            for values in dict(ownership.get('remaining_resource_ids_by_su', {}) or {}).values()
-            for node_id in list(values or [])
+        states = dict(ownership.get('states', {}) or {})
+        state_by_node = {
+            int(node_id): str(state)
+            for state, node_ids in states.items()
+            for node_id in list(node_ids or [])
         }
         rows: List[Dict[str, Any]] = []
-        conflicts: List[Dict[str, Any]] = []
+        conflicts: List[Dict[str, Any]] = [
+            dict(item or {}) for item in list(ownership.get('invariant_errors', []) or [])
+        ]
         for node in sorted(list(nodes or []), key=lambda item: int(getattr(item, 'global_id', -1))):
             node_id = int(getattr(node, 'global_id', -1))
-            candidates = [
-                ('completed_topology', completed_by_node.get(node_id) or ({'role': 'completed_topology'} if node_id in completed_ids else None)),
-                ('pending_topology', pending_by_node.get(node_id) or ({'role': 'pending_topology'} if node_id in pending_ids else None)),
-                ('support_only', {'role': 'support_only'} if node_id in support_ids else None),
-                ('remaining_resource', {'role': 'remaining_resource'} if node_id in resource_ids else None),
-                ('unassigned_nonresource', {'role': 'unassigned_nonresource'} if node_id in unassigned_ids else None),
-            ]
-            present = [(state, meta) for state, meta in candidates if meta is not None]
-            if len(present) > 1:
-                conflicts.append({'node_id': node_id, 'states': [state for state, _ in present]})
-            state, meta = present[0] if present else ('unassigned_nonresource', {'role': 'unassigned_nonresource'})
+            state = str(state_by_node.get(node_id, 'unclassified_or_conflict'))
+            if state in {'completed_topology', 'claimed_closure_resource'}:
+                meta = completed_by_node.get(node_id, {'role': state})
+            elif state == 'pending_topology':
+                meta = pending_by_node.get(node_id, {'role': state})
+            else:
+                meta = {'role': state}
             meta = dict(meta or {})
             rows.append({
                 'node_id': node_id,
@@ -1062,7 +1408,7 @@ class InversePipelineV3:
                 'fragment_class': str(meta.get('fragment_class', '')),
                 'role': str(meta.get('role', state)),
                 'slot_id': str(meta.get('slot_id', '')),
-                'resource_pool': bool(state == 'remaining_resource'),
+                'resource_pool': bool(state in {'remaining_closure_resource', 'remaining_aromatic_donor'}),
             })
         return rows, conflicts
 
@@ -1082,6 +1428,7 @@ class InversePipelineV3:
             print(
                 "[Final Topology] "
                 f"ok={bool(summary.get('ok', False))} "
+                f"status={str(dict(summary.get('diagnostics', {}) or {}).get('solver_reason', ''))} "
                 f"closed={int(summary.get('closed_topology_count', 0))} "
                 f"final_specs={int(summary.get('final_topology_count', 0))} "
                 f"pending={int(summary.get('pending_closure_total_count', 0))}"
@@ -1149,11 +1496,11 @@ class InversePipelineV3:
                 print(
                     "  [TopologySpec] "
                     f"#{int(idx)} "
-                    f"actual_su={row.get('actual_su', '')} "
-                    f"gid={row.get('gid', '')} "
+                    f"topology={row.get('topology_notation', '')} "
+                    f"node_ids={row.get('node_id_notation', '')} "
                     f"source_fragment_ids={row.get('source_fragment_ids', [])} "
-                    f"source_fragment_classes={row.get('source_fragment_classes', [])} "
-                    f"source_node_ids={row.get('source_node_ids', [])}"
+                    f"fixed_source_node_ids={row.get('fixed_source_node_ids', [])} "
+                    f"claimed_resource_ids_by_su={row.get('claimed_resource_ids_by_su', {})}"
                 )
             if len(rows) > len(shown):
                 print(f"  [TopologySpec] ... {len(rows) - len(shown)} more")
@@ -1322,8 +1669,17 @@ class InversePipelineV3:
                                              max_stage3_iterations: int = 20,
                                              max_primary_adjustments_per_stage: int = 10,
                                              max_h_compensation_ops_per_adjustment: int = 8,
-                                             chain_23_limit: int = 6,
+                                             residual_flex_preferred_23: int = 3,
+                                             residual_flex_min_23: int = 2,
+                                             residual_side_preferred_23: int = 2,
+                                             residual_side_min_23: int = 1,
                                              h_tolerance: float = 0.06,
+                                             enable_post_external_spectrum: bool = True,
+                                             spectrum_candidate_limit: int = 10,
+                                             spectrum_max_primary_adjustments: int = 8,
+                                             spectrum_min_r2_gain: float = 0.002,
+                                             spectrum_min_window_loss_gain: float = 0.1,
+                                             spectrum_max_accepted_rounds: int = 2,
                                              iteration_offset: int = 0,
                                              output_dir: Optional[str] = None) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], Dict[str, Any]]:
         def rebuild_fn(H_seed: torch.Tensor,
@@ -1369,6 +1725,14 @@ class InversePipelineV3:
                 tag=tag,
             )
 
+        def context_snapshot_fn() -> Dict[str, Any]:
+            return copy.deepcopy(
+                getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {}
+            )
+
+        def context_restore_fn(snapshot: Dict[str, Any]) -> None:
+            self._set_fixed_partition_meta(copy.deepcopy(snapshot or {}))
+
         workflow_result = self.layer4_adjuster.run_block_c_resource_adjustment_loop(
             H=H.detach().clone(),
             nodes=copy.deepcopy(nodes),
@@ -1376,25 +1740,95 @@ class InversePipelineV3:
             S_target=S_target,
             rebuild_fn=rebuild_fn,
             validate_fn=validate_fn,
+            context_snapshot_fn=context_snapshot_fn,
+            context_restore_fn=context_restore_fn,
             output_dir=output_dir,
             max_stage3_iterations=int(max_stage3_iterations),
             max_primary_adjustments_per_stage=int(max_primary_adjustments_per_stage),
             max_h_compensation_ops_per_adjustment=int(max_h_compensation_ops_per_adjustment),
-            chain_23_limit=int(chain_23_limit),
+            residual_flex_preferred_23=int(residual_flex_preferred_23),
+            residual_flex_min_23=int(residual_flex_min_23),
+            residual_side_preferred_23=int(residual_side_preferred_23),
+            residual_side_min_23=int(residual_side_min_23),
             h_tolerance=float(h_tolerance),
             outer_cycle=int(outer_idx) + 1,
             iteration_offset=max(0, int(iteration_offset)),
+            difference_spectrum=dict(current_diff or {}),
+            enable_post_external_spectrum=bool(enable_post_external_spectrum),
+            spectrum_candidate_limit=int(spectrum_candidate_limit),
+            spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
+            spectrum_min_r2_gain=float(spectrum_min_r2_gain),
+            spectrum_min_window_loss_gain=float(spectrum_min_window_loss_gain),
+            spectrum_max_accepted_rounds=int(spectrum_max_accepted_rounds),
         )
 
         meta = workflow_result.to_dict()
         meta['stage'] = 'topology_resource_adjustment'
         meta['last_r2'] = float(dict(getattr(workflow_result, 'diff', {}) or {}).get('r2', float('nan')))
         meta['completion_diagnostics'] = {}
-        for cycle in reversed(list(getattr(workflow_result, 'cycles', []) or [])):
+        meta['terminal_diagnostics'] = {}
+        workflow_cycles = list(getattr(workflow_result, 'cycles', []) or [])
+        if workflow_cycles:
+            terminal_cycle = workflow_cycles[-1]
+            terminal_plan = dict(getattr(terminal_cycle, 'plan', {}) or {})
+            terminal_phase_result = dict(terminal_plan.get('phase_result', {}) or {})
+            terminal_proof = dict(
+                terminal_phase_result.get('infeasibility_proof', {})
+                or dict(terminal_plan.get('diagnostics', {}) or {}).get(
+                    'infeasibility_proof', {}
+                )
+                or {}
+            )
+            if (
+                str(getattr(workflow_result, 'stop_reason', '') or '')
+                == 'phase_resource_infeasible'
+                and terminal_proof
+            ):
+                terminal_runtime = dict(terminal_plan.get('runtime', {}) or {})
+                terminal_ledger = dict(
+                    terminal_runtime.get('iteration_topology_ledger', {}) or {}
+                )
+                meta['terminal_diagnostics'] = {
+                    'stop_reason': 'phase_resource_infeasible',
+                    'phase': str(terminal_plan.get('phase', '') or 'unknown'),
+                    'generation_id': int(
+                        terminal_ledger.get(
+                            'generation_id', getattr(terminal_cycle, 'cycle', 0)
+                        )
+                        or 0
+                    ),
+                    'infeasibility_proof': terminal_proof,
+                    'node_state_signature': self._stage3_node_state_signature(
+                        list(getattr(workflow_result, 'nodes', []) or [])
+                    ),
+                    'phase_result': terminal_phase_result,
+                }
+        for cycle in reversed(workflow_cycles):
             if str(getattr(cycle, 'stop_reason', '') or '') != 'stage3_complete':
                 continue
             plan_dict = dict(getattr(cycle, 'plan', {}) or {})
-            meta['completion_diagnostics'] = dict(plan_dict.get('diagnostics', {}) or {})
+            runtime = dict(plan_dict.get('runtime', {}) or {})
+            ledger = dict(runtime.get('iteration_topology_ledger', {}) or {})
+            generation_id = int(ledger.get('generation_id', getattr(cycle, 'cycle', 0)) or 0)
+            completed_products = [
+                normalize_stage3_product(
+                    raw,
+                    generation_id=generation_id,
+                    index=index,
+                ).to_dict()
+                for index, raw in enumerate(list(ledger.get('completed_products', []) or []))
+            ]
+            meta['completion_diagnostics'] = {
+                **dict(plan_dict.get('diagnostics', {}) or {}),
+                'stage3_complete': True,
+                'generation_id': int(generation_id),
+                'products': completed_products,
+                'ownership_ledger': self._stage3_completion_ownership(ledger),
+                'node_state_signature': self._stage3_node_state_signature(
+                    list(getattr(workflow_result, 'nodes', []) or [])
+                ),
+                'phase_result': dict(plan_dict.get('phase_result', {}) or {}),
+            }
             break
         return (
             list(getattr(workflow_result, 'nodes', []) or []),
@@ -1437,6 +1871,10 @@ class InversePipelineV3:
                 'resource_deficit_before': '',
                 'resource_deficit_after': '',
                 'layer2_r2': '',
+                'spectrum_candidate_id': '',
+                'spectrum_r2_gain': '',
+                'spectrum_window_loss_gain': '',
+                'spectrum_candidate_scores': '[]',
                 'planned_conversions': '[]',
                 'before_requirements': '{}',
                 'conversion_pattern_key': '',
@@ -1456,6 +1894,7 @@ class InversePipelineV3:
                 'state_signature': '',
                 'cold_rebuild': False,
                 'structural_blockers': '[]',
+                'infeasibility_proof': '{}',
                 'residual_infeasibility_proof': '{}',
             }]
         for item in cycles:
@@ -1464,6 +1903,18 @@ class InversePipelineV3:
             after = dict(rec.get('after_metrics', {}) or {})
             plan_wrapper = dict(rec.get('plan', {}) or {})
             diagnostics = dict(rec.get('diagnostics', {}) or {})
+            plan_diagnostics = dict(plan_wrapper.get('diagnostics', {}) or {})
+            spectrum_diagnostics = (
+                diagnostics
+                if (
+                    'selected_candidate' in diagnostics
+                    or 'evaluated_candidates' in diagnostics
+                )
+                else plan_diagnostics
+            )
+            selected_spectrum_candidate = dict(
+                spectrum_diagnostics.get('selected_candidate', {}) or {}
+            )
             phase_result = dict(plan_wrapper.get('phase_result', {}) or {})
             rows.append({
                 'outer_cycle': int(outer_idx) + 1,
@@ -1492,6 +1943,21 @@ class InversePipelineV3:
                 'resource_deficit_before': before.get('resource_deficit_total', ''),
                 'resource_deficit_after': after.get('resource_deficit_total', ''),
                 'layer2_r2': rec.get('layer2_r2', ''),
+                'spectrum_candidate_id': str(
+                    selected_spectrum_candidate.get('candidate_id', '')
+                ),
+                'spectrum_r2_gain': spectrum_diagnostics.get('r2_gain', ''),
+                'spectrum_window_loss_gain': spectrum_diagnostics.get(
+                    'window_loss_gain', ''
+                ),
+                'spectrum_candidate_scores': json.dumps(
+                    spectrum_diagnostics.get(
+                        'evaluated_candidates',
+                        plan_diagnostics.get('rejected_spectrum_candidates', []),
+                    ),
+                    ensure_ascii=False,
+                    default=str,
+                ),
                 'primary_adjustment_count': int(rec.get('primary_adjustment_count', 0) or 0),
                 'physical_conversion_count': int(rec.get('physical_conversion_count', 0) or 0),
                 'h_compensation_count': int(rec.get('h_compensation_count', 0) or 0),
@@ -1504,6 +1970,16 @@ class InversePipelineV3:
                 'state_signature': str(rec.get('state_signature', '')),
                 'cold_rebuild': bool(rec.get('cold_rebuild', False)),
                 'structural_blockers': json.dumps(rec.get('structural_blockers', []), ensure_ascii=False),
+                'infeasibility_proof': json.dumps(
+                    phase_result.get(
+                        'infeasibility_proof',
+                        dict(plan_wrapper.get('diagnostics', {}) or {}).get(
+                            'infeasibility_proof', {}
+                        ),
+                    ),
+                    ensure_ascii=False,
+                    default=str,
+                ),
                 'residual_infeasibility_proof': json.dumps(
                     dict(plan_wrapper.get('diagnostics', {}) or {}).get('residual_infeasibility_proof', {}),
                     ensure_ascii=False,
@@ -1549,33 +2025,50 @@ class InversePipelineV3:
                                             output_dir: str) -> None:
         final_dir = Path(output_dir)
         final_dir.mkdir(parents=True, exist_ok=True)
+        debug_dir = final_dir / 'debug'
+        debug_dir.mkdir(parents=True, exist_ok=True)
         row_list = [dict(row or {}) for row in list(rows or [])]
-        columns = [
+
+        def _decoded_dict(value: Any) -> Dict[str, Any]:
+            if isinstance(value, dict):
+                return dict(value)
+            try:
+                decoded = json.loads(str(value or '{}'))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return {}
+            return dict(decoded) if isinstance(decoded, dict) else {}
+
+        cycle_columns = [
             'outer_cycle', 'cycle', 'phase', 'applied', 'stage3_stop_reason',
-            'accepted_cycles_total', 'accepted_state_retained', 'rebuild_valid',
-            'after_ok', 'after_flex_range_reconciliation_ok', 'after_external_closure_ok',
-            'after_reason', 'improve_reason',
+            'accepted_state_retained', 'rebuild_valid', 'after_ok', 'improve_reason',
             'h_error_before', 'h_error_after',
-            'element_abs_error_before', 'element_abs_error_after',
             'pending_before', 'pending_after',
             'flex_before', 'flex_after',
-            'flex_deficit_before', 'flex_deficit_after',
             'resource_deficit_before', 'resource_deficit_after',
-            'layer2_r2', 'planned_conversions',
-            'before_requirements', 'conversion_pattern_key',
-            'bundle_count', 'adjustment_bundles',
-            'virtual_leftover_products', 'committed_leftover_products',
+            'layer2_r2', 'spectrum_candidate_id', 'spectrum_r2_gain',
+            'spectrum_window_loss_gain',
             'primary_adjustment_count', 'physical_conversion_count', 'h_compensation_count',
-            'histogram_before', 'histogram_after', 'phase_inventory', 'phase_demand',
-            'gap_before', 'gap_after', 'state_signature', 'cold_rebuild', 'structural_blockers',
-            'residual_infeasibility_proof',
-            'transactions',
+            'infeasibility_reason', 'residual_infeasibility_reason',
         ]
-        pd.DataFrame(row_list, columns=columns).to_csv(
+        compact_cycle_rows = []
+        for row in row_list:
+            proof = _decoded_dict(row.get('infeasibility_proof', {}))
+            residual_proof = _decoded_dict(row.get('residual_infeasibility_proof', {}))
+            compact_cycle_rows.append({
+                **{key: row.get(key, '') for key in cycle_columns},
+                'infeasibility_reason': str(proof.get('reason', '')),
+                'residual_infeasibility_reason': str(residual_proof.get('reason', '')),
+            })
+        pd.DataFrame(compact_cycle_rows, columns=cycle_columns).to_csv(
             final_dir / 'final_stage3_resource_cycles.csv',
             index=False,
         )
-        transaction_rows: List[Dict[str, Any]] = []
+        with open(debug_dir / 'final_stage3_resource_cycle_details.jsonl', 'w', encoding='utf-8') as handle:
+            for row in row_list:
+                handle.write(json.dumps(row, ensure_ascii=False, default=str) + '\n')
+
+        transaction_details: List[Dict[str, Any]] = []
+        transaction_rows_by_signature: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
         for row in row_list:
             raw_transactions = row.get('transactions', '[]')
             try:
@@ -1584,39 +2077,60 @@ class InversePipelineV3:
                 transactions = []
             for transaction in list(transactions or []):
                 item = dict(transaction or {})
-                transaction_rows.append({
-                    'outer_cycle': int(item.get('outer_cycle', row.get('outer_cycle', 0)) or 0),
-                    'iteration': int(item.get('iteration', row.get('cycle', 0)) or 0),
+                outer_cycle = int(item.get('outer_cycle', row.get('outer_cycle', 0)) or 0)
+                iteration = int(item.get('iteration', row.get('cycle', 0)) or 0)
+                detail = {
+                    **item,
+                    'outer_cycle': outer_cycle,
+                    'iteration': iteration,
+                    'phase': str(item.get('phase', row.get('phase', ''))),
+                }
+                transaction_details.append(detail)
+                compact = {
+                    'first_outer_cycle': outer_cycle,
+                    'last_outer_cycle': outer_cycle,
+                    'first_iteration': iteration,
+                    'last_iteration': iteration,
                     'phase': str(item.get('phase', row.get('phase', ''))),
                     'contract_id': int(item.get('contract_id', -1) or -1),
                     'target_role': str(item.get('target_role', '')),
                     'source_node_ids': json.dumps(item.get('source_node_ids', []), ensure_ascii=False),
                     'converted_node_ids': json.dumps(item.get('converted_node_ids', []), ensure_ascii=False),
-                    'conversion_path': json.dumps(item.get('conversion_path', []), ensure_ascii=False),
                     'compensation_node_ids': json.dumps(item.get('compensation_node_ids', []), ensure_ascii=False),
                     'claimed_resource_ids': json.dumps(item.get('claimed_resource_ids', {}), ensure_ascii=False, sort_keys=True),
                     'product_node_ids': json.dumps(item.get('product_node_ids', []), ensure_ascii=False),
-                    'slot_assignments': json.dumps(item.get('slot_assignments', []), ensure_ascii=False),
-                    'edge_plan': json.dumps(item.get('edge_plan', []), ensure_ascii=False),
-                    'H_before': item.get('h_before', ''),
-                    'H_after_primary': item.get('h_after_primary', ''),
-                    'H_after': item.get('h_after', ''),
                     'commit_scope': str(item.get('commit_scope', '')),
                     'committed': bool(item.get('committed', False)),
                     'rollback_reason': str(item.get('rollback_reason', '')),
-                    'infeasibility_proof': json.dumps(item.get('infeasibility_proof', {}), ensure_ascii=False, sort_keys=True),
-                })
+                    'occurrences': 1,
+                }
+                signature_fields = [
+                    'phase', 'contract_id', 'target_role', 'source_node_ids',
+                    'converted_node_ids', 'compensation_node_ids', 'claimed_resource_ids',
+                    'product_node_ids', 'commit_scope', 'committed', 'rollback_reason',
+                ]
+                signature = tuple(compact[key] for key in signature_fields)
+                existing = transaction_rows_by_signature.get(signature)
+                if existing is None:
+                    transaction_rows_by_signature[signature] = compact
+                else:
+                    existing['last_outer_cycle'] = outer_cycle
+                    existing['last_iteration'] = iteration
+                    existing['occurrences'] = int(existing.get('occurrences', 1)) + 1
+        transaction_rows = list(transaction_rows_by_signature.values())
         transaction_columns = [
-            'outer_cycle', 'iteration', 'phase', 'contract_id', 'target_role', 'source_node_ids',
-            'converted_node_ids', 'conversion_path', 'compensation_node_ids',
-            'claimed_resource_ids', 'product_node_ids', 'slot_assignments', 'edge_plan',
-            'H_before', 'H_after_primary', 'H_after', 'commit_scope',
-            'committed', 'rollback_reason', 'infeasibility_proof',
+            'first_outer_cycle', 'last_outer_cycle', 'first_iteration', 'last_iteration',
+            'phase', 'contract_id', 'target_role', 'source_node_ids',
+            'converted_node_ids', 'compensation_node_ids', 'claimed_resource_ids',
+            'product_node_ids', 'commit_scope', 'committed', 'rollback_reason', 'occurrences',
         ]
         pd.DataFrame(transaction_rows, columns=transaction_columns).to_csv(
             final_dir / 'final_stage3_topology_transactions.csv',
             index=False,
         )
+        with open(debug_dir / 'final_stage3_topology_transaction_details.jsonl', 'w', encoding='utf-8') as handle:
+            for row in transaction_details:
+                handle.write(json.dumps(row, ensure_ascii=False, default=str) + '\n')
         summary = {
             'cycle_rows': int(len(row_list)),
             'applied_cycle_count': int(sum(1 for row in row_list if bool(row.get('applied', False)))),
@@ -1626,20 +2140,31 @@ class InversePipelineV3:
                 and bool(row.get('rebuild_valid', False))
             )),
             'committed_transaction_count': int(sum(
-                1 for row in transaction_rows if bool(row.get('committed', False))
+                1 for row in transaction_details if bool(row.get('committed', False))
             )),
             'rolled_back_transaction_count': int(sum(
-                1 for row in transaction_rows
+                1 for row in transaction_details
                 if not bool(row.get('committed', False)) and bool(str(row.get('rollback_reason', '')))
             )),
+            'transaction_detail_rows': int(len(transaction_details)),
+            'transaction_summary_rows': int(len(transaction_rows)),
             'outer_cycles_with_stage3': sorted({
                 int(row.get('outer_cycle', 0) or 0)
                 for row in row_list
                 if int(row.get('outer_cycle', 0) or 0) > 0
             }),
             'last_stop_reason': str(row_list[-1].get('stage3_stop_reason', '')) if row_list else '',
+            'accepted_spectrum_cycle_count': int(sum(
+                1 for row in row_list
+                if str(row.get('phase', '')) == 'remaining_pool_spectrum_rebalance'
+                and str(row.get('stage3_stop_reason', '')) == 'accepted'
+            )),
+            'infeasibility_proof': (
+                _decoded_dict(row_list[-1].get('infeasibility_proof', {}))
+                if row_list else {}
+            ),
             'residual_infeasibility_proof': (
-                json.loads(str(row_list[-1].get('residual_infeasibility_proof', '{}') or '{}'))
+                _decoded_dict(row_list[-1].get('residual_infeasibility_proof', {}))
                 if row_list else {}
             ),
         }
@@ -1647,7 +2172,7 @@ class InversePipelineV3:
             json.dump(
                 {
                     'summary': summary,
-                    'cycles': row_list,
+                    'cycles': compact_cycle_rows,
                 },
                 f,
                 ensure_ascii=False,
@@ -1694,7 +2219,7 @@ class InversePipelineV3:
                     'block_b': {...},
                     'block_c_resource': {
                         'enabled': True,
-                        'max_stage3_iterations': 8,
+                        'max_stage3_iterations': 20,
                         'max_primary_adjustments_per_stage': 10,
                     },
                 }
@@ -1723,7 +2248,7 @@ class InversePipelineV3:
             outer_max_cycles:
                 - Layer4 -> Layer1/2 -> Layer3 宏循环次数上限
             outer_improve_eps:
-                - block_a / block_b（含尾部差谱） 的最小 Layer2 R2 提升阈值
+                - block_a / block_b 的最小 Layer2 R2 提升阈值
         """
         print("=" * 80)
         print("InversePipelineV3: 开始逆向推理")
@@ -1755,21 +2280,26 @@ class InversePipelineV3:
                 'max_cycles': 1,
                 'max_moves_each': 4,
                 'peak_rel_threshold': 0.01,
-                'enable_tail_spectrum': True,
-                'tail_spectrum_max_moves': 5,
-                'tail_spectrum_peak_rel_threshold': 0.01,
-                'tail_spectrum_aromatic_couple': True,
-                'tail_spectrum_h_tolerance': 0.06,
             },
             'block_c_resource': {
                 'enabled': True,
                 'max_stage3_iterations': 20,
                 'max_primary_adjustments_per_stage': 10,
                 'max_h_compensation_ops_per_adjustment': 8,
-                'chain_23_limit': 6,
+                'residual_flex_preferred_23': 3,
+                'residual_flex_min_23': 2,
+                'residual_side_preferred_23': 2,
+                'residual_side_min_23': 1,
                 'h_tolerance': 0.06,
+                'enable_post_external_spectrum': True,
+                'spectrum_candidate_limit': 10,
+                'spectrum_max_primary_adjustments': 8,
+                'spectrum_min_r2_gain': 0.002,
+                'spectrum_min_window_loss_gain': 0.1,
+                'spectrum_max_accepted_rounds': 2,
             },
         }
+        supported_block_b_keys = set(default_stage_configs['block_b'])
         if stage_configs is not None:
             for stage, cfg in stage_configs.items():
                 if stage in default_stage_configs:
@@ -1777,10 +2307,11 @@ class InversePipelineV3:
                 else:
                     raise ValueError(f"未知 stage_configs 键: {stage}")
         block_b_user_cfg = dict((stage_configs or {}).get('block_b', {}) or {})
-        if 'tail_spectrum_carbonyl_couple' in block_b_user_cfg:
+        unknown_block_b_keys = set(block_b_user_cfg) - supported_block_b_keys
+        if unknown_block_b_keys:
             raise ValueError(
-                "block_b contains unsupported key 'tail_spectrum_carbonyl_couple'; "
-                "use 'tail_spectrum_aromatic_couple'"
+                "block_b contains unknown keys: "
+                + ", ".join(sorted(str(key) for key in unknown_block_b_keys))
             )
         resource_cfg = dict(default_stage_configs.get('block_c_resource', {}) or {})
         resource_enabled = bool(resource_cfg.pop('enabled', True))
@@ -1788,8 +2319,17 @@ class InversePipelineV3:
             'max_stage3_iterations',
             'max_primary_adjustments_per_stage',
             'max_h_compensation_ops_per_adjustment',
-            'chain_23_limit',
+            'residual_flex_preferred_23',
+            'residual_flex_min_23',
+            'residual_side_preferred_23',
+            'residual_side_min_23',
             'h_tolerance',
+            'enable_post_external_spectrum',
+            'spectrum_candidate_limit',
+            'spectrum_max_primary_adjustments',
+            'spectrum_min_r2_gain',
+            'spectrum_min_window_loss_gain',
+            'spectrum_max_accepted_rounds',
         }
         unknown_resource_keys = set(resource_cfg) - supported_resource_keys
         if unknown_resource_keys:
@@ -1854,6 +2394,7 @@ class InversePipelineV3:
         print("\n>>> Outer Loop(Layer4 -> Layer1-2 -> Layer3)")
         stage3_resource_cycle_rows: List[Dict[str, Any]] = []
         self._final_stage3_completion_diagnostics = {}
+        self._final_stage3_terminal_diagnostics = {}
         outer_cycle_count = max(1, int(outer_max_cycles))
         for outer_idx in range(outer_cycle_count):
             print("\n" + "=" * 80)
@@ -2030,13 +2571,6 @@ class InversePipelineV3:
             block_b_cfg = dict(default_stage_configs['block_b'])
             block_b_cycles = max(1, int(block_b_cfg.pop('max_cycles', 1)))
             block_b_peak_rel_threshold = float(block_b_cfg.pop('peak_rel_threshold', 0.01))
-            block_b_tail_enabled = bool(block_b_cfg.pop('enable_tail_spectrum', True))
-            block_b_tail_cfg = {
-                'tail_spectrum_max_moves': int(block_b_cfg.pop('tail_spectrum_max_moves', 5)),
-                'tail_spectrum_peak_rel_threshold': float(block_b_cfg.pop('tail_spectrum_peak_rel_threshold', block_b_peak_rel_threshold)),
-                'tail_spectrum_aromatic_couple': bool(block_b_cfg.pop('tail_spectrum_aromatic_couple', True)),
-                'tail_spectrum_h_tolerance': float(block_b_cfg.pop('tail_spectrum_h_tolerance', 0.08)),
-            }
             block_b_families = [
                 ('ether', ['ether_2829', 'ether', 'ether_count19', 'ether_mode19']),
                 ('amine', ['amine', 'amine_count20', 'amine_mode20']),
@@ -2045,8 +2579,6 @@ class InversePipelineV3:
                 # single/double count stage for halogenated aliphatic carbon.
                 ('halogen', ['halogen', 'halogen_mode21']),
             ]
-            if bool(block_b_tail_enabled):
-                block_b_families.append(('tail_spectrum', ['tail_spectrum']))
             for block_b_iter in range(block_b_cycles):
                 block_b_progress = False
                 block_b_attempted = False
@@ -2073,12 +2605,7 @@ class InversePipelineV3:
                                 stage='block_b',
                                 nodes=nodes_stage_base,
                                 block_b_substage=str(substage),
-                                tail_spectrum_max_moves=int(block_b_tail_cfg.get('tail_spectrum_max_moves', 5)),
-                                tail_spectrum_aromatic_couple=bool(block_b_tail_cfg.get('tail_spectrum_aromatic_couple', True)),
-                                tail_spectrum_h_tolerance=float(block_b_tail_cfg.get('tail_spectrum_h_tolerance', 0.08)),
-                                peak_rel_threshold=float(
-                                    block_b_tail_cfg.get('tail_spectrum_peak_rel_threshold', block_b_peak_rel_threshold)
-                                ) if str(substage) == 'tail_spectrum' else block_b_peak_rel_threshold,
+                                peak_rel_threshold=block_b_peak_rel_threshold,
                                 **block_b_cfg,
                             )
                         except Exception as e:
@@ -2212,8 +2739,17 @@ class InversePipelineV3:
                         max_stage3_iterations=int(resource_cfg.get('max_stage3_iterations', 20)),
                         max_primary_adjustments_per_stage=int(resource_cfg.get('max_primary_adjustments_per_stage', 10)),
                         max_h_compensation_ops_per_adjustment=int(resource_cfg.get('max_h_compensation_ops_per_adjustment', 8)),
-                        chain_23_limit=int(resource_cfg.get('chain_23_limit', 6)),
+                        residual_flex_preferred_23=int(resource_cfg.get('residual_flex_preferred_23', 3)),
+                        residual_flex_min_23=int(resource_cfg.get('residual_flex_min_23', 2)),
+                        residual_side_preferred_23=int(resource_cfg.get('residual_side_preferred_23', 2)),
+                        residual_side_min_23=int(resource_cfg.get('residual_side_min_23', 1)),
                         h_tolerance=float(resource_cfg.get('h_tolerance', 0.06)),
+                        enable_post_external_spectrum=bool(resource_cfg.get('enable_post_external_spectrum', True)),
+                        spectrum_candidate_limit=int(resource_cfg.get('spectrum_candidate_limit', 10)),
+                        spectrum_max_primary_adjustments=int(resource_cfg.get('spectrum_max_primary_adjustments', 8)),
+                        spectrum_min_r2_gain=float(resource_cfg.get('spectrum_min_r2_gain', 0.002)),
+                        spectrum_min_window_loss_gain=float(resource_cfg.get('spectrum_min_window_loss_gain', 0.1)),
+                        spectrum_max_accepted_rounds=int(resource_cfg.get('spectrum_max_accepted_rounds', 2)),
                         output_dir=(
                             str(Path(output_dir) / f'outer_cycle_{outer_idx + 1}' / 'block_c')
                             if save_round_outputs else None
@@ -2225,71 +2761,23 @@ class InversePipelineV3:
                     current_nodes = copy.deepcopy(stage3_nodes)
                     current_H = stage3_H.detach().clone()
                     current_diff = copy.deepcopy(stage3_diff)
+                    self._final_stage3_terminal_diagnostics = dict(
+                        stage3_meta.get('terminal_diagnostics', {}) or {}
+                    )
+                    if str(stage3_meta.get('stop_reason', '') or '') == 'stage3_complete':
+                        self._final_stage3_completion_diagnostics = dict(
+                            stage3_meta.get('completion_diagnostics', {}) or {}
+                        )
+                    else:
+                        self._final_stage3_completion_diagnostics = {}
                     print(
                         f"[Block C:resource] 完成: accepted_cycles={int(stage3_meta.get('accepted_cycles', 0) or 0)} "
                         f"stop={stage3_meta.get('stop_reason', '')}"
                     )
                 except Exception as e:
+                    self._final_stage3_completion_diagnostics = {}
+                    self._final_stage3_terminal_diagnostics = {}
                     print(f"[Block C:resource] 失败，保持当前状态: {e}")
-
-            try:
-                current_nodes, current_H, current_diff, cycle_pre_layer3_r2 = self._run_layer12_cycle(
-                    H_seed=current_H.detach().clone(),
-                    S_target=S_target,
-                    E_target=E_target,
-                    eval_lib_path=eval_lib_path,
-                    layer1_runtime_cfg={**layer1_runtime_cfg, 'profile': 'rebuild'},
-                    layer2_runtime_cfg=layer2_runtime_cfg,
-                    identity_seed_nodes=None,
-                    eval_nmr=False,
-                )
-                current_H = self._histogram_from_nodes(current_nodes).detach().clone()
-                current_diff = copy.deepcopy(current_diff)
-                accepted_layer2_r2 = float(cycle_pre_layer3_r2)
-                historical_best_layer2_r2 = max(float(historical_best_layer2_r2), float(cycle_pre_layer3_r2))
-            except Exception as e:
-                print(f"[Outer Cycle {outer_idx + 1}] Block C 后 Layer1/2 失败，保持当前状态: {e}")
-
-            if bool(resource_enabled) and int(outer_idx) + 1 == int(outer_cycle_count):
-                try:
-                    final_stage3_nodes, final_stage3_H, final_stage3_diff, final_stage3_meta = self._run_topology_stage3_resource_cycles(
-                        nodes=copy.deepcopy(current_nodes),
-                        H=current_H.detach().clone(),
-                        current_diff=copy.deepcopy(current_diff),
-                        S_target=S_target,
-                        E_target=E_target,
-                        eval_lib_path=eval_lib_path,
-                        layer1_runtime_cfg={**layer1_runtime_cfg, 'profile': 'rebuild'},
-                        layer2_runtime_cfg=layer2_runtime_cfg,
-                        layer2_eval_hwhm=float(layer2_eval_hwhm),
-                        outer_idx=int(outer_idx),
-                        max_stage3_iterations=int(resource_cfg.get('max_stage3_iterations', 20)),
-                        max_primary_adjustments_per_stage=int(resource_cfg.get('max_primary_adjustments_per_stage', 10)),
-                        max_h_compensation_ops_per_adjustment=int(resource_cfg.get('max_h_compensation_ops_per_adjustment', 8)),
-                        chain_23_limit=int(resource_cfg.get('chain_23_limit', 6)),
-                        h_tolerance=float(resource_cfg.get('h_tolerance', 0.06)),
-                        iteration_offset=int(resource_cfg.get('max_stage3_iterations', 20)),
-                        output_dir=(
-                            str(Path(output_dir) / f'outer_cycle_{outer_idx + 1}' / 'block_c_post_rebuild')
-                            if save_round_outputs else None
-                        ),
-                    )
-                    stage3_resource_cycle_rows.extend(
-                        self._flatten_stage3_resource_cycles(final_stage3_meta, outer_idx=int(outer_idx))
-                    )
-                    current_nodes = copy.deepcopy(final_stage3_nodes)
-                    current_H = final_stage3_H.detach().clone()
-                    current_diff = copy.deepcopy(final_stage3_diff)
-                    self._final_stage3_completion_diagnostics = dict(
-                        final_stage3_meta.get('completion_diagnostics', {}) or {}
-                    )
-                    print(
-                        f"[Block C:post-rebuild] 完成: "
-                        f"accepted_cycles={int(final_stage3_meta.get('accepted_cycles', 0) or 0)} "
-                        f"stop={final_stage3_meta.get('stop_reason', '')}"
-                    )
-                except Exception as e:
-                    print(f"[Block C:post-rebuild] 失败，保持重建后状态: {e}")
 
             try:
                 current_nodes, _ = self.layer3_adjust_templates(
@@ -2952,53 +3440,92 @@ class InversePipelineV3:
                 S_target=S_target,
                 E_target=E_target,
             )
+            debug_dir = final_dir / 'debug'
+            debug_dir.mkdir(parents=True, exist_ok=True)
             topology_columns = [
-                'actual_su', 'gid', 'source_fragment_ids', 'source_fragment_classes',
-                'source_node_ids', 'mainline_node_ids', 'branch_node_ids',
-                'claimed_resource_ids', 'slot_assignments', 'edge_plan',
+                'actual_su', 'gid', 'product_type', 'required_slots_satisfied',
+                'source_fragment_ids', 'fixed_source_node_ids', 'claimed_resource_ids',
             ]
             pd.DataFrame(
-                topology_rows,
+                self._compact_topology_export_rows(topology_rows),
                 columns=topology_columns,
             ).to_csv(final_dir / 'final_topology_specs.csv', index=False)
+            with open(debug_dir / 'final_topology_slot_details.jsonl', 'w', encoding='utf-8') as handle:
+                for row in topology_rows:
+                    handle.write(json.dumps(dict(row or {}), ensure_ascii=False, default=str) + '\n')
             topo_diag = dict(topology_summary.get('diagnostics', {}) or {})
             topo_scalar = {
                 'ok': bool(topology_summary.get('ok', False)),
                 'topology_plan_feasible': bool(topology_summary.get('topology_plan_feasible', False)),
-                'closed_topology_count': int(topology_summary.get('closed_topology_count', 0)),
+                'required_slots_satisfied_count': int(topology_summary.get('closed_topology_count', 0)),
                 'final_topology_count': int(topology_summary.get('final_topology_count', 0)),
                 'pending_closure_total_count': int(topology_summary.get('pending_closure_total_count', 0)),
                 'solver_reason': str(topo_diag.get('solver_reason', '')),
-                'residual_infeasibility_proof': dict(
-                    topo_diag.get('residual_infeasibility_proof', {}) or {}
+                'stage3_terminal_stop_reason': str(
+                    topo_diag.get('stage3_terminal_stop_reason', '') or ''
+                ),
+                'stage3_terminal_phase': str(
+                    topo_diag.get('stage3_terminal_phase', '') or ''
+                ),
+                'stage3_terminal_snapshot_match': bool(
+                    topo_diag.get('stage3_terminal_snapshot_match', False)
                 ),
             }
             resource_ledger = dict(topo_diag.get('resource_ledger', {}) or {})
+            initial_counts = {
+                str(key): int(value)
+                for key, value in dict(resource_ledger.get('initial_counts', {}) or {}).items()
+            }
+            topology_consumed_counts = {
+                str(key): int(value)
+                for key, value in dict(resource_ledger.get('topology_consumed_counts', {}) or {}).items()
+            }
+            residual_consumed_counts = {
+                str(key): int(value)
+                for key, value in dict(resource_ledger.get('residual_consumed_counts', {}) or {}).items()
+            }
+            remaining_counts = {
+                str(key): int(value)
+                for key, value in dict(resource_ledger.get('remaining_counts', {}) or {}).items()
+            }
+            closure_keys = ('11', '22', '23', '24')
+            aromatic_donor_keys = ('10', '12', '13')
             topo_scalar.update({
                 'resource_snapshot_stage': str(resource_ledger.get('snapshot_stage', '')),
-                'initial_resource_pool_counts': dict(resource_ledger.get('initial_counts', {}) or {}),
-                'topology_consumed_counts': dict(resource_ledger.get('topology_consumed_counts', {}) or {}),
-                'residual_consumed_counts': dict(resource_ledger.get('residual_consumed_counts', {}) or {}),
-                'remaining_resource_counts': dict(resource_ledger.get('remaining_counts', {}) or {}),
+                'initial_closure_resource_count': int(sum(
+                    initial_counts.get(key, 0) for key in closure_keys
+                )),
+                'topology_consumed_closure_resource_count': int(sum(
+                    topology_consumed_counts.get(key, 0) for key in closure_keys
+                )),
+                'residual_consumed_closure_resource_count': int(sum(
+                    residual_consumed_counts.get(key, 0) for key in closure_keys
+                )),
+                'remaining_closure_resource_count': int(sum(
+                    remaining_counts.get(key, 0) for key in closure_keys
+                )),
+                'remaining_aromatic_donor_count': int(sum(
+                    remaining_counts.get(key, 0) for key in aromatic_donor_keys
+                )),
+                'remaining_resource_pool_count': int(sum(remaining_counts.values())),
             })
-            pd.DataFrame([topo_scalar]).to_csv(final_dir / 'final_topology_summary.csv', index=False)
             unclosed_rows = list(topology_summary.get('unclosed_candidates', []) or [])
             pending_columns = [
-                'contract_id', 'real', 'real_gid', 'pending_kind', 'phase', 'subphase',
-                'source_fragment_ids', 'source_fragment_classes', 'source_node_ids',
-                'claimed_source_node_ids', 'core_node_ids', 'context_node_ids',
-                'open_mainline_slots', 'branch_slots', 'required_counts',
-                'available_counts', 'infeasibility_proof', 'reason',
-                'attempt_reasons', 'validation_errors',
+                'actual_su', 'gid', 'pending_kind', 'phase', 'contract_id',
+                'source_fragment_ids', 'fixed_source_node_ids', 'required_counts',
+                'available_counts', 'reason',
             ]
-            pd.DataFrame(unclosed_rows, columns=pending_columns).to_csv(
-                final_dir / 'final_topology_unclosed_candidates.csv',
-                index=False,
-            )
-            pd.DataFrame(unclosed_rows, columns=pending_columns).to_csv(
+            pd.DataFrame(
+                self._compact_pending_export_rows(unclosed_rows),
+                columns=pending_columns,
+            ).to_csv(
                 final_dir / 'final_topology_pending.csv',
                 index=False,
             )
+            (final_dir / 'final_topology_unclosed_candidates.csv').unlink(missing_ok=True)
+            with open(debug_dir / 'final_topology_pending_details.jsonl', 'w', encoding='utf-8') as handle:
+                for row in unclosed_rows:
+                    handle.write(json.dumps(dict(row or {}), ensure_ascii=False, default=str) + '\n')
             ownership_rows, ownership_conflicts = self._topology_ownership_rows(
                 nodes=nodes,
                 topology_rows=topology_rows,
@@ -3010,23 +3537,39 @@ class InversePipelineV3:
                 index=False,
             )
             resource_rows = [
-                row for row in ownership_rows
+                {
+                    'node_id': int(row.get('node_id', -1)),
+                    'su_type': int(row.get('su_type', -1)),
+                    'state': str(row.get('state', '')),
+                }
+                for row in ownership_rows
                 if bool(row.get('resource_pool', False))
             ]
-            pd.DataFrame(resource_rows).to_csv(
+            pd.DataFrame(resource_rows, columns=['node_id', 'su_type', 'state']).to_csv(
                 final_dir / 'final_topology_resource_pool.csv',
                 index=False,
             )
             topo_scalar.update({
                 'total_node_count': int(len(ownership_rows)),
                 'ownership_conflict_count': int(len(ownership_conflicts)),
-                'unassigned_nonresource_count': int(sum(
-                    1 for row in ownership_rows if row.get('state') == 'unassigned_nonresource'
+                'unclassified_or_conflict_count': int(sum(
+                    1 for row in ownership_rows if row.get('state') == 'unclassified_or_conflict'
                 )),
-                'remaining_resource_node_count': int(len(resource_rows)),
+                'remaining_pool_node_count': int(len(resource_rows)),
                 'coverage_valid': bool(topology_summary.get('coverage_valid', False)),
             })
             pd.DataFrame([topo_scalar]).to_csv(final_dir / 'final_topology_summary.csv', index=False)
+            with open(debug_dir / 'final_topology_diagnostics.json', 'w', encoding='utf-8') as handle:
+                json.dump(
+                    {
+                        'summary': topology_summary,
+                        'ownership_conflicts': ownership_conflicts,
+                    },
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                )
             reject_rows = list(topology_summary.get('classification_rejects', []) or [])
             reject_columns = sorted({str(key) for row in reject_rows for key in dict(row or {}).keys()}) or [
                 'node_id', 'su_type', 'family', 'reason'

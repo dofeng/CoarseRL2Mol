@@ -8,7 +8,6 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from ...shared.inverse_common import _NodeV3, estimate_region_carbon_budgets
-from .assembly_residual import assemble_residual_resource_chains
 from .classification.classification_models import TopologyClassificationResult, TopologyFragment
 from .classification.classification_tokens import (
     AROMATIC_SU_TYPES,
@@ -23,6 +22,7 @@ from .classification.classification_tokens import (
     normalize_subtype,
 )
 from .stage3_models import (
+    Stage3OwnershipState,
     Stage3Serializable,
     TopologyAssemblyProduct,
     TopologyAssemblyResult,
@@ -32,7 +32,14 @@ from .stage3_models import (
     stage3_contract_owner_key,
 )
 from .iteration_ledger import normalize_slot, required_counts_from_slots
-from .sequential_resource import build_ownership_ledger
+from .round_context import (
+    build_stage3_round_context,
+    claim_round_product,
+    mark_round_pending_contracts,
+    normalize_stage3_product,
+    ownership_public_view,
+    round_context_invariants,
+)
 
 
 RESOURCE_SU_TYPES = (11, 22, 23, 24)
@@ -58,6 +65,14 @@ CHAIN_MATERIALIZABLE_OPEN_CLASSES = {
     "24_CD_M",
     "24_CD_P",
 }
+
+
+def _external_phase_for_role(target_role: str) -> str:
+    return {
+        "flex_chain": "external_flex_closure",
+        "fatty_ring": "external_fatty_ring_closure",
+        "side_chain": "external_side_chain_closure",
+    }.get(str(target_role or ""), "external_side_chain_closure")
 TERMINAL_ENDPOINT_LABELS = {"1", "4", "16", "18", "22", "25", "28", "32", "19d1", "20d1", "21d2"}
 RING_PRODUCT_KIND_TO_TYPE = {
     "fatty_ring_fused": "aliphatic_ring",
@@ -811,6 +826,39 @@ class AssemblyFragmentView(Stage3Serializable):
             }
         return self.branch_stubs_map()
 
+    def pending_branch_stubs_map(self) -> Dict[int, List[BranchStub]]:
+        result = self.real_branch_stubs_map()
+        for anchor, contracts in self.fixed_branch_contracts_by_anchor().items():
+            result.setdefault(int(anchor), [])
+            rendered_node_ids = {
+                int(node_id)
+                for stub in list(result[int(anchor)] or [])
+                for node_id in list(getattr(stub, "source_node_ids", []) or [])
+            }
+            for raw_contract in list(contracts or []):
+                contract = dict(raw_contract or {})
+                labels = [
+                    str(value)
+                    for value in list(contract.get("base_path_labels", []) or [])
+                    if str(value)
+                ]
+                node_ids = [
+                    int(value)
+                    for value in list(contract.get("base_path_node_ids", []) or [])
+                    if _safe_int(value, -1) >= 0
+                ]
+                if not labels or not node_ids or set(node_ids).issubset(rendered_node_ids):
+                    continue
+                result[int(anchor)].append(BranchStub(
+                    topology_notation="-" + "-".join(labels),
+                    node_id_notation="-" + "-".join(str(value) for value in node_ids),
+                    source_node_ids=list(node_ids),
+                    branch_kind="actual_fixed_connection_contract",
+                    mode="fixed_contract_base",
+                ))
+                rendered_node_ids.update(node_ids)
+        return result
+
     def real_branch_kinds_by_anchor(self) -> Dict[int, List[str]]:
         if dict(self.real_unresolved_branch_kinds_by_anchor or {}):
             return {
@@ -831,6 +879,9 @@ class AssemblyFragmentView(Stage3Serializable):
 
     def real_render(self) -> TopologyPathRender:
         return self._render_from_maps(self.real_branch_stubs_map(), self.real_branch_kinds_by_anchor())
+
+    def pending_render(self) -> TopologyPathRender:
+        return self._render_from_maps(self.pending_branch_stubs_map(), self.real_branch_kinds_by_anchor())
 
     def _render_from_maps(
         self,
@@ -976,7 +1027,7 @@ class PoolAllocator:
             for key, values in dict(initial_ids_by_su or {}).items()
         }
         self.initial_ids_by_su = {
-            str(key): sorted(list(values or []))
+            str(key): list(dict.fromkeys(int(value) for value in list(values or [])))
             for key, values in normalized.items()
         }
         self.remaining_ids_by_su = deepcopy(self.initial_ids_by_su)
@@ -1214,6 +1265,40 @@ def _collect_source_metadata(source_views: Sequence["AssemblyFragmentView"]) -> 
         for node_id in list(view.source_node_ids or [])
     })
     return source_fragment_ids, source_fragment_classes, source_node_ids
+
+
+def _fixed_source_ids_from_views(source_views: Sequence["AssemblyFragmentView"]) -> List[int]:
+    fixed_ids: Set[int] = set()
+    for view in list(source_views or []):
+        evidence = dict(getattr(view, "evidence", {}) or {})
+        matched_neighbors = [
+            dict(item or {})
+            for item in list(evidence.get("matched_neighbors", []) or [])
+        ]
+        nonfixed_ids = {
+            int(item.get("node_id"))
+            for item in matched_neighbors
+            if item.get("node_id") is not None and not bool(item.get("is_fixed", False))
+        }
+        fixed_ids.update(
+            int(value)
+            for value in list(getattr(view, "source_node_ids", []) or [])
+            if int(value) not in nonfixed_ids
+        )
+        for key in (
+            "center_node_ids",
+            "atomic_group_node_ids",
+            "fixed_source_node_ids",
+            "fixed_hop1_ids",
+        ):
+            fixed_ids.update(int(value) for value in list(evidence.get(key, []) or []))
+        fixed_ids.update(
+            int(item.get("node_id"))
+            for item in matched_neighbors
+            if item.get("node_id") is not None and bool(item.get("is_fixed", False))
+        )
+        fixed_ids.add(int(view.fragment_id))
+    return sorted(fixed_ids)
 
 
 def _should_materialize_bridge_literal(view: "AssemblyFragmentView", bridge_label: str) -> bool:
@@ -2328,10 +2413,12 @@ class ExternalTopologyAssembler:
         S_target: Any = None,
         E_target: Any = None,
         flex_audit: Optional[Dict[str, Any]] = None,
+        generation_id: int = 0,
     ) -> None:
         self.nodes = list(nodes or [])
         self.nodes_by_id = _build_node_lookup(self.nodes)
         self.classification = classification
+        self.generation_id = int(generation_id)
         self.flex_audit = dict(flex_audit or {})
         if not self.flex_audit:
             from .phase_eval import _compute_flex_audit  # local import to avoid module cycle
@@ -2410,9 +2497,9 @@ class ExternalTopologyAssembler:
                 actual_topology_gid=str(product.actual_topology_gid),
                 topology_notation=str(product.actual_topology_su),
                 validation_reason=(
-                    f"claimed_source_not_materialized:{missing_claimed_ids}"
+                    f"claimed_source_not_in_symbolic_product:{missing_claimed_ids}"
                     if missing_claimed_ids
-                    else f"duplicate_materialized_node_ids:{duplicate_rendered_ids}"
+                    else f"duplicate_symbolic_node_ids:{duplicate_rendered_ids}"
                 ),
                 diagnostics={
                     "declared_source_node_ids": sorted(declared_source_ids),
@@ -2426,7 +2513,7 @@ class ExternalTopologyAssembler:
             return False
         if rendered_node_ids:
             product.source_node_ids = sorted(rendered_source_ids)
-            product.materialized_node_ids = list(product.source_node_ids)
+            product.symbolic_node_ids = list(product.source_node_ids)
         gid_text = str(product.actual_topology_gid or "")
         main_gid_text = re.sub(r"\([^()]*\)", "", gid_text)
         mainline_ids = [int(value) for value in re.findall(r"\d+", main_gid_text)]
@@ -2437,27 +2524,95 @@ class ExternalTopologyAssembler:
         ]
         product.mainline_node_ids = list(dict.fromkeys(mainline_ids))
         product.branch_node_ids = list(dict.fromkeys(branch_ids))
-        edge_plan: List[Dict[str, Any]] = []
-        for index, (left, right) in enumerate(zip(mainline_ids, mainline_ids[1:])):
-            edge_plan.append({
-                "left_node_id": int(left),
-                "right_node_id": int(right),
-                "slot_id": f"product:{len(self.products)}:main:{index}",
-                "edge_role": "assembled_mainline",
-                "fixed": False,
-            })
+        existing_claims = {
+            str(key): {int(value) for value in list(values or [])}
+            for key, values in dict(product.claimed_resource_ids_by_su or {}).items()
+        }
+        fragment_source_ids = {
+            int(value)
+            for fragment_id in list(product.source_fragment_ids or [])
+            for value in list(
+                getattr(
+                    next((
+                        fragment
+                        for fragment in list(getattr(self.classification, "fragments", []) or [])
+                        if int(getattr(fragment, "fragment_id", -1)) == int(fragment_id)
+                    ), None),
+                    "claimed_node_ids",
+                    [],
+                )
+                or []
+            )
+        }
+        if allocator_snapshot is not None:
+            for key, values in self.allocator.claimed_ids_since(allocator_snapshot).items():
+                existing_claims.setdefault(str(key), set()).update(
+                    int(value) for value in list(values or [])
+                )
+        symbolic_resource_ids = {
+            int(value) for values in existing_claims.values() for value in values
+        }
+        product.fixed_source_node_ids = sorted({
+            int(value) for value in list(product.fixed_source_node_ids or [])
+        })
+
+        def _connection_slot(
+            *,
+            left: int,
+            right: int,
+            slot_id: str,
+            anchor_role: str,
+        ) -> Dict[str, Any]:
+            left_node = self.nodes_by_id.get(int(left))
+            right_node = self.nodes_by_id.get(int(right))
+            fixed = bool(
+                int(right) in set(getattr(left_node, "fixed_hop1_ids", set()) or set())
+                or int(left) in set(getattr(right_node, "fixed_hop1_ids", set()) or set())
+            )
+            assigned_resource_ids = sorted(
+                {int(left), int(right)} & symbolic_resource_ids
+            )
+            connection_semantics = (
+                "fixed"
+                if fixed
+                else "symbolic"
+                if assigned_resource_ids
+                else "open"
+            )
+            return {
+                "slot_id": str(slot_id),
+                "kind": f"{connection_semantics.upper()}_CONNECTION",
+                "anchor_node_id": int(left),
+                "anchor_role": str(anchor_role),
+                "required_su_sequence": [],
+                "existing_node_ids": [int(left), int(right)] if fixed else [],
+                "assigned_resource_ids": assigned_resource_ids,
+                "connection_semantics": str(connection_semantics),
+                "state": "OPEN" if connection_semantics == "open" else "FILLED",
+            }
+
+        product.mainline_slots = [
+            _connection_slot(
+                left=int(left),
+                right=int(right),
+                slot_id=f"product:{len(self.products)}:mainline:{index}",
+                anchor_role="mainline",
+            )
+            for index, (left, right) in enumerate(zip(mainline_ids, mainline_ids[1:]))
+        ]
+        product.branch_slots = []
         for branch_index, match in enumerate(re.finditer(r"(\d+)\(([^()]*)\)", gid_text)):
             anchor_id = int(match.group(1))
             path_ids = [int(value) for value in re.findall(r"\d+", match.group(2))]
-            for edge_index, (left, right) in enumerate(zip([anchor_id] + path_ids, path_ids)):
-                edge_plan.append({
-                    "left_node_id": int(left),
-                    "right_node_id": int(right),
-                    "slot_id": f"product:{len(self.products)}:branch:{branch_index}:{edge_index}",
-                    "edge_role": "assembled_branch",
-                    "fixed": False,
-                })
-        product.edge_plan = edge_plan
+            product.branch_slots.extend([
+                _connection_slot(
+                    left=int(left),
+                    right=int(right),
+                    slot_id=f"product:{len(self.products)}:branch:{branch_index}:{edge_index}",
+                    anchor_role="branch",
+                )
+                for edge_index, (left, right) in enumerate(zip([anchor_id] + path_ids, path_ids))
+            ])
         node_ids = [int(value) for value in list(product.source_node_ids or [])]
         if len(node_ids) != len(set(node_ids)):
             conflict = {
@@ -2471,9 +2626,13 @@ class ExternalTopologyAssembler:
             if branch_donors is not None and donor_snapshot is not None:
                 branch_donors[:] = donor_snapshot
             return False
+        owned_node_ids = sorted(
+            set(product.fixed_source_node_ids)
+            | {int(value) for values in existing_claims.values() for value in values}
+        )
         overlaps = sorted(
             int(node_id)
-            for node_id in node_ids
+            for node_id in owned_node_ids
             if int(node_id) in self.product_owner_by_node_id
         )
         if overlaps:
@@ -2493,36 +2652,16 @@ class ExternalTopologyAssembler:
             return False
         product_index = int(len(self.products))
         self.products.append(product)
-        for node_id in node_ids:
+        for node_id in owned_node_ids:
             self.product_owner_by_node_id[int(node_id)] = product_index
         committed_resource_ids: Dict[str, Set[int]] = defaultdict(set)
-        existing_claims = {
-            str(key): {int(value) for value in list(values or [])}
-            for key, values in dict(product.claimed_resource_ids or {}).items()
-        }
-        fragment_source_ids = {
-            int(value)
-            for fragment_id in list(product.source_fragment_ids or [])
-            for value in list(
-                getattr(
-                    next((
-                        fragment
-                        for fragment in list(getattr(self.classification, "fragments", []) or [])
-                        if int(getattr(fragment, "fragment_id", -1)) == int(fragment_id)
-                    ), None),
-                    "claimed_node_ids",
-                    [],
-                )
-                or []
-            )
-        }
-        for node_id in node_ids:
+        for node_id in owned_node_ids:
             su_type = int(getattr(self.nodes_by_id.get(int(node_id)), "su_type", -1))
             if su_type in {11, 22, 23, 24}:
                 committed_resource_ids[str(su_type)].add(int(node_id))
                 if int(node_id) not in fragment_source_ids:
                     existing_claims.setdefault(str(su_type), set()).add(int(node_id))
-        product.claimed_resource_ids = {
+        product.claimed_resource_ids_by_su = {
             str(key): sorted(int(value) for value in values)
             for key, values in existing_claims.items()
             if values
@@ -2557,7 +2696,15 @@ class ExternalTopologyAssembler:
         fixed_node_ids: Set[int] = set()
         for product_index, product in enumerate(list(self.products or [])):
             product_dict = product.to_dict() if hasattr(product, "to_dict") else dict(product or {})
-            source_ids = sorted({int(value) for value in list(product_dict.get("source_node_ids", []) or [])})
+            source_ids = sorted({
+                int(value)
+                for value in list(product_dict.get("fixed_source_node_ids", []) or [])
+                + [
+                    int(value)
+                    for values in dict(product_dict.get("claimed_resource_ids_by_su", {}) or {}).values()
+                    for value in list(values or [])
+                ]
+            })
             counts = Counter(
                 int(getattr(self.nodes_by_id.get(int(node_id)), "su_type", -1))
                 for node_id in source_ids
@@ -2785,19 +2932,19 @@ class ExternalTopologyAssembler:
         )
 
     def _drop_pending_overlapping_product(self, product: TopologyAssemblyProduct) -> None:
-        materialized_node_ids = set(
+        owned_node_ids = {
             int(node_id)
-            for node_id in list(
-                getattr(product, "materialized_node_ids", [])
-                or getattr(product, "source_node_ids", [])
-                or []
-            )
-        )
-        if not materialized_node_ids:
+            for node_id in list(getattr(product, "fixed_source_node_ids", []) or [])
+        } | {
+            int(node_id)
+            for values in dict(getattr(product, "claimed_resource_ids_by_su", {}) or {}).values()
+            for node_id in list(values or [])
+        }
+        if not owned_node_ids:
             return
         self._invalidate_pending_identity(
             fragment_ids=list(getattr(product, "source_fragment_ids", []) or []),
-            claimed_node_ids=materialized_node_ids,
+            claimed_node_ids=owned_node_ids,
         )
 
     def _available_views(self, predicate: Any) -> List[AssemblyFragmentView]:
@@ -2871,14 +3018,6 @@ class ExternalTopologyAssembler:
             int(getattr(fragment, "fragment_id", -1)): fragment
             for fragment in list(getattr(self.classification, "fragments", []) or [])
         }
-        core_node_ids = sorted({
-            int(node_id)
-            for fragment_id in list(source_fragment_ids or [])
-            for node_id in list(
-                getattr(fragment_by_id.get(int(fragment_id)), "claimed_node_ids", [])
-                or []
-            )
-        })
         rendered_branch_source_ids = {
             int(node_id)
             for view in list(views or [])
@@ -2891,8 +3030,7 @@ class ExternalTopologyAssembler:
             for node_id in list(getattr(stub, "source_node_ids", []) or [])
         }
         core_node_ids = sorted(
-            set(core_node_ids)
-            | {int(value) for value in list(source_node_ids or [])}
+            set(_fixed_source_ids_from_views(list(views or [])))
             | rendered_branch_source_ids
         )
         if not core_node_ids:
@@ -2903,9 +3041,18 @@ class ExternalTopologyAssembler:
             for node_id in list(getattr(view, "context_node_ids", []) or [])
         })
         source_node_ids = list(core_node_ids)
+        public_pending_node_notation = re.sub(
+            r"\d+",
+            lambda match: (
+                match.group(0)
+                if int(match.group(0)) in set(core_node_ids)
+                else "OPEN"
+            ),
+            str(actual.node_id_notation or ""),
+        )
         rendered_pending_ids = {
             int(value)
-            for value in re.findall(r"\d+", str(actual.node_id_notation or ""))
+            for value in re.findall(r"\d+", str(public_pending_node_notation or ""))
         }
         render_validation_errors: List[str] = []
         suppressed_support_node_ids = sorted(({
@@ -2927,7 +3074,7 @@ class ExternalTopologyAssembler:
             int(value)
             for product in list(self.products or [])
             for value in list(
-                getattr(product, "materialized_node_ids", [])
+                getattr(product, "symbolic_node_ids", [])
                 or getattr(product, "source_node_ids", [])
                 or []
             )
@@ -3015,12 +3162,12 @@ class ExternalTopologyAssembler:
             contract_kind=str(contract_kind),
             target_role=str(target_role),
             real_topology_partial=str(actual.topology_notation),
-            real_node_partial=str(actual.node_id_notation),
+            real_node_partial=str(public_pending_node_notation),
             source_fragment_ids=source_fragment_ids,
             source_fragment_classes=source_fragment_classes,
             source_node_ids=source_node_ids,
             core_node_ids=core_node_ids,
-            phase="external_structural_closure",
+            phase=_external_phase_for_role(target_role),
             subphase=str(self._pending_subphase(pending_kind, reason)),
             required_counts={str(key): int(value) for key, value in dict(required_counts or {}).items()},
             available_counts={str(key): int(value) for key, value in dict(available_counts or {}).items()},
@@ -3109,7 +3256,7 @@ class ExternalTopologyAssembler:
             "contract_id": int(unit_id),
             "contract_kind": str(contract_kind),
             "target_role": str(target_role),
-            "phase": "external_structural_closure",
+            "phase": _external_phase_for_role(target_role),
             "subphase": self._pending_subphase(str(pending_kind), str(reason)),
             "source_fragment_ids": list(source_fragment_ids or []),
             "source_fragment_classes": list(source_fragment_classes or []),
@@ -3570,7 +3717,8 @@ class ExternalTopologyAssembler:
             suppressed_support_node_ids=suppressed_support_node_ids,
         )
         source_fragment_ids, source_fragment_classes, source_node_ids = _collect_source_metadata(source_views)
-        materialized_node_ids = {
+        fixed_source_node_ids = _fixed_source_ids_from_views(source_views)
+        symbolic_node_ids = {
             int(value)
             for value in list(node_ids or [])
             if value is not None and int(value) >= 0
@@ -3579,8 +3727,8 @@ class ExternalTopologyAssembler:
             for token in list(values or []):
                 for raw_value in str(token).replace("(", "-").replace(")", "-").split("-"):
                     if str(raw_value).isdigit():
-                        materialized_node_ids.add(int(raw_value))
-        source_node_ids = sorted(set(int(value) for value in source_node_ids) | materialized_node_ids)
+                        symbolic_node_ids.add(int(raw_value))
+        source_node_ids = sorted(set(int(value) for value in source_node_ids) | symbolic_node_ids)
         diagnostics_payload = dict(diagnostics or {})
         product_type = str(
             RING_PRODUCT_KIND_TO_TYPE.get(
@@ -3632,7 +3780,8 @@ class ExternalTopologyAssembler:
             source_fragment_ids=source_fragment_ids,
             source_fragment_classes=source_fragment_classes,
             source_node_ids=source_node_ids,
-            materialized_node_ids=sorted(materialized_node_ids),
+            fixed_source_node_ids=fixed_source_node_ids,
+            symbolic_node_ids=sorted(symbolic_node_ids),
             closed=True,
             reason=str(reason),
         )
@@ -3935,7 +4084,9 @@ class ExternalTopologyAssembler:
         grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for item in list(self.pending_contracts or []):
             contract = dict(item or {})
-            grouped[str(contract.get("subphase", "external_structural_closure") or "external_structural_closure")].append(contract)
+            grouped[
+                str(contract.get("subphase", "") or _external_phase_for_role(contract.get("target_role", "")))
+            ].append(contract)
         return {str(key): list(value or []) for key, value in grouped.items()}
 
     def _view_flex_reconcile_roles(
@@ -5305,7 +5456,7 @@ class ExternalTopologyAssembler:
             diagnostics=diagnostics_payload,
         )
         if product is not None:
-            product.claimed_resource_ids = {
+            product.claimed_resource_ids_by_su = {
                 str(key): sorted({int(value) for value in list(values or [])})
                 for key, values in dict(materialization.pool_node_ids_by_su or {}).items()
                 if list(values or [])
@@ -7128,8 +7279,9 @@ class ExternalTopologyAssembler:
         self,
         branch_donors: List[AssemblyFragmentView],
     ) -> bool:
-        # This stage runs only after explicit branch closure and real like24 ring
-        # assembly. It must not be treated as pre-assembly flex reconciliation.
+        # This fallback is only used when no enforceable flex window exists.
+        # It still belongs to the external-flex phase and therefore runs
+        # before any ring or side-chain allocation.
         target_count = int(
             dict(self.flex_bounds or {}).get("target", self._flex_limit("max"))
             if self._flex_bounds_enforced()
@@ -7170,12 +7322,11 @@ class ExternalTopologyAssembler:
                 return True
         return False
 
-    def _assemble_remaining_flex_and_side(
+    def _assemble_remaining_side_products(
         self,
         branch_donors: List[AssemblyFragmentView],
     ) -> bool:
-        progress_made = self._assemble_remaining_flex(branch_donors)
-        progress_made = bool(self._assemble_remaining_external_b_plus_e_side(branch_donors) or progress_made)
+        progress_made = self._assemble_remaining_external_b_plus_e_side(branch_donors)
         progress_made = bool(self._assemble_remaining_su25(branch_donors) or progress_made)
         progress_made = bool(self._assemble_remaining_external_single_e_closures_for_side(branch_donors) or progress_made)
         return progress_made
@@ -7241,7 +7392,7 @@ class ExternalTopologyAssembler:
                 available_counts=self.allocator.available_counts(),
                 reason=str(pending_reason),
                 partial_render=partial,
-                actual_render=view.real_render(),
+                actual_render=view.pending_render(),
             )
 
     def assemble(self) -> TopologyAssemblyResult:
@@ -7260,9 +7411,14 @@ class ExternalTopologyAssembler:
         remaining_stage_attempted = False
         external_subphases.append("explicit_branch_closure")
         self._close_explicit_flex_branches_if_needed(branch_donors)
-        if str(dict(self.flex_audit or {}).get("scenario", "") or "") == "below_range":
+        flex_scenario = str(dict(self.flex_audit or {}).get("scenario", "") or "")
+        flex_enforced = bool(dict(self.flex_audit or {}).get("enforced", False))
+        if flex_scenario == "below_range":
             external_subphases.append("supplemental_flex_closure")
             self._assemble_selected_supplemental_flex(branch_donors)
+        elif flex_scenario == "not_applicable" or not flex_enforced:
+            external_subphases.append("unbounded_external_flex_closure")
+            self._assemble_remaining_flex(branch_donors)
         flex_violation_reason = self._flex_range_violation_reason()
         explicit_branch_stage_ok = not self._has_pending_contracts_for_subphase("explicit_branch_closure")
         unresolved_flex_candidates = self._has_unresolved_selected_flex_candidates()
@@ -7276,7 +7432,7 @@ class ExternalTopologyAssembler:
         ):
             external_subphases.append("remaining_external_halfclosed_closure")
             remaining_stage_attempted = True
-            self._assemble_remaining_flex_and_side(branch_donors)
+            self._assemble_remaining_side_products(branch_donors)
         if ring_stage_attempted:
             ring_candidate_views = self._available_views(lambda item: bool(getattr(item, "can_ring", False)))
             for view in ring_candidate_views:
@@ -7318,49 +7474,8 @@ class ExternalTopologyAssembler:
                     actual_render=view.real_render(),
                 )
 
-        residual_products: List[TopologyAssemblyProduct] = []
-        residual_phase_attempted = False
         protected_resource_counts: Dict[str, int] = {}
         self.allocator.set_protected_counts({})
-        if flex_violation_reason is None and not self._flex_exceeds_max():
-            residual_phase_attempted = True
-            products_before = len(self.products)
-            assemble_residual_resource_chains(
-                allocator=self.allocator,
-                products=self.products,
-                current_flex_count=int(self._current_flex_product_count()),
-                flex_lower=int(self._flex_limit("min")),
-                flex_target=int(dict(self.flex_bounds or {}).get("target", self._flex_limit("min")) or 0),
-                flex_upper=int(self._flex_limit("max")),
-                commit_product=lambda product: self._commit_product(product),
-            )
-            residual_products = list(self.products[products_before:])
-
-        if residual_phase_attempted:
-            final_available_counts = self.allocator.available_counts()
-            for pending in list(self.pending_units or []):
-                pending.available_counts = {
-                    str(key): int(value)
-                    for key, value in dict(final_available_counts or {}).items()
-                }
-                missing_counts = {
-                    str(key): max(
-                        0,
-                        int(dict(pending.required_counts or {}).get(str(key), 0) or 0)
-                        - int(dict(final_available_counts or {}).get(str(key), 0) or 0),
-                    )
-                    for key in dict(pending.required_counts or {})
-                }
-                pending.infeasibility_proof = {
-                    **dict(pending.infeasibility_proof or {}),
-                    "available_counts": dict(pending.available_counts),
-                    "missing_counts": {
-                        str(key): int(value)
-                        for key, value in missing_counts.items()
-                        if int(value) > 0
-                    },
-                    "resource_snapshot": "post_residual",
-                }
 
         # Record every still-available fragment only after all materialization
         # stages have had a chance to consume it.  Pending registration must
@@ -7377,7 +7492,14 @@ class ExternalTopologyAssembler:
         completed_product_node_ids = {
             int(node_id)
             for product in list(self.products or [])
-            for node_id in list(getattr(product, "source_node_ids", []) or [])
+            for node_id in (
+                list(getattr(product, "fixed_source_node_ids", []) or [])
+                + [
+                    int(value)
+                    for values in dict(getattr(product, "claimed_resource_ids_by_su", {}) or {}).values()
+                    for value in list(values or [])
+                ]
+            )
         }
         completed_product_fragment_ids = {
             int(fragment_id)
@@ -7401,7 +7523,7 @@ class ExternalTopologyAssembler:
             "maximum_capacity": max(0, int(self._flex_limit("max")) - int(explicit_flex_count)),
             "external_candidate_capacity": int(len(self.selected_flex_candidate_ids)),
             "external_planned_addition": int(len(self.selected_flex_candidate_ids)),
-            "external_materialized_addition": max(0, int(final_flex_count) - int(explicit_flex_count)),
+            "external_symbolic_addition": max(0, int(final_flex_count) - int(explicit_flex_count)),
             "external_capacity_exhausted": bool(dict(self.flex_audit or {}).get("external_capacity_exhausted", False)),
             "remaining_minimum_gap": max(0, int(self._flex_limit("min")) - int(final_flex_count)),
             "remaining_preferred_gap": max(0, int(dict(self.flex_bounds or {}).get("target", 0) or 0) - int(final_flex_count)),
@@ -7423,19 +7545,7 @@ class ExternalTopologyAssembler:
             for contract in list(pending_contracts or [])
         )
         ledger = self._reconcile_resource_ownership(ledger)
-        residual_consumed_ids = {
-            int(node_id)
-            for product in list(residual_products or [])
-            for node_id in list(
-                getattr(product, "materialized_node_ids", [])
-                or getattr(product, "source_node_ids", [])
-                or []
-            )
-        }
-        ledger.residual_consumed_counts = {
-            str(key): int(len(set(values or []) & residual_consumed_ids))
-            for key, values in dict(ledger.consumed_ids_by_su or {}).items()
-        }
+        ledger.residual_consumed_counts = {str(key): 0 for key in ledger.consumed_ids_by_su}
         ledger.topology_consumed_counts = {
             str(key): max(
                 0,
@@ -7444,68 +7554,66 @@ class ExternalTopologyAssembler:
             )
             for key in set(ledger.initial_counts) | set(ledger.consumed_counts)
         }
-        ledger.snapshot_stage = "post_residual_final"
+        ledger.snapshot_stage = "post_external_final"
         remaining_pool_counts = dict(ledger.allocator_remaining_counts or ledger.remaining_counts or {})
         residual_convertible_total = sum(
             int(remaining_pool_counts.get(str(su_type), 0) or 0)
             for su_type in (11, 22, 23, 24)
         )
+        role_priority = {"flex_chain": 0, "fatty_ring": 1, "side_chain": 2}
+        active_pending_contract = min(
+            list(pending_contracts or []),
+            key=lambda item: (
+                int(role_priority.get(str(dict(item or {}).get("target_role", "")), 3)),
+                int(dict(item or {}).get("contract_id", 10**12) or 10**12),
+            ),
+            default={},
+        )
+        active_external_phase = _external_phase_for_role(
+            str(dict(active_pending_contract or {}).get("target_role", "") or "")
+        )
         if str(flex_violation_reason) == "flex_range_below_minimum":
             result_reason = "external_flex_range_below_minimum"
         elif flex_violation_reason is not None or flex_above_max:
             result_reason = "external_flex_range_exceeded"
-        elif not has_external_pending and residual_convertible_total > 0:
-            result_reason = "residual_resource_self_closure_pending"
-        elif not self.pending_units:
-            result_reason = "topology_assembly_complete"
+        elif not has_external_pending:
+            result_reason = "remaining_pool_spectrum_rebalance_ready"
         elif has_shortage_contract:
             result_reason = "external_pool_shortage_pending"
-        elif has_branch_closure_contract:
-            result_reason = "external_structural_closure_pending"
         elif any(str(unit.pending_kind) == "pending_ring_candidate" for unit in list(self.pending_units or [])):
             result_reason = "external_ring_candidates_pending"
         else:
-            result_reason = "external_structural_closure_pending"
+            result_reason = f"{active_external_phase}_pending"
         if flex_violation_reason is not None or flex_above_max:
             stage3_phase = "flex_range_reconciliation"
         elif has_external_pending:
-            stage3_phase = "external_structural_closure"
-        elif residual_convertible_total > 0:
-            stage3_phase = "residual_resource_self_closure"
+            stage3_phase = str(active_external_phase)
+        elif not has_external_pending:
+            stage3_phase = "remaining_pool_spectrum_rebalance"
         else:
             stage3_phase = "complete"
-        completed_phases = [
-            "flex_range_reconciliation",
-            "explicit_branch_closure",
-            "real_like24_ring_assembly",
-            "remaining_external_halfclosed_closure",
-        ]
-        if residual_phase_attempted and stage3_phase == "complete":
-            completed_phases.append("residual_resource_self_closure")
-        terminal_resource_counts = {
-            str(su_type): int(remaining_pool_counts.get(str(su_type), 0) or 0)
-            for su_type in (12, 13)
-            if int(remaining_pool_counts.get(str(su_type), 0) or 0) > 0
-        }
-        terminal_unresolved_counts = {
-            str(su_type): int(remaining_pool_counts.get(str(su_type), 0) or 0)
-            for su_type in (11, 22, 23, 24)
-            if int(remaining_pool_counts.get(str(su_type), 0) or 0) > 0
-        }
+        completed_phases = ["flex_range_reconciliation"]
+        for phase_name in (
+            "external_flex_closure",
+            "external_fatty_ring_closure",
+            "external_side_chain_closure",
+        ):
+            if has_external_pending and str(phase_name) == str(stage3_phase):
+                break
+            completed_phases.append(str(phase_name))
         diagnostics = {
             "explicit_flex_count": int(explicit_flex_count),
             "total_shortage": {str(k): int(v) for k, v in self.shortage_counts.items()},
             "stage3_phase": stage3_phase,
             "external_subphases": list(external_subphases),
             "active_external_subphase": (
-                list(external_subphases or [])[-1]
-                if list(external_subphases or []) and stage3_phase == "external_structural_closure"
-                else ("flex_range_reconciliation" if stage3_phase == "flex_range_reconciliation" else "")
+                str(stage3_phase)
+                if stage3_phase != "remaining_pool_spectrum_rebalance"
+                else "remaining_pool_spectrum_rebalance"
             ),
             "flex_audit": dict(self.flex_audit or {}),
             "pending_contracts": list(pending_contracts),
             "external_subphase_status": self._external_subphase_status_snapshot(),
-            "residual_closure_product_count": int(len(residual_products)),
             "completed_phases": list(completed_phases),
             "protected_resource_counts": dict(protected_resource_counts),
             "claimable_counts": dict(ledger.convertible_counts or {}),
@@ -7527,44 +7635,59 @@ class ExternalTopologyAssembler:
         }
         if self.invalid_topologies:
             diagnostics["bad_topologies"] = [dict(item or {}) for item in list(self.invalid_topologies or [])]
-        support_only_node_ids = [
-            int(item.get("node_id", item.get("global_id", -1)))
-            for item in list(getattr(self.classification, "support_units_only", []) or [])
-            if int(item.get("node_id", item.get("global_id", -1))) >= 0
-        ]
-        ownership = build_ownership_ledger(
-            self.nodes,
-            ignore_stage3_node_owners=True,
-            completed_products=[
-                product.to_dict() if hasattr(product, "to_dict") else dict(product or {})
-                for product in list(self.products or [])
-            ],
-            pending_topologies=[
+        round_context = build_stage3_round_context(
+            nodes=self.nodes,
+            classification=self.classification,
+            flex_audit=self.flex_audit,
+            generation_id=int(self.generation_id),
+        )
+        for product_index, raw_product in enumerate(list(self.products or [])):
+            symbolic_product = normalize_stage3_product(
+                raw_product,
+                generation_id=int(self.generation_id),
+                index=product_index,
+            )
+            claimed_context, claim_proof = claim_round_product(round_context, symbolic_product)
+            if claimed_context is None:
+                round_context.conflicts.append({
+                    "reason": "external_product_ownership_conflict",
+                    "product_id": str(symbolic_product.product_id),
+                    "proof": dict(claim_proof or {}),
+                })
+                continue
+            round_context = claimed_context
+        round_context = mark_round_pending_contracts(
+            round_context,
+            [
                 pending.to_ownership_dict()
                 if hasattr(pending, "to_ownership_dict")
                 else (pending.to_dict() if hasattr(pending, "to_dict") else dict(pending or {}))
                 for pending in list(self.pending_units or [])
             ],
-            support_only_node_ids=support_only_node_ids,
         )
         for atomic_group in list(getattr(self.classification, "atomic_groups", []) or []):
             group = dict(atomic_group or {})
             group_node_ids = [int(value) for value in list(group.get("node_ids", []) or [])]
-            group_owners = [ownership.by_node_id.get(int(node_id)) for node_id in group_node_ids]
+            group_owners = [round_context.ownership_by_node_id.get(int(node_id)) for node_id in group_node_ids]
             if not group_node_ids or any(owner is None for owner in group_owners):
-                ownership.conflicts.append({
+                round_context.conflicts.append({
                     "reason": "atomic_group_node_missing",
                     "atomic_group_id": int(group.get("group_id", -1)),
                     "node_ids": group_node_ids,
                 })
                 continue
             identities = {
-                (str(owner.state), owner.owner_topology_id, owner.owner_fragment_id)
+                (
+                    str(owner.state),
+                    str(owner.owner_product_id or ""),
+                    owner.owner_contract_id,
+                    owner.owner_fragment_id,
+                )
                 for owner in group_owners
                 if owner is not None
             }
             if len(identities) != 1:
-                ownership.conflicts.append({
+                round_context.conflicts.append({
                     "reason": "atomic_group_identity_split",
                     "atomic_group_id": int(group.get("group_id", -1)),
                     "kind": str(group.get("kind", "")),
@@ -7573,39 +7696,22 @@ class ExternalTopologyAssembler:
                         {
                             "node_id": int(owner.node_id),
                             "state": str(owner.state),
-                            "owner_topology_id": owner.owner_topology_id,
+                            "owner_product_id": str(owner.owner_product_id or ""),
+                            "owner_contract_id": owner.owner_contract_id,
                             "owner_fragment_id": owner.owner_fragment_id,
                         }
                         for owner in group_owners
                         if owner is not None
                     ],
                 })
-        ownership_view = {
-            "completed_topology_node_ids": sorted(
-                int(node_id) for node_id, item in ownership.by_node_id.items()
-                if item.state == "completed_topology"
-            ),
-            "pending_topology_node_ids": sorted(
-                int(node_id) for node_id, item in ownership.by_node_id.items()
-                if item.state == "pending_topology"
-            ),
-            "unassigned_nonresource_node_ids": sorted(
-                int(node_id) for node_id, item in ownership.by_node_id.items()
-                if item.state == "unassigned_nonresource"
-            ),
-            "support_only_node_ids": sorted(
-                int(node_id) for node_id, item in ownership.by_node_id.items()
-                if item.state == "support_only"
-            ),
-            "remaining_resource_ids_by_su": {
-                str(key): list(values)
-                for key, values in ownership.ids_by_su().items()
-            },
-            "conflicts": list(ownership.conflicts or []),
-        }
+        ownership_view = ownership_public_view(round_context)
+        ownership_states = dict(ownership_view.get("states", {}) or {})
         ownership_remaining_ids = {
             str(key): [int(value) for value in list(values or [])]
-            for key, values in dict(ownership_view["remaining_resource_ids_by_su"] or {}).items()
+            for key, values in {
+                **dict(ownership_view.get("closure_pool_ids_by_su", {}) or {}),
+                **dict(ownership_view.get("aromatic_donor_ids_by_su", {}) or {}),
+            }.items()
         }
         ledger.allocator_remaining_ids_by_su = deepcopy(ownership_remaining_ids)
         ledger.remaining_ids_by_su = deepcopy(ownership_remaining_ids)
@@ -7633,19 +7739,7 @@ class ExternalTopologyAssembler:
         ledger.consumed_counts = {
             str(key): int(len(values)) for key, values in ledger.consumed_ids_by_su.items()
         }
-        residual_consumed_ids = {
-            int(node_id)
-            for product in list(residual_products or [])
-            for node_id in list(
-                getattr(product, "materialized_node_ids", [])
-                or getattr(product, "source_node_ids", [])
-                or []
-            )
-        }
-        ledger.residual_consumed_counts = {
-            str(key): int(len(set(values or []) & residual_consumed_ids))
-            for key, values in dict(ledger.consumed_ids_by_su or {}).items()
-        }
+        ledger.residual_consumed_counts = {str(key): 0 for key in ledger.consumed_ids_by_su}
         ledger.topology_consumed_counts = {
             str(key): max(
                 0,
@@ -7656,27 +7750,34 @@ class ExternalTopologyAssembler:
         }
         ledger.snapshot_stage = "final_ownership_reconciled"
         diagnostics["ownership_ledger"] = dict(ownership_view)
-        completed_node_ids = set(int(x) for x in ownership_view["completed_topology_node_ids"])
-        pending_node_ids = set(int(x) for x in ownership_view["pending_topology_node_ids"])
-        support_node_ids = set(int(x) for x in ownership_view["support_only_node_ids"])
+        completed_node_ids = set(int(x) for x in ownership_states.get(Stage3OwnershipState.COMPLETED_TOPOLOGY.value, []))
+        completed_node_ids.update(
+            int(x) for x in ownership_states.get(Stage3OwnershipState.CLAIMED_CLOSURE_RESOURCE.value, [])
+        )
+        pending_node_ids = set(int(x) for x in ownership_states.get(Stage3OwnershipState.PENDING_TOPOLOGY.value, []))
+        fixed_node_ids = set(int(x) for x in ownership_states.get(Stage3OwnershipState.FIXED_TOPOLOGY_CORE.value, []))
+        support_node_ids = set(int(x) for x in ownership_states.get(Stage3OwnershipState.SUPPORT_CONTEXT.value, []))
         resource_node_ids = {
             int(node_id)
-            for values in ownership_view["remaining_resource_ids_by_su"].values()
+            for values in ownership_remaining_ids.values()
             for node_id in list(values or [])
         }
-        unassigned_node_ids = set(int(x) for x in ownership_view["unassigned_nonresource_node_ids"])
+        conflict_node_ids = set(
+            int(x) for x in ownership_states.get(Stage3OwnershipState.UNCLASSIFIED_OR_CONFLICT.value, [])
+        )
         diagnostics["node_coverage"] = {
             "total_node_count": int(len(self.nodes_by_id)),
             "completed_node_count": int(len(completed_node_ids)),
             "pending_node_count": int(len(pending_node_ids)),
-            "remaining_resource_node_count": int(len(resource_node_ids)),
-            "unassigned_nonresource_node_count": int(len(unassigned_node_ids)),
-            "support_only_node_count": int(len(support_node_ids)),
-            "covered_node_count": int(len(completed_node_ids | pending_node_ids | support_node_ids | resource_node_ids)),
+            "fixed_topology_core_node_count": int(len(fixed_node_ids)),
+            "remaining_pool_node_count": int(len(resource_node_ids)),
+            "conflict_node_count": int(len(conflict_node_ids)),
+            "support_context_node_count": int(len(support_node_ids)),
+            "covered_node_count": int(len(round_context.ownership_by_node_id)),
             "uncovered_node_ids": sorted(
-                set(self.nodes_by_id) - completed_node_ids - pending_node_ids - support_node_ids - resource_node_ids - unassigned_node_ids
+                set(self.nodes_by_id) - set(round_context.ownership_by_node_id)
             ),
-            "unassigned_nonresource_node_ids": sorted(unassigned_node_ids),
+            "conflict_node_ids": sorted(conflict_node_ids),
             "duplicate_node_ids": [],
         }
         ownership_residual_total = sum(
@@ -7684,25 +7785,13 @@ class ExternalTopologyAssembler:
             for su_type in (11, 22, 23, 24)
         )
         residual_convertible_total = int(ownership_residual_total)
-        if (
-            stage3_phase == "complete"
-            and int(ownership_residual_total) > 0
-        ):
-            stage3_phase = "residual_resource_self_closure"
-            result_reason = "residual_resource_self_closure_pending"
-            diagnostics["stage3_phase"] = str(stage3_phase)
-            diagnostics["completed_phases"] = [
-                str(value)
-                for value in list(completed_phases or [])
-                if str(value) != "residual_resource_self_closure"
-            ]
         classification_valid = bool(
             len(self.classification.unclassified_nodes or []) == 0
             and len(getattr(self.classification, "claim_conflicts", []) or []) == 0
             and len(self.classification.classification_rejects or []) == 0
         )
         ownership_valid = bool(
-            not list(ownership_view.get("conflicts", []) or [])
+            not list(round_context_invariants(round_context) or [])
             and not list(diagnostics.get("node_coverage", {}).get("uncovered_node_ids", []) or [])
         )
         ledger_valid = bool(not list(ledger.invariant_errors or []))
@@ -7710,9 +7799,11 @@ class ExternalTopologyAssembler:
             len(self.pending_units) == 0
             and flex_violation_reason is None
             and not flex_above_max
-            and stage3_phase == "complete"
+            and stage3_phase == "remaining_pool_spectrum_rebalance"
         )
-        result_ok = bool(topology_complete and classification_valid and ownership_valid and ledger_valid)
+        # This helper owns only external symbolic assembly. Stage3 completion is
+        # decided later by the authoritative state machine.
+        result_ok = False
         if not result_ok and result_reason == "topology_assembly_complete":
             if not ownership_valid:
                 result_reason = "final_ownership_conflict"
@@ -7736,13 +7827,8 @@ class ExternalTopologyAssembler:
             planned_conversions=[],
             active_phase=str(stage3_phase),
             completed_phases=list(completed_phases),
-            residual_closure_products=list(residual_products),
-            terminal_resource_counts=dict(terminal_resource_counts),
-            terminal_converted_counts={},
-            terminal_unresolved_counts=dict(terminal_unresolved_counts),
             phase_metrics={
                 "residual_convertible_total": int(residual_convertible_total),
-                "residual_product_count": int(len(residual_products)),
             },
             flex_target_plan=dict(flex_target_plan),
             resource_demand={
@@ -7777,6 +7863,7 @@ def assemble_external_topologies(
     S_target: Any = None,
     E_target: Any = None,
     flex_audit: Optional[Dict[str, Any]] = None,
+    generation_id: int = 0,
 ) -> TopologyAssemblyResult:
     resolved_flex_audit = dict(flex_audit or {})
     if not resolved_flex_audit:
@@ -7793,6 +7880,7 @@ def assemble_external_topologies(
         S_target=S_target,
         E_target=E_target,
         flex_audit=resolved_flex_audit,
+        generation_id=int(generation_id),
     )
     if bool(dict(assembler.flex_audit or {}).get("enforced", False)):
         scenario = str(dict(assembler.flex_audit or {}).get("scenario", "") or "")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, is_dataclass
 from enum import Enum
+import re
 from typing import Any, Dict, List, Optional
 
 try:
@@ -55,6 +56,77 @@ class Stage3Serializable:
         }
 
 
+class Stage3OwnershipState(str, Enum):
+    FIXED_TOPOLOGY_CORE = "fixed_topology_core"
+    PENDING_TOPOLOGY = "pending_topology"
+    COMPLETED_TOPOLOGY = "completed_topology"
+    CLAIMED_CLOSURE_RESOURCE = "claimed_closure_resource"
+    REMAINING_CLOSURE_RESOURCE = "remaining_closure_resource"
+    REMAINING_AROMATIC_DONOR = "remaining_aromatic_donor"
+    SUPPORT_CONTEXT = "support_context"
+    UNCLASSIFIED_OR_CONFLICT = "unclassified_or_conflict"
+
+
+STAGE3_OWNERSHIP_STATES = tuple(state.value for state in Stage3OwnershipState)
+
+
+@dataclass
+class Stage3NodeOwnership(Stage3Serializable):
+    node_id: int = -1
+    su_type: int = -1
+    state: str = Stage3OwnershipState.UNCLASSIFIED_OR_CONFLICT.value
+    owner_fragment_id: Optional[int] = None
+    owner_contract_id: Optional[int] = None
+    owner_product_id: str = ""
+    owner_slot_id: str = ""
+    role: str = ""
+    reason: str = ""
+
+
+@dataclass
+class Stage3TopologyProduct(Stage3Serializable):
+    product_id: str = ""
+    generation_id: int = 0
+    product_type: str = ""
+    source_fragment_ids: List[int] = field(default_factory=list)
+    fixed_source_node_ids: List[int] = field(default_factory=list)
+    claimed_resource_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
+    mainline_slots: List[Dict[str, Any]] = field(default_factory=list)
+    branch_slots: List[Dict[str, Any]] = field(default_factory=list)
+    topology_notation: str = ""
+    node_id_notation: str = ""
+    closed: bool = False
+    reason: str = ""
+
+
+@dataclass
+class Stage3SpectrumCandidate(Stage3Serializable):
+    candidate_id: str = ""
+    histogram_signature: str = ""
+    inverse_signature: str = ""
+    operations: List[Dict[str, Any]] = field(default_factory=list)
+    target_su_types: List[int] = field(default_factory=list)
+    predicted_window_gain: float = 0.0
+    primary_adjustment_count: int = 0
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Stage3RoundContext(Stage3Serializable):
+    generation_id: int = 0
+    classification: Dict[str, Any] = field(default_factory=dict)
+    ownership_by_node_id: Dict[int, Stage3NodeOwnership] = field(default_factory=dict)
+    closure_pool_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
+    aromatic_donor_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
+    flex_audit: Dict[str, Any] = field(default_factory=dict)
+    products: List[Stage3TopologyProduct] = field(default_factory=list)
+    pending_contracts: List[Dict[str, Any]] = field(default_factory=list)
+    accepted_histogram_signatures: List[str] = field(default_factory=list)
+    rejected_histogram_signatures: List[str] = field(default_factory=list)
+    primary_conversion_count: int = 0
+    conflicts: List[Dict[str, Any]] = field(default_factory=list)
+
+
 class TopologySlotKind(str, Enum):
     F1 = "F1"
     F2 = "F2"
@@ -62,15 +134,6 @@ class TopologySlotKind(str, Enum):
     H1 = "H1"
     FIXED22 = "FIXED22"
     CLOSED_TERMINAL = "CLOSED_TERMINAL"
-
-
-@dataclass
-class TopologyEdgePlan(Stage3Serializable):
-    left_node_id: int = -1
-    right_node_id: int = -1
-    slot_id: str = ""
-    edge_role: str = ""
-    fixed: bool = False
 
 
 @dataclass
@@ -82,7 +145,6 @@ class TopologyClosureSlot(Stage3Serializable):
     required_su_sequence: List[int] = field(default_factory=list)
     existing_node_ids: List[int] = field(default_factory=list)
     assigned_resource_ids: List[int] = field(default_factory=list)
-    edge_plan: List[TopologyEdgePlan] = field(default_factory=list)
     state: str = "OPEN"
 
     def is_complete(self) -> bool:
@@ -90,25 +152,14 @@ class TopologyClosureSlot(Stage3Serializable):
 
 
 @dataclass
-class IterationNodeOwnership(Stage3Serializable):
-    node_id: int = -1
-    su_type: int = -1
-    state: str = "unassigned_nonresource"
-    owner_fragment_id: Optional[int] = None
-    owner_contract_id: Optional[int] = None
-    owner_product_id: str = ""
-    owner_slot_id: str = ""
-    role: str = ""
-
-
-@dataclass
-class IterationTopologyLedger(Stage3Serializable):
-    ownership_by_node_id: Dict[int, IterationNodeOwnership] = field(default_factory=dict)
+class Stage3OwnershipLedger(Stage3Serializable):
+    generation_id: int = 0
+    ownership_by_node_id: Dict[int, Stage3NodeOwnership] = field(default_factory=dict)
     completed_products: List[Dict[str, Any]] = field(default_factory=list)
     pending_contracts: List[Dict[str, Any]] = field(default_factory=list)
-    remaining_resource_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
-    support_only_node_ids: List[int] = field(default_factory=list)
-    unassigned_nonresource_ids: List[int] = field(default_factory=list)
+    available_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
+    support_context_node_ids: List[int] = field(default_factory=list)
+    conflict_node_ids: List[int] = field(default_factory=list)
     conflicts: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -139,7 +190,7 @@ class FlexTargetPlan(Stage3Serializable):
     maximum_capacity: int = 0
     external_candidate_capacity: int = 0
     external_planned_addition: int = 0
-    external_materialized_addition: int = 0
+    external_symbolic_addition: int = 0
     external_capacity_exhausted: bool = False
     remaining_minimum_gap: int = 0
     remaining_preferred_gap: int = 0
@@ -271,31 +322,43 @@ class TopologyAssemblyProduct(Stage3Serializable):
     source_fragment_ids: List[int] = field(default_factory=list)
     source_fragment_classes: List[str] = field(default_factory=list)
     source_node_ids: List[int] = field(default_factory=list)
-    materialized_node_ids: List[int] = field(default_factory=list)
+    fixed_source_node_ids: List[int] = field(default_factory=list)
+    symbolic_node_ids: List[int] = field(default_factory=list)
     mainline_node_ids: List[int] = field(default_factory=list)
     branch_node_ids: List[int] = field(default_factory=list)
-    claimed_resource_ids: Dict[str, List[int]] = field(default_factory=dict)
-    slot_assignments: List[Dict[str, Any]] = field(default_factory=list)
-    edge_plan: List[Dict[str, Any]] = field(default_factory=list)
+    claimed_resource_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
+    mainline_slots: List[Dict[str, Any]] = field(default_factory=list)
+    branch_slots: List[Dict[str, Any]] = field(default_factory=list)
     closed: bool = True
     reason: str = ""
 
     def to_public_dict(self) -> Dict[str, Any]:
+        claimed_ids = {
+            int(value)
+            for values in dict(self.claimed_resource_ids_by_su or {}).values()
+            for value in list(values or [])
+        }
+        fixed_ids = {int(value) for value in list(self.fixed_source_node_ids or [])}
+        owned_ids = fixed_ids | claimed_ids
+        node_id_notation = re.sub(
+            r"\d+",
+            lambda match: match.group(0) if int(match.group(0)) in owned_ids else "OPEN",
+            str(self.actual_topology_gid or ""),
+        )
         return {
-            "actual_su": str(self.actual_topology_su or ""),
-            "gid": str(self.actual_topology_gid or ""),
+            "product_type": str(self.product_type or self.product_kind or ""),
             "source_fragment_ids": [int(x) for x in list(self.source_fragment_ids or [])],
-            "source_fragment_classes": [str(x) for x in list(self.source_fragment_classes or [])],
-            "source_node_ids": [int(x) for x in list(self.source_node_ids or [])],
-            "mainline_node_ids": [int(x) for x in list(self.mainline_node_ids or [])],
-            "branch_node_ids": [int(x) for x in list(self.branch_node_ids or [])],
-            "claimed_resource_ids": {
+            "fixed_source_node_ids": sorted(fixed_ids),
+            "claimed_resource_ids_by_su": {
                 str(key): sorted({int(value) for value in list(values or [])})
-                for key, values in dict(self.claimed_resource_ids or {}).items()
+                for key, values in dict(self.claimed_resource_ids_by_su or {}).items()
                 if list(values or [])
             },
-            "slot_assignments": [dict(item or {}) for item in list(self.slot_assignments or [])],
-            "edge_plan": [dict(item or {}) for item in list(self.edge_plan or [])],
+            "mainline_slots": [dict(item or {}) for item in list(self.mainline_slots or [])],
+            "branch_slots": [dict(item or {}) for item in list(self.branch_slots or [])],
+            "topology_notation": str(self.actual_topology_su or ""),
+            "node_id_notation": str(node_id_notation),
+            "closed": bool(self.closed),
         }
 
 
@@ -403,10 +466,6 @@ class TopologyAssemblyResult(Stage3Serializable):
     active_subphase: str = ""
     active_phase: str = ""
     completed_phases: List[str] = field(default_factory=list)
-    residual_closure_products: List[Dict[str, Any]] = field(default_factory=list)
-    terminal_resource_counts: Dict[str, int] = field(default_factory=dict)
-    terminal_converted_counts: Dict[str, int] = field(default_factory=dict)
-    terminal_unresolved_counts: Dict[str, int] = field(default_factory=dict)
     phase_metrics: Dict[str, Any] = field(default_factory=dict)
     phase_signature: str = ""
     flex_target_plan: Dict[str, Any] = field(default_factory=dict)
@@ -423,12 +482,33 @@ class TopologyAssemblyResult(Stage3Serializable):
                 out.append(item.to_public_dict())
             else:
                 product = dict(item or {})
+                claimed = {
+                    str(key): [int(value) for value in list(values or [])]
+                    for key, values in dict(
+                        product.get("claimed_resource_ids_by_su", product.get("claimed_resource_ids", {})) or {}
+                    ).items()
+                }
+                claimed_ids = {
+                    int(value) for values in claimed.values() for value in values
+                }
+                source_ids = {
+                    int(value)
+                    for value in list(
+                        product.get("fixed_source_node_ids", [])
+                        or product.get("source_node_ids", [])
+                        or []
+                    )
+                }
                 out.append({
-                    "actual_su": str(product.get("actual_topology_su", "")),
-                    "gid": str(product.get("actual_topology_gid", "")),
+                    "product_type": str(product.get("product_type", product.get("product_kind", "")) or ""),
                     "source_fragment_ids": [int(x) for x in list(product.get("source_fragment_ids", []) or [])],
-                    "source_fragment_classes": [str(x) for x in list(product.get("source_fragment_classes", []) or [])],
-                    "source_node_ids": [int(x) for x in list(product.get("source_node_ids", []) or [])],
+                    "fixed_source_node_ids": sorted(source_ids - claimed_ids),
+                    "claimed_resource_ids_by_su": claimed,
+                    "mainline_slots": [dict(value or {}) for value in list(product.get("mainline_slots", []) or [])],
+                    "branch_slots": [dict(value or {}) for value in list(product.get("branch_slots", []) or [])],
+                    "topology_notation": str(product.get("topology_notation", product.get("actual_topology_su", "")) or ""),
+                    "node_id_notation": str(product.get("node_id_notation", product.get("actual_topology_gid", "")) or ""),
+                    "closed": bool(product.get("closed", True)),
                 })
         return out
 
@@ -480,10 +560,6 @@ class TopologyAssemblyResult(Stage3Serializable):
             "active_subphase": str(self.active_subphase or ""),
             "active_phase": str(self.active_phase or ""),
             "completed_phases": [str(value) for value in list(self.completed_phases or [])],
-            "residual_closure_products": _serialize_value(self.residual_closure_products),
-            "terminal_resource_counts": {str(k): int(v) for k, v in dict(self.terminal_resource_counts or {}).items()},
-            "terminal_converted_counts": {str(k): int(v) for k, v in dict(self.terminal_converted_counts or {}).items()},
-            "terminal_unresolved_counts": {str(k): int(v) for k, v in dict(self.terminal_unresolved_counts or {}).items()},
             "phase_metrics": _serialize_value(self.phase_metrics),
             "phase_signature": str(self.phase_signature or ""),
             "flex_target_plan": _serialize_value(self.flex_target_plan),
@@ -497,6 +573,7 @@ class TopologyAssemblyResult(Stage3Serializable):
 
 @dataclass
 class Stage3PhaseEvaluation(Stage3Serializable):
+    generation_id: int = 0
     phase: str = "flex_range_reconciliation"
     done: bool = False
     classification_ready: bool = False
@@ -544,12 +621,12 @@ class Stage3PhaseEvaluation(Stage3Serializable):
     blocked_reason: str = ""
     active_phase: str = ""
     completed_phases: List[str] = field(default_factory=list)
-    residual_closure_products: List[Dict[str, Any]] = field(default_factory=list)
-    terminal_resource_counts: Dict[str, int] = field(default_factory=dict)
-    terminal_converted_counts: Dict[str, int] = field(default_factory=dict)
-    terminal_unresolved_counts: Dict[str, int] = field(default_factory=dict)
     phase_metrics: Dict[str, Any] = field(default_factory=dict)
     phase_signature: str = ""
+    round_context: Stage3RoundContext = field(default_factory=Stage3RoundContext)
+    ownership_ledger: Dict[str, Any] = field(default_factory=dict)
+    closure_pool_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
+    aromatic_donor_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
     ring_contracts: List[Stage3RingAssemblyContract] = field(default_factory=list)
     residual_closure_decision: Stage3ResidualClosureDecision = field(default_factory=Stage3ResidualClosureDecision)
 
@@ -591,7 +668,6 @@ class TopologyClosureContract(Stage3Serializable):
     slot_requirements: List[Dict[str, Any]] = field(default_factory=list)
     required_counts: Dict[int, int] = field(default_factory=dict)
     required_roles: List[str] = field(default_factory=list)
-    edge_plan: List[Dict[str, Any]] = field(default_factory=list)
     expected_topology: str = ""
     reason: str = ""
     blocker_kind: str = ""
@@ -612,7 +688,6 @@ class TopologyResourceTransaction(Stage3Serializable):
     claimed_resource_ids: Dict[int, List[int]] = field(default_factory=dict)
     product_node_ids: List[int] = field(default_factory=list)
     slot_assignments: List[Dict[str, Any]] = field(default_factory=list)
-    edge_plan: List[Dict[str, Any]] = field(default_factory=list)
     h_before: float = 0.0
     h_after_primary: float = 0.0
     h_after: float = 0.0
@@ -629,7 +704,7 @@ class Stage3PhaseResult(Stage3Serializable):
     rebuild_required: bool = False
     primary_adjustment_count: int = 0
     h_compensation_count: int = 0
-    materialized_topology_count: int = 0
+    symbolic_topology_count: int = 0
     transactions: List[TopologyResourceTransaction] = field(default_factory=list)
     stop_reason: str = ""
     infeasibility_proof: Dict[str, Any] = field(default_factory=dict)
@@ -741,6 +816,7 @@ class Stage3AdjustmentPlan(Stage3Serializable):
     unresolved_counts: Dict[str, int] = field(default_factory=dict)
     blocked_reason: str = ""
     phase_result: Stage3PhaseResult = field(default_factory=Stage3PhaseResult)
+    spectrum_candidates: List[Stage3SpectrumCandidate] = field(default_factory=list)
 
 
 @dataclass

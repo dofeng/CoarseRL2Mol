@@ -164,14 +164,14 @@ def test_slot_transaction_claims_h_and_h1_resources_once() -> None:
         ],
     )
 
-    updated, slots, claimed, edge_plan, proof = assign_contract_slots(ledger, contract)
+    updated, slots, claimed, proof = assign_contract_slots(ledger, contract)
 
     assert proof == {}
     assert updated is not None
     assert claimed == {23: [2, 4], 22: [3, 5]}
     assigned_ids = [value for slot in slots for value in slot.assigned_resource_ids]
     assert len(assigned_ids) == len(set(assigned_ids)) == 4
-    assert all(item["fixed"] is False for item in edge_plan)
+    assert all(slot.state == "FILLED" for slot in slots)
 
 
 def test_slot_transaction_rolls_back_when_second_slot_is_short() -> None:
@@ -190,13 +190,15 @@ def test_slot_transaction_rolls_back_when_second_slot_is_short() -> None:
         ],
     )
 
-    updated, _, claimed, _, proof = assign_contract_slots(ledger, contract)
+    updated, _, claimed, proof = assign_contract_slots(ledger, contract)
 
     assert updated is None
     assert claimed == {}
     assert proof["reason"] == "slot_resource_deficit"
-    assert ledger.remaining_resource_ids_by_su[23] == [2]
-    assert ledger.remaining_resource_ids_by_su[22] == [3]
+    assert ledger.available_ids_by_su[23] == [2]
+    assert ledger.available_ids_by_su[22] == [3]
+    assert all(slot.state == "OPEN" for slot in contract.mainline_slots)
+    assert all(slot.assigned_resource_ids == [] for slot in contract.mainline_slots)
 
 
 def test_su24_templates_are_role_matched_and_ordered() -> None:
@@ -223,13 +225,22 @@ def test_su24_templates_are_role_matched_and_ordered() -> None:
 
 
 @pytest.mark.parametrize(
-    ("limit", "expected_first_length"),
-    [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)],
+    ("preferred", "minimum", "expected_first_length"),
+    [(3, 2, 3), (4, 2, 4), (3, 3, 3)],
 )
-def test_residual_chain_limit_and_priority(limit: int, expected_first_length: int) -> None:
+def test_residual_flex_preferred_minimum_and_priority(
+    preferred: int,
+    minimum: int,
+    expected_first_length: int,
+) -> None:
     pool = {11: list(range(1, 20)), 22: [], 23: list(range(100, 140)), 24: []}
 
-    contracts = _residual_contracts(pool, limit, max_flex_chains=1)
+    contracts = _residual_contracts(
+        pool,
+        residual_flex_preferred_23=preferred,
+        residual_flex_min_23=minimum,
+        max_flex_chains=1,
+    )
     flex = next(
         contract
         for contract in contracts
@@ -239,7 +250,7 @@ def test_residual_chain_limit_and_priority(limit: int, expected_first_length: in
     assert flex.contract_kind == "residual_conversion"
     assert flex.target_role == "residual_resource_conversion"
     assert int(flex.required_counts[23]) == expected_first_length
-    assert int(flex.required_counts[23]) <= limit
+    assert int(flex.required_counts[23]) >= minimum
     assert len(flex.mainline_slots) == 1
     assert flex.mainline_slots[0].required_su_sequence == (
         [11] + [23] * expected_first_length + [11]
@@ -247,14 +258,12 @@ def test_residual_chain_limit_and_priority(limit: int, expected_first_length: in
 
 
 def test_direct_stage3_ledger_closure_does_not_mutate_hop1() -> None:
-    center = make_node(60, 3)
-    left_open = make_node(61, 23)
-    right_open = make_node(62, 23)
-    left_cap = make_node(63, 11)
-    right_cap = make_node(64, 11)
-    connect(center, left_open)
-    connect(center, right_open)
-    nodes = [center, left_open, right_open, left_cap, right_cap]
+    center = make_node(100, 0)
+    aromatic_9 = make_node(9, 9)
+    aromatic_6 = make_node(6, 6)
+    connect(center, aromatic_9, fixed=True)
+    connect(center, aromatic_6, fixed=True)
+    nodes = [center, aromatic_9, aromatic_6]
     before_hop1 = {node.global_id: set(node.hop1_ids) for node in nodes}
     H = torch.zeros(40, dtype=torch.long)
     for node in nodes:
@@ -264,7 +273,7 @@ def test_direct_stage3_ledger_closure_does_not_mutate_hop1() -> None:
 
     assert plan.reason == "stage3_complete"
     assert plan.phase_result.primary_adjustment_count == 0
-    assert plan.phase_result.materialized_topology_count >= 1
+    assert plan.phase_result.symbolic_topology_count >= 1
     assert all(set(node.hop1_ids) == before_hop1[node.global_id] for node in nodes)
     assert all(transaction.commit_scope == "iteration_ledger" for transaction in plan.phase_result.transactions)
 
@@ -321,7 +330,7 @@ def test_partial_completed_source_is_identity_conflict() -> None:
     assert proof["available_node_ids"] == [2]
 
 
-def test_blocked_contract_does_not_prevent_later_direct_contract(monkeypatch) -> None:
+def test_blocked_contract_allows_later_direct_contract_but_prevents_false_completion(monkeypatch) -> None:
     nodes = [make_node(1, 5), make_node(2, 5), make_node(3, 11)]
     phase_eval = build_stage3_phase_evaluation(nodes, classification=classify_topology_units(nodes))
     H = torch.zeros(40, dtype=torch.long)
@@ -370,11 +379,11 @@ def test_blocked_contract_does_not_prevent_later_direct_contract(monkeypatch) ->
     )
     monkeypatch.setattr(
         "model.inverse.topology.stage3_state_machine._residual_contracts",
-        lambda pool, chain_23_limit, max_flex_chains: [],
+        lambda pool, **kwargs: [],
     )
 
     plan = plan_stage3_state_machine(phase_eval=phase_eval, H=H, nodes=nodes)
 
-    assert plan.reason == "stage3_complete"
+    assert plan.reason == "phase_resource_infeasible"
     assert any(item.contract_id == 2 and item.committed for item in plan.phase_result.transactions)
-    assert plan.diagnostics["infeasible_contracts"][0]["contract_id"] == 1
+    assert plan.phase_result.infeasibility_proof["reason"] == "stage3_completion_invariants_failed"

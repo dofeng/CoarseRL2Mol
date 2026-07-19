@@ -31,7 +31,6 @@ from .inverse_layer4_block_b import (
     adjust_block_b_hetero_anchor_impl,
 )
 from .inverse_layer4_block_c import (
-    adjust_block_b_tail_spectrum_impl,
     run_block_c_resource_adjustment_loop_impl,
 )
 
@@ -794,10 +793,7 @@ class Layer4Adjuster:
                                      max_moves_mode: Optional[int] = None,
                                      peak_rel_threshold: float = 0.01,
                                      substage: Optional[str] = None,
-                                     nodes: Optional[List[_NodeV3]] = None,
-                                     tail_spectrum_max_moves: int = 5,
-                                     tail_spectrum_aromatic_couple: bool = True,
-                                     tail_spectrum_h_tolerance: float = 0.08) -> Tuple[torch.Tensor, List[Dict], Dict]:
+                                     nodes: Optional[List[_NodeV3]] = None) -> Tuple[torch.Tensor, List[Dict], Dict]:
         return adjust_block_b_hetero_anchor_impl(
             self,
             H,
@@ -810,36 +806,6 @@ class Layer4Adjuster:
             peak_rel_threshold=peak_rel_threshold,
             substage=substage,
             nodes=nodes,
-            tail_spectrum_max_moves=tail_spectrum_max_moves,
-            tail_spectrum_aromatic_couple=tail_spectrum_aromatic_couple,
-            tail_spectrum_h_tolerance=tail_spectrum_h_tolerance,
-        )
-
-    def adjust_block_b_tail_spectrum(self,
-                                      H: torch.Tensor,
-                                      ppm: Optional[np.ndarray],
-                                      diff: Optional[np.ndarray],
-                                      E_target: Optional[torch.Tensor] = None,
-                                      max_moves: int = 6,
-                                      peak_rel_threshold: float = 0.01,
-                                      min_keep_22: int = 1,
-                                      min_keep_23: int = 0,
-                                      min_keep_24: int = 0,
-                                      aromatic_couple: bool = True,
-                                      h_tolerance: float = 0.08) -> Tuple[torch.Tensor, List[Dict], Dict]:
-        return adjust_block_b_tail_spectrum_impl(
-            self,
-            H,
-            ppm,
-            diff,
-            E_target=E_target,
-            max_moves=max_moves,
-            peak_rel_threshold=peak_rel_threshold,
-            min_keep_22=min_keep_22,
-            min_keep_23=min_keep_23,
-            min_keep_24=min_keep_24,
-            aromatic_couple=aromatic_couple,
-            h_tolerance=h_tolerance,
         )
 
     # ========================================================================
@@ -1426,7 +1392,7 @@ class Layer4Adjuster:
         }
 
     def _print_allocation_details(self, alloc_res: Any, header: str = "候选完整资源分配结果（未验收）") -> None:
-        print(f"\n  [Topology-Alloc] {header}: 详见新的 final_topology_summary/specs/unclosed_candidates/resource diagnostics")
+        print(f"\n  [Topology-Alloc] {header}: 详见 final_topology_summary/specs/pending/resource_pool；完整诊断位于 debug/")
 
     def _evaluate_full_allocation_balance(self,
                                           nodes: List[_NodeV3],
@@ -1523,8 +1489,19 @@ class Layer4Adjuster:
                                            E_target: Optional[torch.Tensor] = None,
                                            max_primary_adjustments_per_stage: int = 10,
                                            max_h_compensation_ops_per_adjustment: int = 8,
-                                           chain_23_limit: int = 6,
-                                           h_tolerance: float = 0.06) -> Any:
+                                           residual_flex_preferred_23: int = 3,
+                                           residual_flex_min_23: int = 2,
+                                           residual_side_preferred_23: int = 2,
+                                           residual_side_min_23: int = 1,
+                                           h_tolerance: float = 0.06,
+                                           generation_id: int = 0,
+                                           difference_spectrum: Optional[Dict[str, Any]] = None,
+                                           enable_post_external_spectrum: bool = True,
+                                           skip_post_external_spectrum: bool = False,
+                                           spectrum_candidate_limit: int = 10,
+                                           spectrum_max_primary_adjustments: int = 8,
+                                           rejected_spectrum_histogram_signatures: Optional[Any] = None,
+                                           forbidden_spectrum_inverse_signatures: Optional[Any] = None) -> Any:
         nodes_local = list(nodes or [])
         plan = plan_stage3_resource_adjustments(
             H=H,
@@ -1534,10 +1511,21 @@ class Layer4Adjuster:
             E_target=E_target,
             max_primary_adjustments_per_stage=max_primary_adjustments_per_stage,
             max_h_compensation_ops_per_adjustment=max_h_compensation_ops_per_adjustment,
-            chain_23_limit=chain_23_limit,
+            residual_flex_preferred_23=residual_flex_preferred_23,
+            residual_flex_min_23=residual_flex_min_23,
+            residual_side_preferred_23=residual_side_preferred_23,
+            residual_side_min_23=residual_side_min_23,
             h_tolerance=h_tolerance,
             special_degree_meta=self._get_special_degree_meta(H.detach().cpu() if hasattr(H, "detach") else None),
             su11_rotation_index=int(getattr(self, "_stage3_su11_rotation_index", 0) or 0),
+            generation_id=int(generation_id),
+            difference_spectrum=difference_spectrum,
+            enable_post_external_spectrum=bool(enable_post_external_spectrum),
+            skip_post_external_spectrum=bool(skip_post_external_spectrum),
+            spectrum_candidate_limit=int(spectrum_candidate_limit),
+            spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
+            rejected_spectrum_histogram_signatures=rejected_spectrum_histogram_signatures,
+            forbidden_spectrum_inverse_signatures=forbidden_spectrum_inverse_signatures,
         )
         return plan
 
@@ -1669,7 +1657,6 @@ class Layer4Adjuster:
                 min_keep=kwargs.get('min_keep', 0),
             )
         elif stage == 'block_b':
-            self._h_tolerance = float(kwargs.get('tail_spectrum_h_tolerance', self._h_tolerance))
             H_work, moves, meta = self.adjust_block_b_hetero_anchor(
                 H_work, ppm, diff,
                 max_moves_each=kwargs.get('max_moves_each', 3),
@@ -1679,9 +1666,6 @@ class Layer4Adjuster:
                 peak_rel_threshold=kwargs.get('peak_rel_threshold', 0.01),
                 substage=kwargs.get('block_b_substage'),
                 nodes=kwargs.get('nodes'),
-                tail_spectrum_max_moves=kwargs.get('tail_spectrum_max_moves', 5),
-                tail_spectrum_aromatic_couple=kwargs.get('tail_spectrum_aromatic_couple', True),
-                tail_spectrum_h_tolerance=kwargs.get('tail_spectrum_h_tolerance', 0.08),
             )
         elif stage == 'block_c_resource':
             workflow_result = run_block_c_resource_adjustment_loop_impl(
@@ -1693,8 +1677,27 @@ class Layer4Adjuster:
                 rebuild_fn=kwargs.get('rebuild_fn'),
                 validate_fn=kwargs.get('validate_fn'),
                 output_dir=kwargs.get('output_dir'),
-                max_stage3_iterations=kwargs.get('max_stage3_iterations', 8),
+                max_stage3_iterations=kwargs.get('max_stage3_iterations', 20),
                 max_primary_adjustments_per_stage=kwargs.get('max_primary_adjustments_per_stage', 10),
+                max_h_compensation_ops_per_adjustment=kwargs.get(
+                    'max_h_compensation_ops_per_adjustment', 8
+                ),
+                residual_flex_preferred_23=kwargs.get('residual_flex_preferred_23', 3),
+                residual_flex_min_23=kwargs.get('residual_flex_min_23', 2),
+                residual_side_preferred_23=kwargs.get('residual_side_preferred_23', 2),
+                residual_side_min_23=kwargs.get('residual_side_min_23', 1),
+                h_tolerance=kwargs.get('h_tolerance', 0.06),
+                outer_cycle=kwargs.get('outer_cycle', 0),
+                iteration_offset=kwargs.get('iteration_offset', 0),
+                context_snapshot_fn=kwargs.get('context_snapshot_fn'),
+                context_restore_fn=kwargs.get('context_restore_fn'),
+                difference_spectrum=kwargs.get('difference_spectrum'),
+                enable_post_external_spectrum=kwargs.get('enable_post_external_spectrum', True),
+                spectrum_candidate_limit=kwargs.get('spectrum_candidate_limit', 10),
+                spectrum_max_primary_adjustments=kwargs.get('spectrum_max_primary_adjustments', 8),
+                spectrum_min_r2_gain=kwargs.get('spectrum_min_r2_gain', 0.002),
+                spectrum_min_window_loss_gain=kwargs.get('spectrum_min_window_loss_gain', 0.1),
+                spectrum_max_accepted_rounds=kwargs.get('spectrum_max_accepted_rounds', 2),
             )
             H_work = torch.clamp(getattr(workflow_result, 'H', H_work).detach().clone(), min=0).long()
             meta = workflow_result.to_dict()
@@ -1731,13 +1734,25 @@ class Layer4Adjuster:
         rebuild_fn: Any = None,
         validate_fn: Any = None,
         output_dir: Optional[str] = None,
-        max_stage3_iterations: int = 8,
+        max_stage3_iterations: int = 20,
         max_primary_adjustments_per_stage: int = 10,
         max_h_compensation_ops_per_adjustment: int = 8,
-        chain_23_limit: int = 6,
+        residual_flex_preferred_23: int = 3,
+        residual_flex_min_23: int = 2,
+        residual_side_preferred_23: int = 2,
+        residual_side_min_23: int = 1,
         h_tolerance: float = 0.06,
         outer_cycle: int = 0,
         iteration_offset: int = 0,
+        context_snapshot_fn: Any = None,
+        context_restore_fn: Any = None,
+        difference_spectrum: Optional[Dict[str, Any]] = None,
+        enable_post_external_spectrum: bool = True,
+        spectrum_candidate_limit: int = 10,
+        spectrum_max_primary_adjustments: int = 8,
+        spectrum_min_r2_gain: float = 0.002,
+        spectrum_min_window_loss_gain: float = 0.1,
+        spectrum_max_accepted_rounds: int = 2,
     ) -> Any:
         return run_block_c_resource_adjustment_loop_impl(
             self,
@@ -1751,9 +1766,21 @@ class Layer4Adjuster:
             max_stage3_iterations=max_stage3_iterations,
             max_primary_adjustments_per_stage=int(max_primary_adjustments_per_stage),
             max_h_compensation_ops_per_adjustment=int(max_h_compensation_ops_per_adjustment),
-            chain_23_limit=int(chain_23_limit),
+            residual_flex_preferred_23=int(residual_flex_preferred_23),
+            residual_flex_min_23=int(residual_flex_min_23),
+            residual_side_preferred_23=int(residual_side_preferred_23),
+            residual_side_min_23=int(residual_side_min_23),
             h_tolerance=float(h_tolerance),
             outer_cycle=int(outer_cycle),
             iteration_offset=max(0, int(iteration_offset)),
+            context_snapshot_fn=context_snapshot_fn,
+            context_restore_fn=context_restore_fn,
+            difference_spectrum=difference_spectrum,
+            enable_post_external_spectrum=bool(enable_post_external_spectrum),
+            spectrum_candidate_limit=int(spectrum_candidate_limit),
+            spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
+            spectrum_min_r2_gain=float(spectrum_min_r2_gain),
+            spectrum_min_window_loss_gain=float(spectrum_min_window_loss_gain),
+            spectrum_max_accepted_rounds=int(spectrum_max_accepted_rounds),
         )
     

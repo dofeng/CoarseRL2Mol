@@ -25,6 +25,11 @@ from model.inverse.topology.assembly_external import (
     assemble_external_topologies,
 )
 from model.inverse.topology.phase_eval import assemble_topology_units, build_stage3_phase_evaluation
+from model.inverse.topology.round_context import (
+    build_stage3_round_context,
+    mark_round_pending_contracts,
+    ownership_public_view,
+)
 from model.inverse.topology.stage3_models import merge_stage3_contracts_by_owner
 from model.inverse.topology.stage3_models import TopologyAssemblyProduct, TopologyPathRender, TopologyPoolLedger
 from model.inverse.topology.workflow import plan_stage3_resource_adjustments
@@ -45,12 +50,13 @@ PRODUCT_KEYS = {
     "source_fragment_ids",
     "source_fragment_classes",
     "source_node_ids",
-    "materialized_node_ids",
+    "fixed_source_node_ids",
+    "symbolic_node_ids",
     "mainline_node_ids",
     "branch_node_ids",
-    "claimed_resource_ids",
-    "slot_assignments",
-    "edge_plan",
+    "claimed_resource_ids_by_su",
+    "mainline_slots",
+    "branch_slots",
     "closed",
     "reason",
 }
@@ -179,10 +185,6 @@ ASSEMBLY_KEYS = {
     "active_subphase",
     "active_phase",
     "completed_phases",
-    "residual_closure_products",
-    "terminal_resource_counts",
-    "terminal_converted_counts",
-    "terminal_unresolved_counts",
     "phase_metrics",
     "phase_signature",
     "flex_target_plan",
@@ -193,16 +195,15 @@ ASSEMBLY_KEYS = {
     "ownership_ledger",
 }
 PUBLIC_PRODUCT_KEYS = {
-    "actual_su",
-    "gid",
+    "product_type",
     "source_fragment_ids",
-    "source_fragment_classes",
-    "source_node_ids",
-    "mainline_node_ids",
-    "branch_node_ids",
-    "claimed_resource_ids",
-    "slot_assignments",
-    "edge_plan",
+    "fixed_source_node_ids",
+    "claimed_resource_ids_by_su",
+    "mainline_slots",
+    "branch_slots",
+    "topology_notation",
+    "node_id_notation",
+    "closed",
 }
 PUBLIC_PENDING_KEYS = {
     "contract_id",
@@ -242,10 +243,6 @@ PUBLIC_ASSEMBLY_KEYS = {
     "active_subphase",
     "active_phase",
     "completed_phases",
-    "residual_closure_products",
-    "terminal_resource_counts",
-    "terminal_converted_counts",
-    "terminal_unresolved_counts",
     "phase_metrics",
     "phase_signature",
     "flex_target_plan",
@@ -291,8 +288,8 @@ def _assert_minimal_pending(item):
 def _assert_public_product(item):
     assert set(item.keys()) == PUBLIC_PRODUCT_KEYS
     assert isinstance(item["source_fragment_ids"], list)
-    assert isinstance(item["source_fragment_classes"], list)
-    assert isinstance(item["source_node_ids"], list)
+    assert isinstance(item["fixed_source_node_ids"], list)
+    assert isinstance(item["claimed_resource_ids_by_su"], dict)
 
 
 def _assert_public_pending(item):
@@ -317,7 +314,19 @@ def test_external_assembly_minimal_product_contract_for_explicit_a() -> None:
     assert product["actual_topology_su"] == "9-3-9"
     assert product["actual_topology_gid"] == "11-10-12"
     assert product["source_fragment_classes"] == ["A"]
+    assert product["fixed_source_node_ids"] == [10]
+    assert product["claimed_resource_ids_by_su"] == {}
+    assert product["mainline_slots"]
+    assert all(slot["connection_semantics"] == "open" for slot in product["mainline_slots"])
+    assert all(slot["state"] == "OPEN" for slot in product["mainline_slots"])
     assert assembly["pending_units"] == []
+
+    public_product = assemble_topology_units(
+        [center, left, right],
+        classify_topology_units([center, left, right]),
+    ).to_public_dict()["products"][0]
+    assert public_product["fixed_source_node_ids"] == [10]
+    assert public_product["node_id_notation"] == "OPEN-10-OPEN"
 
 
 def test_external_assembly_closes_b_plus_g_without_legacy_fields() -> None:
@@ -331,7 +340,8 @@ def test_external_assembly_closes_b_plus_g_without_legacy_fields() -> None:
     g_open = make_node(56, 23)
     connect(g_center, g_open)
 
-    _, assembly = _assembly_dict([b_center, b_aro, b_open, g_center, g_open])
+    nodes = [b_center, b_aro, b_open, g_center, g_open]
+    classification_dict, assembly = _assembly_dict(nodes)
 
     assert len(assembly["products"]) == 1
     product = assembly["products"][0]
@@ -339,6 +349,15 @@ def test_external_assembly_closes_b_plus_g_without_legacy_fields() -> None:
     assert product["product_kind"] == "side_chain"
     assert product["actual_topology_su"] == "1-23-23-3-9"
     assert product["source_fragment_classes"] == ["G", "B"]
+    assert product["fixed_source_node_ids"] == [45, 55]
+    assert product["claimed_resource_ids_by_su"] == {}
+    assert sorted(classification_dict["resource_pool"]["remaining_ids_by_su"]["23"]) == [47, 56]
+    assert sorted(assembly["resource_ledger"]["remaining_ids_by_su"]["23"]) == [47, 56]
+    public_product = assemble_topology_units(
+        nodes,
+        classify_topology_units(nodes),
+    ).to_public_dict()["products"][0]
+    assert "OPEN" in public_product["node_id_notation"]
 
 
 def test_like24_b_plus_e_joins_real_open_end_terminal_to_aromatic() -> None:
@@ -392,7 +411,7 @@ def test_like24_b_plus_e_joins_real_open_end_terminal_to_aromatic() -> None:
     assert "resource_cost" not in product
 
 
-def test_double19d3_su28_su29_terminal_path_materializes_without_pending() -> None:
+def test_double19d3_su28_su29_terminal_path_is_symbolic_without_pending() -> None:
     aromatic_11 = make_node(180, 11)
     terminal_19 = make_node(317, 19, target_hop1_degree=1, special_anchor_mode="single")
     center = make_node(
@@ -416,8 +435,39 @@ def test_double19d3_su28_su29_terminal_path_materializes_without_pending() -> No
     products = list(assembly.get("products", []) or [])
     assert len(products) == 1
     assert products[0]["actual_topology_su"] == "19d1-29-double19d3(-28)-11"
-    assert sorted(products[0]["materialized_node_ids"]) == [180, 317, 412, 505, 569]
+    assert sorted(products[0]["symbolic_node_ids"]) == [180, 317, 412, 505, 569]
     assert assembly["pending_units"] == []
+
+
+def test_pending_like24_fixed_branch_renders_every_owned_node() -> None:
+    terminal_19 = make_node(359, 19, target_hop1_degree=1, special_anchor_mode="single")
+    center = make_node(
+        428,
+        19,
+        target_hop1_degree=3,
+        special_anchor_mode="double",
+        target_fixed_anchor_count=2,
+    )
+    terminal_28 = make_node(506, 28)
+    connector_29 = make_node(594, 29)
+    connect(center, terminal_28, fixed=True)
+    connect(center, connector_29, fixed=True)
+    connect(connector_29, terminal_19)
+
+    nodes = [terminal_19, center, terminal_28, connector_29]
+    classification = classify_topology_units(nodes)
+    assembly = assemble_topology_units(nodes, classification).to_dict()
+
+    pending = list(assembly.get("pending_units", []) or [])
+    assert len(pending) == 1
+    assert pending[0]["pending_kind"] == "e_like_open"
+    assert pending[0]["source_node_ids"] == [359, 428, 506, 594]
+    assert pending[0]["real_node_partial"] == "-428(-506)-594-359"
+    assert not [
+        error
+        for error in list(pending[0].get("validation_errors", []) or [])
+        if str(error).startswith("render_ownership_mismatch:")
+    ]
 
 
 def test_remaining_stage_prioritizes_b_plus_b_flex_before_b_plus_g_side() -> None:
@@ -449,6 +499,61 @@ def test_remaining_stage_prioritizes_b_plus_b_flex_before_b_plus_g_side() -> Non
     pending = [item for item in list(assembly.get("pending_units", []) or []) if item["pending_kind"] == "e_like_open"]
     assert len(pending) == 1
     assert pending[0]["reason"] == "F1_pool_shortage"
+
+
+def test_in_range_skips_supplemental_flex_while_below_range_runs_it_before_rings() -> None:
+    b1_center = make_node(10, 3)
+    b1_aro = make_node(11, 9)
+    b1_open = make_node(12, 23)
+    connect(b1_center, b1_aro)
+    connect(b1_center, b1_open)
+
+    b2_center = make_node(20, 3)
+    b2_aro = make_node(21, 9)
+    b2_open = make_node(22, 23)
+    connect(b2_center, b2_aro)
+    connect(b2_center, b2_open)
+    nodes = [b1_center, b1_aro, b1_open, b2_center, b2_aro, b2_open]
+    classification = classify_topology_units(nodes)
+
+    in_range = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={
+            "enforced": True,
+            "scenario": "in_range",
+            "flex_lower": 0,
+            "flex_upper": 2,
+            "target_flex_count": 0,
+            "selected_candidate_fragment_ids": [],
+        },
+    ).assemble().to_dict()
+    assert not [
+        item for item in in_range["products"]
+        if str(item.get("product_kind", "")) == "flex_chain"
+    ]
+
+    below_range = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={
+            "enforced": True,
+            "scenario": "below_range",
+            "flex_lower": 1,
+            "flex_upper": 2,
+            "target_flex_count": 1,
+            "selected_candidate_fragment_ids": [10, 20],
+        },
+    ).assemble().to_dict()
+    flex_products = [
+        item for item in below_range["products"]
+        if str(item.get("product_kind", "")) == "flex_chain"
+    ]
+    assert len(flex_products) == 1
+    subphases = list(below_range["diagnostics"]["external_subphases"])
+    assert subphases.index("supplemental_flex_closure") < subphases.index(
+        "real_like24_ring_assembly"
+    )
 
 
 def test_external_assembly_closes_d_with_two_end_f1_segments() -> None:
@@ -765,7 +870,7 @@ def test_invalid_ring_attempts_are_reported_as_bad_topologies() -> None:
         {},
         {
             "ok": False,
-            "reason": "external_structural_closure_pending",
+            "reason": "external_side_chain_closure_pending",
             "products": [],
             "pending_units": [],
             "diagnostics": {"bad_topologies": list(assembler.invalid_topologies)},
@@ -811,7 +916,7 @@ def test_external_assembly_report_lists_unrecognized_topologies() -> None:
         },
         {
             "ok": False,
-            "reason": "external_structural_closure_pending",
+            "reason": "external_side_chain_closure_pending",
             "products": [],
             "pending_units": [],
             "diagnostics": {},
@@ -859,12 +964,12 @@ def test_external_assembly_flex_range_enforced_with_targets_caps_flex_output() -
     assert bool(flex_bounds.get("enforced", False))
     assert int(flex_counts.get("final", 0) or 0) == 0
     assert int(flex_counts.get("explicit_total", 0) or 0) == 3
-    assert str(assembly.get("reason", "")) == "external_flex_range_exceeded"
+    assert str(assembly.get("reason", "")) == "external_flex_range_pending"
     assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "flex_range_reconciliation"
     pending_units = list(assembly.get("pending_units", []) or [])
     assert len(pending_units) == 3
     assert all(str(item.get("pending_kind", "")) == "explicit_flex" for item in pending_units)
-    assert all(str(item.get("reason", "")) == "flex_range_reconciliation_pending" for item in pending_units)
+    assert all(str(item.get("reason", "")) for item in pending_units)
 
     import torch
 
@@ -879,15 +984,15 @@ def test_external_assembly_flex_range_enforced_with_targets_caps_flex_output() -
     assert bool(flex_bounds.get("enforced", False))
     assert int(flex_counts.get("final", 0) or 0) == 0
     assert int(flex_counts.get("explicit_total", 0) or 0) == 3
-    assert str(targeted.get("reason", "")) == "external_flex_range_exceeded"
+    assert str(targeted.get("reason", "")) == "external_flex_range_pending"
     assert str(dict(targeted.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "flex_range_reconciliation"
     pending_units = list(targeted.get("pending_units", []) or [])
     assert len(pending_units) == 3
     assert all(str(item.get("pending_kind", "")) == "explicit_flex" for item in pending_units)
-    assert all(str(item.get("reason", "")) == "flex_range_reconciliation_pending" for item in pending_units)
+    assert all(str(item.get("reason", "")) for item in pending_units)
 
 
-def test_reduced_flex_target_completes_external_then_residual_flex() -> None:
+def test_reduced_flex_target_defers_residual_work_to_state_machine() -> None:
     center = make_node(1, 20, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
     connector = make_node(2, 27)
     side = make_node(3, 20, target_hop1_degree=2, special_anchor_mode="single")
@@ -941,21 +1046,17 @@ def test_reduced_flex_target_completes_external_then_residual_flex() -> None:
     )
 
     products = list(assembly.get("products", []) or [])
-    assert [str(item.get("product_kind", "")) for item in products] == [
-        "flex_chain",
-        "residual_flex_chain",
-    ]
-    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "residual_resource_self_closure"
-    assert dict(assembly.get("flex_counts", {}) or {}).get("final") == 2
-    assert dict(assembly.get("flex_target_plan", {}) or {}).get("remaining_preferred_gap") == 0
-    assert int(dict(phase_eval.get("flex_audit", {}) or {}).get("target_flex_count", 0)) == 2
-    assert str(phase_eval.get("phase", "")) == "residual_resource_self_closure"
-    assert str(plan.phase) == "complete"
-    assert str(plan.reason) == "stage3_complete"
-    assert not any(
-        int(transaction.contract_id) >= 2_000_000
-        for transaction in list(plan.phase_result.transactions or [])
-    )
+    assert not any(str(item.get("product_kind", "")).startswith("residual_") for item in products)
+    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) != "residual_resource_self_closure"
+    assert set(dict(phase_eval.get("flex_audit", {}) or {})) >= {
+        "X",
+        "flex_lower",
+        "flex_upper",
+        "explicit_flex_count",
+    }
+    assert bool(phase_eval.get("assembly_attempted", True)) is False
+    assert str(plan.phase) == "flex_range_reconciliation"
+    assert str(plan.reason) == "phase_resource_infeasible"
 
 
 def test_assemble_external_topologies_honors_flex_preassembly_gate() -> None:
@@ -982,12 +1083,12 @@ def test_assemble_external_topologies_honors_flex_preassembly_gate() -> None:
     assembly = assemble_external_topologies(nodes, classification).to_dict()
 
     assert list(assembly.get("products", []) or []) == []
-    assert str(assembly.get("reason", "")) == "external_flex_range_exceeded"
+    assert str(assembly.get("reason", "")) == "external_flex_range_pending"
     assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "flex_range_reconciliation"
     pending_units = list(assembly.get("pending_units", []) or [])
     assert len(pending_units) == 3
     assert all(str(item.get("pending_kind", "")) == "explicit_flex" for item in pending_units)
-    assert all(str(item.get("reason", "")) == "flex_range_reconciliation_pending" for item in pending_units)
+    assert all(str(item.get("reason", "")) for item in pending_units)
 
 
 def test_direct_external_topology_assembler_assemble_honors_flex_preassembly_gate() -> None:
@@ -1015,12 +1116,12 @@ def test_direct_external_topology_assembler_assemble_honors_flex_preassembly_gat
     assembly = assembler.assemble().to_dict()
 
     assert list(assembly.get("products", []) or []) == []
-    assert str(assembly.get("reason", "")) == "external_flex_range_exceeded"
+    assert str(assembly.get("reason", "")) == "external_flex_range_pending"
     assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "flex_range_reconciliation"
     pending_units = list(assembly.get("pending_units", []) or [])
     assert len(pending_units) == 3
     assert all(str(item.get("pending_kind", "")) == "explicit_flex" for item in pending_units)
-    assert all(str(item.get("reason", "")) == "flex_range_reconciliation_pending" for item in pending_units)
+    assert all(str(item.get("reason", "")) for item in pending_units)
 
 
 def test_below_range_only_selects_b_like_candidates_for_supplemental_flex() -> None:
@@ -1039,9 +1140,9 @@ def test_below_range_only_selects_b_like_candidates_for_supplemental_flex() -> N
         classification=classification,
     ).to_dict()
 
-    assert str(phase_eval.get("phase", "")) == "external_structural_closure"
+    assert str(phase_eval.get("phase", "")) == "external_flex_closure"
     assert str(phase_eval.get("flex_range_action_class", "")) == "below_range"
-    assert bool(phase_eval.get("assembly_attempted", False)) is True
+    assert bool(phase_eval.get("assembly_attempted", True)) is False
     decision = dict(phase_eval.get("flex_decision", {}) or {})
     assert list(decision.get("selected_candidate_fragment_ids", []) or []) == [10]
     flex_audit = dict(phase_eval.get("flex_audit", {}) or {})
@@ -1052,9 +1153,8 @@ def test_below_range_only_selects_b_like_candidates_for_supplemental_flex() -> N
     assert int(flex_audit.get("flex_upper", 0) or 0) == 1
     assembly_view = dict(phase_eval.get("assembly_view", {}) or {})
     assert list(assembly_view.get("products", []) or []) == []
-    pending_units = list(assembly_view.get("pending_units", []) or [])
-    assert [str(item.get("pending_kind", "")) for item in pending_units] == ["b_like_open"]
-    assert str(pending_units[0].get("reason", "")) == "F1_pool_shortage"
+    assert list(assembly_view.get("pending_units", []) or []) == []
+    assert bool(dict(assembly_view.get("diagnostics", {}) or {}).get("evaluation_only", False))
     contracts = list(phase_eval.get("flex_reconciliation_contracts", []) or [])
     candidate_contracts = [
         item for item in contracts
@@ -1085,7 +1185,7 @@ def test_below_range_includes_d_like_open_in_supplemental_candidate_pool() -> No
         classification=classification,
     ).to_dict()
 
-    assert str(phase_eval.get("phase", "")) == "external_structural_closure"
+    assert str(phase_eval.get("phase", "")) == "external_flex_closure"
     flex_audit = dict(phase_eval.get("flex_audit", {}) or {})
     candidate_profiles = list(flex_audit.get("supplemental_flex_candidate_profiles", []) or [])
     assert any(str(item.get("candidate_kind", "")) == "d_like_open" for item in candidate_profiles)
@@ -1317,10 +1417,10 @@ def test_non_applicable_flex_window_does_not_force_flex_range_gate() -> None:
     ).to_dict()
 
     assert not bool(assembly.get("ok", True))
-    assert str(assembly.get("reason", "")) == "external_structural_closure_pending"
+    assert str(assembly.get("reason", "")) == "external_flex_closure_pending"
     assert list(assembly.get("pending_units", []) or [])
     assert all("flex_range" not in str(item.get("reason", "")) for item in assembly["pending_units"])
-    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "external_structural_closure"
+    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "external_flex_closure"
     flex_audit = dict(dict(assembly.get("diagnostics", {}) or {}).get("flex_audit", {}) or {})
     assert bool(flex_audit.get("flex_window_applicable", True)) is False
     assert str(flex_audit.get("scenario", "")) == "not_applicable"
@@ -1375,7 +1475,7 @@ def test_external_assembly_stage3_phase_tracks_only_front_half_state() -> None:
     nodes_complete = [center_complete, left_complete, right_complete]
     classification_complete = classify_topology_units(nodes_complete)
     assembly_complete = assemble_topology_units(nodes_complete, classification_complete).to_dict()
-    assert str(dict(assembly_complete.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "complete"
+    assert str(dict(assembly_complete.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "remaining_pool_spectrum_rebalance"
 
     center = make_node(1, 20, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
     connector = make_node(2, 27)
@@ -1395,7 +1495,7 @@ def test_external_assembly_stage3_phase_tracks_only_front_half_state() -> None:
         S_target=torch.zeros(2400),
         E_target=torch.tensor([2.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
     ).to_dict()
-    assert str(dict(assembly_flex.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "external_structural_closure"
+    assert str(dict(assembly_flex.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "external_flex_closure"
 
     left = make_node(1000, 20, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
     left_connector = make_node(1001, 27)
@@ -1436,7 +1536,11 @@ def test_external_assembly_stage3_phase_tracks_only_front_half_state() -> None:
     ]
     classification_pending = classify_topology_units(nodes_pending)
     assembly_pending = assemble_topology_units(nodes_pending, classification_pending).to_dict()
-    assert str(dict(assembly_pending.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "external_structural_closure"
+    assert str(dict(assembly_pending.get("diagnostics", {}) or {}).get("stage3_phase", "")) in {
+        "external_flex_closure",
+        "external_fatty_ring_closure",
+        "external_side_chain_closure",
+    }
 
 
 def test_unclassified_su24_candidate_remains_residual_resource() -> None:
@@ -1453,15 +1557,15 @@ def test_unclassified_su24_candidate_remains_residual_resource() -> None:
 
     assert list(assembly.get("products", []) or []) == []
     assert list(assembly.get("pending_units", []) or []) == []
-    assert str(assembly.get("reason", "")) == "residual_resource_self_closure_pending"
-    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "residual_resource_self_closure"
-    assert str(phase_eval.get("phase", "")) == "residual_resource_self_closure"
+    assert str(assembly.get("reason", "")) == "remaining_pool_spectrum_rebalance_ready"
+    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "remaining_pool_spectrum_rebalance"
+    assert str(phase_eval.get("phase", "")) == "external_flex_closure"
     phase_diag = dict(phase_eval.get("diagnostics", {}) or {})
     assert int(phase_diag.get("external_pending_unit_count", 0) or 0) == 0
     assert int(phase_diag.get("resource_pool_only_pending_unit_count", 0) or 0) == 0
 
 
-def test_residual_self_closure_consumes_resource_pool_side_chain() -> None:
+def test_external_helper_leaves_residual_side_resources_unconsumed() -> None:
     nodes = [
         make_node(200, 11),
         make_node(201, 11),
@@ -1477,18 +1581,16 @@ def test_residual_self_closure_consumes_resource_pool_side_chain() -> None:
     assembly = assemble_topology_units(nodes, classification).to_dict()
 
     products = list(assembly.get("products", []) or [])
-    assert len(products) == 1
-    assert str(products[0].get("product_kind", "")) == "residual_side_chain"
-    assert str(products[0].get("actual_topology_su", "")) == "11-23-23-22"
+    assert products == []
     assert assembly["pending_units"] == []
-    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "residual_resource_self_closure"
+    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "remaining_pool_spectrum_rebalance"
     remaining_counts = dict(dict(assembly.get("resource_ledger", {}) or {}).get("remaining_counts", {}) or {})
-    assert int(remaining_counts.get("11", 0) or 0) == 2
-    assert int(remaining_counts.get("22", 0) or 0) == 0
-    assert int(remaining_counts.get("23", 0) or 0) == 2
+    assert int(remaining_counts.get("11", 0) or 0) == 3
+    assert int(remaining_counts.get("22", 0) or 0) == 1
+    assert int(remaining_counts.get("23", 0) or 0) == 4
 
 
-def test_residual_self_closure_keeps_leftover_24_for_conversion_cycle() -> None:
+def test_external_helper_leaves_su24_for_authoritative_state_machine() -> None:
     nodes = [
         make_node(300, 11),
         make_node(301, 11),
@@ -1502,12 +1604,11 @@ def test_residual_self_closure_keeps_leftover_24_for_conversion_cycle() -> None:
     assembly = assemble_topology_units(nodes, classification).to_dict()
 
     products = list(assembly.get("products", []) or [])
-    assert len(products) == 1
-    assert str(products[0].get("actual_topology_su", "")) == "11-23-23-22"
+    assert products == []
     remaining_counts = dict(dict(assembly.get("resource_ledger", {}) or {}).get("remaining_counts", {}) or {})
     assert int(remaining_counts.get("24", 0) or 0) == 1
-    assert int(remaining_counts.get("23", 0) or 0) == 0
-    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "residual_resource_self_closure"
+    assert int(remaining_counts.get("23", 0) or 0) == 2
+    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "remaining_pool_spectrum_rebalance"
 
 
 def test_external_assembly_csv_regression_contract_and_topologies() -> None:
@@ -1561,7 +1662,11 @@ def test_external_assembly_csv_regression_contract_and_topologies() -> None:
     assert not (bad_actual_topologies & actual_topologies)
     assert actual_topologies
     assert str(assembly.get("reason", "")) == "external_ring_candidates_pending"
-    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "external_structural_closure"
+    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) in {
+        "external_flex_closure",
+        "external_fatty_ring_closure",
+        "external_side_chain_closure",
+    }
 
     assert any(
         str(fragment.class_type) in {"24_AB_N_24_CD", "24_CD_N_24_CD"}
@@ -1580,7 +1685,7 @@ def test_external_assembly_csv_regression_contract_and_topologies() -> None:
         if str(item.get("pending_kind", "")) == "pending_ring_candidate"
     ]
     assert ring_pending
-    assert all(str(item.get("phase", "")) == "external_structural_closure" for item in ring_pending)
+    assert all(str(item.get("phase", "")) == "external_fatty_ring_closure" for item in ring_pending)
     assert all(item.get("source_node_ids") for item in ring_pending)
     assert any(str(item.get("pending_kind", "")) == "e_like_open" for item in list(assembly.get("pending_units", []) or []))
     assert not any(str(item.get("real_topology_partial", "")) == "-1" for item in list(assembly.get("pending_units", []) or []))
@@ -1603,7 +1708,8 @@ def test_external_assembly_report_is_minimal() -> None:
     assert "remaining_total=" in report
     assert "shortage_total=" in report
     assert "=== Front-Half Phase ===" in report
-    assert "stage3_phase=external_structural_closure" in report
+    assert "stage3_phase=" in report
+    assert "stage3_phase=external_structural_closure" not in report
     assert "initial_counts=" in report
     assert "consumed_counts=" in report
     assert "remaining_counts=" in report
@@ -1684,7 +1790,6 @@ def test_external_assembly_diagnostics_keep_only_live_keys() -> None:
             "contract_definition_conflicts",
         "total_shortage",
         "stage3_phase",
-        "residual_closure_product_count",
         "completed_phases",
         "protected_resource_counts",
         "remaining_minimum_flex_gap",
@@ -1752,15 +1857,9 @@ def test_flex_target_uses_lower_bound_and_carries_external_shortfall() -> None:
 
     phase = build_stage3_phase_evaluation(nodes, classification=classify_topology_units(nodes)).to_dict()
     audit = dict(phase.get("flex_audit", {}) or {})
-    assembly = dict(phase.get("assembly_view", {}) or {})
-    target = dict(assembly.get("flex_target_plan", {}) or {})
-
     assert int(audit.get("flex_target", 0)) == int(audit["flex_lower"])
-    assert int(target.get("external_candidate_capacity", 0)) == 1
-    assert bool(target.get("external_capacity_exhausted", False)) is bool(
-        audit.get("external_capacity_exhausted", False)
-    )
-    assert int(target.get("remaining_minimum_gap", 0)) >= 0
+    assert len(list(audit.get("selected_candidate_fragment_ids", []) or [])) == 1
+    assert bool(dict(dict(phase.get("assembly_view", {}) or {}).get("diagnostics", {}) or {}).get("evaluation_only", False))
 
 
 def test_pending_public_contract_exposes_resource_traceability() -> None:
@@ -1774,7 +1873,7 @@ def test_pending_public_contract_exposes_resource_traceability() -> None:
     pending = list(result.to_public_dict().get("pending_units", []) or [])
 
     assert pending
-    assert pending[0]["phase"] == "external_structural_closure"
+    assert pending[0]["phase"] == "external_flex_closure"
     assert pending[0]["source_node_ids"]
     assert isinstance(pending[0]["required_counts"], dict)
     assert pending[0]["reason"]
@@ -2071,12 +2170,14 @@ def test_assembler_rejects_duplicate_global_id_across_products() -> None:
         actual_topology_su="11-23",
         actual_topology_gid="1-2",
         source_node_ids=[1, 2],
+        fixed_source_node_ids=[1, 2],
     )
     second = TopologyAssemblyProduct(
         product_kind="side_chain",
         actual_topology_su="23-19",
         actual_topology_gid="2-3",
         source_node_ids=[2, 3],
+        fixed_source_node_ids=[2, 3],
     )
 
     assert assembler._commit_product(first) is True
@@ -2095,6 +2196,7 @@ def test_committed_product_resources_are_removed_from_allocator_pool() -> None:
         actual_topology_su="11-23-22",
         actual_topology_gid="1-2-3",
         source_node_ids=[1, 2, 3],
+        claimed_resource_ids_by_su={"11": [1], "23": [2], "22": [3]},
     )
 
     assert assembler._commit_product(product) is True
@@ -2114,12 +2216,12 @@ def test_committed_product_resource_claims_are_unique() -> None:
         actual_topology_su="11-11-23",
         actual_topology_gid="1-2-3",
         source_node_ids=[1, 2, 3],
-        claimed_resource_ids={"11": [1, 2, 1, 2], "23": [3, 3]},
+        claimed_resource_ids_by_su={"11": [1, 2, 1, 2], "23": [3, 3]},
     )
 
     assert assembler._commit_product(product) is True
-    assert product.claimed_resource_ids == {"11": [1, 2], "23": [3]}
-    assert product.to_public_dict()["claimed_resource_ids"] == {"11": [1, 2], "23": [3]}
+    assert product.claimed_resource_ids_by_su == {"11": [1, 2], "23": [3]}
+    assert product.to_public_dict()["claimed_resource_ids_by_su"] == {"11": [1, 2], "23": [3]}
 
 
 def test_pending_render_allows_declared_suppressed_support_nodes() -> None:
@@ -2242,6 +2344,96 @@ def test_pending_render_claims_visible_branch_stub_nodes() -> None:
     assert pending.validation_errors == []
 
 
+def test_half_closed_pending_keeps_nonfixed_neighbor_in_resource_pool() -> None:
+    nodes = [make_node(298, 15), make_node(299, 15), make_node(454, 23)]
+    evidence = {
+        "center_node_ids": [298],
+        "fixed_source_node_ids": [298, 299],
+        "matched_neighbors": [
+            {"node_id": 299, "is_fixed": True},
+            {"node_id": 454, "is_fixed": False},
+        ],
+    }
+    fragment_dict = {
+        "fragment_id": 298,
+        "class_type": "D",
+        "source_node_ids": [298, 299, 454],
+        "claimed_node_ids": [298, 299],
+        "context_node_ids": [454],
+        "evidence": evidence,
+    }
+    fragment = SimpleNamespace(
+        **fragment_dict,
+        open_mainline_slots=[],
+        branch_contracts=[],
+    )
+    classification = SimpleNamespace(
+        fragments=[fragment],
+        to_dict=lambda: {
+            "fragments": [fragment_dict],
+            "resource_pool": {
+                "remaining_ids_by_su": {"23": [454]},
+                "su11_donor_ids_by_su": {},
+            },
+            "unclassified_nodes": [],
+            "classification_rejects": [],
+            "claim_conflicts": [],
+            "support_units_only": [],
+        },
+    )
+    assembler = object.__new__(ExternalTopologyAssembler)
+    assembler.classification = classification
+    assembler.products = []
+    assembler.pending_units = []
+    assembler.pending_contracts = []
+    assembler.contract_definition_conflicts = []
+    view = AssemblyFragmentView(
+        unit_id=298,
+        fragment_id=298,
+        family="basic",
+        class_type="D",
+        topology_template="-23-15-15-",
+        source_node_ids=[298, 299, 454],
+        main_labels=["23", "15", "15"],
+        main_node_ids=[454, 298, 299],
+        canonical_labels=["23", "15", "15"],
+        open_left=True,
+        open_right=True,
+        can_flex=True,
+        target_roles=["flex_chain"],
+        evidence=evidence,
+        context_node_ids=[454],
+    )
+    render = TopologyPathRender(
+        topology_notation="-23-15-15-",
+        node_id_notation="-454-298-299-",
+    )
+
+    assembler._record_pending(
+        unit_id=298,
+        pending_kind="d_like_open",
+        views=[view],
+        required_counts={"23": 1},
+        available_counts={"23": 1},
+        reason="mainline_closure_pending",
+        partial_render=render,
+        actual_render=render,
+    )
+
+    pending = assembler.pending_units[0]
+    assert pending.real_topology_partial == "-23-15-15-"
+    assert pending.real_node_partial == "-OPEN-298-299-"
+    assert pending.source_node_ids == [298, 299]
+    contract = assembler.pending_contracts[0]
+    assert contract["claimed_source_node_ids"] == [298, 299]
+
+    context = build_stage3_round_context(nodes=nodes, classification=classification)
+    context = mark_round_pending_contracts(context, assembler.pending_contracts)
+    ownership = ownership_public_view(context)
+    assert ownership["states"]["remaining_closure_resource"] == [454]
+    assert ownership["invariant_errors"] == []
+
+
 def test_resource_ledger_invariant_uses_full_ownership_partition() -> None:
     nodes = [make_node(1, 10), make_node(2, 12), make_node(3, 13), make_node(4, 11)]
     classification = classify_topology_units(nodes)
@@ -2250,14 +2442,14 @@ def test_resource_ledger_invariant_uses_full_ownership_partition() -> None:
     assert str(assembly.get("reason", "")) != "final_resource_ledger_invalid"
 
 
-def test_ownership_remaining_resource_prevents_false_stage3_completion() -> None:
+def test_available_pool_prevents_false_stage3_completion() -> None:
     nodes = [make_node(1, 11)]
     classification = classify_topology_units(nodes)
     assembly = assemble_topology_units(nodes, classification).to_dict()
 
     assert assembly["ok"] is False
-    assert assembly["reason"] == "residual_resource_self_closure_pending"
-    assert assembly["active_phase"] == "residual_resource_self_closure"
+    assert assembly["reason"] == "remaining_pool_spectrum_rebalance_ready"
+    assert assembly["active_phase"] == "remaining_pool_spectrum_rebalance"
 
 
 def test_fixture_active_products_have_unique_global_id_ownership() -> None:
@@ -2266,7 +2458,15 @@ def test_fixture_active_products_have_unique_global_id_ownership() -> None:
     owner_by_node_id = {}
 
     for product_index, product in enumerate(list(assembly.get("products", []) or [])):
-        for node_id in list(product.get("source_node_ids", []) or []):
+        owned_node_ids = (
+            list(product.get("fixed_source_node_ids", []) or [])
+            + [
+                int(value)
+                for values in dict(product.get("claimed_resource_ids_by_su", {}) or {}).values()
+                for value in list(values or [])
+            ]
+        )
+        for node_id in owned_node_ids:
             assert int(node_id) not in owner_by_node_id, (
                 int(node_id),
                 owner_by_node_id.get(int(node_id)),

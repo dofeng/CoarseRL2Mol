@@ -17,7 +17,7 @@ def test_most_surplus_resource_fills_most_deficient_resource() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[11], H[23], H[22], H[24] = 1, 3, 3, 1
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         minimum_resource_request={11: 4, 23: 7, 22: 3, 24: 0},
         runtime={
             "assembly_before_adjustment": {
@@ -40,7 +40,7 @@ def test_histogram_application_does_not_mutate_nodes() -> None:
     node = type("Node", (), {"su_type": 24, "hop1_ids": [8], "hop1_su": [11], "global_id": 7})()
     plan = Stage3AdjustmentPlan(
         phase="residual_resource_self_closure",
-        planned_conversions=[{"from_su": 24, "to_su": 23, "reason": "residual"}],
+        planned_conversions=[{"from_su": 24, "to_su": 23, "node_id": 7, "reason": "residual"}],
         runtime={
             "assembly_before_adjustment": {
                 "resource_ledger": {
@@ -66,7 +66,7 @@ def test_high_h_state_rejects_explicit_conversion_that_raises_h_further() -> Non
     H = torch.zeros(33, dtype=torch.long)
     H[11], H[22], H[23], H[24] = 1, 10, 1, 3
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         minimum_resource_request={11: 1, 22: 0, 23: 1, 24: 0},
         planned_conversions=[{"from_su": 24, "to_su": 23, "reason": "primary"}],
         runtime={
@@ -96,7 +96,7 @@ def test_explicit_primary_cannot_consume_phase_required_resource() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[23] = 1
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         minimum_resource_request={11: 0, 22: 0, 23: 1, 24: 0},
         planned_conversions=[{"from_su": 23, "to_su": 11, "reason": "invalid_primary"}],
         runtime={
@@ -116,7 +116,7 @@ def test_executor_atomically_rejects_bundle_that_worsens_phase_deficit() -> None
     H = torch.zeros(33, dtype=torch.long)
     H[22], H[23], H[24] = 1, 1, 1
     histogram_plan = HistogramAdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         inventory_before={11: 0, 22: 1, 23: 1, 24: 1},
         demand_before={11: 0, 22: 0, 23: 1, 24: 0},
         groups=[AtomicAdjustmentGroup(
@@ -138,7 +138,7 @@ def test_missing_surplus_h_compensation_reports_tolerance_requirement() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[23], H[24] = 1, 1
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         minimum_resource_request={11: 0, 22: 0, 23: 1, 24: 0},
         planned_conversions=[{"from_su": 24, "to_su": 23, "reason": "primary"}],
         runtime={
@@ -164,7 +164,7 @@ def test_primary_conversion_cannot_push_h_below_tolerance_without_compensation()
     H = torch.zeros(33, dtype=torch.long)
     H[22], H[23] = 1, 1
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         hard_required_counts={11: 1},
         planned_conversions=[{"from_su": 22, "to_su": 11, "reason": "primary"}],
         runtime={
@@ -195,7 +195,7 @@ def test_hard_demand_precedes_preferred_demand() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[22] = 2
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         hard_required_counts={"11": 1},
         preferred_required_counts={"11": 1, "23": 1},
         runtime={
@@ -219,7 +219,7 @@ def test_gap_recomputed_after_each_primary_adjustment() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[11], H[23], H[22], H[24] = 1, 6, 9, 3
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         hard_required_counts={"11": 4, "23": 7, "22": 3, "24": 0},
         runtime={
             "assembly_before_adjustment": {
@@ -240,7 +240,7 @@ def test_rejected_deterministic_primary_does_not_loop_forever(monkeypatch) -> No
 
     H = torch.zeros(33, dtype=torch.long)
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         hard_required_counts={"11": 1},
         runtime={
             "assembly_before_adjustment": {
@@ -273,7 +273,7 @@ def test_external_shortage_cover_ops_are_physical_conversions() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[22] = 1
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         hard_required_counts={"11": 1},
         planned_conversions=[
             {"from_su": 22, "to_su": 11, "reason": "external_only_shortage_cover"},
@@ -296,7 +296,7 @@ def test_explicit_operation_is_not_replayed_after_gap_is_filled() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[22] = 2
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         hard_required_counts={"11": 1},
         planned_conversions=[
             {"from_su": 22, "to_su": 11, "reason": "shortage_cover"},
@@ -319,7 +319,7 @@ def test_low_hydrogen_state_blocks_conversion_that_would_lower_h_further() -> No
     H = torch.zeros(33, dtype=torch.long)
     H[22] = 1
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         hard_required_counts={"11": 1},
         runtime={
             "assembly_before_adjustment": {
@@ -438,7 +438,7 @@ def test_su11_rotation_advances_only_after_successful_real_adjustment() -> None:
     H[12] = 1
     node = SimpleNamespace(global_id=101, su_type=12)
     histogram_plan = HistogramAdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         inventory_before={12: 1},
         demand_before={11: 1},
         groups=[AtomicAdjustmentGroup(
@@ -447,7 +447,7 @@ def test_su11_rotation_advances_only_after_successful_real_adjustment() -> None:
         )],
     )
     plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         histogram_adjustment_plan=histogram_plan,
         diagnostics={"su11_rotation_index_after": 1},
     )
@@ -458,9 +458,9 @@ def test_su11_rotation_advances_only_after_successful_real_adjustment() -> None:
     assert adjuster._stage3_su11_rotation_index == 1
 
     rejected_plan = Stage3AdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         histogram_adjustment_plan=HistogramAdjustmentPlan(
-            phase="external_structural_closure",
+            phase="external_side_chain_closure",
             inventory_before={12: 1},
             demand_before={11: 1},
             groups=[AtomicAdjustmentGroup(
@@ -483,7 +483,7 @@ def test_real_node_v3_supports_persistent_stage3_conversion_history() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[12] = 1
     plan = HistogramAdjustmentPlan(
-        phase="external_structural_closure",
+        phase="external_side_chain_closure",
         inventory_before={12: 1},
         demand_before={11: 1},
         groups=[AtomicAdjustmentGroup(

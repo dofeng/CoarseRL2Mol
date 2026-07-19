@@ -729,7 +729,7 @@ def apply_histogram_adjustment_plan(
         if unavailable:
             rejected_ops.append({
                 "group": group.to_dict(),
-                "reason": "donor_not_in_remaining_resource_pool",
+                "reason": "donor_not_in_authorized_stage3_pool",
                 "unavailable_counts": unavailable,
             })
             return Stage3AdjustmentApplyResult(
@@ -767,18 +767,12 @@ def apply_histogram_adjustment_plan(
         for op in [group.primary_op] + list(group.h_compensation_ops or []):
             node_ids = [int(value) for value in list(getattr(op, "node_ids", []) or [])]
             if len(node_ids) != int(op.count):
-                candidates = sorted(
-                    int(node_id)
-                    for node_id, node in nodes_by_id.items()
-                    if int(getattr(node, "su_type", -1)) == int(op.from_su)
-                )
-                node_ids = candidates[:int(op.count)]
-            if len(node_ids) != int(op.count):
                 rejected_ops.append({
                     "group": group.to_dict(),
-                    "reason": "real_donor_node_unavailable",
+                    "reason": "authorized_real_donor_ids_missing",
                     "from_su": int(op.from_su),
                     "required": int(op.count),
+                    "provided_node_ids": list(node_ids),
                 })
                 return Stage3AdjustmentApplyResult(
                     nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],

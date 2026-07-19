@@ -42,16 +42,15 @@ def test_pending_and_resource_pool_are_disjoint() -> None:
 
     classification = classify_topology_units([center, resource])
     assembly = assemble_topology_units([center, resource], classification).to_dict()
-    pending_ids = {
-        int(node_id)
-        for pending in assembly.get("pending_units", [])
-        for node_id in pending.get("source_node_ids", [])
-    }
-    resource_ledger = dict(assembly.get("resource_ledger", {}) or {})
+    states = dict(
+        dict(assembly.get("diagnostics", {}) or {}).get("ownership_ledger", {}).get("states", {})
+        or {}
+    )
+    pending_ids = {int(node_id) for node_id in list(states.get("pending_topology", []) or [])}
     resource_ids = {
         int(node_id)
-        for values in resource_ledger.get("remaining_ids_by_su", {}).values()
-        for node_id in values
+        for state in ("remaining_closure_resource", "remaining_aromatic_donor")
+        for node_id in list(states.get(state, []) or [])
     }
     assert pending_ids.isdisjoint(resource_ids)
 

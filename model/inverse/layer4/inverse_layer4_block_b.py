@@ -11,7 +11,6 @@ from ..special_anchor_evidence import (
     SU19_DOUBLE_SUPPORT_WEIGHT,
     weighted_su19_double_area,
 )
-from .inverse_layer4_block_c import adjust_block_b_tail_spectrum_impl
 
 
 AROMATIC_ANCHOR_WINDOWS: Dict[int, Tuple[float, float, float]] = {
@@ -1792,9 +1791,6 @@ def adjust_block_b_hetero_anchor_impl(
     peak_rel_threshold: float = 0.01,
     substage: Optional[str] = None,
     nodes: Optional[List[Any]] = None,
-    tail_spectrum_max_moves: int = 5,
-    tail_spectrum_aromatic_couple: bool = True,
-    tail_spectrum_h_tolerance: float = 0.08,
 ) -> Tuple[torch.Tensor, List[Dict[str, Any]], Dict[str, Any]]:
     print("\n[Block B] 异原子锚点联合调整")
     H_work = torch.clamp(H, min=0).long().clone()
@@ -1880,16 +1876,6 @@ def adjust_block_b_hetero_anchor_impl(
             "max_moves": int(mode_stage_moves),
             "peak_rel_threshold": float(peak_rel_threshold),
         }),
-        ("tail_spectrum", adjust_block_b_tail_spectrum_impl, {
-            "E_target": getattr(adjuster, "E_target", None),
-            "max_moves": int(max(0, min(int(tail_spectrum_max_moves), 5))),
-            "peak_rel_threshold": float(peak_rel_threshold),
-            "min_keep_22": 1,
-            "min_keep_23": 0,
-            "min_keep_24": 0,
-            "aromatic_couple": bool(tail_spectrum_aromatic_couple),
-            "h_tolerance": float(tail_spectrum_h_tolerance),
-        }),
     ]
     for name, fn, kwargs in subcalls:
         if substage_name is not None and str(name) != str(substage_name):
@@ -1897,13 +1883,12 @@ def adjust_block_b_hetero_anchor_impl(
         partition_meta = dict(getattr(adjuster, 'fixed_partition_meta', {}) or {})
         H_before_substage = H_work.detach().clone()
         before_balance = _summarize_block_b_balance(H_work, fixed_partition_meta=partition_meta)
-        if str(name) != "tail_spectrum":
-            _print_anchor_mode_snapshot(
-                H_work,
-                fixed_partition_meta=partition_meta,
-                header=f"[Block B/{name}] 模式快照(调整前)",
-                indent="  ",
-            )
+        _print_anchor_mode_snapshot(
+            H_work,
+            fixed_partition_meta=partition_meta,
+            header=f"[Block B/{name}] 模式快照(调整前)",
+            indent="  ",
+        )
         H_work, moves, submeta = fn(
             adjuster,
             H_work,
@@ -1994,13 +1979,12 @@ def adjust_block_b_hetero_anchor_impl(
                     adjuster.layer0_estimator.fixed_partition_meta = dict(partition_meta)
                 print(f"  [Block B/{name}] 固定连接可行性预检拒绝并回滚: {precheck_reason}")
         after_balance = _summarize_block_b_balance(H_work, fixed_partition_meta=after_partition_meta)
-        if str(name) != "tail_spectrum":
-            _print_anchor_mode_snapshot(
-                H_work,
-                fixed_partition_meta=after_partition_meta,
-                header=f"[Block B/{name}] 模式快照(调整后)",
-                indent="  ",
-            )
+        _print_anchor_mode_snapshot(
+            H_work,
+            fixed_partition_meta=after_partition_meta,
+            header=f"[Block B/{name}] 模式快照(调整后)",
+            indent="  ",
+        )
         meta[name] = submeta
         if isinstance(meta[name], dict):
             meta[name]["balance_before"] = dict(before_balance)

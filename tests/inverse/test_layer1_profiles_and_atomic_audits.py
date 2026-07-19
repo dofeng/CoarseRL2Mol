@@ -2,16 +2,9 @@ from __future__ import annotations
 
 import inspect
 
-import torch
-
 from model.inverse.inverse_pipeline import InversePipelineV3
 from model.inverse.layer1.inverse_layer1 import Layer1Assigner
-from model.inverse.layer4.inverse_layer4 import Layer4Adjuster
 from model.shared.inverse_common import _NodeV3
-from model.inverse.layer4.inverse_layer4_block_c import (
-    _tail_bundle_conservation_reason,
-    _tail_h_compensation_at,
-)
 
 
 def test_layer1_public_api_has_single_cold_start_profile() -> None:
@@ -81,32 +74,3 @@ def test_unsaturated_pairing_reserves_su15_for_su16() -> None:
 
     assert {nodes[0].hop1_ids[0], nodes[1].hop1_ids[0]} == {2, 3}
     assert {nodes[2].hop1_ids[0], nodes[3].hop1_ids[0]} == {0, 1}
-
-
-def test_tail_h_compensation_cycle_repeats_prescribed_order() -> None:
-    assert [_tail_h_compensation_at(index) for index in range(4)] == [
-        (23, 11),
-        (23, 11),
-        (22, 11),
-        (23, 11),
-    ]
-
-
-def test_tail_bundle_audit_requires_total_and_fixed_element_conservation() -> None:
-    adjuster = Layer4Adjuster(device=torch.device("cpu"))
-    before = torch.zeros(33, dtype=torch.long)
-    before[23] = 2
-
-    valid = before.clone()
-    valid[23] -= 1
-    valid[11] += 1
-    assert _tail_bundle_conservation_reason(adjuster, before, valid) == ""
-
-    invalid_total = before.clone()
-    invalid_total[11] += 1
-    assert _tail_bundle_conservation_reason(adjuster, before, invalid_total) == "su_total_not_conserved"
-
-    invalid_fixed_elements = before.clone()
-    invalid_fixed_elements[23] -= 1
-    invalid_fixed_elements[28] += 1
-    assert _tail_bundle_conservation_reason(adjuster, before, invalid_fixed_elements) == "fixed_elements_not_conserved"

@@ -10,6 +10,7 @@ from model.inverse.topology import (
     plan_stage3_resource_adjustments,
 )
 from model.inverse.topology.stage3_models import Stage3AdjustmentPlan
+from model.inverse.topology.stage3_state_machine import _residual_contracts
 from tests.inverse.topology.helpers import connect, make_node
 
 
@@ -20,28 +21,15 @@ def _histogram(nodes, size=40):
     return out
 
 
-def test_residual_self_closure_prefers_two_23_side_chain() -> None:
-    nodes = [
-        make_node(200, 11), make_node(201, 11), make_node(202, 11),
-        make_node(203, 22),
-        make_node(204, 23), make_node(205, 23), make_node(206, 23), make_node(207, 23),
-    ]
+def test_residual_planner_prefers_two_23_side_chain() -> None:
+    contracts = _residual_contracts(
+        {11: [200], 22: [203], 23: [204, 205], 24: []},
+        max_flex_chains=0,
+    )
 
-    assembly = assemble_topology_units(nodes, classify_topology_units(nodes)).to_dict()
-
-    residual = list(assembly.get("residual_closure_products", []) or [])
-    assert residual
-    assert str(residual[0].get("product_kind", "")) == "residual_side_chain"
-    assert str(residual[0].get("actual_topology_su", "")) == "11-23-23-22"
-    assert residual[0]["materialized_node_ids"] == residual[0]["source_node_ids"]
-    assert residual[0]["claimed_resource_ids"]
-    ledger = dict(assembly.get("resource_ledger", {}) or {})
-    for su_type, initial in dict(ledger.get("initial_counts", {}) or {}).items():
-        assert int(initial) == (
-            int(dict(ledger.get("topology_consumed_counts", {}) or {}).get(str(su_type), 0))
-            + int(dict(ledger.get("residual_consumed_counts", {}) or {}).get(str(su_type), 0))
-            + int(dict(ledger.get("remaining_counts", {}) or {}).get(str(su_type), 0))
-        )
+    side = next(item for item in contracts if item.diagnostics.get("product_role") == "residual_side_chain")
+    assert side.expected_topology == "11-23-23-22"
+    assert side.required_counts == {11: 1, 22: 1, 23: 2}
 
 
 def test_su25_cd_closes_with_real_f2_resources_when_available() -> None:
@@ -61,61 +49,52 @@ def test_su25_cd_closes_with_real_f2_resources_when_available() -> None:
 
     assert not [item for item in assembly.get("pending_units", []) if int(item.get("unit_id", -1)) == 250]
     product = next(item for item in assembly.get("products", []) if 250 in list(item.get("source_fragment_ids", []) or []))
-    assert 250 in list(product.get("materialized_node_ids", []) or [])
-    assert 252 in list(product.get("materialized_node_ids", []) or [])
-    assert 253 in list(product.get("materialized_node_ids", []) or [])
-    assert 254 in list(product.get("materialized_node_ids", []) or [])
-    assert 251 in list(product.get("materialized_node_ids", []) or [])
+    assert {250, 251, 252, 253, 254}.issubset(set(product.get("symbolic_node_ids", []) or []))
 
 
-def test_isolated_su24_finishes_with_residual_infeasibility_proof() -> None:
+def test_isolated_su24_requires_terminalization_and_cold_rebuild() -> None:
     nodes = [make_node(1, 24)]
     H = _histogram(nodes)
     phase_eval = build_stage3_phase_evaluation(nodes, classification=classify_topology_units(nodes))
-    assert str(phase_eval.phase) == "residual_resource_self_closure"
+    assert 1 in list(phase_eval.closure_pool_ids_by_su.get(24, []) or [])
 
     plan = plan_stage3_resource_adjustments(H=H, nodes=nodes)
-    assert str(plan.phase) == "complete"
-    proof = dict(plan.diagnostics.get("residual_infeasibility_proof", {}) or {})
-    assert proof["reason"] == "no_executable_residual_template_fit"
-    assert proof["remaining_counts"]["24"] == 1
+    assert str(plan.phase) == "residual_resource_self_closure"
+    assert plan.reason == "stage3_rebuild_required"
     apply_result = apply_stage3_node_adjustments(nodes, H, plan)
 
-    assert apply_result.changed is False
-    assert int(apply_result.nodes[0].su_type) == 24
-    assert int(apply_result.H[24].item()) == 1
-    assert int(apply_result.H[23].item()) == 0
+    assert apply_result.changed is True
+    assert int(apply_result.nodes[0].su_type) == 23
+    assert int(apply_result.H[24].item()) == 0
+    assert int(apply_result.H[23].item()) == 1
     assert int(dict(apply_result.conservation_after or {}).get("su_count", 0)) == 1
 
 
-def test_isolated_su11_is_not_converted_without_executable_template() -> None:
+def test_isolated_su11_is_terminalized_then_reclassified() -> None:
     nodes = [make_node(1, 11)]
     H = _histogram(nodes)
 
     first_plan = plan_stage3_resource_adjustments(H=H, nodes=nodes)
     first = apply_stage3_node_adjustments(nodes, H, first_plan)
 
-    assert first.changed is False
-    assert int(first.nodes[0].su_type) == 11
-    assert int(first.H[11].item()) == 1
-    assert int(first.H[13].item()) == 0
-    assert first_plan.diagnostics["residual_infeasibility_proof"]["remaining_counts"]["11"] == 1
+    assert first_plan.reason == "stage3_rebuild_required"
+    assert first.changed is True
+    assert int(first.nodes[0].su_type) in {12, 13}
+    assert int(first.H[11].item()) == 0
 
 
-def test_isolated_residual_does_not_request_layer12_rebuild() -> None:
+def test_isolated_residual_requests_layer12_rebuild_after_conversion() -> None:
     nodes = [make_node(1, 24)]
     H = _histogram(nodes)
     plan = plan_stage3_resource_adjustments(H=H, nodes=nodes)
     applied = apply_stage3_node_adjustments(nodes, H, plan)
 
-    assert plan.reason == "stage3_complete"
-    assert applied.changed is False
-    assert int(applied.nodes[0].su_type) == 24
-    assert int(applied.H[24].item()) == 1
-    assert int(applied.H[23].item()) == 0
+    assert plan.reason == "stage3_rebuild_required"
+    assert applied.changed is True
+    assert int(applied.nodes[0].su_type) == 23
 
 
-def test_direct_residual_side_product_needs_no_histogram_rebuild() -> None:
+def test_direct_residual_side_product_then_terminal_conversion_requires_rebuild() -> None:
     nodes = [
         make_node(1, 11),
         make_node(2, 11),
@@ -125,23 +104,23 @@ def test_direct_residual_side_product_needs_no_histogram_rebuild() -> None:
     ]
     H = _histogram(nodes)
     first_eval = build_stage3_phase_evaluation(nodes, classification=classify_topology_units(nodes))
-    assert str(first_eval.phase) == "residual_resource_self_closure"
+    assert bool(first_eval.assembly_attempted) is False
 
     plan = plan_stage3_resource_adjustments(H=H, nodes=nodes)
     applied = apply_stage3_node_adjustments(nodes, H, plan)
-    assert plan.reason == "stage3_complete"
-    assert applied.changed is False
+    assert plan.reason == "stage3_rebuild_required"
+    assert applied.changed is True
     assert any(
-        str(transaction.target_role) == "residual_side_chain"
+        str(transaction.target_role) == "residual_resource_conversion"
         and bool(transaction.committed)
         for transaction in plan.phase_result.transactions
     )
 
 
-def test_su24_resource_advances_to_residual_phase() -> None:
+def test_su24_resource_is_visible_in_round_closure_pool() -> None:
     nodes = [make_node(1, 24), make_node(2, 24)]
     phase_eval = build_stage3_phase_evaluation(nodes, classification=classify_topology_units(nodes))
-    assert str(phase_eval.phase) == "residual_resource_self_closure"
+    assert sorted(phase_eval.closure_pool_ids_by_su[24]) == [1, 2]
 
 
 def test_su24_and_aromatic_support_remain_resources_without_real_fragment() -> None:
@@ -165,7 +144,7 @@ def test_histogram_conversion_does_not_update_old_neighbor_histograms() -> None:
     H = _histogram([center, neighbor])
     plan = Stage3AdjustmentPlan(
         phase="residual_resource_self_closure",
-        planned_conversions=[{"op": "test_conversion", "from_su": 23, "to_su": 11}],
+        planned_conversions=[{"op": "test_conversion", "from_su": 23, "to_su": 11, "node_id": 2}],
         runtime={"assembly_before_adjustment": {"resource_ledger": {"remaining_counts": {"23": 1}}}},
     )
 

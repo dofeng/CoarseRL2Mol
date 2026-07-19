@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -8,9 +9,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ...shared.inverse_common import _NodeV3
 from .aromatic_clusters import generate_aromatic_clusters
-from .assembly_external import assemble_external_topologies
 from .classification.classifier import classify_topology_units
 from .classification.classification_models import TopologyClassificationResult
+from .round_context import build_stage3_round_context, ownership_public_view
 from .stage3_models import (
     Stage3FlexDecision,
     Stage3PhaseEvaluation,
@@ -25,6 +26,7 @@ PHASE_SEQUENCE = (
     "external_flex_closure",
     "external_fatty_ring_closure",
     "external_side_chain_closure",
+    "remaining_pool_spectrum_rebalance",
     "resource_su24_ring_closure",
     "residual_resource_self_closure",
     "complete",
@@ -37,9 +39,10 @@ EXTERNAL_SUBPHASE_ORDER = {
     "external_flex_closure": 1,
     "external_fatty_ring_closure": 2,
     "external_side_chain_closure": 3,
-    "resource_su24_ring_closure": 4,
-    "residual_resource_self_closure": 5,
-    "complete": 6,
+    "remaining_pool_spectrum_rebalance": 4,
+    "resource_su24_ring_closure": 5,
+    "residual_resource_self_closure": 6,
+    "complete": 7,
 }
 
 
@@ -280,12 +283,9 @@ def _compute_flex_audit(
     error = str(cluster_error_before_trim)
     rigid10_pairs = max(0, int(counts.get(10, 0)) // 2)
     y_value = int(rigid10_pairs)
-    z_value = max(0, int(cluster_count) - int(y_value))
+    z_value = int(cluster_count) - int(y_value)
     flex_lower = int(z_value + 1)
-    flex_upper_raw = int(max(
-        int(flex_lower),
-        math.floor(0.7 * float(max(0, int(cluster_count)))),
-    ))
+    flex_upper_raw = int(math.floor(0.8 * float(max(0, int(cluster_count)))))
     window_ok = bool(int(flex_lower) <= int(flex_upper_raw))
     window_applicable = bool(int(cluster_count) > 0)
 
@@ -738,9 +738,17 @@ def _group_contracts_by_subphase(
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for contract in merge_stage3_contracts_by_owner(list(contracts or [])):
         item = dict(contract or {})
-        subphase = str(item.get("subphase", "") or "external_structural_closure")
+        subphase = str(item.get("subphase", "") or _external_phase_for_role(item.get("target_role", "")))
         grouped.setdefault(str(subphase), []).append(item)
     return grouped
+
+
+def _external_phase_for_role(target_role: str) -> str:
+    return {
+        "flex_chain": "external_flex_closure",
+        "fatty_ring": "external_fatty_ring_closure",
+        "side_chain": "external_side_chain_closure",
+    }.get(str(target_role or ""), "external_side_chain_closure")
 
 
 def _preassembly_gate_assembly_dict(
@@ -920,18 +928,33 @@ def _requirement_summary_by_phase(
         ]
         for key, value in dict(external_requirements.get("contracts_by_subphase", {}) or {}).items()
     }
-    return {
+    summary = {
         "flex_range_reconciliation": {
             "contract_count": int(len(list(flex_contracts or []))),
             "contracts_by_contract_kind": _contracts_by_contract_kind(list(flex_contracts or [])),
         },
-        "external_structural_closure": {
-            "contract_count": int(len(external_contracts)),
-            "blocker_count": int(len(blocker_contracts)),
-            "contracts_by_subphase": dict(contracts_by_subphase or {}),
-            "contracts_by_contract_kind": _contracts_by_contract_kind(external_contracts + blocker_contracts),
-        },
     }
+    for target_role in ("flex_chain", "fatty_ring", "side_chain"):
+        phase = _external_phase_for_role(target_role)
+        phase_contracts = [
+            item for item in external_contracts
+            if str(item.get("target_role", "") or "") == str(target_role)
+        ]
+        phase_blockers = [
+            item for item in blocker_contracts
+            if str(item.get("target_role", "") or "") == str(target_role)
+        ]
+        summary[str(phase)] = {
+            "contract_count": int(len(phase_contracts)),
+            "blocker_count": int(len(phase_blockers)),
+            "contracts_by_subphase": {
+                str(key): list(values)
+                for key, values in contracts_by_subphase.items()
+                if any(item in phase_contracts for item in values)
+            },
+            "contracts_by_contract_kind": _contracts_by_contract_kind(phase_contracts + phase_blockers),
+        }
+    return summary
 
 
 def _external_phase_structured_views(
@@ -989,7 +1012,7 @@ def _pending_summary_by_phase(
     for item in list(pending_units or []):
         pending_kind = str(dict(item or {}).get("pending_kind", "") or "unknown_pending")
         pending_by_kind[str(pending_kind)] = int(pending_by_kind.get(str(pending_kind), 0) or 0) + 1
-    return {
+    summary = {
         "flex_range_reconciliation": {
             "scenario": str(dict(flex_audit or {}).get("scenario", "") or ""),
             "blocked_reason": str(dict(flex_audit or {}).get("blocked_reason", "") or ""),
@@ -1006,15 +1029,32 @@ def _pending_summary_by_phase(
                 for value in list(dict(flex_audit or {}).get("selected_candidate_fragment_ids", []) or [])
             ],
         },
-        "external_structural_closure": {
-            "pending_unit_count": int(len(list(pending_units or []))),
-            "pending_unit_count_by_kind": dict(pending_by_kind or {}),
+    }
+    for phase in (
+        "external_flex_closure",
+        "external_fatty_ring_closure",
+        "external_side_chain_closure",
+    ):
+        phase_pending = [
+            dict(item or {}) for item in list(pending_units or [])
+            if str(dict(item or {}).get("phase", "") or "") == str(phase)
+        ]
+        summary[str(phase)] = {
+            "pending_unit_count": int(len(phase_pending)),
+            "pending_unit_count_by_kind": {
+                str(kind): sum(
+                    1 for item in phase_pending
+                    if str(item.get("pending_kind", "") or "unknown_pending") == str(kind)
+                )
+                for kind in pending_by_kind
+            },
             "pending_by_subphase": {
                 str(key): int(len(list(value or [])))
                 for key, value in dict(external_pending_by_subphase or {}).items()
+                if any(dict(item or {}) in phase_pending for item in list(value or []))
             },
-        },
-    }
+        }
+    return summary
 
 
 def _build_front_half_step_trace(
@@ -1088,6 +1128,8 @@ def _assemble_external_only(
     S_target: Any = None,
     E_target: Any = None,
 ) -> TopologyAssemblyResult:
+    from .assembly_external import assemble_external_topologies
+
     return assemble_external_topologies(
         nodes=list(nodes or []),
         classification=classification,
@@ -1173,7 +1215,9 @@ def build_stage3_phase_evaluation(
     fixed_partition_meta: Optional[Dict[str, Any]] = None,
     S_target: Any = None,
     E_target: Any = None,
+    generation_id: int = 0,
 ) -> Stage3PhaseEvaluation:
+    del S_target, E_target
     classification_obj = classification or classify_topology_units(
         list(nodes or []),
         fixed_partition_meta=fixed_partition_meta,
@@ -1184,168 +1228,73 @@ def build_stage3_phase_evaluation(
         enforce=True,
     )
     classification_dict = classification_obj.to_dict()
-    if _flex_precheck_required(flex_audit):
-        assembly_attempted = False
-        assembly_dict = _preassembly_gate_assembly_dict(
-            classification_obj,
-            classification_dict,
-            flex_audit,
-        )
-    else:
-        assembly_attempted = True
-        assembly_obj = _assemble_external_only(
-            nodes=list(nodes or []),
-            classification=classification_obj,
-            S_target=S_target,
-            E_target=E_target,
-            flex_audit=flex_audit,
-        )
-        assembly_dict = assembly_obj.to_dict()
-    assembly_ledger = dict(assembly_dict.get("resource_ledger", {}) or {})
-    remaining_count_source = dict(assembly_ledger.get("remaining_counts", {}) or {})
-    if not remaining_count_source:
-        resource_pool = dict(classification_dict.get("resource_pool", {}) or {})
-        remaining_count_source = dict(resource_pool.get("remaining_counts", {}) or {})
-    remaining_counts = {
-        str(k): int(v)
-        for k, v in dict(remaining_count_source or {}).items()
-    }
-    unclassified_non_resource_count = int(
-        dict(classification_dict.get("summary", {}) or {}).get("unclassified_non_resource_count", 0) or 0
+    round_context = build_stage3_round_context(
+        nodes=list(nodes or []),
+        classification=classification_obj,
+        flex_audit=flex_audit,
+        generation_id=int(generation_id),
     )
-    pending_units = list(assembly_dict.get("pending_units", []) or [])
-    flex_bounds = dict(assembly_dict.get("flex_bounds", {}) or {})
-    flex_counts = dict(assembly_dict.get("flex_counts", {}) or {})
-    flex_min = int(flex_bounds.get("min", 0) or 0)
-    flex_max = int(flex_bounds.get("max", 0) or 0)
-    flex_final = int(flex_counts.get("final", 0) or 0)
+    ownership_view = ownership_public_view(round_context)
+    flex_bounds = _flex_bounds_from_audit(flex_audit)
+    explicit_count = int(dict(flex_audit or {}).get("explicit_flex_count", 0) or 0)
+    flex_counts = {
+        "explicit_total": int(explicit_count),
+        "final": int(explicit_count),
+    }
     flex_enforced = bool(flex_audit.get("enforced", False))
     flex_reconciliation_required = bool(_flex_precheck_required(flex_audit))
-    needs_window_reconciliation = bool(flex_reconciliation_required)
-    flex_final_within_bounds = bool(
-        (not bool(flex_enforced))
-        or (int(flex_final) >= int(flex_min) and int(flex_final) <= int(flex_max))
-    )
-    flex_scenario = str(dict(flex_audit or {}).get("scenario", "") or "")
-    flex_target = int(dict(flex_audit or {}).get("target_flex_count", 0) or 0)
-    if flex_scenario == "below_range":
-        flex_range_ok = bool(
-            assembly_attempted
-            and not str(dict(flex_audit or {}).get("blocked_reason", "") or "")
-            and int(flex_final) >= int(flex_target)
-            and int(flex_final) <= int(flex_max)
-        )
-    else:
-        flex_range_ok = bool(not flex_reconciliation_required)
-    assembly_phase = str(
-        assembly_dict.get("active_phase", "")
-        or dict(assembly_dict.get("diagnostics", {}) or {}).get("stage3_phase", "")
-        or ("complete" if bool(assembly_dict.get("ok", False)) else "external_structural_closure")
-    )
-    if str(assembly_phase) == "complete" and not bool(assembly_dict.get("ok", False)):
-        assembly_phase = "external_structural_closure"
-    external_ok = bool(assembly_phase in {"residual_resource_self_closure", "complete"})
-    external_requirements, external_blockers = _derive_external_closure_requirements(assembly_dict)
     flex_contracts = _flex_reconciliation_contracts(classification_obj, flex_audit)
-    assembly_contracts = [
-        dict(item or {})
-        for item in list(dict(assembly_dict.get("diagnostics", {}) or {}).get("pending_contracts", []) or [])
-        if dict(item or {})
-    ]
-    canonical_contracts = _canonical_stage3_contracts(
-        flex_contracts=list(flex_contracts or []),
-        assembly_contracts=list(assembly_contracts or []),
-    )
-    external_pending_by_subphase = {
-        str(key): [
-            dict(item or {})
-            for item in list(value or [])
-            if dict(item or {})
-        ]
-        for key, value in dict(external_requirements.get("contracts_by_subphase", {}) or {}).items()
+    phase = "flex_range_reconciliation" if flex_reconciliation_required else "external_flex_closure"
+    minimal_ledger = _minimal_resource_ledger_from_classification(classification_dict)
+    minimal_ledger["ownership"] = ownership_view
+    assembly_dict = {
+        "ok": False,
+        "reason": "stage3_round_not_executed",
+        "products": [],
+        "pending_units": [],
+        "resource_ledger": minimal_ledger,
+        "flex_bounds": dict(flex_bounds),
+        "flex_counts": dict(flex_counts),
+        "active_phase": str(phase),
+        "active_subphase": str(phase),
+        "completed_phases": [],
+        "diagnostics": {
+            "stage3_phase": str(phase),
+            "evaluation_only": True,
+            "pending_contracts": list(flex_contracts or []),
+        },
     }
-    external_contracts_by_contract_kind = _contracts_by_contract_kind(
-        list(external_requirements.get("contracts", []) or []) + list(external_blockers.get("contracts", []) or [])
-    )
-    external_structured_views = _external_phase_structured_views(
-        dict(external_requirements or {}),
-        dict(external_blockers or {}),
-    )
-    front_half_requirement_summary = _requirement_summary_by_phase(
-        flex_contracts=list(flex_contracts or []),
-        external_requirements=dict(external_requirements or {}),
-        external_blockers=dict(external_blockers or {}),
-    )
-    front_half_pending_summary = _pending_summary_by_phase(
-        flex_audit=dict(flex_audit or {}),
-        pending_units=list(pending_units or []),
-        external_pending_by_subphase=dict(external_pending_by_subphase or {}),
-    )
-    flex_range_action_class = str(dict(flex_audit or {}).get("scenario", "") or "in_range")
-    dormant_phase_reasons: Dict[str, str] = {}
-
-    phase = str(assembly_phase)
-    done = bool(phase == "complete")
-    phase_status = {
-        "flex_range_reconciliation": bool(flex_range_ok),
-        "external_structural_closure": bool(external_ok),
-        "residual_resource_self_closure": bool(phase in {"residual_resource_self_closure", "complete"}),
-        "residual_resource_self_closure": bool(phase == "complete"),
-    }
-    front_half_step_trace = _build_front_half_step_trace(
-        phase=str(phase),
-        flex_audit=dict(flex_audit or {}),
-        assembly_attempted=bool(assembly_attempted),
-        assembly_dict=dict(assembly_dict or {}),
-        external_requirements=dict(external_requirements or {}),
-        external_ok=bool(external_ok),
-    )
 
     diagnostics = {
         "phase_sequence": list(PHASE_SEQUENCE),
-        "phase_status": dict(phase_status),
-        "resource_pool_remaining_counts": remaining_counts,
-        "unclassified_non_resource_count": int(unclassified_non_resource_count),
+        "phase_status": {
+            "classification": True,
+            "ownership_partition": not bool(ownership_view.get("invariant_errors", [])),
+            "flex_range_reconciliation": not bool(flex_reconciliation_required),
+        },
+        "resource_pool_remaining_counts": {
+            str(key): len(values)
+            for key, values in dict(round_context.closure_pool_ids_by_su or {}).items()
+        },
+        "unclassified_non_resource_count": int(
+            dict(classification_dict.get("summary", {}) or {}).get("unclassified_non_resource_count", 0) or 0
+        ),
         "claim_conflict_count": int(dict(classification_dict.get("summary", {}) or {}).get("claim_conflict_count", 0) or 0),
         "support_units_only_count": int(dict(classification_dict.get("summary", {}) or {}).get("support_units_only_count", 0) or 0),
-        "pending_unit_count": int(len(pending_units)),
-        "external_pending_unit_count": int(len(pending_units)),
-        "resource_pool_only_pending_unit_count": 0,
+        "pending_unit_count": int(len(flex_contracts)),
         "reject_count": int(dict(classification_dict.get("summary", {}) or {}).get("reject_count", 0) or 0),
         "open_fragment_count": int(dict(classification_dict.get("summary", {}) or {}).get("open_fragment_count", 0) or 0),
-        "realization_mode_count": int(
-            dict(classification_dict.get("summary", {}) or {}).get("realization_mode_count", 0) or 0
-        ),
         "flex_audit": dict(flex_audit or {}),
         "classification_ready": True,
-        "assembly_attempted": bool(assembly_attempted),
+        "assembly_attempted": False,
+        "evaluation_only": True,
         "flex_enforced": bool(flex_enforced),
         "flex_reconciliation_required": bool(flex_reconciliation_required),
         "flex_reconciliation_scenario": str(dict(flex_audit or {}).get("scenario", "") or ""),
         "flex_reconciliation_block_reason": str(dict(flex_audit or {}).get("blocked_reason", "") or ""),
         "flex_reconciliation_contracts": list(flex_contracts or []),
-        "needs_window_reconciliation": bool(needs_window_reconciliation),
-        "post_audit_flex_final_within_bounds": bool(flex_final_within_bounds),
-        "external_closure_requirements": dict(external_requirements or {}),
-        "external_closure_blockers": dict(external_blockers or {}),
-        "active_external_subphase": str(external_structured_views.get("active_external_subphase", "") or ""),
-        "external_subphase_status": dict(external_requirements.get("subphase_status", {}) or {}),
-        "external_contracts_by_subphase": dict(external_structured_views.get("external_contracts_by_subphase", {}) or {}),
-        "external_pending_by_subphase": dict(external_pending_by_subphase or {}),
-        "external_contracts_by_contract_kind": dict(external_contracts_by_contract_kind or {}),
-        "external_blockers_by_kind": dict(external_structured_views.get("external_blockers_by_kind", {}) or {}),
-        "external_partner_request_summary": dict(external_structured_views.get("external_partner_request_summary", {}) or {}),
-        "external_partner_match_requests": dict(external_structured_views.get("external_partner_match_requests", {}) or {}),
-        "front_half_requirement_summary": dict(front_half_requirement_summary or {}),
-        "front_half_pending_summary": dict(front_half_pending_summary or {}),
-        "flex_range_action_class": str(flex_range_action_class),
-        "dormant_phase_reasons": dict(dormant_phase_reasons or {}),
-        "front_half_step_trace": list(front_half_step_trace or []),
-        "realization_modes": sorted({
-            str(mode)
-            for fragment in list(classification_dict.get("fragments", []) or [])
-            for mode in list(dict(dict(fragment or {}).get("evidence", {}) or {}).get("realization_modes", []) or [])
-        }),
+        "ownership_ledger": ownership_view,
+        "generation_id": int(generation_id),
     }
     flex_decision = Stage3FlexDecision(
         scenario=str(dict(flex_audit or {}).get("scenario", "in_range") or "in_range"),
@@ -1372,12 +1321,13 @@ def build_stage3_phase_evaluation(
     topology_metrics = build_stage3_topology_metrics(classification_obj, assembly_dict, flex_decision)
     topology_signature = build_stage3_topology_signature(classification_obj, assembly_dict, flex_decision)
     return Stage3PhaseEvaluation(
+        generation_id=int(generation_id),
         phase=str(phase),
-        done=bool(done),
+        done=False,
         classification_ready=True,
-        assembly_attempted=bool(assembly_attempted),
-        flex_range_reconciliation_ok=bool(flex_range_ok),
-        external_closure_ok=bool(external_ok),
+        assembly_attempted=False,
+        flex_range_reconciliation_ok=not bool(flex_reconciliation_required),
+        external_closure_ok=False,
         flex_reconciliation_required=bool(flex_reconciliation_required),
         flex_reconciliation_scenario=str(dict(flex_audit or {}).get("scenario", "") or ""),
         flex_reconciliation_block_reason=str(dict(flex_audit or {}).get("blocked_reason", "") or ""),
@@ -1401,23 +1351,11 @@ def build_stage3_phase_evaluation(
             if dict(item or {})
         ],
         flex_reconciliation_contracts=list(flex_contracts or []),
-        canonical_contracts=list(canonical_contracts or []),
-        flex_range_action_class=str(flex_range_action_class),
-        external_closure_requirements=dict(external_requirements or {}),
-        external_closure_blockers=dict(external_blockers or {}),
-        active_external_subphase=str(external_structured_views.get("active_external_subphase", "") or ""),
-        external_subphase_status=dict(external_requirements.get("subphase_status", {}) or {}),
-        external_contracts_by_subphase=dict(external_structured_views.get("external_contracts_by_subphase", {}) or {}),
-        external_pending_by_subphase=dict(external_pending_by_subphase or {}),
-        external_contracts_by_contract_kind=dict(external_contracts_by_contract_kind or {}),
-        external_blockers_by_kind=dict(external_structured_views.get("external_blockers_by_kind", {}) or {}),
-        external_partner_request_summary=dict(external_structured_views.get("external_partner_request_summary", {}) or {}),
-        external_partner_match_requests=dict(external_structured_views.get("external_partner_match_requests", {}) or {}),
-        front_half_requirement_summary=dict(front_half_requirement_summary or {}),
-        front_half_pending_summary=dict(front_half_pending_summary or {}),
-        front_half_step_trace=list(front_half_step_trace or []),
+        canonical_contracts=list(flex_contracts or []),
+        flex_range_action_class=str(dict(flex_audit or {}).get("scenario", "") or "in_range"),
+        active_external_subphase="external_flex_closure" if not flex_reconciliation_required else "",
         dormant_phases=[],
-        dormant_phase_reasons=dict(dormant_phase_reasons or {}),
+        dormant_phase_reasons={},
         assembly_view=assembly_dict,
         classification_view=classification_dict,
         diagnostics=diagnostics,
@@ -1432,11 +1370,10 @@ def build_stage3_phase_evaluation(
         },
         blocked_reason=str(dict(flex_audit or {}).get("blocked_reason", "") or ""),
         active_phase=str(phase),
-        completed_phases=[str(value) for value in list(assembly_dict.get("completed_phases", []) or [])],
-        residual_closure_products=[dict(item or {}) for item in list(assembly_dict.get("residual_closure_products", []) or [])],
-        terminal_resource_counts={str(k): int(v) for k, v in dict(assembly_dict.get("terminal_resource_counts", {}) or {}).items()},
-        terminal_converted_counts={str(k): int(v) for k, v in dict(assembly_dict.get("terminal_converted_counts", {}) or {}).items()},
-        terminal_unresolved_counts={str(k): int(v) for k, v in dict(assembly_dict.get("terminal_unresolved_counts", {}) or {}).items()},
-        phase_metrics=dict(assembly_dict.get("phase_metrics", {}) or {}),
-        phase_signature=str(assembly_dict.get("phase_signature", "") or topology_signature),
+        completed_phases=[],
+        phase_signature=str(topology_signature),
+        round_context=round_context,
+        ownership_ledger=ownership_view,
+        closure_pool_ids_by_su=deepcopy(dict(round_context.closure_pool_ids_by_su or {})),
+        aromatic_donor_ids_by_su=deepcopy(dict(round_context.aromatic_donor_ids_by_su or {})),
     )
