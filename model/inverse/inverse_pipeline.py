@@ -4,6 +4,7 @@ import copy
 import numpy as np
 import json
 import re
+import time
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional, Any, Sequence
 
@@ -30,7 +31,7 @@ from .layer1.inverse_layer1 import Layer1Assigner, DEFAULT_MAX_SOFT_CONSISTENCY_
 from .layer2.inverse_layer2 import Layer2Estimator
 from .layer3.inverse_layer3 import Layer3Estimator
 from .layer4.inverse_layer4 import Layer4Adjuster
-from .topology import assemble_topology_units, classify_topology_units
+from .topology import audit_stage3_topology
 from .topology.round_context import normalize_stage3_product
 # ============================================================================
 # 主推理类
@@ -98,7 +99,6 @@ class InversePipelineV3:
         )
         self.layer2_estimator = Layer2Estimator(
             device=torch.device(device),
-            vae_model=self.vae
         )
 
         self.layer3_estimator = Layer3Estimator(
@@ -236,7 +236,6 @@ class InversePipelineV3:
 
     def _build_layer_runtime_configs(self,
                                      eval_hwhm: float,
-                                     eval_allow_approx: bool,
                                      enable_hop1_adjust: bool,
                                      hop1_adjust_iterations: int,
                                      hop1_neg_threshold: float,
@@ -245,9 +244,7 @@ class InversePipelineV3:
                                      layer2_config: Optional[Dict[str, Any]] = None,
                                      layer3_config: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         layer1_defaults = {
-            'profile': 'initial',
             'eval_hwhm': float(eval_hwhm),
-            'eval_allow_approx': bool(eval_allow_approx),
             'enable_carbonyl_joint_adjust': True,
             'carbonyl_joint_iterations': 10,
             'carbonyl_joint_max_adjustments': 3,
@@ -257,23 +254,23 @@ class InversePipelineV3:
             'hop1_adjust_iterations': int(hop1_adjust_iterations),
             'hop1_neg_threshold': float(hop1_neg_threshold),
             'hop1_pos_threshold': float(hop1_pos_threshold),
-            'initial_enable_spectral_refine': True,
-            'initial_hop1_adjust_iterations': int(hop1_adjust_iterations),
-            'initial_hop1_adjust_max_candidate_trials': 240,
+            'hop1_adjust_max_candidate_trials': 240,
             'hop1_adjust_max_candidate_nodes_per_su': 24,
             'hop1_adjust_max_alternatives_per_node': 4,
             'hop1_adjust_region_order': ['aromatic', 'carbonyl', 'unsaturated', 'aliphatic'],
             'hop1_adjust_max_moves_per_region': 8,
             'hop1_adjust_max_full_evals': 64,
+            'hop1_adjust_min_r2_gain': 1e-4,
             'build_attempts': 3,
-            'local_swap_max_attempts': 64,
+            'hop1_completion_max_backtracks': None,
+            'hop1_completion_branch_limit': None,
+            'enable_hop1_diversity_refine': True,
+            'hop1_diversity_max_moves': 12,
+            'hop1_diversity_max_trials': 96,
             'build_variant': 0,
         }
         layer2_defaults = {
             'eval_hwhm': float(eval_hwhm),
-            'layer2_max_hop2_diff_nodes': 2,
-            'layer2_use_g2s_decoder': False,
-            'layer2_decoder_max_mu_delta': 8.0,
         }
         layer3_defaults = {
             'max_iters': 40,
@@ -283,16 +280,38 @@ class InversePipelineV3:
             'top_k_samples': 10,
             'neg_top_k_peaks': 15,
             'neg_peak_min_sep_ppm': 1.0,
-            'enable_approx_hop2_template_adjust': False,
-            'approx_hop2_max_iters': 20,
-            'approx_hop2_max_diff_nodes': 8,
-            'approx_hop2_top_k_templates': 80,
-            'layer3_use_g2s_decoder': False,
             'layer3_verbose': True,
         }
 
         def _merge_strict(defaults: Dict[str, Any], user_cfg: Optional[Dict[str, Any]], label: str) -> Dict[str, Any]:
             cfg = dict(user_cfg or {})
+            removed_by_layer = {
+                'layer1_config': {
+                    'layer1_total_time_budget_s': (
+                        "removed: Layer1 no longer uses wall-clock deadlines"
+                    ),
+                    'hop1_spectral_reserve_s': (
+                        "removed: Layer1 always runs the configured spectral refinement"
+                    ),
+                    'local_swap_max_attempts': (
+                        "removed: Layer1 now uses hop1_completion_max_backtracks and "
+                        "hop1_completion_branch_limit in the global completion solver"
+                    ),
+                },
+                'layer2_config': {
+                    'layer2_decoder_max_mu_delta': (
+                        "removed: Layer2 always uses template center_mu and never performs G2S decoding"
+                    ),
+                    'layer2_use_g2s_decoder': (
+                        "removed: Layer2 always uses template center_mu and never performs G2S decoding"
+                    ),
+                },
+            }
+            removed = dict(removed_by_layer.get(str(label), {}) or {})
+            supplied_removed = [str(key) for key in cfg if str(key) in removed]
+            if supplied_removed:
+                details = "; ".join(f"{key}: {removed[key]}" for key in sorted(supplied_removed))
+                raise ValueError(f"{label} contains removed configuration: {details}")
             unknown = sorted(str(k) for k in cfg.keys() if str(k) not in defaults)
             if unknown:
                 raise ValueError(f"{label} contains unsupported keys: {unknown}")
@@ -308,7 +327,6 @@ class InversePipelineV3:
 
     def get_default_runtime_configs(self,
                                     eval_hwhm: float = 1.0,
-                                    eval_allow_approx: bool = True,
                                     enable_hop1_adjust: bool = True,
                                     hop1_adjust_iterations: int = 10,
                                     hop1_neg_threshold: float = -1.0,
@@ -316,7 +334,6 @@ class InversePipelineV3:
         """返回 Layer1/2/3 当前可调参数及默认值。"""
         layer1_cfg, layer2_cfg, layer3_cfg = self._build_layer_runtime_configs(
             eval_hwhm=eval_hwhm,
-            eval_allow_approx=eval_allow_approx,
             enable_hop1_adjust=enable_hop1_adjust,
             hop1_adjust_iterations=hop1_adjust_iterations,
             hop1_neg_threshold=hop1_neg_threshold,
@@ -523,7 +540,6 @@ class InversePipelineV3:
                            eval_lib_path: Optional[str],
                            layer1_runtime_cfg: Dict[str, Any],
                            layer2_runtime_cfg: Dict[str, Any],
-                           identity_seed_nodes: Optional[List[_NodeV3]] = None,
                            eval_nmr: bool = False,
                            eval_output_dir: Optional[str] = None,
                            layer2_output_dir: Optional[str] = None) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], float]:
@@ -564,60 +580,44 @@ class InversePipelineV3:
                 E_target=E_target,
                 verbose=False,
             )
-            layer1_accept_ok_local, layer1_accept_meta_local = self.layer1_assigner.assess_consistency_acceptance(
-                list(layer1_errors_local or []),
-                max_soft_errors=DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS,
-            )
-            if not bool(layer1_accept_ok_local):
-                local_swap_diag = dict(getattr(self.layer1_assigner, '_last_local_swap_diagnostics', {}) or {})
-                if local_swap_diag and not bool(local_swap_diag.get('ok', True)):
-                    layer1_errors_local = list(layer1_errors_local or []) + [
-                        f"local_swap_exhausted: {local_swap_diag}"
-                    ]
-            if not bool(layer1_accept_ok_local):
+            layer1_accept_ok_local = bool(layer1_ok_local and not layer1_errors_local)
+            if not layer1_accept_ok_local:
                 print(
                     f"  [Layer1 {attempt_name}校验失败] "
                     f"{_first_layer1_error(list(layer1_errors_local or []))}"
                 )
-            elif (not bool(layer1_ok_local)) and int(layer1_accept_meta_local.get('n_soft', 0)) > 0:
-                print(
-                    f"  [Layer1 {attempt_name}软缺口容忍] "
-                    f"soft={int(layer1_accept_meta_local.get('n_soft', 0))}/"
-                    f"{int(layer1_accept_meta_local.get('max_soft_errors', 0))}"
-                )
             return nodes_local, bool(layer1_accept_ok_local), list(layer1_errors_local or [])
 
         layer1_cfg_base = dict(layer1_runtime_cfg)
-        profile = str(layer1_cfg_base.get('profile', 'rebuild') or 'rebuild').strip().lower()
-        if profile not in {'initial', 'rebuild'}:
-            raise ValueError(f"unsupported Layer1 profile: {profile}")
         build_attempts = max(1, int(layer1_cfg_base.pop('build_attempts', 3)))
         base_variant = int(layer1_cfg_base.get('build_variant', 0) or 0)
         nodes = None
         layer1_ok = False
         layer1_errors: List[str] = []
         attempt_errors: List[str] = []
+        effective_build_variant = int(base_variant)
         for attempt_idx in range(build_attempts):
             layer1_cfg_attempt = dict(layer1_cfg_base)
             layer1_cfg_attempt['build_variant'] = int(base_variant + 1009 * attempt_idx)
             nodes, layer1_ok, layer1_errors = _run_layer1_once(
                 cfg_local=layer1_cfg_attempt,
-                attempt_name=f'cold-start variant={int(layer1_cfg_attempt["build_variant"])}',
+                attempt_name=f'fresh-build variant={int(layer1_cfg_attempt["build_variant"])}',
             )
             if bool(layer1_ok):
+                effective_build_variant = int(layer1_cfg_attempt['build_variant'])
                 break
             attempt_errors.append(_first_layer1_error(list(layer1_errors or [])))
         if not bool(layer1_ok):
             raise RuntimeError("layer1_graph_invalid: " + " | ".join(attempt_errors or [_first_layer1_error(list(layer1_errors or []))]))
         layer2_call_cfg = dict(layer2_runtime_cfg)
         layer1_baseline_diff: Dict[str, object] = {}
-        if eval_lib_path and profile == 'initial':
+        if eval_lib_path:
             _, layer1_baseline_diff = self._materialize_layer1_library_baseline(
                 nodes=copy.deepcopy(nodes),
                 S_target=S_target,
                 lib_path=eval_lib_path,
                 hwhm=float(layer2_runtime_cfg.get('eval_hwhm', 1.0)),
-                allow_approx=bool(layer1_runtime_cfg.get('eval_allow_approx', True)),
+                allow_approx=False,
             )
         nodes = self.layer2_assign(
             nodes=nodes,
@@ -633,29 +633,15 @@ class InversePipelineV3:
             S_target=S_target,
             hwhm=float(layer2_runtime_cfg.get('eval_hwhm', 1.0)),
         )
+        diff_info['source_stage'] = 'layer2'
+        diff_info['spectral_contract'] = 'template_center_mu'
+        diff_info['evaluation_hwhm'] = float(layer2_runtime_cfg.get('eval_hwhm', 1.0))
+        diff_info['effective_build_variant'] = int(effective_build_variant)
         r2 = float(diff_info.get('r2', 0.0))
         if layer1_baseline_diff:
             diff_info['layer1_library_baseline_r2'] = float(layer1_baseline_diff.get('r2', float('nan')))
             diff_info['layer1_library_baseline_alpha'] = float(layer1_baseline_diff.get('alpha', float('nan')))
         return nodes, H_nodes, diff_info, r2
-
-    def _print_final_resource_summary(self,
-                                      nodes: List[_NodeV3],
-                                      S_target: torch.Tensor,
-                                      E_target: torch.Tensor) -> None:
-        try:
-            alloc_diag = self.layer4_adjuster._evaluate_full_allocation_balance(
-                nodes=nodes,
-                S_target=S_target,
-                E_target=E_target,
-            )
-            print(
-                "[Final Allocation] "
-                f"ok={bool(alloc_diag.get('ok', False))} "
-                f"reason={alloc_diag.get('reason', 'unknown')}"
-            )
-        except Exception as e:
-            print(f"[Final Allocation] Failed to summarize allocation: {e}")
 
     @staticmethod
     def _topology_pending_summary(assembly_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -818,152 +804,75 @@ class InversePipelineV3:
             ],
         }
 
-    @staticmethod
-    def _stage3_completion_resource_ledger(
-        classification: Dict[str, Any],
-        products: Sequence[Dict[str, Any]],
-        ownership: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        pool = dict(classification.get('resource_pool', {}) or {})
-        initial: Dict[str, set[int]] = {}
-        for raw_pool in (
-            dict(pool.get('initial_ids_by_su', {}) or {}),
-            dict(pool.get('su11_donor_ids_by_su', {}) or {}),
-        ):
-            for key, values in raw_pool.items():
-                initial.setdefault(str(key), set()).update(
-                    int(value) for value in list(values or [])
-                )
-        available: Dict[str, set[int]] = {}
-        for raw_pool in (
-            dict(ownership.get('closure_pool_ids_by_su', {}) or {}),
-            dict(ownership.get('aromatic_donor_ids_by_su', {}) or {}),
-        ):
-            for key, values in raw_pool.items():
-                available.setdefault(str(key), set()).update(
-                    int(value) for value in list(values or [])
-                )
-        residual_claimed: Dict[str, set[int]] = {}
-        for product in list(products or []):
-            row = dict(product or {})
-            product_type = str(row.get('product_type', row.get('target_role', '')) or '')
-            for key, values in dict(row.get('claimed_resource_ids_by_su', {}) or {}).items():
-                claimed_ids = {int(value) for value in list(values or [])}
-                initial.setdefault(str(key), set()).update(claimed_ids)
-                if product_type.startswith('residual_'):
-                    residual_claimed.setdefault(str(key), set()).update(claimed_ids)
-        for key, values in available.items():
-            initial.setdefault(str(key), set()).update(values)
-        keys = sorted(
-            set(initial) | set(available),
-            key=lambda value: (
-                (0, int(value))
-                if str(value).lstrip('-').isdigit()
-                else (1, str(value))
-            ),
-        )
-        consumed = {
-            str(key): sorted(initial.get(str(key), set()) - available.get(str(key), set()))
-            for key in keys
-        }
-        residual = {
-            str(key): sorted(set(consumed.get(str(key), [])) & residual_claimed.get(str(key), set()))
-            for key in keys
-        }
-        topology = {
-            str(key): sorted(set(consumed.get(str(key), [])) - set(residual.get(str(key), [])))
-            for key in keys
-        }
-        return {
-            'initial_ids_by_su': {str(key): sorted(initial.get(str(key), set())) for key in keys},
-            'consumed_ids_by_su': consumed,
-            'remaining_ids_by_su': {
-                str(key): sorted(available.get(str(key), set())) for key in keys
-            },
-            'initial_counts': {str(key): len(initial.get(str(key), set())) for key in keys},
-            'consumed_counts': {str(key): len(consumed.get(str(key), [])) for key in keys},
-            'topology_consumed_counts': {
-                str(key): len(topology.get(str(key), [])) for key in keys
-            },
-            'residual_consumed_counts': {
-                str(key): len(residual.get(str(key), [])) for key in keys
-            },
-            'remaining_counts': {str(key): len(available.get(str(key), set())) for key in keys},
-            'shortage_counts': {},
-            'snapshot_stage': 'stage3_complete_generation_ledger',
-        }
-
-    @staticmethod
-    def _public_topology_rows_from_assembly(assembly_result: Any) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
-        if hasattr(assembly_result, "to_public_dict"):
-            public = assembly_result.to_public_dict()
-        else:
-            public = dict(assembly_result or {})
-        products = [dict(item or {}) for item in list(public.get('products', []) or [])]
-        pending = [dict(item or {}) for item in list(public.get('pending_units', []) or [])]
-        ledger = dict(public.get('resource_ledger', {}) or {})
-        summary = {
-            'ok': bool(public.get('ok', False)),
-            'reason': str(public.get('reason', 'assembly_pending')),
-            'topology_plan_feasible': bool(public.get('feasible', False)),
-            'closed_topology_count': int(len(products)),
-            'final_topology_count': int(len(products)),
-            'pending_closure_total_count': int(len(pending)),
-            'unclosed_candidates': pending,
-            'resource_ledger': ledger,
-            'diagnostics': {
-                'reason': str(public.get('reason', 'assembly_pending')),
-                'solver_reason': str(public.get('reason', 'assembly_pending')),
-                'resource_ledger': ledger,
-            },
-        }
-        return products, pending, summary
-
     def _final_topology_rows(
         self,
         nodes: List[_NodeV3],
         S_target: Optional[torch.Tensor] = None,
         E_target: Optional[torch.Tensor] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        classification = classify_topology_units(
-            list(nodes or []),
-            fixed_partition_meta=getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {},
-        )
-        assembly = assemble_topology_units(
+        fresh_audit = audit_stage3_topology(
+            H=self._histogram_from_nodes(list(nodes or [])).detach().cpu().long(),
             nodes=list(nodes or []),
-            classification=classification,
             fixed_partition_meta=getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {},
             S_target=S_target,
             E_target=E_target,
+            allow_conversions=False,
+            enable_spectrum_rebalance=False,
         )
-        classification_dict = classification.to_dict()
-        assembly_dict = assembly.to_dict()
-        public_rows, public_pending, public_summary = self._public_topology_rows_from_assembly(assembly)
-        completion_diagnostics = dict(
-            getattr(self, '_final_stage3_completion_diagnostics', {}) or {}
-        )
-        terminal_diagnostics = dict(
-            getattr(self, '_final_stage3_terminal_diagnostics', {}) or {}
+        classification_dict = dict(fresh_audit.get('classification', {}) or {})
+        assembly_dict = dict(fresh_audit.get('external_assembly', {}) or {})
+        public_rows = [
+            dict(item or {}) for item in list(fresh_audit.get('products', []) or [])
+        ]
+        public_pending = [
+            dict(item or {})
+            for item in list(fresh_audit.get('pending_contracts', []) or [])
+        ]
+        public_summary = {
+            'ok': bool(fresh_audit.get('ok', False)),
+            'reason': str(fresh_audit.get('reason', 'fresh_stage3_audit_failed') or ''),
+            'topology_plan_feasible': bool(fresh_audit.get('ok', False)),
+            'closed_topology_count': int(len(public_rows)),
+            'final_topology_count': int(len(public_rows)),
+            'pending_closure_total_count': int(len(public_pending)),
+            'unclosed_candidates': list(public_pending),
+            'resource_ledger': dict(fresh_audit.get('resource_ledger', {}) or {}),
+        }
+        completion_diagnostics = {
+            'stage3_complete': bool(fresh_audit.get('ok', False)),
+            'generation_id': 0,
+            'products': list(public_rows),
+            'ownership_ledger': dict(fresh_audit.get('ownership_ledger', {}) or {}),
+            'residual_infeasibility_proof': dict(
+                fresh_audit.get('infeasibility_proof', {}) or {}
+            ),
+        }
+        terminal_diagnostics = (
+            {}
+            if bool(fresh_audit.get('ok', False))
+            else {
+                'stop_reason': str(fresh_audit.get('reason', '') or ''),
+                'phase': str(
+                    dict(fresh_audit.get('plan', {}) or {}).get('phase', '') or ''
+                ),
+                'generation_id': 0,
+                'infeasibility_proof': dict(
+                    fresh_audit.get('infeasibility_proof', {}) or {}
+                ),
+            }
         )
         residual_infeasibility_proof = dict(
             completion_diagnostics.get('residual_infeasibility_proof', {}) or {}
         )
-        current_node_state_signature = self._stage3_node_state_signature(nodes)
-        completion_matches = bool(
-            completion_diagnostics.get('stage3_complete', False)
-            and list(completion_diagnostics.get('node_state_signature', []) or [])
-            == current_node_state_signature
-        )
-        terminal_matches = bool(
-            terminal_diagnostics.get('stop_reason') == 'phase_resource_infeasible'
-            and list(terminal_diagnostics.get('node_state_signature', []) or [])
-            == current_node_state_signature
-        )
+        completion_matches = bool(completion_diagnostics.get('stage3_complete', False))
+        terminal_matches = bool(terminal_diagnostics)
         infeasibility_proof = (
             dict(terminal_diagnostics.get('infeasibility_proof', {}) or {})
             if terminal_matches else {}
         )
-        completion_ownership: Dict[str, Any] = {}
+        completion_ownership: Dict[str, Any] = dict(
+            fresh_audit.get('ownership_ledger', {}) or {}
+        )
         completion_coverage: Dict[str, Any] = {}
         if completion_matches:
             public_rows = [
@@ -974,10 +883,8 @@ class InversePipelineV3:
             completion_ownership = dict(
                 completion_diagnostics.get('ownership_ledger', {}) or {}
             )
-            completion_resource_ledger = self._stage3_completion_resource_ledger(
-                classification_dict,
-                public_rows,
-                completion_ownership,
+            completion_resource_ledger = dict(
+                fresh_audit.get('resource_ledger', {}) or {}
             )
             public_summary.update({
                 'ok': True,
@@ -1023,26 +930,13 @@ class InversePipelineV3:
                     - resource_ids_for_coverage
                     - conflict_ids_for_coverage
                     - {int(value) for value in list(states.get('support_context', []) or [])}
-                    - {int(value) for value in list(states.get('fixed_topology_core', []) or [])}
                 ),
             }
-        terminal_residual_complete = bool(
-            completion_matches
-            or (
-                not public_pending
-                and bool(public_summary.get('topology_plan_feasible', False))
-                and residual_infeasibility_proof
-                and residual_infeasibility_proof.get('executable') is False
-            )
-        )
-        final_reason = (
+        terminal_residual_complete = bool(completion_matches)
+        final_reason = str(
             'stage3_complete'
             if terminal_residual_complete
-            else (
-                'phase_resource_infeasible'
-                if infeasibility_proof
-                else str(public_summary.get('reason', 'assembly_pending'))
-            )
+            else fresh_audit.get('reason', 'fresh_stage3_audit_failed')
         )
         cls_summary = dict(classification_dict.get('summary', {}) or {})
         covered_product_node_ids = {
@@ -1066,14 +960,8 @@ class InversePipelineV3:
         for rec in unclassified_non_resource:
             rec.setdefault('reason', 'unclassified_non_resource')
         summary = {
-            'ok': bool(
-                terminal_residual_complete
-                or (not infeasibility_proof and public_summary.get('ok', False))
-            ),
-            'topology_plan_feasible': bool(
-                not infeasibility_proof
-                and public_summary.get('topology_plan_feasible', False)
-            ),
+            'ok': bool(terminal_residual_complete),
+            'topology_plan_feasible': bool(terminal_residual_complete),
             'closed_topology_count': int(public_summary.get('closed_topology_count', 0)),
             'final_topology_count': int(public_summary.get('final_topology_count', 0)),
             'pending_closure_total_count': int(public_summary.get('pending_closure_total_count', 0)),
@@ -1102,7 +990,7 @@ class InversePipelineV3:
                 ),
                 'ownership_ledger': (
                     dict(completion_ownership)
-                    if completion_matches
+                    if completion_ownership
                     else dict(dict(assembly_dict.get('diagnostics', {}) or {}).get('ownership_ledger', {}) or {})
                 ),
                 'stage3_generation_id': int(
@@ -1117,6 +1005,19 @@ class InversePipelineV3:
                     terminal_diagnostics.get('phase', '') or ''
                 ),
                 'stage3_terminal_snapshot_match': bool(terminal_matches),
+                'fresh_stage3_audit': {
+                    'ok': bool(fresh_audit.get('ok', False)),
+                    'reason': str(fresh_audit.get('reason', '') or ''),
+                    'requires_conversion': bool(
+                        fresh_audit.get('requires_conversion', False)
+                    ),
+                    'resource_shortage': dict(
+                        fresh_audit.get('resource_shortage', {}) or {}
+                    ),
+                    'resource_accounting': dict(
+                        fresh_audit.get('resource_accounting', {}) or {}
+                    ),
+                },
             },
         }
         coverage = dict(summary['diagnostics'].get('node_coverage', {}) or {})
@@ -1269,7 +1170,14 @@ class InversePipelineV3:
         for group in list(classification_dict.get('atomic_groups', []) or []):
             group_ids = [int(value) for value in list(dict(group or {}).get('node_ids', []) or [])]
             states = {identity_by_node.get(int(value), 'other') for value in group_ids}
-            if len(states) > 1:
+            if 'other' in states:
+                invariant_conflicts.append({
+                    'reason': 'atomic_pair_unowned',
+                    'group_id': int(dict(group or {}).get('group_id', -1) or -1),
+                    'node_ids': group_ids,
+                    'states': sorted(states),
+                })
+            elif len(states) > 1:
                 invariant_conflicts.append({
                     'reason': 'atomic_pair_split',
                     'group_id': int(dict(group or {}).get('group_id', -1) or -1),
@@ -1425,10 +1333,18 @@ class InversePipelineV3:
                 S_target=S_target,
                 E_target=E_target,
             )
+            solver_reason = str(
+                dict(summary.get('diagnostics', {}) or {}).get('solver_reason', '')
+            )
+            print(
+                "[Final Allocation] "
+                f"ok={bool(summary.get('ok', False))} "
+                f"reason={solver_reason}"
+            )
             print(
                 "[Final Topology] "
                 f"ok={bool(summary.get('ok', False))} "
-                f"status={str(dict(summary.get('diagnostics', {}) or {}).get('solver_reason', ''))} "
+                f"status={solver_reason} "
                 f"closed={int(summary.get('closed_topology_count', 0))} "
                 f"final_specs={int(summary.get('final_topology_count', 0))} "
                 f"pending={int(summary.get('pending_closure_total_count', 0))}"
@@ -1611,7 +1527,7 @@ class InversePipelineV3:
                 H,
                 E_target,
                 S_target=S_target,
-                enforce_h_rel=True,
+                enforce_h_rel=False,
             )
         except Exception as e:
             self._set_fixed_partition_meta(meta_before_sync)
@@ -1652,7 +1568,7 @@ class InversePipelineV3:
             "predicted_h": predicted_h,
             "target_h": target_h,
             "required_h_drop": int(required_h_drop),
-            "source": "layer1_cold_start",
+            "source": "layer1_fresh_build",
         }
 
     def _run_topology_stage3_resource_cycles(self,
@@ -1666,7 +1582,6 @@ class InversePipelineV3:
                                              layer2_runtime_cfg: Dict[str, Any],
                                              layer2_eval_hwhm: float,
                                              outer_idx: int,
-                                             max_stage3_iterations: int = 20,
                                              max_primary_adjustments_per_stage: int = 10,
                                              max_h_compensation_ops_per_adjustment: int = 8,
                                              residual_flex_preferred_23: int = 3,
@@ -1675,27 +1590,35 @@ class InversePipelineV3:
                                              residual_side_min_23: int = 1,
                                              h_tolerance: float = 0.06,
                                              enable_post_external_spectrum: bool = True,
-                                             spectrum_candidate_limit: int = 10,
-                                             spectrum_max_primary_adjustments: int = 8,
+                                             spectrum_candidate_limit: int = 2,
+                                             spectrum_max_primary_adjustments: int = 10,
                                              spectrum_min_r2_gain: float = 0.002,
-                                             spectrum_min_window_loss_gain: float = 0.1,
-                                             spectrum_max_accepted_rounds: int = 2,
                                              iteration_offset: int = 0,
                                              output_dir: Optional[str] = None) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], Dict[str, Any]]:
+        baseline_diff = dict(current_diff or {})
+        if (
+            str(baseline_diff.get('source_stage', '') or '') != 'layer2'
+            or str(baseline_diff.get('spectral_contract', '') or '') != 'template_center_mu'
+        ):
+            raise ValueError('stage3_requires_saved_layer2_baseline')
+
         def rebuild_fn(H_seed: torch.Tensor,
                        phase: str,
                        cycle_idx: int,
-                       identity_seed_nodes: Optional[List[_NodeV3]] = None) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, Any], float]:
+                       build_variant: Optional[int] = None) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, Any], float]:
             layer1_stage3_cfg = dict(layer1_runtime_cfg)
             try:
                 base_variant = int(layer1_stage3_cfg.get('build_variant', 0))
             except Exception:
                 base_variant = 0
-            layer1_stage3_cfg['profile'] = 'rebuild'
-            layer1_stage3_cfg['build_variant'] = (
-                int(base_variant) +
-                503 * int(outer_idx + 1) +
-                29 * int(cycle_idx + 1)
+            layer1_stage3_cfg['build_variant'] = int(
+                build_variant
+                if build_variant is not None
+                else (
+                    int(base_variant)
+                    + 503 * int(outer_idx + 1)
+                    + 29 * int(cycle_idx + 1)
+                )
             )
             cand_nodes, cand_H, cand_diff, cand_r2 = self._run_layer12_cycle(
                 H_seed=H_seed.detach().clone(),
@@ -1704,14 +1627,15 @@ class InversePipelineV3:
                 eval_lib_path=eval_lib_path,
                 layer1_runtime_cfg=layer1_stage3_cfg,
                 layer2_runtime_cfg=layer2_runtime_cfg,
-                identity_seed_nodes=None,
                 eval_nmr=False,
             )
             cand_H = self._histogram_from_nodes(cand_nodes).detach().clone()
             cand_diff = dict(cand_diff or {})
-            cand_diff['mode'] = 'stage3_resource_adjustment_layer1_layer2'
-            cand_diff['preserves_node_ids'] = False
-            cand_diff['cold_rebuild'] = True
+            cand_diff['source_stage'] = 'layer2'
+            cand_diff['spectral_contract'] = 'template_center_mu'
+            cand_diff['mode'] = 'stage3_full_layer1_layer2_rebuild'
+            cand_diff['preserves_previous_stage3_state'] = False
+            cand_diff['fresh_rebuild'] = True
             return cand_nodes, cand_H, cand_diff, float(cand_r2)
 
         def validate_fn(nodes: List[_NodeV3],
@@ -1743,7 +1667,6 @@ class InversePipelineV3:
             context_snapshot_fn=context_snapshot_fn,
             context_restore_fn=context_restore_fn,
             output_dir=output_dir,
-            max_stage3_iterations=int(max_stage3_iterations),
             max_primary_adjustments_per_stage=int(max_primary_adjustments_per_stage),
             max_h_compensation_ops_per_adjustment=int(max_h_compensation_ops_per_adjustment),
             residual_flex_preferred_23=int(residual_flex_preferred_23),
@@ -1758,8 +1681,6 @@ class InversePipelineV3:
             spectrum_candidate_limit=int(spectrum_candidate_limit),
             spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
             spectrum_min_r2_gain=float(spectrum_min_r2_gain),
-            spectrum_min_window_loss_gain=float(spectrum_min_window_loss_gain),
-            spectrum_max_accepted_rounds=int(spectrum_max_accepted_rounds),
         )
 
         meta = workflow_result.to_dict()
@@ -1873,6 +1794,10 @@ class InversePipelineV3:
                 'layer2_r2': '',
                 'spectrum_candidate_id': '',
                 'spectrum_r2_gain': '',
+                'spectrum_balance_penalty': '',
+                'spectrum_balanced_r2_gain': '',
+                'spectrum_required_r2_gain': '',
+                'spectrum_balance_diagnostics': '{}',
                 'spectrum_window_loss_gain': '',
                 'spectrum_candidate_scores': '[]',
                 'planned_conversions': '[]',
@@ -1892,10 +1817,30 @@ class InversePipelineV3:
                 'gap_before': '{}',
                 'gap_after': '{}',
                 'state_signature': '',
-                'cold_rebuild': False,
+                'fresh_rebuild': False,
                 'structural_blockers': '[]',
                 'infeasibility_proof': '{}',
                 'residual_infeasibility_proof': '{}',
+                'applied_ops': '[]',
+                'request_ops': '[]',
+                'rejected_ops': '[]',
+                'apply_rejection_reason': '',
+                'apply_changed': False,
+                'histogram_changed': False,
+                'aggregate_inventory_before': '{}',
+                'aggregate_inventory_after': '{}',
+                'aggregate_required_counts': '{}',
+                'protected_resource_counts': '{}',
+                'resource_accounting': '{}',
+                'external_contracts_seen': 0,
+                'external_directly_completed': 0,
+                'external_completed_after_conversion': 0,
+                'external_blocked': 0,
+                'external_remaining_pending': 0,
+                'external_primary_count': 0,
+                'external_remaining_budget': 0,
+                'external_stage_completed': False,
+                'stage_rebuild_reason': '',
             }]
         for item in cycles:
             rec = dict(item or {})
@@ -1947,6 +1892,20 @@ class InversePipelineV3:
                     selected_spectrum_candidate.get('candidate_id', '')
                 ),
                 'spectrum_r2_gain': spectrum_diagnostics.get('r2_gain', ''),
+                'spectrum_balance_penalty': spectrum_diagnostics.get(
+                    'balance_penalty', ''
+                ),
+                'spectrum_balanced_r2_gain': spectrum_diagnostics.get(
+                    'balanced_r2_gain', ''
+                ),
+                'spectrum_required_r2_gain': spectrum_diagnostics.get(
+                    'required_r2_gain', ''
+                ),
+                'spectrum_balance_diagnostics': json.dumps(
+                    spectrum_diagnostics.get('balance_diagnostics', {}),
+                    ensure_ascii=False,
+                    default=str,
+                ),
                 'spectrum_window_loss_gain': spectrum_diagnostics.get(
                     'window_loss_gain', ''
                 ),
@@ -1968,7 +1927,7 @@ class InversePipelineV3:
                 'gap_before': json.dumps(rec.get('gap_before', {}), ensure_ascii=False, sort_keys=True),
                 'gap_after': json.dumps(rec.get('gap_after', {}), ensure_ascii=False, sort_keys=True),
                 'state_signature': str(rec.get('state_signature', '')),
-                'cold_rebuild': bool(rec.get('cold_rebuild', False)),
+                'fresh_rebuild': bool(rec.get('fresh_rebuild', False)),
                 'structural_blockers': json.dumps(rec.get('structural_blockers', []), ensure_ascii=False),
                 'infeasibility_proof': json.dumps(
                     phase_result.get(
@@ -1984,6 +1943,51 @@ class InversePipelineV3:
                     dict(plan_wrapper.get('diagnostics', {}) or {}).get('residual_infeasibility_proof', {}),
                     ensure_ascii=False,
                     default=str,
+                ),
+                'applied_ops': json.dumps(
+                    diagnostics.get('applied_ops', []), ensure_ascii=False, default=str,
+                ),
+                'request_ops': json.dumps(
+                    diagnostics.get('request_ops', []), ensure_ascii=False, default=str,
+                ),
+                'rejected_ops': json.dumps(
+                    diagnostics.get('rejected_ops', []), ensure_ascii=False, default=str,
+                ),
+                'apply_rejection_reason': str(diagnostics.get('apply_rejection_reason', '')),
+                'apply_changed': bool(diagnostics.get('apply_changed', rec.get('applied', False))),
+                'histogram_changed': bool(diagnostics.get('histogram_changed', False)),
+                'aggregate_inventory_before': json.dumps(
+                    diagnostics.get('aggregate_inventory_before', {}), ensure_ascii=False, sort_keys=True,
+                ),
+                'aggregate_inventory_after': json.dumps(
+                    diagnostics.get('aggregate_inventory_after', {}), ensure_ascii=False, sort_keys=True,
+                ),
+                'aggregate_required_counts': json.dumps(
+                    diagnostics.get('aggregate_required_counts', {}), ensure_ascii=False, sort_keys=True,
+                ),
+                'protected_resource_counts': json.dumps(
+                    diagnostics.get('protected_resource_counts', {}), ensure_ascii=False, sort_keys=True,
+                ),
+                'resource_accounting': json.dumps(
+                    diagnostics.get('resource_accounting', {}), ensure_ascii=False, default=str,
+                ),
+                'external_contracts_seen': int(plan_diagnostics.get('external_contracts_seen', 0) or 0),
+                'external_directly_completed': int(plan_diagnostics.get('external_directly_completed', 0) or 0),
+                'external_completed_after_conversion': int(plan_diagnostics.get('external_completed_after_conversion', 0) or 0),
+                'external_blocked': int(plan_diagnostics.get('external_blocked', 0) or 0),
+                'external_remaining_pending': int(plan_diagnostics.get('external_remaining_pending', 0) or 0),
+                'external_primary_count': int(plan_diagnostics.get('external_primary_count', 0) or 0),
+                'external_remaining_budget': int(plan_diagnostics.get('external_remaining_budget', 0) or 0),
+                'external_stage_completed': bool(plan_diagnostics.get('external_stage_completed', False)),
+                'stage_rebuild_reason': str(
+                    plan_diagnostics.get(
+                        'external_rebuild_reason',
+                        plan_diagnostics.get(
+                            'su24_rebuild_reason',
+                            plan_diagnostics.get('residual_rebuild_reason', ''),
+                        ),
+                    )
+                    or ''
                 ),
                 'planned_conversions': json.dumps(
                     diagnostics.get('planned_conversions', []),
@@ -2048,6 +2052,11 @@ class InversePipelineV3:
             'layer2_r2', 'spectrum_candidate_id', 'spectrum_r2_gain',
             'spectrum_window_loss_gain',
             'primary_adjustment_count', 'physical_conversion_count', 'h_compensation_count',
+            'external_contracts_seen', 'external_directly_completed',
+            'external_completed_after_conversion', 'external_blocked',
+            'external_remaining_pending', 'external_primary_count',
+            'external_remaining_budget', 'external_stage_completed',
+            'stage_rebuild_reason',
             'infeasibility_reason', 'residual_infeasibility_reason',
         ]
         compact_cycle_rows = []
@@ -2185,7 +2194,6 @@ class InversePipelineV3:
               output_dir: str = 'inverse_result',
               eval_lib_path: Optional[str] = None,
               eval_hwhm: float = 1.0,
-              eval_allow_approx: bool = True,
               enable_hop1_adjust: bool = True,
               hop1_adjust_iterations: int = 6,
               hop1_neg_threshold: float = -0.8,
@@ -2201,15 +2209,15 @@ class InversePipelineV3:
         
         流程：
         1. Layer0 初始化 SU 直方图
-        2. Layer1 -> Layer2 -> Layer3 得到初始完整状态
+        2. Layer1 -> Layer2 得到并保存完整基线状态
         3. 进入外循环：
            - block_a / block_b:
              作为候选 H 调整，只在重跑 Layer1/2 后通过结构校验且
              Layer2 R2 超过当前接受参考时才采纳
            - block_c_resource:
-             每轮执行“分类 -> 组装 -> 精确需求 -> 合法转化 -> 冷启动 Layer1/2”
-             的 Stage3 组装循环；保持合法即向前探索，不做短期回退
-           - 每轮结束后执行一次 Layer3 细化
+             每轮执行“分类 -> 组装 -> 精确需求 -> 合法转化 -> 完全重建 Layer1/2”
+             的 Stage3 组装循环；资源差谱候选仅以 Layer2-to-Layer2 R2 验收
+           - Stage3（包括SU24阶段）完成后执行固定模板 Layer3 z 细化
         4. 返回当前外循环结束时的状态
         
         Args:
@@ -2219,12 +2227,11 @@ class InversePipelineV3:
                     'block_b': {...},
                     'block_c_resource': {
                         'enabled': True,
-                        'max_stage3_iterations': 20,
                         'max_primary_adjustments_per_stage': 10,
                     },
                 }
             layer1_config 可调参数:
-                - eval_hwhm, eval_allow_approx, build_variant
+                - eval_hwhm, build_variant
                 - enable_carbonyl_joint_adjust, carbonyl_joint_iterations
                 - carbonyl_joint_max_adjustments
                 - carbonyl_joint_pos_threshold, carbonyl_joint_neg_threshold
@@ -2233,18 +2240,20 @@ class InversePipelineV3:
                 - hop1_adjust_region_order, hop1_adjust_max_candidate_trials
                 - hop1_adjust_max_moves_per_region
                 - hop1_adjust_max_full_evals
-                - profile, build_attempts, local_swap_max_attempts
+                - hop1_adjust_min_r2_gain
+                - build_attempts
+                - hop1_completion_max_backtracks, hop1_completion_branch_limit
+                - enable_hop1_diversity_refine
+                - hop1_diversity_max_moves, hop1_diversity_max_trials
             layer2_config 可调参数:
                 - eval_hwhm
-                - layer2_max_hop2_diff_nodes
-                - layer2_use_g2s_decoder, layer2_decoder_max_mu_delta
+                Layer2 keeps center/1-hop exact, selects the nearest available
+                2-hop tier, and always reconstructs with template center_mu.
             layer3_config 可调参数:
                 - max_iters, hwhm, pos_search_window, neg_assign_window
                 - top_k_samples, neg_top_k_peaks, neg_peak_min_sep_ppm
-                - enable_approx_hop2_template_adjust
-                - approx_hop2_max_iters, approx_hop2_max_diff_nodes
-                - approx_hop2_top_k_templates
-                - layer3_use_g2s_decoder, layer3_verbose
+                Layer3 keeps every Layer2 template fixed and always decodes
+                candidate z values with G2S. layer3_verbose controls logging.
             outer_max_cycles:
                 - Layer4 -> Layer1/2 -> Layer3 宏循环次数上限
             outer_improve_eps:
@@ -2256,7 +2265,6 @@ class InversePipelineV3:
 
         layer1_runtime_cfg, layer2_runtime_cfg, layer3_runtime_cfg = self._build_layer_runtime_configs(
             eval_hwhm=eval_hwhm,
-            eval_allow_approx=eval_allow_approx,
             enable_hop1_adjust=enable_hop1_adjust,
             hop1_adjust_iterations=hop1_adjust_iterations,
             hop1_neg_threshold=hop1_neg_threshold,
@@ -2283,7 +2291,6 @@ class InversePipelineV3:
             },
             'block_c_resource': {
                 'enabled': True,
-                'max_stage3_iterations': 20,
                 'max_primary_adjustments_per_stage': 10,
                 'max_h_compensation_ops_per_adjustment': 8,
                 'residual_flex_preferred_23': 3,
@@ -2292,11 +2299,9 @@ class InversePipelineV3:
                 'residual_side_min_23': 1,
                 'h_tolerance': 0.06,
                 'enable_post_external_spectrum': True,
-                'spectrum_candidate_limit': 10,
-                'spectrum_max_primary_adjustments': 8,
+                'spectrum_candidate_limit': 2,
+                'spectrum_max_primary_adjustments': 10,
                 'spectrum_min_r2_gain': 0.002,
-                'spectrum_min_window_loss_gain': 0.1,
-                'spectrum_max_accepted_rounds': 2,
             },
         }
         supported_block_b_keys = set(default_stage_configs['block_b'])
@@ -2316,7 +2321,6 @@ class InversePipelineV3:
         resource_cfg = dict(default_stage_configs.get('block_c_resource', {}) or {})
         resource_enabled = bool(resource_cfg.pop('enabled', True))
         supported_resource_keys = {
-            'max_stage3_iterations',
             'max_primary_adjustments_per_stage',
             'max_h_compensation_ops_per_adjustment',
             'residual_flex_preferred_23',
@@ -2328,8 +2332,6 @@ class InversePipelineV3:
             'spectrum_candidate_limit',
             'spectrum_max_primary_adjustments',
             'spectrum_min_r2_gain',
-            'spectrum_min_window_loss_gain',
-            'spectrum_max_accepted_rounds',
         }
         unknown_resource_keys = set(resource_cfg) - supported_resource_keys
         if unknown_resource_keys:
@@ -2346,13 +2348,13 @@ class InversePipelineV3:
             pass
         self._print_histogram_and_elements(H_init, E_target, label='Layer0 Summary')
 
-        print("\n>>> 初始化 Layer1 -> Layer2 -> Layer3")
+        print("\n>>> 初始化 Layer1 -> Layer2")
         initial_layer12_nodes, initial_layer12_H, initial_layer12_diff, initial_layer2_r2 = self._run_layer12_cycle(
             H_seed=H_init.detach().clone(),
             S_target=S_target,
             E_target=E_target,
             eval_lib_path=eval_lib_path,
-            layer1_runtime_cfg={**layer1_runtime_cfg, 'profile': 'initial'},
+            layer1_runtime_cfg=layer1_runtime_cfg,
             layer2_runtime_cfg=layer2_runtime_cfg,
             eval_nmr=True,
             eval_output_dir=(str(Path(output_dir) / 'initial_layer12') if save_intermediates and output_dir else None),
@@ -2360,41 +2362,18 @@ class InversePipelineV3:
         )
         print(f"[Initial Layer2] r2={initial_layer2_r2:.4f}")
 
-        current_nodes = copy.deepcopy(initial_layer12_nodes)
-        current_H = initial_layer12_H.detach().clone()
-        current_diff = copy.deepcopy(initial_layer12_diff)
+        current_layer2_nodes = copy.deepcopy(initial_layer12_nodes)
+        current_layer2_H = initial_layer12_H.detach().clone()
+        current_layer2_diff = copy.deepcopy(initial_layer12_diff)
+        current_nodes = copy.deepcopy(current_layer2_nodes)
+        current_H = current_layer2_H.detach().clone()
+        current_diff = copy.deepcopy(current_layer2_diff)
         accepted_layer2_r2 = float(initial_layer2_r2)
         historical_best_layer2_r2 = float(initial_layer2_r2)
 
-        try:
-            current_nodes, _ = self.layer3_adjust_templates(
-                nodes=copy.deepcopy(current_nodes),
-                S_target=S_target,
-                E_target=E_target,
-                lib_path=eval_lib_path,
-                output_dir=None,
-                **layer3_runtime_cfg,
-            )
-        except Exception as e:
-            print(f"[Initial Layer3] 失败: {e}")
-
-        current_H = self._histogram_from_nodes(current_nodes).detach().clone()
-        current_diff = self._compute_difference_spectrum_from_nodes_mu(
-            nodes=current_nodes,
-            S_target=S_target,
-            hwhm=float(layer2_eval_hwhm),
-        )
-        initial_post_layer3_r2 = float(current_diff.get('r2', float('nan')))
-        print(
-            f"[Initial Layer3] r2={initial_post_layer3_r2:.4f}"
-            if np.isfinite(initial_post_layer3_r2) else
-            "[Initial Layer3] r2=nan"
-        )
-
         print("\n>>> Outer Loop(Layer4 -> Layer1-2 -> Layer3)")
         stage3_resource_cycle_rows: List[Dict[str, Any]] = []
-        self._final_stage3_completion_diagnostics = {}
-        self._final_stage3_terminal_diagnostics = {}
+        last_layer3_success = False
         outer_cycle_count = max(1, int(outer_max_cycles))
         for outer_idx in range(outer_cycle_count):
             print("\n" + "=" * 80)
@@ -2521,7 +2500,7 @@ class InversePipelineV3:
                         S_target=S_target,
                         E_target=E_target,
                         eval_lib_path=eval_lib_path,
-                        layer1_runtime_cfg={**layer1_runtime_cfg, 'profile': 'rebuild'},
+                        layer1_runtime_cfg=layer1_runtime_cfg,
                         layer2_runtime_cfg=layer2_runtime_cfg,
                         # After Layer4 changes the histogram, rebuild 1-hop
                         # from the current constraints.
@@ -2539,6 +2518,9 @@ class InversePipelineV3:
                     current_nodes = cand_nodes
                     current_H = cand_H.detach().clone()
                     current_diff = copy.deepcopy(cand_diff)
+                    current_layer2_nodes = copy.deepcopy(cand_nodes)
+                    current_layer2_H = cand_H.detach().clone()
+                    current_layer2_diff = copy.deepcopy(cand_diff)
                     cycle_pre_layer3_r2 = float(cand_r2)
                     accepted_layer2_r2 = float(cand_r2)
                     historical_best_layer2_r2 = max(float(historical_best_layer2_r2), float(cand_r2))
@@ -2654,7 +2636,6 @@ class InversePipelineV3:
 
                         try:
                             layer1_stage_cfg = dict(layer1_runtime_cfg)
-                            layer1_stage_cfg['profile'] = 'rebuild'
                             try:
                                 base_variant = int(layer1_stage_cfg.get('build_variant', 0))
                             except Exception:
@@ -2691,6 +2672,9 @@ class InversePipelineV3:
                             current_nodes = cand_nodes
                             current_H = cand_H.detach().clone()
                             current_diff = copy.deepcopy(cand_diff)
+                            current_layer2_nodes = copy.deepcopy(cand_nodes)
+                            current_layer2_H = cand_H.detach().clone()
+                            current_layer2_diff = copy.deepcopy(cand_diff)
                             cycle_pre_layer3_r2 = float(cand_r2)
                             accepted_layer2_r2 = float(cand_r2)
                             historical_best_layer2_r2 = max(float(historical_best_layer2_r2), float(cand_r2))
@@ -2723,20 +2707,20 @@ class InversePipelineV3:
                 if not bool(block_b_progress) and not bool(block_b_attempted):
                     break
 
+            stage3_complete_for_layer3 = not bool(resource_enabled)
             if bool(resource_enabled):
                 try:
                     stage3_nodes, stage3_H, stage3_diff, stage3_meta = self._run_topology_stage3_resource_cycles(
-                        nodes=copy.deepcopy(current_nodes),
-                        H=current_H.detach().clone(),
-                        current_diff=copy.deepcopy(current_diff),
+                        nodes=copy.deepcopy(current_layer2_nodes),
+                        H=current_layer2_H.detach().clone(),
+                        current_diff=copy.deepcopy(current_layer2_diff),
                         S_target=S_target,
                         E_target=E_target,
                         eval_lib_path=eval_lib_path,
-                        layer1_runtime_cfg={**layer1_runtime_cfg, 'profile': 'rebuild'},
+                        layer1_runtime_cfg=layer1_runtime_cfg,
                         layer2_runtime_cfg=layer2_runtime_cfg,
                         layer2_eval_hwhm=float(layer2_eval_hwhm),
                         outer_idx=int(outer_idx),
-                        max_stage3_iterations=int(resource_cfg.get('max_stage3_iterations', 20)),
                         max_primary_adjustments_per_stage=int(resource_cfg.get('max_primary_adjustments_per_stage', 10)),
                         max_h_compensation_ops_per_adjustment=int(resource_cfg.get('max_h_compensation_ops_per_adjustment', 8)),
                         residual_flex_preferred_23=int(resource_cfg.get('residual_flex_preferred_23', 3)),
@@ -2745,11 +2729,9 @@ class InversePipelineV3:
                         residual_side_min_23=int(resource_cfg.get('residual_side_min_23', 1)),
                         h_tolerance=float(resource_cfg.get('h_tolerance', 0.06)),
                         enable_post_external_spectrum=bool(resource_cfg.get('enable_post_external_spectrum', True)),
-                        spectrum_candidate_limit=int(resource_cfg.get('spectrum_candidate_limit', 10)),
-                        spectrum_max_primary_adjustments=int(resource_cfg.get('spectrum_max_primary_adjustments', 8)),
+                        spectrum_candidate_limit=int(resource_cfg.get('spectrum_candidate_limit', 2)),
+                        spectrum_max_primary_adjustments=int(resource_cfg.get('spectrum_max_primary_adjustments', 10)),
                         spectrum_min_r2_gain=float(resource_cfg.get('spectrum_min_r2_gain', 0.002)),
-                        spectrum_min_window_loss_gain=float(resource_cfg.get('spectrum_min_window_loss_gain', 0.1)),
-                        spectrum_max_accepted_rounds=int(resource_cfg.get('spectrum_max_accepted_rounds', 2)),
                         output_dir=(
                             str(Path(output_dir) / f'outer_cycle_{outer_idx + 1}' / 'block_c')
                             if save_round_outputs else None
@@ -2761,35 +2743,58 @@ class InversePipelineV3:
                     current_nodes = copy.deepcopy(stage3_nodes)
                     current_H = stage3_H.detach().clone()
                     current_diff = copy.deepcopy(stage3_diff)
-                    self._final_stage3_terminal_diagnostics = dict(
-                        stage3_meta.get('terminal_diagnostics', {}) or {}
-                    )
-                    if str(stage3_meta.get('stop_reason', '') or '') == 'stage3_complete':
-                        self._final_stage3_completion_diagnostics = dict(
-                            stage3_meta.get('completion_diagnostics', {}) or {}
+                    current_layer2_nodes = copy.deepcopy(stage3_nodes)
+                    current_layer2_H = stage3_H.detach().clone()
+                    current_layer2_diff = copy.deepcopy(stage3_diff)
+                    stage3_layer2_r2 = float(stage3_diff.get('r2', float('nan')))
+                    if np.isfinite(stage3_layer2_r2):
+                        accepted_layer2_r2 = float(stage3_layer2_r2)
+                        historical_best_layer2_r2 = max(
+                            float(historical_best_layer2_r2),
+                            float(stage3_layer2_r2),
                         )
-                    else:
-                        self._final_stage3_completion_diagnostics = {}
+                        cycle_pre_layer3_r2 = float(stage3_layer2_r2)
+                    stage3_stop_reason = str(stage3_meta.get('stop_reason', '') or '')
+                    stage3_complete_for_layer3 = stage3_stop_reason == 'stage3_complete'
+                    status = '完成' if stage3_complete_for_layer3 else '未完成'
                     print(
-                        f"[Block C:resource] 完成: accepted_cycles={int(stage3_meta.get('accepted_cycles', 0) or 0)} "
-                        f"stop={stage3_meta.get('stop_reason', '')}"
+                        f"[Block C:resource] {status}: "
+                        f"accepted_cycles={int(stage3_meta.get('accepted_cycles', 0) or 0)} "
+                        f"stop={stage3_stop_reason}"
                     )
                 except Exception as e:
-                    self._final_stage3_completion_diagnostics = {}
-                    self._final_stage3_terminal_diagnostics = {}
-                    print(f"[Block C:resource] 失败，保持当前状态: {e}")
+                    raise RuntimeError(
+                        f"Block C resource workflow crashed: {e}"
+                    ) from e
+            else:
+                current_nodes = copy.deepcopy(current_layer2_nodes)
+                current_H = current_layer2_H.detach().clone()
+                current_diff = copy.deepcopy(current_layer2_diff)
+                cycle_pre_layer3_r2 = float(current_layer2_diff.get('r2', float('nan')))
 
-            try:
-                current_nodes, _ = self.layer3_adjust_templates(
-                    nodes=copy.deepcopy(current_nodes),
-                    S_target=S_target,
-                    E_target=E_target,
-                    lib_path=eval_lib_path,
-                    output_dir=None,
-                    **layer3_runtime_cfg,
+            if stage3_complete_for_layer3:
+                try:
+                    current_nodes, _ = self.layer3_adjust_templates(
+                        nodes=copy.deepcopy(current_nodes),
+                        S_target=S_target,
+                        E_target=E_target,
+                        lib_path=eval_lib_path,
+                        output_dir=None,
+                        **layer3_runtime_cfg,
+                    )
+                except Exception as e:
+                    raise RuntimeError(f"Outer Cycle {outer_idx + 1} Layer3 failed: {e}") from e
+                last_layer3_success = True
+            else:
+                print(
+                    f"[Outer Cycle {outer_idx + 1}] Layer3 skipped: "
+                    "Stage3 topology assembly is incomplete"
                 )
-            except Exception as e:
-                print(f"[Outer Cycle {outer_idx + 1}] Layer3 失败: {e}")
+                last_layer3_success = False
+                current_nodes = copy.deepcopy(current_layer2_nodes)
+                current_H = current_layer2_H.detach().clone()
+                current_diff = copy.deepcopy(current_layer2_diff)
+                continue
 
             current_H = self._histogram_from_nodes(current_nodes).detach().clone()
             current_diff = self._compute_difference_spectrum_from_nodes_mu(
@@ -2797,6 +2802,9 @@ class InversePipelineV3:
                 S_target=S_target,
                 hwhm=float(layer2_eval_hwhm),
             )
+            current_diff['source_stage'] = 'post_layer3'
+            current_diff['spectral_contract'] = 'g2s_layer3'
+            current_diff['evaluation_hwhm'] = float(layer2_eval_hwhm)
             cycle_post_layer3_r2 = float(current_diff.get('r2', float('nan')))
             cycle_pre_layer3_txt = (
                 f"{cycle_pre_layer3_r2:.4f}"
@@ -2846,6 +2854,9 @@ class InversePipelineV3:
                 except Exception:
                     pass
 
+        if not bool(last_layer3_success):
+            raise RuntimeError('final_result_requires_completed_stage3_and_layer3')
+
         print(
             "[Final Topology] using final Post-Layer3 node state; no extra Layer1/2 rebuild",
             flush=True,
@@ -2891,15 +2902,19 @@ class InversePipelineV3:
             f"historical_best_layer2_r2={historical_best_layer2_r2:.4f}, "
             f"final_post_layer3_r2={final_post_layer3_txt}"
         )
-        stage3_applied = int(sum(1 for row in stage3_resource_cycle_rows if bool(row.get('applied', False))))
+        stage3_accepted = int(sum(
+            1
+            for row in stage3_resource_cycle_rows
+            if str(row.get('stage3_stop_reason', '')) == 'accepted'
+            and bool(row.get('rebuild_valid', False))
+        ))
         stage3_last_stop = str(stage3_resource_cycle_rows[-1].get('stage3_stop_reason', '')) if stage3_resource_cycle_rows else ''
         print(
             f"[Final Stage3 Resource] cycles={len(stage3_resource_cycle_rows)} "
-            f"accepted={stage3_applied} "
+            f"accepted={stage3_accepted} "
             f"last_stop={stage3_last_stop}"
         )
         self._print_histogram_and_elements(H_final, E_target, label='Final Summary', nodes=nodes)
-        self._print_final_resource_summary(nodes, S_target, E_target)
         self._print_final_topology_specs(
             nodes,
             S_target=S_target,
@@ -2960,12 +2975,11 @@ class InversePipelineV3:
                 if not isinstance(rec, dict):
                     continue
                 mu = rec.get('mu')
-                pi = rec.get('pi')
-                if mu is None or pi is None:
+                if mu is None:
                     continue
                 try:
                     node.mu = float(mu)
-                    node.pi = float(max(1e-6, float(pi)))
+                    node.pi = 1.0
                     if isinstance(getattr(node, 'score_components', None), dict):
                         node.score_components['layer1_library_baseline'] = True
                 except Exception:
@@ -3012,7 +3026,6 @@ class InversePipelineV3:
     def layer1_assign(self, H_init: torch.Tensor, S_target: torch.Tensor, E_target: torch.Tensor,
                       eval_nmr: bool = True, eval_output_dir: str = 'inverse_result',
                       eval_lib_path: Optional[str] = None, eval_hwhm: float = 1.0,
-                      eval_allow_approx: bool = True,
                       build_variant: int = 0,
                       enable_carbonyl_joint_adjust: bool = True,
                       carbonyl_joint_iterations: int = 5,
@@ -3029,18 +3042,18 @@ class InversePipelineV3:
                       hop1_adjust_region_order: Optional[List[str]] = None,
                       hop1_adjust_max_moves_per_region: int = 8,
                       hop1_adjust_max_full_evals: int = 32,
-                      profile: str = 'initial',
-                      local_swap_max_attempts: int = 64,
-                      initial_enable_spectral_refine: bool = True,
-                      initial_hop1_adjust_iterations: int = 6,
-                      initial_hop1_adjust_max_candidate_trials: int = 240) -> List[_NodeV3]:
+                      hop1_adjust_min_r2_gain: float = 1e-4,
+                      hop1_completion_max_backtracks: Optional[int] = None,
+                      hop1_completion_branch_limit: Optional[int] = None,
+                      enable_hop1_diversity_refine: bool = True,
+                      hop1_diversity_max_moves: int = 12,
+                      hop1_diversity_max_trials: int = 96) -> List[_NodeV3]:
         """委托给Layer1Assigner执行1-hop分配"""
         eval_lib_path = eval_lib_path or self.default_template_lib_path
         return self.layer1_assigner.layer1_assign(
             H_init=H_init, S_target=S_target, E_target=E_target,
             eval_nmr=eval_nmr, eval_output_dir=eval_output_dir,
             eval_lib_path=eval_lib_path, eval_hwhm=eval_hwhm,
-            eval_allow_approx=eval_allow_approx,
             build_variant=int(build_variant),
             enable_carbonyl_joint_adjust=enable_carbonyl_joint_adjust,
             carbonyl_joint_iterations=carbonyl_joint_iterations,
@@ -3057,11 +3070,12 @@ class InversePipelineV3:
             hop1_adjust_region_order=hop1_adjust_region_order,
             hop1_adjust_max_moves_per_region=hop1_adjust_max_moves_per_region,
             hop1_adjust_max_full_evals=hop1_adjust_max_full_evals,
-            profile=profile,
-            local_swap_max_attempts=local_swap_max_attempts,
-            initial_enable_spectral_refine=initial_enable_spectral_refine,
-            initial_hop1_adjust_iterations=initial_hop1_adjust_iterations,
-            initial_hop1_adjust_max_candidate_trials=initial_hop1_adjust_max_candidate_trials,
+            hop1_adjust_min_r2_gain=hop1_adjust_min_r2_gain,
+            hop1_completion_max_backtracks=hop1_completion_max_backtracks,
+            hop1_completion_branch_limit=hop1_completion_branch_limit,
+            enable_hop1_diversity_refine=enable_hop1_diversity_refine,
+            hop1_diversity_max_moves=hop1_diversity_max_moves,
+            hop1_diversity_max_trials=hop1_diversity_max_trials,
         )
     
     def _compute_layer1_difference_spectrum(self, nodes: List[_NodeV3], S_target: torch.Tensor,
@@ -3092,17 +3106,14 @@ class InversePipelineV3:
                       S_target: torch.Tensor, E_target: torch.Tensor,
                       lib_path: Optional[str] = None,
                       output_dir: Optional[str] = None,
-                      eval_hwhm: float = 1.0,
-                      layer2_max_hop2_diff_nodes: int = 2,
-                      layer2_use_g2s_decoder: bool = False,
-                      layer2_decoder_max_mu_delta: float = 8.0) -> List[_NodeV3]:
+                      eval_hwhm: float = 1.0) -> List[_NodeV3]:
         """
         Layer2: 委托给Layer2Estimator进行2-hop推导和模板检索
         
         功能：
         1. 从1-hop邻居推导2-hop邻居
         2. 模板精确匹配和近似匹配
-        3. z向量初始化和mu/pi解码
+        3. 保存模板center_z并使用模板center_mu
         4. NMR谱图重建和评估
         """
         lib_path = lib_path or self.default_template_lib_path
@@ -3121,9 +3132,6 @@ class InversePipelineV3:
             E_target=E_target,
             output_dir=output_dir,
             hwhm=eval_hwhm,
-            layer2_max_hop2_diff_nodes=int(layer2_max_hop2_diff_nodes),
-            layer2_use_g2s_decoder=bool(layer2_use_g2s_decoder),
-            layer2_decoder_max_mu_delta=float(layer2_decoder_max_mu_delta),
         )
 
     def _share_layer2_template_cache_with_layer3(self, lib_path: Optional[str]) -> bool:
@@ -3153,11 +3161,6 @@ class InversePipelineV3:
                                 top_k_samples: int = 8,
                                 neg_top_k_peaks: int = 10,
                                 neg_peak_min_sep_ppm: float = 0.8,
-                                enable_approx_hop2_template_adjust: bool = True,
-                                approx_hop2_max_iters: Optional[int] = None,
-                                approx_hop2_max_diff_nodes: int = 5,
-                                approx_hop2_top_k_templates: int = 80,
-                                layer3_use_g2s_decoder: bool = False,
                                 layer3_verbose: bool = True) \
                                 -> Tuple[List[_NodeV3], float]:
         """
@@ -3181,11 +3184,6 @@ class InversePipelineV3:
             top_k_samples=int(top_k_samples),
             neg_top_k_peaks=int(neg_top_k_peaks),
             neg_peak_min_sep_ppm=float(neg_peak_min_sep_ppm),
-            enable_approx_hop2_template_adjust=bool(enable_approx_hop2_template_adjust),
-            approx_hop2_max_iters=(int(approx_hop2_max_iters) if approx_hop2_max_iters is not None else None),
-            approx_hop2_max_diff_nodes=int(approx_hop2_max_diff_nodes),
-            approx_hop2_top_k_templates=int(approx_hop2_top_k_templates),
-            use_g2s_decoder=bool(layer3_use_g2s_decoder),
             verbose=bool(layer3_verbose),
         )
 
@@ -3203,11 +3201,6 @@ class InversePipelineV3:
         top_k_samples: int = 8,
         neg_top_k_peaks: int = 10,
         neg_peak_min_sep_ppm: float = 0.8,
-        enable_approx_hop2_template_adjust: bool = True,
-        approx_hop2_max_iters: Optional[int] = None,
-        approx_hop2_max_diff_nodes: int = 5,
-        approx_hop2_top_k_templates: int = 80,
-        use_g2s_decoder: bool = False,
         verbose: bool = True,
     ) -> Tuple[List[_NodeV3], float]:
         lib_path = lib_path or self.default_template_lib_path
@@ -3237,11 +3230,6 @@ class InversePipelineV3:
             top_k_samples=int(top_k_samples),
             neg_top_k_peaks=int(neg_top_k_peaks),
             neg_peak_min_sep_ppm=float(neg_peak_min_sep_ppm),
-            enable_approx_hop2_template_adjust=bool(enable_approx_hop2_template_adjust),
-            approx_hop2_max_iters=(int(approx_hop2_max_iters) if approx_hop2_max_iters is not None else None),
-            approx_hop2_max_diff_nodes=int(approx_hop2_max_diff_nodes),
-            approx_hop2_top_k_templates=int(approx_hop2_top_k_templates),
-            use_g2s_decoder=bool(use_g2s_decoder),
             verbose=bool(verbose),
         )
 

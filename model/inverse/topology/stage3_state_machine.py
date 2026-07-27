@@ -1,18 +1,35 @@
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
-from itertools import combinations
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
-from .assembly_external import assemble_external_topologies
 from .classification.classifier import classify_topology_units
+from .assembly_external import assemble_pool_su24_rings
+from .phase_eval import assemble_topology_units
 from .histogram_adjustment import (
     _h_total,
     build_histogram_adjustment_plan,
     next_su11_aromatic_target,
 )
+from .conversion_scoring import (
+    ConversionContext,
+    apply_conversions_to_H,
+    apply_conversions_to_inventory,
+    rank_conversions,
+    score_conversion_bundle,
+)
+from .resource_profiles import (
+    H_SOFT_LOWER_RATIO,
+    H_SOFT_UPPER_RATIO,
+    MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
+    audit_raw_su24_resource_profiles,
+    build_raw_su24_resource_profiles,
+    h_soft_bounds,
+)
+from .resource_accounting import build_resource_accounting_snapshot
 from .iteration_ledger import (
     assign_contract_slots,
     build_iteration_ledger,
@@ -22,12 +39,7 @@ from .iteration_ledger import (
     required_counts_from_slots,
     seed_ledger_topology_state,
 )
-from .round_context import (
-    claim_round_product,
-    mark_round_pending_contracts,
-    normalize_stage3_product,
-    ownership_public_view,
-)
+from .round_context import normalize_stage3_product
 from .spectrum_rebalance import generate_spectrum_candidates
 from .stage3_models import (
     AtomicAdjustmentGroup,
@@ -46,11 +58,29 @@ from .stage3_models import (
 )
 
 RESOURCE_TYPES = (11, 22, 23, 24)
-EXTERNAL_PHASES = (
+EXTERNAL_ROLE_ORDER = (
     ("external_flex_closure", "flex_chain"),
     ("external_fatty_ring_closure", "fatty_ring"),
     ("external_side_chain_closure", "side_chain"),
 )
+EXTERNAL_STAGE = "external_topology_assembly"
+EXTERNAL_PHASE_NAMES = frozenset(phase for phase, _ in EXTERNAL_ROLE_ORDER)
+
+
+def _h_soft_rule_diagnostics(h_tolerance: float) -> Dict[str, Any]:
+    return {
+        "h_tolerance_deprecated": True,
+        "received_h_tolerance": float(h_tolerance),
+        "soft_lower_ratio": float(H_SOFT_LOWER_RATIO),
+        "soft_upper_ratio": float(H_SOFT_UPPER_RATIO),
+    }
+
+
+def _annotate_h_soft_rule(plan: Stage3AdjustmentPlan, h_tolerance: float) -> Stage3AdjustmentPlan:
+    diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
+    diagnostics.setdefault("h_soft_rule", _h_soft_rule_diagnostics(h_tolerance))
+    plan.diagnostics = diagnostics
+    return plan
 
 
 def _evaluate_external_phases(
@@ -62,7 +92,7 @@ def _evaluate_external_phases(
     E_target: Any = None,
 ) -> Any:
     classification_obj = classification or classify_topology_units(list(nodes or []))
-    assembly_obj = assemble_external_topologies(
+    assembly_obj = assemble_topology_units(
         nodes=list(nodes or []),
         classification=classification_obj,
         S_target=S_target,
@@ -94,23 +124,20 @@ def _evaluate_external_phases(
         merge_stage3_contracts_by_owner(pending_contracts),
         key=contract_priority,
     )
-    round_context = deepcopy(getattr(working, "round_context", None))
-    if round_context is not None:
-        for product in symbolic_product_objects:
-            claimed_context, claim_proof = claim_round_product(round_context, product)
-            if claimed_context is None:
-                round_context.conflicts.append({
-                    "reason": "state_machine_product_ownership_conflict",
-                    "product_id": str(product.product_id),
-                    "proof": dict(claim_proof or {}),
-                })
-                continue
-            round_context = claimed_context
-        round_context = mark_round_pending_contracts(round_context, working.canonical_contracts)
-        working.round_context = round_context
-        working.ownership_ledger = ownership_public_view(round_context)
-        working.closure_pool_ids_by_su = deepcopy(round_context.closure_pool_ids_by_su)
-        working.aromatic_donor_ids_by_su = deepcopy(round_context.aromatic_donor_ids_by_su)
+    ownership = dict(
+        assembly.get("ownership_ledger", {})
+        or diagnostics.get("ownership_ledger", {})
+        or {}
+    )
+    working.ownership_ledger = ownership
+    working.closure_pool_ids_by_su = {
+        int(key): [int(value) for value in list(values or [])]
+        for key, values in dict(ownership.get("closure_pool_ids_by_su", {}) or {}).items()
+    }
+    working.aromatic_donor_ids_by_su = {
+        int(key): [int(value) for value in list(values or [])]
+        for key, values in dict(ownership.get("aromatic_donor_ids_by_su", {}) or {}).items()
+    }
     working.external_closure_ok = not bool(assembly.get("pending_units", []) or pending_contracts)
     working.active_phase = str(
         assembly.get("active_phase", "")
@@ -124,6 +151,35 @@ def _evaluate_external_phases(
     )
     working.flex_bounds = dict(assembly.get("flex_bounds", working.flex_bounds) or {})
     working.flex_counts = dict(assembly.get("flex_counts", working.flex_counts) or {})
+    working.flex_decision = dict(assembly.get("flex_decision", {}) or {})
+    working.topology_metrics = dict(assembly.get("topology_metrics", {}) or {})
+    working.topology_signature = str(assembly.get("topology_signature", "") or "")
+    working.phase_signature = str(
+        assembly.get("phase_signature", "") or working.topology_signature
+    )
+    working.requested_counts = {
+        str(key): int(value)
+        for key, value in dict(assembly.get("requested_counts", {}) or {}).items()
+        if int(value) > 0
+    }
+    working.unresolved_counts = {
+        str(key): int(value)
+        for key, value in dict(assembly.get("unresolved_counts", {}) or {}).items()
+        if int(value) > 0
+    }
+    working.blocked_reason = str(assembly.get("blocked_reason", "") or "")
+    working.completed_phases = [
+        str(value) for value in list(assembly.get("completed_phases", []) or [])
+    ]
+    working.phase_metrics = dict(assembly.get("phase_metrics", {}) or {})
+    working.external_subphase_status = dict(
+        diagnostics.get("external_subphase_status", {}) or {}
+    )
+    resource_demand = dict(assembly.get("resource_demand", {}) or {})
+    working.external_closure_requirements = resource_demand
+    working.flex_range_reconciliation_ok = bool(
+        working.active_phase != "flex_range_reconciliation"
+    )
     working.diagnostics = {
         **dict(getattr(working, "diagnostics", {}) or {}),
         "external_assembly": diagnostics,
@@ -131,14 +187,6 @@ def _evaluate_external_phases(
         "external_pending_contract_count": len(pending_contracts),
     }
     return working
-
-
-def _integer_map(values: Dict[Any, Any]) -> Dict[int, int]:
-    return {
-        int(key): int(value)
-        for key, value in dict(values or {}).items()
-        if str(key).lstrip("-").isdigit()
-    }
 
 
 def _resource_ids(phase_eval: Any) -> Dict[int, List[int]]:
@@ -166,6 +214,31 @@ def _resource_ids(phase_eval: Any) -> Dict[int, List[int]]:
     for su_type in (10, 11, 12, 13, 22, 23, 24):
         result.setdefault(int(su_type), [])
     return result
+
+
+def _remaining_closure_ids_by_su(
+    pool: Dict[int, List[int]],
+) -> Dict[int, List[int]]:
+    return {
+        int(su_type): [int(value) for value in list(pool.get(int(su_type), []) or [])]
+        for su_type in RESOURCE_TYPES
+        if list(pool.get(int(su_type), []) or [])
+    }
+
+
+def _tolerated_remaining_closure_ids(
+    pool: Dict[int, List[int]],
+    *,
+    remaining_flex_goal: int,
+) -> Dict[int, List[int]]:
+    by_su = _remaining_closure_ids_by_su(pool)
+    total = sum(len(values) for values in by_su.values())
+    if (
+        int(remaining_flex_goal) <= 0
+        and int(total) <= int(MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES)
+    ):
+        return by_su
+    return {}
 
 
 def _consume(pool: Dict[int, List[int]], required: Dict[int, int]) -> Optional[Dict[int, List[int]]]:
@@ -247,111 +320,91 @@ def _external_contracts(phase_eval: Any, nodes: Sequence[Any]) -> List[Dict[str,
     return sorted(merge_stage3_contracts_by_owner(contracts), key=contract_priority)
 
 
+def _external_product_materialization_errors(phase_eval: Any) -> List[Dict[str, Any]]:
+    assembly = dict(getattr(phase_eval, "assembly_view", {}) or {})
+    errors: List[Dict[str, Any]] = []
+    for index, raw in enumerate(list(assembly.get("products", []) or [])):
+        product = dict(raw or {})
+        reasons: List[str] = []
+        if not bool(product.get("closed", False)):
+            reasons.append("product_not_closed")
+        if bool(product.get("provisional", False)):
+            reasons.append("provisional_product_forbidden")
+        topology = str(
+            product.get("topology_notation", product.get("actual_topology_su", ""))
+            or ""
+        )
+        node_topology = str(
+            product.get("node_id_notation", product.get("actual_topology_gid", ""))
+            or ""
+        )
+        if not topology or "OPEN" in topology.upper():
+            reasons.append("topology_not_fully_materialized")
+        if not node_topology or "OPEN" in node_topology.upper():
+            reasons.append("node_identity_not_fully_materialized")
+        if reasons:
+            errors.append({
+                "product_index": int(index),
+                "product_id": str(product.get("product_id", "") or ""),
+                "product_type": str(
+                    product.get("product_type", product.get("product_kind", "")) or ""
+                ),
+                "reasons": reasons,
+                "product": product,
+            })
+    return errors
+
+
 def build_su24_resource_role_profiles(nodes: Sequence[Any], pool: Dict[int, List[int]]) -> List[SU24ResourceRoleProfile]:
-    by_id = {int(getattr(node, "global_id", -1)): node for node in list(nodes or [])}
-    profiles: List[SU24ResourceRoleProfile] = []
-    for node_id in sorted(pool.get(24, [])):
-        node = by_id.get(int(node_id))
-        if node is None:
-            continue
-        hop1_su = _integer_map(dict(getattr(node, "hop1_su", {}) or {}))
-        fixed_ids = set(getattr(node, "fixed_hop1_ids", set()) or set())
-        hop1_node_ids = sorted(int(value) for value in list(getattr(node, "hop1_ids", set()) or set()))
-        degree = int(sum(hop1_su.values()))
-        target_degree = int(getattr(node, "target_hop1_degree", 3) or 3)
-        remaining_slots = max(0, target_degree - degree)
-        roles: List[str] = []
-        if fixed_ids == set() and remaining_slots >= 2:
-            roles.append("A")
-        if remaining_slots >= 1:
-            roles.append("B")
-        if fixed_ids or int(hop1_su.get(11, 0)) > 0:
-            roles.append("C")
-        if degree <= target_degree:
-            roles.append("D")
-        allowed_slots: List[str] = []
-        if "A" in roles:
-            allowed_slots.extend([
-                "side:middle",
-                "upper_lower:fixed_anchor",
-                "upper_lower:path",
-                "fused:left_outer_anchor",
-                "fused:right_outer_anchor",
-            ])
-        if "B" in roles:
-            allowed_slots.extend([
-                "side:middle",
-                "upper_lower:path",
-                "fused:left_outer_anchor",
-                "fused:right_outer_anchor",
-            ])
-        if "C" in roles:
-            allowed_slots.extend([
-                "side:middle",
-                "upper_lower:path",
-                "fused:left_bridgehead",
-                "fused:right_bridgehead",
-                "fused:inner_core",
-            ])
-        if "D" in roles:
-            allowed_slots.extend([
-                "side:middle",
-                "upper_lower:path",
-                "fused:inner_core",
-            ])
-        all_slots = {
-            "side:middle", "upper_lower:fixed_anchor", "upper_lower:path",
-            "fused:left_outer_anchor", "fused:right_outer_anchor",
-            "fused:left_bridgehead", "fused:right_bridgehead", "fused:inner_core",
-        }
-        profiles.append(SU24ResourceRoleProfile(
-            node_id=int(node_id),
-            roles=roles,
-            available_roles=list(roles),
-            hop1_su=hop1_su,
-            hop1_node_ids=hop1_node_ids,
-            fixed_neighbor_ids=sorted(int(value) for value in fixed_ids),
-            fixed_neighbor_count=len(fixed_ids),
-            remaining_degree=int(remaining_slots),
-            branch_h_count=max(0, int(remaining_slots) - 1),
-            requires_su11_cap=bool(remaining_slots > 0 and not fixed_ids),
-            allowed_ring_slots=sorted(set(allowed_slots)),
-            forbidden_ring_slots=sorted(all_slots - set(allowed_slots)),
+    return build_raw_su24_resource_profiles(nodes, pool)
+
+
+def _pool_su24_ring_conversion_contract(
+    attempt: Dict[str, Any],
+    *,
+    contract_id: int = 1_000_000,
+) -> TopologyClosureContract:
+    generic_sequence = [
+        int(value)
+        for value in list(attempt.get("generic_required_sequence", []) or [])
+    ]
+    source_ids = sorted({
+        int(value)
+        for value in list(attempt.get("selected_source_node_ids", []) or [])
+    })
+    slots = []
+    if generic_sequence:
+        slots.append(TopologyClosureSlot(
+            slot_id=f"pool_su24:{int(contract_id)}:support",
+            kind="RESOURCE_PATH",
+            anchor_node_id=int(source_ids[-1]) if source_ids else -1,
+            anchor_role="ring_support",
+            required_su_sequence=list(generic_sequence),
         ))
-    return profiles
-
-
-def _su24_ring_contracts(profiles: Sequence[SU24ResourceRoleProfile]) -> List[TopologyClosureContract]:
-    available = sorted(profiles, key=lambda item: int(item.node_id))
-    contracts: List[TopologyClosureContract] = []
-    templates = (
-        ("resource_su24_side_ring", "side", ("A", "B"), {11: 2, 22: 2, 23: 4}),
-        ("resource_su24_upper_lower_ring", "upper_lower", ("A", "B", "C"), {11: 2, 22: 2, 23: 3}),
-        ("resource_su24_fused_ring", "fused", ("A", "B", "C", "D"), {11: 2, 22: 2, 23: 2}),
+    return TopologyClosureContract(
+        contract_id=int(contract_id),
+        contract_kind="ring_partner",
+        phase="resource_su24_ring_closure",
+        priority=int(attempt.get("template_priority", 0) or 0),
+        target_role="fatty_ring",
+        source_node_ids=list(source_ids),
+        claimed_source_node_ids=list(source_ids),
+        mainline_slots=slots,
+        required_counts={
+            int(key): int(value)
+            for key, value in dict(attempt.get("required_counts", {}) or {}).items()
+            if int(value) > 0
+        },
+        expected_topology=str(attempt.get("ring_template", "pool_su24_ring")),
+        diagnostics={
+            "conversion_only": True,
+            "pool_su24_ring_attempt": {
+                str(key): value
+                for key, value in dict(attempt or {}).items()
+                if str(key) != "ordered_segments"
+            },
+        },
     )
-    for template_index, (name, template_key, role_slots, required) in enumerate(templates):
-        for group in combinations(available, len(role_slots)):
-            assignments = list(zip(role_slots, group))
-            if any(str(role) not in set(item.available_roles or item.roles) for role, item in assignments):
-                continue
-            contracts.append(TopologyClosureContract(
-                contract_id=1_000_000 + len(contracts),
-                contract_kind="ring_partner",
-                phase="resource_su24_ring_closure",
-                priority=int(template_index),
-                target_role="fatty_ring",
-                source_node_ids=[int(item.node_id) for item in group],
-                claimed_source_node_ids=[int(item.node_id) for item in group],
-                required_counts=dict(required),
-                required_roles=[str(role) for role in role_slots],
-                slot_requirements=[
-                    {"slot": f"{template_key}:{role}", "node_id": int(item.node_id), "role": str(role)}
-                    for role, item in assignments
-                ],
-                expected_topology=name,
-                diagnostics={"ring_template": str(name)},
-            ))
-    return contracts
 
 
 def _residual_contracts(
@@ -363,370 +416,130 @@ def _residual_contracts(
     max_flex_chains: Optional[int] = None,
 ) -> List[TopologyClosureContract]:
     contracts: List[TopologyClosureContract] = []
-    available = {int(key): len(values) for key, values in pool.items()}
-    preferred_flex_23 = max(int(residual_flex_min_23), int(residual_flex_preferred_23))
-    minimum_flex_23 = max(2, int(residual_flex_min_23))
+    pool_work = {
+        int(key): list(values or []) for key, values in dict(pool or {}).items()
+    }
     contract_id = 2_000_000
-    flex_created = 0
-    for chain_length in range(int(preferred_flex_23), int(minimum_flex_23) - 1, -1):
-        required = {11: 2, 23: int(chain_length)}
-        sequence = [11] + [23] * int(chain_length) + [11]
-        while (
-            all(int(available.get(su, 0)) >= count for su, count in required.items())
-            and (max_flex_chains is None or int(flex_created) < int(max_flex_chains))
+    flex_goal_left = (
+        sum(len(values) for values in pool_work.values())
+        if max_flex_chains is None
+        else max(0, int(max_flex_chains))
+    )
+    while True:
+        selected = None
+        for product_role, chain_23_count, required_counts in _residual_template_specs(
+            remaining_flex_chains=flex_goal_left,
+            residual_flex_preferred_23=residual_flex_preferred_23,
+            residual_flex_min_23=residual_flex_min_23,
+            residual_side_preferred_23=residual_side_preferred_23,
+            residual_side_min_23=residual_side_min_23,
         ):
-            contracts.append(TopologyClosureContract(
-                contract_id=contract_id,
-                contract_kind="residual_conversion",
-                phase="residual_resource_self_closure",
-                priority=0,
-                target_role="residual_resource_conversion",
-                mainline_slots=[TopologyClosureSlot(
-                    slot_id=f"residual:{contract_id}:mainline",
-                    kind="RESOURCE_PATH",
-                    anchor_node_id=-1,
-                    anchor_role="resource_path",
-                    required_su_sequence=list(sequence),
-                )],
-                required_counts=dict(required),
-                expected_topology="11-" + "-".join(["23"] * chain_length) + "-11",
-                diagnostics={"product_role": "residual_flex_chain"},
-            ))
-            contract_id += 1
-            flex_created += 1
-            for su, count in required.items():
-                available[su] -= count
-    if max_flex_chains is not None and int(flex_created) < int(max_flex_chains):
-        return contracts
-    preferred_side_23 = max(int(residual_side_min_23), int(residual_side_preferred_23))
-    minimum_side_23 = max(1, int(residual_side_min_23))
-    for chain_length in range(int(preferred_side_23), int(minimum_side_23) - 1, -1):
-        required = {11: 1, 22: 1, 23: int(chain_length)}
-        topology = "11-" + "-".join(["23"] * int(chain_length)) + "-22"
-        sequence = [int(value) for value in topology.split("-")]
-        while all(int(available.get(su, 0)) >= count for su, count in required.items()):
-            contracts.append(TopologyClosureContract(
-                contract_id=contract_id,
-                contract_kind="residual_conversion",
-                phase="residual_resource_self_closure",
-                priority=1,
-                target_role="residual_resource_conversion",
-                mainline_slots=[TopologyClosureSlot(
-                    slot_id=f"residual:{contract_id}:mainline",
-                    kind="RESOURCE_PATH",
-                    anchor_node_id=-1,
-                    anchor_role="resource_path",
-                    required_su_sequence=list(sequence),
-                )],
-                required_counts=dict(required),
-                expected_topology=topology,
-                diagnostics={"product_role": "residual_side_chain"},
-            ))
-            contract_id += 1
-            for su, count in required.items():
-                available[su] -= count
+            if not _deficit(pool_work, required_counts):
+                selected = (product_role, chain_23_count, required_counts)
+                break
+        if selected is None:
+            break
+        product_role, chain_23_count, required_counts = selected
+        contract = _residual_product_contract(
+            product_role=product_role,
+            chain_23_count=chain_23_count,
+            required_counts=required_counts,
+            contract_id=contract_id,
+        )
+        contracts.append(contract)
+        if _consume(pool_work, required_counts) is None:
+            break
+        contract_id += 1
+        if product_role == "residual_flex_chain":
+            flex_goal_left = max(0, int(flex_goal_left) - 1)
     return contracts
 
 
-def _apply_conversion_to_histogram(
-    H: torch.Tensor,
-    conversion: HistogramConversion,
-) -> Optional[torch.Tensor]:
-    candidate = H.detach().clone().long()
-    source = int(conversion.from_su)
-    target = int(conversion.to_su)
-    count = max(1, int(conversion.count))
-    if int(candidate[source].item()) < int(count):
-        return None
-    candidate[source] -= int(count)
-    candidate[target] += int(count)
-    return candidate
+def _residual_product_sequence(product_role: str, chain_23_count: int) -> List[int]:
+    if str(product_role) == "residual_flex_chain":
+        return [11] + [23] * int(chain_23_count) + [11]
+    return [11] + [23] * int(chain_23_count) + [22]
 
 
-def _fit_residual_required_counts(
+def _residual_product_topology(product_role: str, chain_23_count: int) -> str:
+    return "-".join(str(value) for value in _residual_product_sequence(product_role, chain_23_count))
+
+
+def _residual_template_specs(
     *,
-    pool: Dict[int, List[int]],
-    required_counts: Dict[int, int],
-    H: torch.Tensor,
-    E_target: Any,
-    h_tolerance: float,
-    special_degree_meta: Optional[Dict[str, Any]],
-    su11_rotation_index: int,
-    max_conversions: int,
-    max_h_compensation_ops: int,
-) -> Optional[Dict[str, Any]]:
-    deficits = {
-        int(su_type): max(0, int(required) - len(pool.get(int(su_type), [])))
-        for su_type, required in dict(required_counts or {}).items()
-    }
-    if not any(deficits.values()):
-        return None
-    surplus_ids = {
-        int(su_type): list(pool.get(int(su_type), []))[max(0, int(required_counts.get(int(su_type), 0))):]
-        for su_type in (11, 12, 13, 22, 23, 24)
-    }
-    if sum(len(values) for values in surplus_ids.values()) < sum(deficits.values()):
-        return None
-
-    H_work = H.detach().clone().long()
-    conversions: List[HistogramConversion] = []
-    rotation_cursor = int(su11_rotation_index)
-    target_h = None
-    try:
-        target_h = float(E_target.detach().cpu().float()[1].item())
-    except Exception:
-        target_h = None
-
-    target_sequence = [
-        int(target)
-        for target in (23, 22, 11, 24)
-        for _ in range(int(deficits.get(int(target), 0)))
-    ]
-    for target in target_sequence:
-        aromatic_available = [
-            int(su_type)
-            for su_type in (12, 13)
-            if list(surplus_ids.get(int(su_type), []) or [])
-        ]
-        next_aromatic = None
-        next_cursor = int(rotation_cursor)
-        if aromatic_available:
-            next_aromatic, next_cursor = next_su11_aromatic_target(
-                int(rotation_cursor),
-                available_targets=aromatic_available,
-            )
-        candidates: List[tuple[float, int, int, torch.Tensor, HistogramConversion]] = []
-        for source in (11, 22, 23, 24, 12, 13):
-            source_ids = list(surplus_ids.get(int(source), []) or [])
-            if not source_ids or int(source) == int(target):
-                continue
-            if int(source) in {12, 13} and int(source) != int(next_aromatic or -1):
-                continue
-            conversion = HistogramConversion(
-                from_su=int(source),
-                to_su=int(target),
-                count=1,
-                reason="residual_atomic_template_fit",
-                node_ids=[int(source_ids[0])],
-                via_su=11 if int(source) in {12, 13} and int(target) != 11 else None,
-            )
-            H_candidate = _apply_conversion_to_histogram(H_work, conversion)
-            if H_candidate is None:
-                continue
-            h_error = (
-                abs(_h_total(H_candidate, special_degree_meta) - float(target_h))
-                if target_h is not None
-                else 0.0
-            )
-            candidates.append((
-                float(h_error),
-                1 if int(source) in {12, 13} else 0,
-                int(source_ids[0]),
-                H_candidate,
-                conversion,
-            ))
-        if not candidates:
-            return None
-        _, _, node_id, H_work, selected = min(candidates, key=lambda item: item[:3])
-        surplus_ids[int(selected.from_su)].remove(int(node_id))
-        conversions.append(selected)
-        if int(selected.from_su) in {12, 13}:
-            rotation_cursor = int(next_cursor)
-
-    final_h = _h_total(H_work, special_degree_meta)
-    compensation_limit = min(
-        max(0, int(max_conversions)),
-        len(conversions) + max(0, int(max_h_compensation_ops)),
-    )
-    while target_h is not None and target_h > 0 and len(conversions) < compensation_limit:
-        h_lower = float(target_h) * (1.0 - float(h_tolerance))
-        h_upper = float(target_h) * (1.0 + float(h_tolerance))
-        if float(h_lower) <= float(final_h) <= float(h_upper):
-            break
-        current_error = abs(float(final_h) - float(target_h))
-        aromatic_available = [
-            int(su_type)
-            for su_type in (12, 13)
-            if list(surplus_ids.get(int(su_type), []) or [])
-        ]
-        next_aromatic_source = None
-        next_aromatic_source_cursor = int(rotation_cursor)
-        if aromatic_available:
-            next_aromatic_source, next_aromatic_source_cursor = next_su11_aromatic_target(
-                int(rotation_cursor),
-                available_targets=aromatic_available,
-            )
-        next_aromatic_target, next_aromatic_target_cursor = next_su11_aromatic_target(
-            int(rotation_cursor),
-        )
-        compensation_candidates = []
-        for source in (11, 22, 23, 24, 12, 13):
-            source_ids = list(surplus_ids.get(int(source), []) or [])
-            if not source_ids:
-                continue
-            if int(source) in {12, 13} and int(source) != int(next_aromatic_source or -1):
-                continue
-            targets = [11, 22, 23, 24]
-            if int(source) == 11 and next_aromatic_target is not None:
-                targets.append(int(next_aromatic_target))
-            for target in targets:
-                if int(source) == int(target):
-                    continue
-                conversion = HistogramConversion(
-                    from_su=int(source),
-                    to_su=int(target),
-                    count=1,
-                    reason="residual_atomic_h_compensation",
-                    node_ids=[int(source_ids[0])],
-                    via_su=11 if int(source) in {12, 13} and int(target) != 11 else None,
-                )
-                H_candidate = _apply_conversion_to_histogram(H_work, conversion)
-                if H_candidate is None:
-                    continue
-                candidate_error = abs(
-                    _h_total(H_candidate, special_degree_meta) - float(target_h)
-                )
-                if float(candidate_error) + 1e-9 >= float(current_error):
-                    continue
-                compensation_candidates.append((
-                    float(candidate_error),
-                    1 if conversion.via_su is not None else 0,
-                    int(source_ids[0]),
-                    int(target),
-                    H_candidate,
-                    conversion,
-                ))
-        if not compensation_candidates:
-            break
-        _, _, node_id, _, H_work, selected = min(
-            compensation_candidates,
-            key=lambda item: item[:4],
-        )
-        surplus_ids[int(selected.from_su)].remove(int(node_id))
-        conversions.append(selected)
-        if int(selected.from_su) in {12, 13}:
-            rotation_cursor = int(next_aromatic_source_cursor)
-        elif int(selected.from_su) == 11 and int(selected.to_su) in {12, 13}:
-            rotation_cursor = int(next_aromatic_target_cursor)
-        final_h = _h_total(H_work, special_degree_meta)
-
-    if target_h is not None and target_h > 0:
-        h_lower = float(target_h) * (1.0 - float(h_tolerance))
-        h_upper = float(target_h) * (1.0 + float(h_tolerance))
-        if not (float(h_lower) <= float(final_h) <= float(h_upper)):
-            return None
-    return {
-        "required_counts": {int(key): int(value) for key, value in required_counts.items()},
-        "conversions": conversions,
-        "H_after": H_work,
-        "h_after": float(final_h),
-        "h_error": (
-            abs(float(final_h) - float(target_h))
-            if target_h is not None
-            else 0.0
-        ),
-        "rotation_after": int(rotation_cursor),
-    }
-
-
-def _best_residual_template_fit(
-    *,
-    pool: Dict[int, List[int]],
-    H: torch.Tensor,
-    E_target: Any,
-    h_tolerance: float,
-    special_degree_meta: Optional[Dict[str, Any]],
-    su11_rotation_index: int,
     remaining_flex_chains: int,
     residual_flex_preferred_23: int,
     residual_flex_min_23: int,
     residual_side_preferred_23: int,
     residual_side_min_23: int,
-    max_conversions: int,
-    max_h_compensation_ops: int,
-) -> Optional[Dict[str, Any]]:
-    total = sum(len(pool.get(int(su_type), [])) for su_type in (11, 12, 13, 22, 23, 24))
-    requirements: List[Tuple[str, int, int, Dict[int, int]]] = []
-    if int(remaining_flex_chains) > 0:
-        maximum_products = min(int(remaining_flex_chains), int(total // 3))
-        for product_count in range(maximum_products, 0, -1):
-            preferred_flex_23 = max(int(residual_flex_min_23), int(residual_flex_preferred_23))
-            minimum_flex_23 = max(2, int(residual_flex_min_23))
-            for chain_nodes in range(
-                int(preferred_flex_23 * product_count),
-                int(minimum_flex_23 * product_count) - 1,
-                -1,
-            ):
-                requirements.append((
-                    "residual_flex_chain",
-                    int(product_count),
-                    int(chain_nodes),
-                    {11: int(2 * product_count), 23: int(chain_nodes)},
-                ))
-    else:
-        maximum_products = int(total // 3)
-        for product_count in range(maximum_products, 0, -1):
-            preferred_side_23 = max(int(residual_side_min_23), int(residual_side_preferred_23))
-            minimum_side_23 = max(1, int(residual_side_min_23))
-            for chain_nodes in range(
-                int(preferred_side_23 * product_count),
-                int(minimum_side_23 * product_count) - 1,
-                -1,
-            ):
-                requirements.append((
-                    "residual_side_chain",
-                    int(product_count),
-                    int(chain_nodes),
-                    {11: int(product_count), 22: int(product_count), 23: int(chain_nodes)},
-                ))
-
-    candidates: List[Dict[str, Any]] = []
-    for product_role, product_count, long_count, required in requirements:
-        consumed_count = int(sum(required.values()))
-        if consumed_count > int(total):
-            continue
-        conversion_count = int(sum(_deficit(pool, required).values()))
-        if conversion_count <= 0 or conversion_count > max(0, int(max_conversions)):
-            continue
-        fitted = _fit_residual_required_counts(
-            pool=pool,
-            required_counts=required,
-            H=H,
-            E_target=E_target,
-            h_tolerance=h_tolerance,
-            special_degree_meta=special_degree_meta,
-            su11_rotation_index=su11_rotation_index,
-            max_conversions=max_conversions,
-            max_h_compensation_ops=max_h_compensation_ops,
+    remaining_flex_capacity: Optional[int] = None,
+) -> List[Tuple[str, int, Dict[int, int]]]:
+    requirements: List[Tuple[str, int, Dict[int, int]]] = []
+    allow_flex = bool(
+        int(remaining_flex_chains) > 0
+        or (
+            remaining_flex_capacity is not None
+            and int(remaining_flex_capacity) > 0
         )
-        if fitted is None:
-            continue
-        fitted.update({
+    )
+    if allow_flex:
+        preferred_flex_23 = max(int(residual_flex_min_23), int(residual_flex_preferred_23))
+        # The configured minimum controls the normal preference, not topology
+        # legality. One SU23 is still a valid last-resort flex chain.
+        for chain_nodes in range(int(preferred_flex_23), 0, -1):
+            requirements.append((
+                "residual_flex_chain",
+                int(chain_nodes),
+                {11: 2, 23: int(chain_nodes)},
+            ))
+
+    preferred_side_23 = max(int(residual_side_min_23), int(residual_side_preferred_23))
+    # 11-22 is a complete side chain and must remain available when no SU23
+    # is left in the residual pool.
+    for chain_nodes in range(int(preferred_side_23), -1, -1):
+        requirements.append((
+            "residual_side_chain",
+            int(chain_nodes),
+            {11: 1, 22: 1, 23: int(chain_nodes)},
+        ))
+    return requirements
+
+
+def _residual_product_contract(
+    *,
+    product_role: str,
+    chain_23_count: int,
+    required_counts: Dict[int, int],
+    contract_id: int,
+) -> TopologyClosureContract:
+    sequence = _residual_product_sequence(product_role, chain_23_count)
+    return TopologyClosureContract(
+        contract_id=int(contract_id),
+        contract_kind="residual_conversion",
+        phase="residual_resource_self_closure",
+        priority=0 if product_role == "residual_flex_chain" else 1,
+        target_role="residual_resource_conversion",
+        mainline_slots=[TopologyClosureSlot(
+            slot_id=f"residual:{int(contract_id)}:mainline",
+            kind="RESOURCE_PATH",
+            anchor_node_id=-1,
+            anchor_role="resource_path",
+            required_su_sequence=list(sequence),
+        )],
+        required_counts=dict(required_counts),
+        expected_topology=_residual_product_topology(product_role, chain_23_count),
+        diagnostics={
             "product_role": str(product_role),
-            "product_count": int(product_count),
-            "long_product_count": int(long_count),
-            "consumed_count": int(consumed_count),
-            "deficit_conversion_count": int(conversion_count),
-            "conversion_count": len(list(fitted["conversions"])),
-        })
-        candidates.append(fitted)
-    if not candidates:
-        return None
-    return min(
-        candidates,
-        key=lambda item: (
-            -int(item["consumed_count"]),
-            int(item["conversion_count"]),
-            float(item["h_error"]),
-            tuple(int(op.node_ids[0]) for op in list(item["conversions"])),
-        ),
+            "chain_23_count": int(chain_23_count),
+            "residual_stepwise": True,
+        },
     )
 
 
-def _residual_template_fit_plan(
+def _plan_next_residual_product(
     *,
     phase_eval: Any,
-    pool: Dict[int, List[int]],
+    iteration_ledger: Any,
     H: torch.Tensor,
     E_target: Any,
     h_tolerance: float,
@@ -739,259 +552,317 @@ def _residual_template_fit_plan(
     residual_side_min_23: int,
     max_conversions: int,
     max_h_compensation_ops: int,
-) -> Optional[Stage3AdjustmentPlan]:
-    fitted = _best_residual_template_fit(
-        pool=pool,
-        H=H,
-        E_target=E_target,
-        h_tolerance=h_tolerance,
-        special_degree_meta=special_degree_meta,
-        su11_rotation_index=su11_rotation_index,
+    contract_id: int,
+    remaining_flex_capacity: Optional[int] = None,
+    prefix_groups: Optional[Sequence[Any]] = None,
+    accounting_initial_pool: Optional[Dict[int, List[int]]] = None,
+    forbidden_primary_conversion_signatures: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    pool = deepcopy(getattr(iteration_ledger, "available_ids_by_su", {}) or {})
+    required_flex = int(remaining_flex_chains) > 0
+    template_specs = _residual_template_specs(
         remaining_flex_chains=remaining_flex_chains,
         residual_flex_preferred_23=residual_flex_preferred_23,
         residual_flex_min_23=residual_flex_min_23,
         residual_side_preferred_23=residual_side_preferred_23,
         residual_side_min_23=residual_side_min_23,
-        max_conversions=max_conversions,
-        max_h_compensation_ops=max_h_compensation_ops,
+        remaining_flex_capacity=remaining_flex_capacity,
     )
-    if fitted is None:
-        return None
-    conversions = list(fitted["conversions"])
-    H_after = fitted["H_after"].detach().clone()
-    inventory_before = {int(key): len(values) for key, values in pool.items()}
-    inventory_after = dict(inventory_before)
-    for conversion in conversions:
-        inventory_after[int(conversion.from_su)] = int(inventory_after.get(int(conversion.from_su), 0)) - 1
-        inventory_after[int(conversion.to_su)] = int(inventory_after.get(int(conversion.to_su), 0)) + 1
-    combined_delta: Dict[int, int] = {}
-    for conversion in conversions:
-        combined_delta[int(conversion.from_su)] = int(combined_delta.get(int(conversion.from_su), 0)) - 1
-        combined_delta[int(conversion.to_su)] = int(combined_delta.get(int(conversion.to_su), 0)) + 1
-    H_after_primary = _apply_conversion_to_histogram(H, conversions[0])
-    if H_after_primary is None:
-        return None
-    group = AtomicAdjustmentGroup(
-        primary_op=conversions[0],
-        h_compensation_ops=list(conversions[1:]),
-        combined_delta={int(key): int(value) for key, value in combined_delta.items() if int(value) != 0},
-        demand_before=dict(fitted["required_counts"]),
-        demand_after={},
-        h_before=_h_total(H, special_degree_meta),
-        h_after_primary=_h_total(H_after_primary, special_degree_meta),
-        h_after_final=float(fitted["h_after"]),
-    )
-    histogram = HistogramAdjustmentPlan(
-        phase="residual_resource_self_closure",
-        groups=[group],
-        primary_adjustment_count=len(conversions),
-        physical_conversion_count=sum(2 if op.via_su is not None else 1 for op in conversions),
-        H_before=H.detach().clone(),
-        H_after=H_after,
-        demand_before=dict(fitted["required_counts"]),
-        demand_after=dict(fitted["required_counts"]),
-        inventory_before=inventory_before,
-        inventory_after=inventory_after,
-        unresolved_counts={},
-        su11_rotation_index_before=int(su11_rotation_index),
-        su11_rotation_index_after=int(fitted["rotation_after"]),
-    )
-    transaction = TopologyResourceTransaction(
-        phase="residual_resource_self_closure",
-        contract_id=2_750_000,
-        target_role="residual_resource_conversion",
-        converted_node_ids=[int(op.node_ids[0]) for op in conversions],
-        conversion_path=[op.to_dict() for op in conversions],
-        h_before=float(group.h_before),
-        h_after_primary=float(group.h_after_primary),
-        h_after=float(group.h_after_final),
-        commit_scope="physical_histogram",
-        committed=True,
-    )
-    plan = Stage3AdjustmentPlan(
-        ok=True,
-        reason="stage3_rebuild_required",
-        phase="residual_resource_self_closure",
-        plan_kind="residual_atomic_template_fit",
-        pre_assembly_gate="residual_resource_self_closure",
-        active_subphase="residual_resource_self_closure",
-        hard_required_counts={str(key): int(value) for key, value in fitted["required_counts"].items()},
-        histogram_adjustment_plan=histogram,
-        planned_conversions=[
-            Stage3AdjustmentOp(
-                op="convert",
-                from_su=int(conversion.from_su),
-                to_su=int(conversion.to_su),
-                node_id=int(conversion.node_ids[0]),
-                reason=str(conversion.reason),
-                via_su=conversion.via_su,
-            )
-            for conversion in conversions
-        ],
-        phase_result=Stage3PhaseResult(
-            active_phase="residual_resource_self_closure",
-            rebuild_required=True,
-            primary_adjustment_count=len(conversions),
-            h_compensation_count=max(0, len(conversions) - 1),
-            transactions=[transaction],
-            stop_reason="stage3_rebuild_required",
-        ),
-        runtime=_runtime_with_pool(phase_eval, pool),
-    )
-    plan.diagnostics = {
-        "stage3_phase": "residual_resource_self_closure",
-        "residual_template_fit": {
-            key: value
-            for key, value in fitted.items()
-            if key not in {"conversions", "H_after"}
-        },
-        "su11_rotation_index_after": int(fitted["rotation_after"]),
-    }
-    return plan
+    if required_flex:
+        template_specs = [
+            item for item in template_specs if item[0] == "residual_flex_chain"
+        ]
+    attempts: List[Dict[str, Any]] = []
 
+    # First inspect every legal template against the unchanged ledger. A
+    # preferred long template must never trigger conversions before a shorter
+    # template that can already be assembled from real residual resources.
+    direct_candidates: List[Tuple[Tuple[int, int, int], Dict[str, Any]]] = []
+    for template_index, (product_role, chain_23_count, required_counts) in enumerate(template_specs):
+        contract = _residual_product_contract(
+            product_role=product_role,
+            chain_23_count=chain_23_count,
+            required_counts=required_counts,
+            contract_id=int(contract_id),
+        )
+        updated_ledger, transaction, direct_proof = _ledger_transaction(
+            ledger=iteration_ledger,
+            contract=contract,
+            phase="residual_resource_self_closure",
+            H=H,
+            special_degree_meta=special_degree_meta,
+        )
+        if transaction is not None:
+            direct_candidates.append((
+                (
+                    -sum(int(value) for value in required_counts.values()),
+                    0 if product_role == "residual_flex_chain" else 1,
+                    int(template_index),
+                ),
+                {
+                    "mode": "direct",
+                    "ledger": updated_ledger,
+                    "transaction": transaction,
+                    "product_role": product_role,
+                    "chain_23_count": int(chain_23_count),
+                    "required_counts": dict(required_counts),
+                },
+            ))
+            continue
+        attempts.append({
+            "product_role": product_role,
+            "chain_23_count": int(chain_23_count),
+            "required_counts": dict(required_counts),
+            "reason": str(direct_proof.get("reason", "direct_resource_shortage") or "direct_resource_shortage"),
+            "mode": "direct",
+        })
 
-def _residual_infeasibility_proof(
-    *,
-    pool: Dict[int, List[int]],
-    H: torch.Tensor,
-    E_target: Any,
-    h_tolerance: float,
-    special_degree_meta: Optional[Dict[str, Any]],
-    remaining_flex_chains: int,
-    residual_flex_preferred_23: int,
-    residual_flex_min_23: int,
-    residual_side_preferred_23: int,
-    residual_side_min_23: int,
-    max_conversions: int,
-) -> Dict[str, Any]:
-    target_h = None
+    if direct_candidates:
+        _, selected = min(direct_candidates, key=lambda item: item[0])
+        selected["attempts"] = list(attempts)
+        selected["selection_reason"] = "all_direct_templates_checked_before_conversion"
+        return selected
+
+    total_available = sum(
+        len(pool.get(int(su_type), []) or [])
+        for su_type in (11, 12, 13, 22, 23, 24)
+    )
+    conversion_candidates: List[Tuple[Tuple[float, ...], Dict[str, Any]]] = []
+    target_h: Optional[float] = None
     try:
         target_h = float(E_target.detach().cpu().float()[1].item())
     except Exception:
         target_h = None
-    current_h = _h_total(H, special_degree_meta)
-    h_bounds = {}
-    if target_h is not None and target_h > 0:
-        h_bounds = {
-            "target": float(target_h),
-            "lower": float(target_h) * (1.0 - float(h_tolerance)),
-            "upper": float(target_h) * (1.0 + float(h_tolerance)),
-            "current": float(current_h),
-        }
-    return {
-        "reason": "no_executable_residual_template_fit",
-        "remaining_counts": {
-            str(key): len(values)
-            for key, values in sorted(pool.items())
-            if list(values or [])
-        },
-        "remaining_flex_target": int(remaining_flex_chains),
-        "template_priority": (
-            ["11-23...-11"]
-            if int(remaining_flex_chains) > 0
-            else ["11-23-23-22", "11-23-22"]
-        ),
-        "allowed_conversion_sources": [11, 12, 13, 22, 23, 24],
-        "allowed_template_resources": [11, 22, 23, 24],
-        "residual_flex_preferred_23": int(residual_flex_preferred_23),
-        "residual_flex_min_23": int(residual_flex_min_23),
-        "residual_side_preferred_23": int(residual_side_preferred_23),
-        "residual_side_min_23": int(residual_side_min_23),
-        "max_atomic_conversions": int(max_conversions),
-        "h_bounds": h_bounds,
-        "executable": False,
-    }
+    h_lower, h_upper = h_soft_bounds(target_h)
+
+    for template_index, (product_role, chain_23_count, required_counts) in enumerate(template_specs):
+        direct_coverage = sum(
+            min(len(pool.get(int(su_type), []) or []), int(count))
+            for su_type, count in required_counts.items()
+        )
+        template_size = sum(int(value) for value in required_counts.values())
+        if not required_flex and int(direct_coverage) <= 0:
+            attempts.append({
+                "product_role": product_role,
+                "chain_23_count": int(chain_23_count),
+                "required_counts": dict(required_counts),
+                "reason": "optional_template_has_no_existing_matching_resource",
+                "mode": "conversion",
+            })
+            continue
+        if sum(required_counts.values()) > int(total_available):
+            attempts.append({
+                "product_role": product_role,
+                "chain_23_count": int(chain_23_count),
+                "required_counts": dict(required_counts),
+                "reason": "insufficient_total_residual_nodes",
+                "mode": "conversion",
+            })
+            continue
+        contract = _residual_product_contract(
+            product_role=product_role,
+            chain_23_count=chain_23_count,
+            required_counts=required_counts,
+            contract_id=int(contract_id),
+        )
+        candidate_plan = _transaction_plan(
+            phase_eval=phase_eval,
+            contract=contract,
+            pool=pool,
+            H=H,
+            E_target=E_target,
+            max_primary_adjustments=max_conversions,
+            max_h_compensation_ops=max_h_compensation_ops,
+            h_tolerance=h_tolerance,
+            special_degree_meta=special_degree_meta,
+            su11_rotation_index=su11_rotation_index,
+            iteration_ledger=iteration_ledger,
+            prefix_groups=prefix_groups,
+            accounting_initial_pool=accounting_initial_pool,
+            forbidden_primary_conversion_signatures=forbidden_primary_conversion_signatures,
+            protected_resource_counts={
+                11: 2 * max(0, int(remaining_flex_chains)),
+                23: max(0, int(remaining_flex_chains)),
+            },
+        )
+        attempts.append({
+            "product_role": product_role,
+            "chain_23_count": int(chain_23_count),
+            "required_counts": dict(required_counts),
+            "reason": str(candidate_plan.reason),
+            "blocked_reason": str(candidate_plan.blocked_reason or ""),
+            "unresolved_counts": dict(candidate_plan.unresolved_counts or {}),
+            "mode": "conversion",
+        })
+        if candidate_plan.ok:
+            histogram = candidate_plan.histogram_adjustment_plan
+            primary_count = int(getattr(histogram, "primary_adjustment_count", 0) or 0)
+            h_after = _h_total(histogram.H_after, special_degree_meta)
+            h_before = _h_total(H, special_degree_meta)
+            h_after_primary = (
+                float(histogram.groups[-1].h_after_primary)
+                if list(histogram.groups or [])
+                else float(h_after)
+            )
+            if h_lower is None or h_upper is None:
+                h_violation = 0.0
+            elif float(h_after) < float(h_lower):
+                h_violation = float(h_lower) - float(h_after)
+            elif float(h_after) > float(h_upper):
+                h_violation = float(h_after) - float(h_upper)
+            else:
+                h_violation = 0.0
+            h_error = (
+                abs(float(h_after) - float(target_h))
+                if target_h is not None
+                else 0.0
+            )
+            optional_h_worsened = bool(
+                not required_flex
+                and h_lower is not None
+                and h_upper is not None
+                and (
+                    (float(h_before) <= float(h_upper) < float(h_after_primary))
+                    or (float(h_before) >= float(h_lower) > float(h_after_primary))
+                    or (
+                        float(h_before) > float(h_upper)
+                        and float(h_after_primary) >= float(h_before)
+                    )
+                    or (
+                        float(h_before) < float(h_lower)
+                        and float(h_after_primary) <= float(h_before)
+                    )
+                )
+            )
+            missing_slot_count = max(0, int(template_size) - int(direct_coverage))
+            if not required_flex and (
+                int(primary_count) > int(missing_slot_count)
+                or bool(optional_h_worsened)
+            ):
+                attempts.append({
+                    "product_role": product_role,
+                    "chain_23_count": int(chain_23_count),
+                    "required_counts": dict(required_counts),
+                    "reason": (
+                        "optional_conversion_worsens_h_soft_balance"
+                        if optional_h_worsened
+                        else "optional_template_uses_excess_conversions"
+                    ),
+                    "mode": "conversion",
+                    "h_before": float(h_before),
+                    "h_after_primary": float(h_after_primary),
+                    "h_after": float(h_after),
+                })
+                continue
+            if required_flex:
+                score = (
+                    float(primary_count),
+                    float(h_violation),
+                    float(h_error),
+                    float(-direct_coverage),
+                    float(-int(chain_23_count)),
+                    float(template_index),
+                )
+            else:
+                score = (
+                    float(h_violation),
+                    float(h_error),
+                    float(primary_count),
+                    float(-direct_coverage),
+                    float(-template_size),
+                    float(template_index),
+                )
+            candidate_plan.plan_kind = "residual_single_product_conversion"
+            candidate_plan.diagnostics.update({
+                "residual_product_role": product_role,
+                "residual_chain_23_count": int(chain_23_count),
+                "residual_required_counts": dict(required_counts),
+                "residual_candidate_attempts": list(attempts),
+                "residual_candidate_score": list(score),
+                "residual_selection_rule": (
+                    "minimum_conversion_then_h_then_existing_resource_use"
+                    if required_flex
+                    else "single_missing_slot_then_h_then_existing_resource_use"
+                ),
+            })
+            conversion_candidates.append((score, {
+                "mode": "conversion",
+                "plan": candidate_plan,
+                "product_role": product_role,
+                "chain_23_count": int(chain_23_count),
+                "required_counts": dict(required_counts),
+            }))
+    if conversion_candidates:
+        _, selected = min(conversion_candidates, key=lambda item: item[0])
+        selected["attempts"] = list(attempts)
+        selected["selection_reason"] = (
+            "ranked_required_flex_conversion_candidates"
+            if required_flex
+            else "ranked_single_gap_optional_conversion_candidates"
+        )
+        return selected
+    return {"mode": "none", "attempts": attempts}
 
 
-def _residual_su24_terminalization_plan(
+def _attach_conversion_only_accounting(
     *,
     phase_eval: Any,
-    pool: Dict[int, List[int]],
-    H: torch.Tensor,
-    E_target: Any,
-    h_tolerance: float,
-    special_degree_meta: Optional[Dict[str, Any]],
-    su11_rotation_index: int,
-    max_conversions: int,
-    max_h_compensation_ops: int,
-) -> Optional[Stage3AdjustmentPlan]:
-    node_ids = list(pool.get(24, []) or [])[:max(0, min(10, int(max_conversions)))]
-    if not node_ids:
-        return None
-    plan = Stage3AdjustmentPlan(
-        ok=False,
-        reason="residual_su24_terminalization_pending",
-        phase="residual_resource_self_closure",
-        plan_kind="residual_su24_to_su23_terminalization",
-        pre_assembly_gate="residual_resource_self_closure",
-        active_subphase="residual_resource_self_closure",
-        planned_conversions=[
-            Stage3AdjustmentOp(
-                op="convert",
-                from_su=24,
-                to_su=23,
-                node_id=int(node_id),
-                reason="residual_terminalize_su24_to_su23",
-            )
-            for node_id in node_ids
-        ],
-        runtime=_runtime_with_pool(phase_eval, pool),
+    histogram: HistogramAdjustmentPlan,
+    initial_pool: Dict[int, List[int]],
+    final_pool: Dict[int, List[int]],
+    committed_transactions: Optional[Sequence[TopologyResourceTransaction]] = None,
+) -> Dict[str, Any]:
+    aggregate_ids = _round_resource_ids(phase_eval)
+    groups = list(histogram.groups or [])
+    transactions = (
+        list(committed_transactions)
+        if committed_transactions is not None
+        else _assembly_product_transactions(phase_eval, histogram.H_before, None)
     )
-    histogram = build_histogram_adjustment_plan(
-        plan=plan,
-        H=H,
-        E_target=E_target,
-        max_primary_adjustments=len(node_ids),
-        max_h_compensation_ops=max_h_compensation_ops,
-        h_tolerance=h_tolerance,
-        special_degree_meta=special_degree_meta,
-        su11_rotation_index=su11_rotation_index,
+    accounting = build_resource_accounting_snapshot(
+        aggregate_ids_before_by_su=aggregate_ids,
+        authorized_ids_before_by_su=initial_pool,
+        final_remaining_ids_by_su=final_pool,
+        committed_claimed_ids_by_su=_committed_occupied_ids_by_su(
+            transactions,
+            aggregate_ids_by_su=aggregate_ids,
+            groups=groups,
+        ),
+        groups=groups,
     )
-    if not list(histogram.groups or []):
-        return None
-    _bind_real_node_ids(histogram, pool)
-    converted_ids = [
-        int(value)
-        for group in list(histogram.groups or [])
-        for op in [group.primary_op] + list(group.h_compensation_ops or [])
-        for value in list(op.node_ids or [])
-    ]
-    transaction = TopologyResourceTransaction(
-        phase="residual_resource_self_closure",
-        contract_id=2_500_000,
-        target_role="residual_su24_terminalization",
-        converted_node_ids=converted_ids,
-        conversion_path=[
-            op.to_dict()
-            for group in list(histogram.groups or [])
-            for op in [group.primary_op] + list(group.h_compensation_ops or [])
-        ],
-        h_before=_h_total(H, special_degree_meta),
-        h_after_primary=float(histogram.groups[0].h_after_primary),
-        h_after=_h_total(histogram.H_after, special_degree_meta),
-        commit_scope="physical_histogram",
-        committed=True,
-    )
-    plan.ok = True
-    plan.reason = "stage3_rebuild_required"
-    plan.histogram_adjustment_plan = histogram
-    plan.phase_result = Stage3PhaseResult(
-        active_phase="residual_resource_self_closure",
-        phase_completed=False,
-        rebuild_required=True,
-        primary_adjustment_count=int(histogram.primary_adjustment_count),
-        h_compensation_count=_h_compensation_count(histogram.groups),
-        transactions=[transaction],
-        stop_reason="stage3_rebuild_required",
-    )
-    plan.diagnostics = {
-        "stage3_phase": "residual_resource_self_closure",
-        "terminalization": "24_to_23",
-        "remaining_su24_before": len(pool.get(24, []) or []),
-        "primary_conversion_limit": min(10, int(max_conversions)),
-        "su11_rotation_index_after": int(histogram.su11_rotation_index_after),
+    histogram.inventory_before = {
+        int(key): int(value)
+        for key, value in dict(
+            accounting.get("authorized_inventory_before", {}) or {}
+        ).items()
     }
-    return plan
+    histogram.inventory_after = {
+        int(key): int(value)
+        for key, value in dict(
+            accounting.get("authorized_inventory_after", {}) or {}
+        ).items()
+    }
+    histogram.aggregate_inventory_before = {
+        int(key): int(value)
+        for key, value in dict(
+            accounting.get("aggregate_inventory_before", {}) or {}
+        ).items()
+    }
+    histogram.aggregate_inventory_after = {
+        int(key): int(value)
+        for key, value in dict(
+            accounting.get("aggregate_inventory_after", {}) or {}
+        ).items()
+    }
+    histogram.aggregate_required_counts = {
+        int(key): int(value)
+        for key, value in dict(
+            accounting.get("aggregate_required_counts", {}) or {}
+        ).items()
+    }
+    histogram.protected_resource_counts = _phase_protected_resource_counts(phase_eval)
+    histogram.accounting_diagnostics = dict(accounting)
+    return accounting
 
 
 def _residual_orphan_terminalization_plan(
@@ -1004,26 +875,13 @@ def _residual_orphan_terminalization_plan(
     special_degree_meta: Optional[Dict[str, Any]],
     su11_rotation_index: int,
     max_conversions: int,
-    max_h_compensation_ops: int,
+    prefix_transactions: Optional[Sequence[TopologyResourceTransaction]] = None,
 ) -> Optional[Stage3AdjustmentPlan]:
     limit = max(0, min(10, int(max_conversions)))
     operations: List[Stage3AdjustmentOp] = []
-    for source in (22, 23):
+    cursor = int(su11_rotation_index)
+    for source in (22, 23, 24):
         for node_id in list(pool.get(int(source), []) or []):
-            if len(operations) >= limit:
-                break
-            operations.append(Stage3AdjustmentOp(
-                op="convert",
-                from_su=int(source),
-                to_su=11,
-                node_id=int(node_id),
-                reason="residual_orphan_to_su11",
-            ))
-        if len(operations) >= limit:
-            break
-    if not operations:
-        cursor = int(su11_rotation_index)
-        for node_id in list(pool.get(11, []) or []):
             if len(operations) >= limit:
                 break
             target, cursor_after = next_su11_aromatic_target(cursor)
@@ -1031,12 +889,29 @@ def _residual_orphan_terminalization_plan(
                 break
             operations.append(Stage3AdjustmentOp(
                 op="convert",
-                from_su=11,
+                from_su=int(source),
                 to_su=int(target),
                 node_id=int(node_id),
-                reason="residual_terminal_su11_aromatic_rotation",
+                reason="residual_orphan_via_su11_aromatic_rotation",
+                via_su=11,
             ))
             cursor = int(cursor_after)
+        if len(operations) >= limit:
+            break
+    for node_id in list(pool.get(11, []) or []):
+        if len(operations) >= limit:
+            break
+        target, cursor_after = next_su11_aromatic_target(cursor)
+        if target is None:
+            break
+        operations.append(Stage3AdjustmentOp(
+            op="convert",
+            from_su=11,
+            to_su=int(target),
+            node_id=int(node_id),
+            reason="residual_terminal_su11_aromatic_rotation",
+        ))
+        cursor = int(cursor_after)
     if not operations:
         return None
     plan = Stage3AdjustmentPlan(
@@ -1054,14 +929,26 @@ def _residual_orphan_terminalization_plan(
         H=H,
         E_target=E_target,
         max_primary_adjustments=len(operations),
-        max_h_compensation_ops=max_h_compensation_ops,
+        # Terminalization must strictly reduce the number of unassembled
+        # closure resources. H compensation that creates SU22/SU23 would undo
+        # that progress and can cause an endless rebuild/terminalize loop.
+        max_h_compensation_ops=0,
         h_tolerance=h_tolerance,
         special_degree_meta=special_degree_meta,
         su11_rotation_index=su11_rotation_index,
     )
     if not list(histogram.groups or []):
         return None
-    _bind_real_node_ids(histogram, pool)
+    pool_after = _bind_real_node_ids(histogram, pool)
+    accounting = _attach_conversion_only_accounting(
+        phase_eval=phase_eval,
+        histogram=histogram,
+        initial_pool=pool,
+        final_pool=pool_after,
+        committed_transactions=prefix_transactions,
+    )
+    if not bool(accounting.get("ok", False)):
+        return None
     all_ops = [
         op
         for group in list(histogram.groups or [])
@@ -1095,11 +982,12 @@ def _residual_orphan_terminalization_plan(
     )
     plan.diagnostics = {
         "stage3_phase": "residual_resource_self_closure",
-        "terminalization": "orphan_22_23_to_11_then_11_to_13_12",
+        "terminalization": "orphan_22_23_via_11_then_aromatic_rotation",
         "primary_conversion_limit": int(limit),
         "su11_rotation_index_after": int(histogram.su11_rotation_index_after),
+        "resource_accounting": dict(accounting),
     }
-    return plan
+    return _annotate_h_soft_rule(plan, h_tolerance)
 
 
 def _flex_excess_reduction_plan(
@@ -1118,34 +1006,97 @@ def _flex_excess_reduction_plan(
     excess = max(0, int(audit.get("above_range_excess", 0) or 0))
     limit = max(0, min(10, int(max_primary_adjustments)))
     operations: List[Stage3AdjustmentOp] = []
-
-    for node_id in list(pool.get(12, []) or []):
-        if len(operations) >= limit or len(operations) >= excess:
+    target_h = None
+    try:
+        target_h = float(E_target.detach().cpu().float()[1].item())
+    except Exception:
+        target_h = None
+    inventory_work = {
+        int(su_type): len(list(pool.get(int(su_type), []) or []))
+        for su_type in (10, 11, 12, 13, 22, 23, 24)
+    }
+    H_work = H.detach().clone().long()
+    used_node_ids: Set[int] = set()
+    selected_excess_units = 0
+    while selected_excess_units < int(excess) and len(operations) < int(limit):
+        candidate_bundles: List[Tuple[List[HistogramConversion], int]] = []
+        for node_id in list(pool.get(12, []) or []):
+            if int(node_id) in used_node_ids or len(operations) + 1 > int(limit):
+                continue
+            candidate_bundles.append((
+                [HistogramConversion(
+                    from_su=12,
+                    to_su=11,
+                    count=1,
+                    reason="flex_excess_reduce_su12_to_su11",
+                    node_ids=[int(node_id)],
+                )],
+                1,
+            ))
+        su10_ids = [
+            int(node_id)
+            for node_id in list(pool.get(10, []) or [])
+            if int(node_id) not in used_node_ids
+        ]
+        for pair_index in range(len(su10_ids) // 2):
+            if len(operations) + 2 > int(limit):
+                break
+            pair_ids = su10_ids[2 * pair_index:2 * pair_index + 2]
+            candidate_bundles.append((
+                [
+                    HistogramConversion(
+                        from_su=10,
+                        to_su=11,
+                        count=1,
+                        reason="flex_excess_reduce_su10_pair_to_su11",
+                        node_ids=[int(node_id)],
+                    )
+                    for node_id in pair_ids
+                ],
+                1,
+            ))
+        if not candidate_bundles:
             break
-        operations.append(Stage3AdjustmentOp(
-            op="convert",
-            from_su=12,
-            to_su=11,
-            node_id=int(node_id),
-            reason="flex_excess_reduce_su12_to_su11",
-        ))
-
-    remaining_excess = max(0, excess - len(operations))
-    su10_ids = list(pool.get(10, []) or [])
-    for pair_index in range(min(remaining_excess, len(su10_ids) // 2)):
-        pair_ids = su10_ids[2 * pair_index:2 * pair_index + 2]
-        if len(operations) + 2 > limit:
-            break
-        operations.extend([
-            Stage3AdjustmentOp(
-                op="convert",
-                from_su=10,
-                to_su=11,
-                node_id=int(node_id),
-                reason="flex_excess_reduce_su10_pair_to_su11",
+        context = ConversionContext(
+            inventory=dict(inventory_work),
+            demand={},
+            current_H=H_work,
+            target_h=target_h,
+            flex_audit=dict(audit or {}),
+            su11_rotation_index=int(su11_rotation_index),
+            phase="flex_range_reconciliation",
+            reason="flex_excess_reduction",
+        )
+        scored = []
+        for bundle, unit_count in candidate_bundles:
+            score = score_conversion_bundle(
+                context,
+                bundle,
+                h_total_fn=_h_total,
+                special_degree_meta=special_degree_meta,
             )
-            for node_id in pair_ids
-        ])
+            if score.feasible:
+                scored.append((score.sort_key, bundle, int(unit_count), score))
+        if not scored:
+            break
+        _, selected_bundle, unit_count, _ = min(scored, key=lambda item: item[0])
+        next_H = apply_conversions_to_H(H_work, selected_bundle)
+        next_inventory = apply_conversions_to_inventory(inventory_work, selected_bundle)
+        if next_H is None or next_inventory is None:
+            break
+        H_work = next_H
+        inventory_work = next_inventory
+        selected_excess_units += int(unit_count)
+        for conversion in selected_bundle:
+            used_node_ids.update(int(value) for value in list(conversion.node_ids or []))
+            operations.append(Stage3AdjustmentOp(
+                op="convert",
+                from_su=int(conversion.from_su),
+                to_su=int(conversion.to_su),
+                node_id=int(conversion.node_ids[0]) if list(conversion.node_ids or []) else None,
+                reason=str(conversion.reason),
+                via_su=conversion.via_su,
+            ))
 
     proof = {
         "phase": "flex_range_reconciliation",
@@ -1159,7 +1110,7 @@ def _flex_excess_reduction_plan(
         "primary_conversion_limit": int(limit),
     }
     if not operations:
-        return Stage3AdjustmentPlan(
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
             ok=False,
             reason="phase_resource_infeasible",
             blocked_reason=str(proof["reason"]),
@@ -1176,7 +1127,7 @@ def _flex_excess_reduction_plan(
             ),
             diagnostics={"stage3_phase": "flex_range_reconciliation", "infeasibility_proof": proof},
             runtime=_runtime_with_pool(phase_eval, pool),
-        )
+        ), h_tolerance)
 
     plan = Stage3AdjustmentPlan(
         ok=False,
@@ -1214,13 +1165,38 @@ def _flex_excess_reduction_plan(
             "stage3_phase": "flex_range_reconciliation",
             "infeasibility_proof": proof,
         }
-        return plan
+        return _annotate_h_soft_rule(plan, h_tolerance)
 
     all_ops = [
         op
         for group in list(histogram.groups or [])
         for op in [group.primary_op] + list(group.h_compensation_ops or [])
     ]
+    pool_after = _bind_real_node_ids(histogram, pool)
+    accounting = _attach_conversion_only_accounting(
+        phase_eval=phase_eval,
+        histogram=histogram,
+        initial_pool=pool,
+        final_pool=pool_after,
+    )
+    if not bool(accounting.get("ok", False)):
+        proof["reason"] = "stage3_resource_accounting_invariant_failed"
+        proof["resource_accounting"] = dict(accounting)
+        plan.reason = "phase_resource_infeasible"
+        plan.blocked_reason = str(proof["reason"])
+        plan.histogram_adjustment_plan = histogram
+        plan.phase_result = Stage3PhaseResult(
+            active_phase="flex_range_reconciliation",
+            phase_completed=False,
+            rebuild_required=False,
+            stop_reason="phase_resource_infeasible",
+            infeasibility_proof=proof,
+        )
+        plan.diagnostics = {
+            "stage3_phase": "flex_range_reconciliation",
+            "infeasibility_proof": proof,
+        }
+        return _annotate_h_soft_rule(plan, h_tolerance)
     transaction = TopologyResourceTransaction(
         phase="flex_range_reconciliation",
         contract_id=-1002,
@@ -1263,23 +1239,104 @@ def _flex_excess_reduction_plan(
         "flex_excess_before": int(excess),
         "primary_conversion_limit": int(limit),
         "su11_rotation_index_after": int(histogram.su11_rotation_index_after),
+        "resource_accounting": dict(accounting),
     }
-    return plan
+    return _annotate_h_soft_rule(plan, h_tolerance)
 
 
-def _runtime_with_pool(phase_eval: Any, pool: Dict[int, List[int]]) -> Dict[str, Any]:
+def _runtime_with_pool(
+    phase_eval: Any,
+    pool: Dict[int, List[int]],
+    *,
+    protected_counts: Optional[Dict[int, int]] = None,
+) -> Dict[str, Any]:
     assembly = deepcopy(dict(getattr(phase_eval, "assembly_view", {}) or {}))
     ledger = dict(assembly.get("resource_ledger", {}) or {})
     ledger["remaining_ids_by_su"] = {str(key): list(values) for key, values in pool.items()}
     ledger["remaining_counts"] = {str(key): len(values) for key, values in pool.items()}
     ledger["remaining_counts_by_su"] = dict(ledger["remaining_counts"])
     ledger["convertible_counts"] = dict(ledger["remaining_counts"])
+    ledger["su11_donor_ids_by_su"] = {
+        str(su_type): list(pool.get(int(su_type), []) or [])
+        for su_type in (10, 12, 13)
+    }
+    ledger["su11_donor_counts"] = {
+        str(su_type): len(list(pool.get(int(su_type), []) or []))
+        for su_type in (10, 12, 13)
+    }
+    merged_protected = {
+        int(key): max(0, int(value))
+        for key, value in dict(ledger.get("protected_counts", {}) or {}).items()
+        if str(key).lstrip("-").isdigit()
+    }
+    for key, value in dict(protected_counts or {}).items():
+        merged_protected[int(key)] = max(
+            int(merged_protected.get(int(key), 0)),
+            max(0, int(value)),
+        )
+    ledger["protected_counts"] = {
+        str(key): int(value)
+        for key, value in sorted(merged_protected.items())
+        if int(value) > 0
+    }
     assembly["resource_ledger"] = ledger
     return {
         "phase_evaluation": phase_eval,
         "phase_evaluation_dict": phase_eval.to_dict(),
         "assembly_before_adjustment": assembly,
         "assembly_before_adjustment_dict": assembly,
+    }
+
+
+def _protect_future_su11_aromatic_donors(
+    pool: Dict[int, List[int]],
+    *,
+    current_required_11: int,
+    future_required_11: int,
+    aromatic_cursor: int,
+) -> Dict[int, int]:
+    available_11_after_current = max(
+        0,
+        len(list(pool.get(11, []) or [])) - max(0, int(current_required_11)),
+    )
+    future_donor_need = max(
+        0,
+        int(future_required_11) - int(available_11_after_current),
+    )
+    current_11_gap = max(
+        0,
+        int(current_required_11) - len(list(pool.get(11, []) or [])),
+    )
+    available = {
+        12: len(list(pool.get(12, []) or [])),
+        13: len(list(pool.get(13, []) or [])),
+    }
+    aromatic_total = sum(available.values())
+    protected_total = min(
+        int(future_donor_need),
+        max(0, int(aromatic_total) - int(current_11_gap)),
+    )
+    spendable_total = max(0, int(aromatic_total) - int(protected_total))
+    spendable = {12: 0, 13: 0}
+    remaining = dict(available)
+    cursor = int(aromatic_cursor)
+    for _ in range(int(spendable_total)):
+        target, cursor_after = next_su11_aromatic_target(
+            cursor,
+            available_targets=[
+                su_type for su_type in (12, 13)
+                if int(remaining.get(int(su_type), 0)) > 0
+            ],
+        )
+        if target is None:
+            break
+        spendable[int(target)] += 1
+        remaining[int(target)] -= 1
+        cursor = int(cursor_after)
+    return {
+        int(su_type): int(available[int(su_type)] - spendable[int(su_type)])
+        for su_type in (12, 13)
+        if int(available[int(su_type)] - spendable[int(su_type)]) > 0
     }
 
 
@@ -1307,10 +1364,43 @@ def _iteration_ledger_for_phase_eval(
         support_context_node_ids=support_ids,
         claimed_source_ids=claimed_source_ids,
     )
+    round_context = getattr(phase_eval, "round_context", None)
+    round_ownership = dict(
+        getattr(round_context, "ownership_by_node_id", {}) or {}
+    )
+    if round_ownership:
+        ledger.ownership_by_node_id = deepcopy(round_ownership)
+        ledger.support_context_node_ids = sorted(
+            int(node_id)
+            for node_id, owner in round_ownership.items()
+            if str(getattr(owner, "state", "") or "")
+            == Stage3OwnershipState.SUPPORT_CONTEXT.value
+        )
+        ledger.conflict_node_ids = sorted(
+            int(node_id)
+            for node_id, owner in round_ownership.items()
+            if str(getattr(owner, "state", "") or "")
+            == Stage3OwnershipState.UNCLASSIFIED_OR_CONFLICT.value
+        )
+        ledger.conflicts = deepcopy(
+            list(getattr(round_context, "conflicts", []) or [])
+        )
     ledger.generation_id = int(getattr(phase_eval, "generation_id", 0) or 0)
+    completed_products: List[Dict[str, Any]] = []
+    product_ids = set()
+    for raw in list(assembly.get("products", []) or []):
+        product = dict(raw or {})
+        if not product:
+            continue
+        product_id = str(product.get("product_id", "") or "")
+        if product_id and product_id in product_ids:
+            continue
+        if product_id:
+            product_ids.add(product_id)
+        completed_products.append(product)
     return seed_ledger_topology_state(
         ledger,
-        completed_products=list(assembly.get("products", []) or []),
+        completed_products=completed_products,
         pending_contracts=list(contracts or []),
     )
 
@@ -1323,6 +1413,12 @@ def _ledger_transaction(
     H: torch.Tensor,
     special_degree_meta: Optional[Dict[str, Any]],
 ) -> tuple[Any, Optional[TopologyResourceTransaction], Dict[str, Any]]:
+    if str(phase) in EXTERNAL_PHASE_NAMES:
+        return ledger, None, {
+            "reason": "external_contract_requires_physical_assembler",
+            "contract_id": int(contract.contract_id),
+            "phase": str(phase),
+        }
     updated, slots, claimed, proof = assign_contract_slots(ledger, contract)
     if updated is None:
         return ledger, None, dict(proof or {})
@@ -1349,6 +1445,7 @@ def _ledger_transaction(
         h_after_primary=float(h_value),
         h_after=float(h_value),
         commit_scope="iteration_ledger",
+        transaction_origin="current_plan_candidate",
         committed=True,
     )
     return updated, transaction, {}
@@ -1358,15 +1455,23 @@ def _assembly_product_transactions(
     phase_eval: Any,
     H: torch.Tensor,
     special_degree_meta: Optional[Dict[str, Any]],
+    completed_products: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> List[TopologyResourceTransaction]:
     assembly = dict(getattr(phase_eval, "assembly_view", {}) or {})
     h_value = _h_total(H, special_degree_meta)
     transactions: List[TopologyResourceTransaction] = []
-    for index, raw in enumerate(list(assembly.get("products", []) or [])):
+    products = (
+        list(completed_products or [])
+        if completed_products is not None
+        else list(assembly.get("products", []) or [])
+    )
+    for index, raw in enumerate(products):
         product = dict(raw or {})
         product_kind = str(product.get("product_kind", product.get("product_type", "")) or "")
-        phase = (
-            "external_fatty_ring_closure"
+        phase = str(product.get("phase", "") or "") or (
+            "residual_resource_self_closure"
+            if str(product.get("product_role", "") or "").startswith("residual_")
+            else "external_fatty_ring_closure"
             if "ring" in product_kind
             else "external_side_chain_closure"
             if "side" in product_kind
@@ -1387,7 +1492,7 @@ def _assembly_product_transactions(
         transactions.append(TopologyResourceTransaction(
             phase=phase,
             contract_id=int(product.get("contract_id", min(fragment_ids or [index + 1])) or index + 1),
-            target_role=product_kind,
+            target_role=str(product.get("target_role", "") or product_kind),
             source_node_ids=fixed_source_ids,
             claimed_resource_ids=claimed_resource_ids,
             product_node_ids=sorted(set(product_ids)),
@@ -1399,22 +1504,201 @@ def _assembly_product_transactions(
             h_after_primary=float(h_value),
             h_after=float(h_value),
             commit_scope="iteration_ledger",
+            transaction_origin="assembly_snapshot",
             committed=True,
         ))
     return transactions
 
 
-def _bind_real_node_ids(histogram_plan: Any, pool: Dict[int, List[int]]) -> Dict[int, List[int]]:
+def _bind_real_node_ids(
+    histogram_plan: Any,
+    pool: Dict[int, List[int]],
+    *,
+    protected_node_ids: Optional[Sequence[int]] = None,
+) -> Dict[int, List[int]]:
     work = {int(key): list(values) for key, values in pool.items()}
+    protected = {int(value) for value in list(protected_node_ids or [])}
     for group in list(getattr(histogram_plan, "groups", []) or []):
         for op in [group.primary_op] + list(group.h_compensation_ops or []):
             candidates = list(work.get(int(op.from_su), []))
-            selected = candidates[: int(op.count)]
+            requested = [int(value) for value in list(op.node_ids or [])]
+            eligible = [
+                int(value) for value in candidates if int(value) not in protected
+            ]
+            selected = (
+                requested[: int(op.count)]
+                if len(requested) >= int(op.count)
+                and set(requested[: int(op.count)]).issubset(set(eligible))
+                else eligible[: int(op.count)]
+            )
             op.node_ids = selected
-            work[int(op.from_su)] = candidates[int(op.count):]
+            selected_set = set(selected)
+            work[int(op.from_su)] = [
+                int(value) for value in candidates if int(value) not in selected_set
+            ]
             work.setdefault(int(op.to_su), []).extend(selected)
             work[int(op.to_su)] = sorted(work[int(op.to_su)])
     return work
+
+
+def _ledger_after_histogram_conversions(
+    ledger: Any,
+    histogram_plan: Any,
+) -> Any:
+    working = deepcopy(ledger)
+    working.available_ids_by_su = _bind_real_node_ids(
+        histogram_plan,
+        deepcopy(getattr(working, "available_ids_by_su", {}) or {}),
+    )
+    for group in list(getattr(histogram_plan, "groups", []) or []):
+        for op in [group.primary_op] + list(group.h_compensation_ops or []):
+            for node_id in list(op.node_ids or []):
+                owner = working.ownership_by_node_id.get(int(node_id))
+                if owner is None:
+                    continue
+                owner.su_type = int(op.to_su)
+                owner.state = (
+                    Stage3OwnershipState.REMAINING_CLOSURE_RESOURCE.value
+                    if int(op.to_su) in RESOURCE_TYPES
+                    else Stage3OwnershipState.REMAINING_AROMATIC_DONOR.value
+                )
+                owner.owner_contract_id = None
+                owner.owner_product_id = ""
+                owner.owner_slot_id = ""
+                owner.role = str(owner.state)
+    return working
+
+
+def _round_resource_ids(phase_eval: Any) -> Dict[int, List[int]]:
+    context = getattr(phase_eval, "round_context", None)
+    if context is None:
+        return _resource_ids(phase_eval)
+    result: Dict[int, List[int]] = {}
+    for raw in (
+        getattr(context, "closure_pool_ids_by_su", {}) or {},
+        getattr(context, "aromatic_donor_ids_by_su", {}) or {},
+    ):
+        for key, values in dict(raw or {}).items():
+            result.setdefault(int(key), [])
+            result[int(key)].extend(int(value) for value in list(values or []))
+    return {
+        int(key): sorted(set(values))
+        for key, values in result.items()
+    }
+
+
+def _post_conversion_resource_types(
+    aggregate_ids_by_su: Dict[int, List[int]],
+    groups: Sequence[Any],
+) -> Dict[int, int]:
+    resource_types = {
+        int(node_id): int(su_type)
+        for su_type, node_ids in dict(aggregate_ids_by_su or {}).items()
+        for node_id in list(node_ids or [])
+    }
+    for group in list(groups or []):
+        for op in [group.primary_op] + list(group.h_compensation_ops or []):
+            for node_id in list(op.node_ids or []):
+                if int(node_id) in resource_types:
+                    resource_types[int(node_id)] = int(op.to_su)
+    return resource_types
+
+
+def _committed_occupied_ids_by_su(
+    transactions: Sequence[TopologyResourceTransaction],
+    *,
+    aggregate_ids_by_su: Dict[int, List[int]],
+    groups: Sequence[Any],
+) -> Dict[int, List[int]]:
+    occupied: Dict[int, List[int]] = {}
+    resource_types = _post_conversion_resource_types(
+        aggregate_ids_by_su,
+        groups,
+    )
+    for transaction in list(transactions or []):
+        if not bool(getattr(transaction, "committed", False)):
+            continue
+        transaction_ids = {
+            int(value)
+            for value in (
+                list(getattr(transaction, "source_node_ids", []) or [])
+                + list(getattr(transaction, "product_node_ids", []) or [])
+                + [
+                    int(node_id)
+                    for values in dict(
+                        getattr(transaction, "claimed_resource_ids", {}) or {}
+                    ).values()
+                    for node_id in list(values or [])
+                ]
+            )
+            if int(value) in resource_types
+        }
+        for node_id in sorted(transaction_ids):
+            su_type = int(resource_types[int(node_id)])
+            occupied.setdefault(su_type, []).append(int(node_id))
+    return occupied
+
+
+def _ledger_occupied_ids_by_su(
+    ledger: Any,
+    *,
+    aggregate_ids_by_su: Dict[int, List[int]],
+) -> Dict[int, List[int]]:
+    aggregate_ids = {
+        int(node_id)
+        for node_ids in dict(aggregate_ids_by_su or {}).values()
+        for node_id in list(node_ids or [])
+    }
+    occupied: Dict[int, List[int]] = {}
+    for raw_product in list(getattr(ledger, "completed_products", []) or []):
+        product = dict(raw_product or {})
+        product_ids = {
+            int(node_id)
+            for node_id in (
+                list(product.get("fixed_source_node_ids", []) or [])
+                + [
+                    int(value)
+                    for values in dict(
+                        product.get("claimed_resource_ids_by_su", {})
+                        or product.get("claimed_resource_ids", {})
+                        or {}
+                    ).values()
+                    for value in list(values or [])
+                ]
+            )
+            if int(node_id) in aggregate_ids
+        }
+        for node_id in sorted(product_ids):
+            owner = getattr(ledger, "ownership_by_node_id", {}).get(int(node_id))
+            if owner is None:
+                continue
+            occupied.setdefault(int(owner.su_type), []).append(int(node_id))
+    return occupied
+
+
+def _phase_protected_resource_counts(phase_eval: Any) -> Dict[int, int]:
+    assembly = dict(getattr(phase_eval, "assembly_view", {}) or {})
+    ledger = dict(assembly.get("resource_ledger", {}) or {})
+    diagnostics = dict(assembly.get("diagnostics", {}) or {})
+    raw = (
+        assembly.get("protected_resource_counts")
+        or ledger.get("protected_counts")
+        or diagnostics.get("protected_resource_counts")
+        or {}
+    )
+    return {
+        int(key): max(0, int(value))
+        for key, value in dict(raw or {}).items()
+        if str(key).lstrip("-").isdigit()
+    }
+
+
+def _group_operations(groups: Sequence[Any]) -> List[Dict[str, Any]]:
+    return [
+        op.to_dict()
+        for group in list(groups or [])
+        for op in [group.primary_op] + list(group.h_compensation_ops or [])
+    ]
 
 
 def _h_compensation_count(groups: Sequence[Any]) -> int:
@@ -1430,11 +1714,76 @@ def _finalize_phase_plan(
     initial_pool: Dict[int, List[int]],
     final_pool: Dict[int, List[int]],
     groups: List[Any],
-    ops: List[Dict[str, Any]],
     transactions: List[TopologyResourceTransaction],
     rotation_before: int,
     rotation_after: int,
+    h_tolerance: float,
+    infeasible_contracts: Optional[List[Dict[str, Any]]] = None,
+    stage_diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Stage3AdjustmentPlan:
+    phase_infeasible_contracts = [
+        dict(item or {})
+        for item in list(infeasible_contracts or [])
+    ]
+    phase_transactions = [
+        item
+        for item in list(transactions or [])
+        if (
+            str(getattr(item, "phase", "") or "") == str(phase)
+            or (
+                str(phase) == EXTERNAL_STAGE
+                and str(getattr(item, "phase", "") or "") in EXTERNAL_PHASE_NAMES
+            )
+        )
+    ]
+    requirement_contracts: List[Dict[str, Any]] = []
+    for transaction in phase_transactions:
+        required_counts = {
+            int(key): len(list(values or []))
+            for key, values in dict(
+                getattr(transaction, "claimed_resource_ids", {}) or {}
+            ).items()
+            if list(values or [])
+        }
+        if not required_counts:
+            required_counts = {
+                int(key): int(value)
+                for key, value in required_counts_from_slots(
+                    list(getattr(transaction, "slot_assignments", []) or [])
+                ).items()
+                if int(value) > 0
+            }
+        requirement_contracts.append({
+            "contract_id": int(getattr(transaction, "contract_id", -1)),
+            "contract_kind": "topology_closure",
+            "target_role": str(getattr(transaction, "target_role", "") or ""),
+            "source_fragment_ids": [],
+            "claimed_source_node_ids": [
+                int(value)
+                for value in list(getattr(transaction, "source_node_ids", []) or [])
+            ],
+            "required_counts": {
+                str(key): int(value) for key, value in required_counts.items()
+            },
+        })
+    aggregate_ids = _round_resource_ids(phase_eval)
+    accounting = build_resource_accounting_snapshot(
+        aggregate_ids_before_by_su=aggregate_ids,
+        authorized_ids_before_by_su=initial_pool,
+        final_remaining_ids_by_su=final_pool,
+        committed_claimed_ids_by_su=_committed_occupied_ids_by_su(
+            transactions,
+            aggregate_ids_by_su=aggregate_ids,
+            groups=groups,
+        ),
+        groups=groups,
+    )
+    aggregate_required_counts = {
+        int(key): int(value)
+        for key, value in dict(accounting.get("aggregate_required_counts", {}) or {}).items()
+        if int(value) > 0
+    }
+    demand_before: Dict[int, int] = {}
     histogram = HistogramAdjustmentPlan(
         phase=str(phase),
         groups=list(groups),
@@ -1446,16 +1795,117 @@ def _finalize_phase_plan(
         ),
         H_before=H_before.detach().clone(),
         H_after=H_after.detach().clone(),
-        inventory_before={int(key): len(values) for key, values in initial_pool.items()},
-        inventory_after={int(key): len(values) for key, values in final_pool.items()},
-        demand_before={},
-        demand_after={},
+        inventory_before={
+            int(key): int(value)
+            for key, value in dict(accounting.get("authorized_inventory_before", {}) or {}).items()
+        },
+        inventory_after={
+            int(key): int(value)
+            for key, value in dict(accounting.get("authorized_inventory_after", {}) or {}).items()
+        },
+        aggregate_inventory_before={
+            int(key): int(value)
+            for key, value in dict(accounting.get("aggregate_inventory_before", {}) or {}).items()
+        },
+        aggregate_inventory_after={
+            int(key): int(value)
+            for key, value in dict(accounting.get("aggregate_inventory_after", {}) or {}).items()
+        },
+        aggregate_required_counts=dict(aggregate_required_counts),
+        protected_resource_counts=_phase_protected_resource_counts(phase_eval),
+        accounting_diagnostics=dict(accounting),
+        demand_before=dict(demand_before),
+        demand_after=dict(demand_before),
         su11_rotation_index_before=int(rotation_before),
         su11_rotation_index_after=int(rotation_after),
     )
+    stage_completed = True
+    for key in (
+        "external_stage_completed",
+        "su24_stage_completed",
+        "residual_stage_completed",
+    ):
+        if key in dict(stage_diagnostics or {}):
+            stage_completed = bool(dict(stage_diagnostics or {}).get(key))
+            break
+    if not bool(accounting.get("ok", False)):
+        phase_infeasible_contracts.insert(0, {
+            "phase": str(phase),
+            "contract_id": -1,
+            "target_role": "resource_accounting",
+            "source_node_ids": [],
+            "required_counts": dict(aggregate_required_counts),
+            "proof": {
+                "reason": "stage3_resource_accounting_invariant_failed",
+                "accounting": dict(accounting),
+            },
+        })
+    if phase_infeasible_contracts:
+        pending_required_counts = {
+            str(key): int(value)
+            for key, value in dict(
+                phase_infeasible_contracts[0].get("required_counts", {}) or {}
+            ).items()
+            if int(value) > 0
+        }
+        proof = {
+            "phase": str(phase),
+            "reason": "stage3_completion_invariants_failed",
+            "failed_contract": dict(phase_infeasible_contracts[0]),
+            "required_counts": dict(
+                phase_infeasible_contracts[0].get("required_counts", {}) or {}
+            ),
+            "available_counts": {
+                str(key): len(values) for key, values in dict(final_pool or {}).items()
+            },
+            "missing_counts": {},
+            "attempted_conversions": list(phase_infeasible_contracts),
+            "h_or_element_rejections": [
+                dict(item or {}).get("proof", {})
+                for item in list(phase_infeasible_contracts or [])
+            ],
+            "template_checks": {"phase_has_unresolved_blockers": True},
+        }
+        phase_result = Stage3PhaseResult(
+            active_phase=str(phase),
+            phase_completed=False,
+            rebuild_required=False,
+            primary_adjustment_count=int(histogram.primary_adjustment_count),
+            h_compensation_count=_h_compensation_count(histogram.groups),
+            symbolic_topology_count=sum(1 for item in transactions if bool(item.committed)),
+            transactions=list(transactions),
+            stop_reason="phase_resource_infeasible",
+            infeasibility_proof=proof,
+        )
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+            ok=False,
+            reason="phase_resource_infeasible",
+            blocked_reason=str(proof["reason"]),
+            phase=str(phase),
+            plan_kind="sequential_phase_infeasible_after_progress",
+            pre_assembly_gate=str(phase),
+            active_subphase=str(phase),
+            requirement_contracts=list(requirement_contracts),
+            pending_contracts=list(phase_infeasible_contracts),
+            hard_required_counts=dict(pending_required_counts),
+            minimum_resource_request=dict(pending_required_counts),
+            requested_counts=dict(pending_required_counts),
+            histogram_adjustment_plan=histogram,
+            phase_result=phase_result,
+            diagnostics={
+                "stage3_phase": str(phase),
+                "sequential_single_topology": True,
+                "candidate_alternatives_enabled": True,
+                "phase_result": phase_result.to_dict(),
+                "histogram_adjustment_plan": histogram.to_dict(),
+                "infeasible_contracts": list(phase_infeasible_contracts),
+                **dict(stage_diagnostics or {}),
+            },
+            runtime=_runtime_with_pool(phase_eval, final_pool),
+        ), h_tolerance)
     phase_result = Stage3PhaseResult(
         active_phase=str(phase),
-        phase_completed=True,
+        phase_completed=bool(stage_completed),
         rebuild_required=True,
         primary_adjustment_count=int(histogram.primary_adjustment_count),
         h_compensation_count=_h_compensation_count(histogram.groups),
@@ -1463,40 +1913,62 @@ def _finalize_phase_plan(
         transactions=list(transactions),
         stop_reason="stage3_rebuild_required",
     )
-    return Stage3AdjustmentPlan(
+    return _annotate_h_soft_rule(Stage3AdjustmentPlan(
         ok=True,
         reason="stage3_rebuild_required",
         phase=str(phase),
         plan_kind="sequential_phase_transactions",
         pre_assembly_gate=str(phase),
         active_subphase=str(phase),
+        requirement_contracts=list(requirement_contracts),
+        pending_contracts=[],
+        # Completed-product claims are aggregate accounting evidence, not a
+        # new demand against the already reduced authorized inventory.
+        hard_required_counts={},
+        minimum_resource_request={},
+        requested_counts={},
+        resource_request_breakdown={
+            "active_contract_count_before_overlap_filter": len(requirement_contracts),
+            "active_contract_count_after_overlap_filter": len(requirement_contracts),
+            "selected_active_contracts": list(requirement_contracts),
+        },
         adjustment_bundles=[Stage3AdjustmentBundle(
             bundle_id=f"{phase}:transactions",
             phase=str(phase),
-            bundle_ops=list(ops),
+            bundle_ops=_group_operations(groups),
             diagnostics={"sequential_single_topology": True},
         )],
         histogram_adjustment_plan=histogram,
         planned_conversions=[
             Stage3AdjustmentOp(
                 op="convert",
-                from_su=int(group.primary_op.from_su),
-                to_su=int(group.primary_op.to_su),
-                node_id=int(list(group.primary_op.node_ids or [-1])[0]),
-                reason=str(group.primary_op.reason),
+                from_su=int(op.from_su),
+                to_su=int(op.to_su),
+                node_id=int(list(op.node_ids or [-1])[0]),
+                reason=str(op.reason),
+                via_su=op.via_su,
             )
             for group in groups
-            if list(group.primary_op.node_ids or [])
+            for op in [group.primary_op] + list(group.h_compensation_ops or [])
+            if list(op.node_ids or [])
         ],
         phase_result=phase_result,
         diagnostics={
             "stage3_phase": str(phase),
             "sequential_single_topology": True,
+            "candidate_alternatives_enabled": True,
             "phase_result": phase_result.to_dict(),
             "su11_rotation_index_after": int(rotation_after),
+            "resource_request_breakdown": {
+                "active_contract_count_before_overlap_filter": len(requirement_contracts),
+                "active_contract_count_after_overlap_filter": len(requirement_contracts),
+                "selected_active_contracts": list(requirement_contracts),
+            },
+            "resource_accounting": dict(accounting),
+            **dict(stage_diagnostics or {}),
         },
         runtime=_runtime_with_pool(phase_eval, initial_pool),
-    )
+    ), h_tolerance)
 
 
 def _transaction_plan(
@@ -1512,11 +1984,15 @@ def _transaction_plan(
     special_degree_meta: Optional[Dict[str, Any]],
     su11_rotation_index: int = 0,
     iteration_ledger: Any = None,
-    prefix_ops: Optional[List[Dict[str, Any]]] = None,
-    prefix_transactions: Optional[List[TopologyResourceTransaction]] = None,
+    prefix_groups: Optional[Sequence[Any]] = None,
+    protected_resource_counts: Optional[Dict[int, int]] = None,
+    accounting_initial_pool: Optional[Dict[int, List[int]]] = None,
+    forbidden_primary_conversion_signatures: Optional[Sequence[str]] = None,
+    reserve_contract_after_conversion: bool = True,
 ) -> Stage3AdjustmentPlan:
     if iteration_ledger is not None:
         pool = deepcopy(iteration_ledger.available_ids_by_su)
+    contract_dict = contract.to_dict()
     plan = Stage3AdjustmentPlan(
         ok=False,
         reason="phase_resource_infeasible",
@@ -1524,12 +2000,31 @@ def _transaction_plan(
         plan_kind="single_topology_transaction",
         pre_assembly_gate=str(contract.phase),
         active_subphase=str(contract.phase),
-        requirement_contracts=[contract.to_dict()],
-        pending_contracts=[contract.to_dict()],
+        requirement_contracts=[contract_dict],
+        pending_contracts=[contract_dict],
         hard_required_counts={str(key): int(value) for key, value in contract.required_counts.items()},
         minimum_resource_request={str(key): int(value) for key, value in contract.required_counts.items()},
         resource_deficit=_deficit(pool, contract.required_counts),
-        runtime=_runtime_with_pool(phase_eval, pool),
+        resource_request_breakdown={
+            "active_contract_count_before_overlap_filter": 1,
+            "active_contract_count_after_overlap_filter": 1,
+            "selected_active_contracts": [contract_dict],
+        },
+        runtime={
+            **_runtime_with_pool(
+                phase_eval,
+                pool,
+                protected_counts=protected_resource_counts,
+            ),
+        },
+        diagnostics={
+            "candidate_alternatives_enabled": True,
+            "forbidden_primary_conversion_signatures": sorted({
+                str(value)
+                for value in list(forbidden_primary_conversion_signatures or [])
+                if str(value)
+            }),
+        },
     )
     histogram = build_histogram_adjustment_plan(
         plan=plan,
@@ -1541,28 +2036,22 @@ def _transaction_plan(
         special_degree_meta=special_degree_meta,
         su11_rotation_index=su11_rotation_index,
     )
-    pool_after = _bind_real_node_ids(histogram, pool)
-    ledger_after_conversion = deepcopy(iteration_ledger) if iteration_ledger is not None else None
+    pool_after = _bind_real_node_ids(
+        histogram,
+        pool,
+        protected_node_ids=(
+            contract.claimed_source_node_ids or contract.source_node_ids
+        ),
+    )
+    ledger_after_conversion = (
+        _ledger_after_histogram_conversions(iteration_ledger, histogram)
+        if iteration_ledger is not None
+        else None
+    )
     assigned_slots: List[Any] = []
     proof: Dict[str, Any] = {}
     claimed: Optional[Dict[int, List[int]]] = None
-    if ledger_after_conversion is not None:
-        ledger_after_conversion.available_ids_by_su = deepcopy(pool_after)
-        for group in list(histogram.groups or []):
-            for op in [group.primary_op] + list(group.h_compensation_ops or []):
-                for node_id in list(op.node_ids or []):
-                    owner = ledger_after_conversion.ownership_by_node_id.get(int(node_id))
-                    if owner is not None:
-                        owner.su_type = int(op.to_su)
-                        owner.state = (
-                            Stage3OwnershipState.REMAINING_CLOSURE_RESOURCE.value
-                            if int(op.to_su) in RESOURCE_TYPES
-                            else Stage3OwnershipState.REMAINING_AROMATIC_DONOR.value
-                        )
-                        owner.owner_contract_id = None
-                        owner.owner_product_id = ""
-                        owner.owner_slot_id = ""
-                        owner.role = str(owner.state)
+    if ledger_after_conversion is not None and bool(reserve_contract_after_conversion):
         updated_ledger, assigned_slots, claimed_map, proof = assign_contract_slots(
             ledger_after_conversion,
             contract,
@@ -1570,8 +2059,74 @@ def _transaction_plan(
         if updated_ledger is not None:
             ledger_after_conversion = updated_ledger
             claimed = claimed_map
-    else:
+    elif ledger_after_conversion is None and bool(reserve_contract_after_conversion):
         claimed = _consume(pool_after, contract.required_counts)
+    else:
+        claimed = {}
+    accounting: Dict[str, Any] = {}
+    if claimed is not None and ledger_after_conversion is not None:
+        aggregate_ids = _round_resource_ids(phase_eval)
+        accounting_groups = list(prefix_groups or []) + list(histogram.groups or [])
+        accounting = build_resource_accounting_snapshot(
+            aggregate_ids_before_by_su=aggregate_ids,
+            authorized_ids_before_by_su=(
+                accounting_initial_pool
+                if accounting_initial_pool is not None
+                else pool
+            ),
+            final_remaining_ids_by_su=ledger_after_conversion.available_ids_by_su,
+            committed_claimed_ids_by_su=_ledger_occupied_ids_by_su(
+                ledger_after_conversion,
+                aggregate_ids_by_su=aggregate_ids,
+            ),
+            groups=accounting_groups,
+        )
+        histogram.inventory_before = {
+            int(key): int(value)
+            for key, value in dict(
+                accounting.get("authorized_inventory_before", {}) or {}
+            ).items()
+        }
+        histogram.inventory_after = {
+            int(key): int(value)
+            for key, value in dict(
+                accounting.get("authorized_inventory_after", {}) or {}
+            ).items()
+        }
+        histogram.aggregate_inventory_before = {
+            int(key): int(value)
+            for key, value in dict(
+                accounting.get("aggregate_inventory_before", {}) or {}
+            ).items()
+        }
+        histogram.aggregate_inventory_after = {
+            int(key): int(value)
+            for key, value in dict(
+                accounting.get("aggregate_inventory_after", {}) or {}
+            ).items()
+        }
+        histogram.aggregate_required_counts = {
+            int(key): int(value)
+            for key, value in dict(
+                accounting.get("aggregate_required_counts", {}) or {}
+            ).items()
+        }
+        phase_protected = _phase_protected_resource_counts(phase_eval)
+        histogram.protected_resource_counts = {
+            int(key): max(
+                int(phase_protected.get(int(key), 0)),
+                int(dict(protected_resource_counts or {}).get(int(key), 0)),
+            )
+            for key in (
+                set(phase_protected)
+                | {int(value) for value in dict(protected_resource_counts or {})}
+            )
+            if max(
+                int(phase_protected.get(int(key), 0)),
+                int(dict(protected_resource_counts or {}).get(int(key), 0)),
+            ) > 0
+        }
+        histogram.accounting_diagnostics = dict(accounting)
     conversions = []
     compensation_ids: List[int] = []
     converted_ids: List[int] = []
@@ -1582,7 +2137,11 @@ def _transaction_plan(
         for compensation in list(group.h_compensation_ops or []):
             compensation_ids.extend(int(value) for value in list(compensation.node_ids or []))
             conversions.append(compensation.to_dict())
-    feasible = claimed is not None and not dict(histogram.unresolved_counts or {})
+    feasible = (
+        claimed is not None
+        and not dict(histogram.unresolved_counts or {})
+        and (not accounting or bool(accounting.get("ok", False)))
+    )
     requires_rebuild = bool(feasible and histogram.primary_adjustment_count > 0)
     zero_conversion_proof = (
         {
@@ -1603,11 +2162,19 @@ def _transaction_plan(
         phase=str(contract.phase),
         contract_id=int(contract.contract_id),
         target_role=str(contract.target_role),
-        source_node_ids=list(contract.source_node_ids),
+        source_node_ids=(
+            list(contract.source_node_ids)
+            if bool(reserve_contract_after_conversion)
+            else []
+        ),
         converted_node_ids=converted_ids,
         conversion_path=conversions,
         compensation_node_ids=compensation_ids,
-        claimed_resource_ids=dict(claimed or {}) if requires_rebuild else {},
+        claimed_resource_ids=(
+            dict(claimed or {})
+            if requires_rebuild and bool(reserve_contract_after_conversion)
+            else {}
+        ),
         product_node_ids=(
             sorted(set(
                 contract.source_node_ids
@@ -1617,11 +2184,11 @@ def _transaction_plan(
                     for value in values
                 ]
             ))
-            if requires_rebuild else []
+            if requires_rebuild and bool(reserve_contract_after_conversion) else []
         ),
         slot_assignments=(
             [slot.to_dict() for slot in list(assigned_slots or [])]
-            if requires_rebuild else []
+            if requires_rebuild and bool(reserve_contract_after_conversion) else []
         ),
         h_before=_h_total(H, special_degree_meta),
         h_after_primary=float(h_after_primary),
@@ -1640,10 +2207,19 @@ def _transaction_plan(
         infeasibility_proof=(
             {}
             if requires_rebuild
-            else dict(zero_conversion_proof or proof or {})
+            else dict(
+                zero_conversion_proof
+                or ({
+                    "reason": "stage3_resource_accounting_invariant_failed",
+                    "accounting": dict(accounting),
+                    "attempted_claimed_resource_ids": dict(claimed or {}),
+                } if accounting and not bool(accounting.get("ok", False)) else {})
+                or proof
+                or {}
+            )
         ),
     )
-    ops = [dict(value) for value in list(prefix_ops or [])] + [dict(value) for value in conversions]
+    ops = [dict(value) for value in conversions]
     plan.ok = bool(requires_rebuild)
     plan.reason = "stage3_rebuild_required" if plan.ok else "phase_resource_infeasible"
     plan.histogram_adjustment_plan = histogram
@@ -1671,10 +2247,9 @@ def _transaction_plan(
         primary_adjustment_count=int(histogram.primary_adjustment_count),
         h_compensation_count=_h_compensation_count(histogram.groups),
         symbolic_topology_count=(
-            sum(1 for item in list(prefix_transactions or []) if bool(item.committed))
-            + (1 if requires_rebuild else 0)
+            1 if requires_rebuild and bool(reserve_contract_after_conversion) else 0
         ),
-        transactions=list(prefix_transactions or []) + [transaction],
+        transactions=[transaction],
         stop_reason=str(plan.reason),
         infeasibility_proof={} if plan.ok else {
             "contract_id": int(contract.contract_id),
@@ -1682,20 +2257,31 @@ def _transaction_plan(
             "available_counts": {int(key): len(values) for key, values in pool.items()},
             "unresolved_counts": dict(histogram.unresolved_counts or _deficit(pool, contract.required_counts)),
             "slot_assignment_proof": dict(zero_conversion_proof or proof or {}),
+            "resource_accounting": dict(accounting),
         },
     )
     plan.diagnostics = {
         "stage3_phase": str(contract.phase),
         "sequential_single_topology": True,
+        "candidate_alternatives_enabled": True,
+        "forbidden_primary_conversion_signatures": sorted({
+            str(value)
+            for value in list(forbidden_primary_conversion_signatures or [])
+            if str(value)
+        }),
         "current_contract": contract.to_dict(),
         "phase_result": plan.phase_result.to_dict(),
         "histogram_adjustment_plan": histogram.to_dict(),
+        "resource_accounting": dict(accounting),
+        "su11_rotation_index_after": int(
+            histogram.su11_rotation_index_after
+        ),
     }
     plan.unresolved_counts = {str(key): int(value) for key, value in dict(histogram.unresolved_counts or {}).items()}
     plan.requested_counts = {str(key): int(value) for key, value in contract.required_counts.items()}
     if ledger_after_conversion is not None:
         plan.runtime["iteration_topology_ledger"] = ledger_after_conversion
-    return plan
+    return _annotate_h_soft_rule(plan, h_tolerance)
 
 
 def plan_stage3_state_machine(
@@ -1708,9 +2294,9 @@ def plan_stage3_state_machine(
     E_target: Any = None,
     difference_spectrum: Optional[Dict[str, Any]] = None,
     enable_post_external_spectrum: bool = True,
-    skip_post_external_spectrum: bool = False,
-    spectrum_candidate_limit: int = 10,
-    spectrum_max_primary_adjustments: int = 8,
+    post_external_resume_phase: str = "remaining_pool_spectrum_rebalance",
+    spectrum_candidate_limit: int = 2,
+    spectrum_max_primary_adjustments: int = 10,
     rejected_spectrum_histogram_signatures: Optional[Sequence[str]] = None,
     forbidden_spectrum_inverse_signatures: Optional[Sequence[str]] = None,
     max_primary_adjustments_per_stage: int = 10,
@@ -1722,6 +2308,7 @@ def plan_stage3_state_machine(
     residual_side_min_23: int = 1,
     special_degree_meta: Optional[Dict[str, Any]] = None,
     su11_rotation_index: int = 0,
+    forbidden_resource_conversion_signatures: Optional[Sequence[str]] = None,
 ) -> Stage3AdjustmentPlan:
     max_primary_adjustments_per_stage = max(
         0,
@@ -1737,10 +2324,18 @@ def plan_stage3_state_machine(
             su_type = int(getattr(node, "su_type", -1))
             if 0 <= su_type < histogram_size:
                 H[su_type] += 1
-    if int(residual_flex_min_23) < 2 or int(residual_flex_preferred_23) < int(residual_flex_min_23):
-        raise ValueError("residual flex configuration requires preferred >= minimum >= 2")
-    if int(residual_side_min_23) < 1 or int(residual_side_preferred_23) < int(residual_side_min_23):
-        raise ValueError("residual side configuration requires preferred >= minimum >= 1")
+    if int(residual_flex_min_23) < 1 or int(residual_flex_preferred_23) < int(residual_flex_min_23):
+        raise ValueError("residual flex configuration requires preferred >= minimum >= 1")
+    if int(residual_side_min_23) < 0 or int(residual_side_preferred_23) < int(residual_side_min_23):
+        raise ValueError("residual side configuration requires preferred >= minimum >= 0")
+    resume_phase = str(post_external_resume_phase or "remaining_pool_spectrum_rebalance")
+    valid_resume_phases = {
+        "remaining_pool_spectrum_rebalance",
+        "resource_su24_ring_closure",
+        "residual_resource_self_closure",
+    }
+    if resume_phase not in valid_resume_phases:
+        raise ValueError(f"invalid post-external resume phase: {resume_phase}")
     flex_block = str(getattr(phase_eval, "flex_reconciliation_block_reason", "") or "")
     if flex_block:
         flex_contracts = [
@@ -1759,7 +2354,7 @@ def plan_stage3_state_machine(
                 "flex_counts": dict(getattr(phase_eval, "flex_counts", {}) or {}),
             },
         )
-        return Stage3AdjustmentPlan(
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
             ok=False,
             reason="phase_resource_infeasible",
             blocked_reason=flex_block,
@@ -1775,7 +2370,7 @@ def plan_stage3_state_machine(
                 "phase_result": phase_result.to_dict(),
             },
             runtime=_runtime_with_pool(phase_eval, _resource_ids(phase_eval)),
-        )
+        ), h_tolerance)
     if str(dict(getattr(phase_eval, "flex_audit", {}) or {}).get("scenario", "") or "") == "above_range":
         return _flex_excess_reduction_plan(
             phase_eval=phase_eval,
@@ -1787,6 +2382,8 @@ def plan_stage3_state_machine(
             special_degree_meta=special_degree_meta,
             su11_rotation_index=su11_rotation_index,
         )
+    if classification is None:
+        classification = classify_topology_units(list(nodes or []))
     phase_eval = _evaluate_external_phases(
         phase_eval=phase_eval,
         nodes=nodes,
@@ -1794,35 +2391,132 @@ def plan_stage3_state_machine(
         S_target=S_target,
         E_target=E_target,
     )
+    materialization_errors = _external_product_materialization_errors(phase_eval)
+    if materialization_errors:
+        proof = {
+            "phase": EXTERNAL_STAGE,
+            "reason": "external_physical_product_validation_failed",
+            "materialization_errors": materialization_errors,
+        }
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+            ok=False,
+            reason="phase_resource_infeasible",
+            blocked_reason=str(proof["reason"]),
+            phase=EXTERNAL_STAGE,
+            plan_kind="external_physical_product_validation_failed",
+            pre_assembly_gate=EXTERNAL_STAGE,
+            active_subphase=EXTERNAL_STAGE,
+            phase_result=Stage3PhaseResult(
+                active_phase=EXTERNAL_STAGE,
+                phase_completed=False,
+                rebuild_required=False,
+                stop_reason="phase_resource_infeasible",
+                infeasibility_proof=proof,
+            ),
+            diagnostics={
+                "stage3_phase": EXTERNAL_STAGE,
+                "external_stage_completed": False,
+                "infeasibility_proof": proof,
+            },
+            runtime=_runtime_with_pool(phase_eval, _resource_ids(phase_eval)),
+        ), h_tolerance)
     pool = _resource_ids(phase_eval)
     H_work = H.detach().clone()
     contracts = _external_contracts(phase_eval, nodes)
-    iteration_ledger = _iteration_ledger_for_phase_eval(phase_eval, nodes, pool, contracts)
+    iteration_ledger = _iteration_ledger_for_phase_eval(
+        phase_eval,
+        nodes,
+        pool,
+        contracts,
+    )
     pool = deepcopy(iteration_ledger.available_ids_by_su)
     initial_pool = deepcopy(pool)
+    committed_product_conflicts = [
+        dict(item or {})
+        for item in list(iteration_ledger.conflicts or [])
+        if str(dict(item or {}).get("reason", "") or "").startswith(
+            ("completed_product_", "duplicate_completed_product")
+        )
+    ]
+    if committed_product_conflicts:
+        proof = {
+            "phase": "resource_accounting",
+            "reason": "committed_product_resource_identity_conflict",
+            "conflicts": committed_product_conflicts,
+            "available_counts": {
+                str(key): len(values) for key, values in pool.items()
+            },
+        }
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+            ok=False,
+            reason="phase_resource_infeasible",
+            blocked_reason=str(proof["reason"]),
+            phase="resource_accounting",
+            plan_kind="committed_product_resource_identity_conflict",
+            pre_assembly_gate="resource_accounting",
+            active_subphase="resource_accounting",
+            phase_result=Stage3PhaseResult(
+                active_phase="resource_accounting",
+                phase_completed=False,
+                rebuild_required=False,
+                stop_reason="phase_resource_infeasible",
+                infeasibility_proof=proof,
+            ),
+            diagnostics={
+                "stage3_phase": "resource_accounting",
+                "infeasibility_proof": proof,
+            },
+            runtime={
+                **_runtime_with_pool(phase_eval, pool),
+                "iteration_topology_ledger": iteration_ledger,
+            },
+        ), h_tolerance)
     completed_phases: List[str] = ["flex_range_reconciliation"]
-    physical_ops: List[Dict[str, Any]] = []
     direct_transactions: List[TopologyResourceTransaction] = _assembly_product_transactions(
         phase_eval,
         H_work,
         special_degree_meta,
+        completed_products=list(iteration_ledger.completed_products or []),
     )
     phase_groups: List[Any] = []
     infeasible_contracts: List[Dict[str, Any]] = []
     stale_identity_contracts: List[Dict[str, Any]] = []
     rotation_cursor = int(su11_rotation_index)
     fallback_id = 1
-    for phase, role in EXTERNAL_PHASES:
-        phase_adjusted = False
+    external_contracts_seen = 0
+    materialized_external_products = [
+        dict(product or {})
+        for product in list(iteration_ledger.completed_products or [])
+        if str(dict(product or {}).get("phase", "") or "") in EXTERNAL_PHASE_NAMES
+        and bool(dict(product or {}).get("closed", False))
+        and not bool(dict(product or {}).get("provisional", False))
+    ]
+    external_directly_completed = len(materialized_external_products)
+    external_completed_after_conversion = 0
+    external_superseded = 0
+    external_status: Dict[str, Dict[str, Any]] = {}
+    for role_index, (phase, role) in enumerate(EXTERNAL_ROLE_ORDER):
+        role_seen = 0
+        role_direct = sum(
+            1
+            for product in materialized_external_products
+            if str(product.get("target_role", product.get("product_role", "")) or "")
+            == str(role)
+        )
+        role_converted = 0
+        role_blocked = 0
         phase_contracts = [item for item in contracts if str(item.get("target_role", "")) == role]
-        for raw in phase_contracts:
+        for contract_index, raw in enumerate(phase_contracts):
+            external_contracts_seen += 1
+            role_seen += 1
             contract = _closure_contract(raw, phase, fallback_id)
             fallback_id += 1
-            source_status, _ = contract_source_status(
+            source_status, source_proof = contract_source_status(
                 iteration_ledger,
                 list(contract.claimed_source_node_ids or contract.source_node_ids or []),
             )
             if source_status == "superseded":
+                external_superseded += 1
                 continue
             blocker_reason = str(raw.get("blocker_kind", raw.get("blocked_reason", "")) or "")
             if blocker_reason and not contract.required_counts:
@@ -1838,26 +2532,15 @@ def plan_stage3_state_machine(
                         "source_node_ids": list(contract.source_node_ids),
                     },
                 })
+                role_blocked += 1
                 continue
-            next_ledger, direct_transaction, direct_proof = _ledger_transaction(
-                ledger=iteration_ledger,
-                contract=contract,
-                phase=phase,
-                H=H_work,
-                special_degree_meta=special_degree_meta,
-            )
-            if direct_transaction is not None:
-                iteration_ledger = next_ledger
-                pool = deepcopy(iteration_ledger.available_ids_by_su)
-                direct_transactions.append(direct_transaction)
-                continue
-            if str(direct_proof.get("reason", "") or "") == "contract_identity_conflict":
+            if source_status == "conflict":
                 stale_proof = {
                     "phase": str(phase),
                     "contract_id": int(contract.contract_id),
                     "target_role": str(contract.target_role),
                     "reason": "stale_pending_identity",
-                    **dict(direct_proof or {}),
+                    **dict(source_proof or {}),
                 }
                 stale_identity_contracts.append(stale_proof)
                 infeasible_contracts.append({
@@ -1868,8 +2551,76 @@ def plan_stage3_state_machine(
                     "required_counts": dict(contract.required_counts),
                     "proof": dict(stale_proof),
                 })
+                role_blocked += 1
                 continue
+            missing_counts = _deficit(pool, contract.required_counts)
+            if not missing_counts:
+                materialization_proof = {
+                    "phase": str(phase),
+                    "contract_id": int(contract.contract_id),
+                    "target_role": str(contract.target_role),
+                    "reason": "external_physical_materialization_failed",
+                    "assembler_reason": str(
+                        raw.get("reason", contract.reason) or "external_product_not_created"
+                    ),
+                    "source_fragment_ids": list(contract.source_fragment_ids),
+                    "source_node_ids": list(contract.source_node_ids),
+                    "required_counts": dict(contract.required_counts),
+                    "available_counts": {
+                        int(key): len(list(values or []))
+                        for key, values in pool.items()
+                    },
+                    "missing_counts": {},
+                    "mainline_slots": [
+                        slot.to_dict() for slot in list(contract.mainline_slots or [])
+                    ],
+                    "branch_slots": [
+                        slot.to_dict() for slot in list(contract.branch_slots or [])
+                    ],
+                    "assembler_diagnostics": dict(raw.get("diagnostics", {}) or {}),
+                }
+                infeasible_contracts.append({
+                    "phase": str(phase),
+                    "contract_id": int(contract.contract_id),
+                    "target_role": str(contract.target_role),
+                    "source_node_ids": list(contract.source_node_ids),
+                    "required_counts": dict(contract.required_counts),
+                    "proof": materialization_proof,
+                })
+                role_blocked += 1
+                continue
+            direct_proof = {
+                "reason": "external_resource_deficit",
+                "missing_counts": dict(missing_counts),
+            }
             remaining_limit = max(0, int(max_primary_adjustments_per_stage) - len(phase_groups))
+            future_contracts = list(phase_contracts[int(contract_index) + 1:])
+            for _, future_role in EXTERNAL_ROLE_ORDER[int(role_index) + 1:]:
+                future_contracts.extend(
+                    item
+                    for item in contracts
+                    if str(item.get("target_role", "")) == str(future_role)
+                )
+            future_required_11 = sum(
+                max(
+                    0,
+                    int(
+                        dict(item.get("required_counts", {}) or {}).get(
+                            11,
+                            dict(item.get("required_counts", {}) or {}).get("11", 0),
+                        )
+                        or 0
+                    ),
+                )
+                for item in future_contracts
+            )
+            current_required_11 = int(contract.required_counts.get(11, 0) or 0)
+            protected_aromatic_donors = _protect_future_su11_aromatic_donors(
+                pool,
+                current_required_11=current_required_11,
+                future_required_11=future_required_11,
+                aromatic_cursor=rotation_cursor,
+            )
             candidate_plan = _transaction_plan(
                 phase_eval=phase_eval,
                 contract=contract,
@@ -1882,21 +2633,43 @@ def plan_stage3_state_machine(
                 special_degree_meta=special_degree_meta,
                 su11_rotation_index=rotation_cursor,
                 iteration_ledger=iteration_ledger,
+                prefix_groups=phase_groups,
+                protected_resource_counts=protected_aromatic_donors,
+                accounting_initial_pool=initial_pool,
+                forbidden_primary_conversion_signatures=forbidden_resource_conversion_signatures,
+                reserve_contract_after_conversion=False,
             )
             if not candidate_plan.ok:
-                if phase_adjusted:
+                if phase_groups:
                     return _finalize_phase_plan(
                         phase_eval=phase_eval,
-                        phase=phase,
+                        phase=EXTERNAL_STAGE,
                         H_before=H,
                         H_after=H_work,
                         initial_pool=initial_pool,
                         final_pool=pool,
                         groups=phase_groups,
-                        ops=physical_ops,
                         transactions=direct_transactions,
                         rotation_before=su11_rotation_index,
                         rotation_after=rotation_cursor,
+                        h_tolerance=h_tolerance,
+                        stage_diagnostics={
+                            "external_stage_completed": False,
+                            "external_rebuild_reason": "blocker_after_conversion",
+                            "external_contracts_seen": int(external_contracts_seen),
+                            "external_directly_completed": int(external_directly_completed),
+                            "external_completed_after_conversion": int(external_completed_after_conversion),
+                            "external_blocked": 1,
+                            "external_remaining_pending": max(
+                                1,
+                                len(contracts) - int(external_contracts_seen) + 1,
+                            ),
+                            "external_primary_count": len(phase_groups),
+                            "external_remaining_budget": max(
+                                0,
+                                int(max_primary_adjustments_per_stage) - len(phase_groups),
+                            ),
+                        },
                     )
                 failed_transactions = list(candidate_plan.phase_result.transactions or [])
                 direct_transactions.extend(failed_transactions)
@@ -1912,6 +2685,7 @@ def plan_stage3_state_machine(
                         or {}
                     ),
                 })
+                role_blocked += 1
                 continue
             histogram = candidate_plan.histogram_adjustment_plan
             candidate_ledger = dict(getattr(candidate_plan, "runtime", {}) or {}).get(
@@ -1930,38 +2704,107 @@ def plan_stage3_state_machine(
             phase_groups.extend(list(histogram.groups or []))
             rotation_cursor = int(histogram.su11_rotation_index_after)
             direct_transactions.extend(list(candidate_plan.phase_result.transactions or []))
-            phase_adjusted = True
-            if len(phase_groups) >= int(max_primary_adjustments_per_stage):
-                return _finalize_phase_plan(
-                    phase_eval=phase_eval,
-                    phase=phase,
-                    H_before=H,
-                    H_after=H_work,
-                    initial_pool=initial_pool,
-                    final_pool=pool,
-                    groups=phase_groups,
-                    ops=physical_ops,
-                    transactions=direct_transactions,
-                    rotation_before=su11_rotation_index,
-                    rotation_after=rotation_cursor,
-                )
-        if phase_adjusted:
+            external_completed_after_conversion += 1
+            role_converted += 1
             return _finalize_phase_plan(
                 phase_eval=phase_eval,
-                phase=phase,
+                phase=EXTERNAL_STAGE,
                 H_before=H,
                 H_after=H_work,
                 initial_pool=initial_pool,
                 final_pool=pool,
                 groups=phase_groups,
-                ops=physical_ops,
                 transactions=direct_transactions,
                 rotation_before=su11_rotation_index,
                 rotation_after=rotation_cursor,
+                h_tolerance=h_tolerance,
+                stage_diagnostics={
+                    "external_stage_completed": False,
+                    "external_rebuild_reason": (
+                        "external_blocker_after_conversion"
+                        if infeasible_contracts
+                        else "resource_conversion_requires_fresh_assembly"
+                    ),
+                    "external_contracts_seen": int(external_contracts_seen),
+                    "external_directly_completed": int(external_directly_completed),
+                    "external_completed_after_conversion": 0,
+                    "external_blocked": len(infeasible_contracts),
+                    "external_remaining_pending": len(contracts),
+                    "external_primary_count": len(phase_groups),
+                    "external_remaining_budget": max(
+                        0,
+                        int(max_primary_adjustments_per_stage) - len(phase_groups),
+                    ),
+                    "physical_materialization_required_after_rebuild": True,
+                },
             )
+        external_status[str(role)] = {
+            "phase": str(phase),
+            "contracts_seen": int(role_seen),
+            "directly_completed": int(role_direct),
+            "completed_after_conversion": int(role_converted),
+            "blocked": int(role_blocked),
+            "completed": bool(role_blocked == 0),
+        }
         completed_phases.append(phase)
 
-    if bool(enable_post_external_spectrum) and not bool(skip_post_external_spectrum):
+    external_diagnostics = {
+        "external_contracts_seen": int(external_contracts_seen),
+        "external_directly_completed": int(external_directly_completed),
+        "external_completed_after_conversion": int(external_completed_after_conversion),
+        "external_superseded": int(external_superseded),
+        "external_materialized_product_count": len(materialized_external_products),
+        "external_blocked": len(infeasible_contracts),
+        "external_remaining_pending": len(infeasible_contracts),
+        "external_primary_count": len(phase_groups),
+        "external_remaining_budget": max(
+            0,
+            int(max_primary_adjustments_per_stage) - len(phase_groups),
+        ),
+        "external_subphase_status": dict(external_status),
+        "external_stage_completed": not bool(infeasible_contracts),
+    }
+    if phase_groups:
+        external_diagnostics["external_rebuild_reason"] = (
+            "external_stage_completed_after_conversion"
+            if not infeasible_contracts
+            else "external_blocker_after_conversion"
+        )
+        return _finalize_phase_plan(
+            phase_eval=phase_eval,
+            phase=EXTERNAL_STAGE,
+            H_before=H,
+            H_after=H_work,
+            initial_pool=initial_pool,
+            final_pool=pool,
+            groups=phase_groups,
+            transactions=direct_transactions,
+            rotation_before=su11_rotation_index,
+            rotation_after=rotation_cursor,
+            h_tolerance=h_tolerance,
+            stage_diagnostics=external_diagnostics,
+        )
+    if infeasible_contracts:
+        return _finalize_phase_plan(
+            phase_eval=phase_eval,
+            phase=EXTERNAL_STAGE,
+            H_before=H,
+            H_after=H_work,
+            initial_pool=initial_pool,
+            final_pool=pool,
+            groups=[],
+            transactions=direct_transactions,
+            rotation_before=su11_rotation_index,
+            rotation_after=rotation_cursor,
+            h_tolerance=h_tolerance,
+            infeasible_contracts=infeasible_contracts,
+            stage_diagnostics=external_diagnostics,
+        )
+
+    if (
+        resume_phase == "remaining_pool_spectrum_rebalance"
+        and bool(enable_post_external_spectrum)
+    ):
         spectrum_candidates, spectrum_audit = generate_spectrum_candidates(
             H=H_work,
             difference_spectrum=difference_spectrum,
@@ -1978,8 +2821,12 @@ def plan_stage3_state_machine(
                 int(max_primary_adjustments_per_stage),
                 int(spectrum_max_primary_adjustments),
             ),
+            max_h_compensation_ops=int(max_h_compensation_ops_per_adjustment),
             rejected_histogram_signatures=rejected_spectrum_histogram_signatures,
             forbidden_inverse_signatures=forbidden_spectrum_inverse_signatures,
+            E_target=E_target,
+            special_degree_meta=special_degree_meta,
+            flex_audit=dict(getattr(phase_eval, "flex_audit", {}) or {}),
         )
         if spectrum_candidates:
             phase_result = Stage3PhaseResult(
@@ -1988,7 +2835,7 @@ def plan_stage3_state_machine(
                 rebuild_required=False,
                 stop_reason="stage3_spectrum_candidates_ready",
             )
-            return Stage3AdjustmentPlan(
+            return _annotate_h_soft_rule(Stage3AdjustmentPlan(
                 ok=True,
                 reason="stage3_spectrum_candidates_ready",
                 phase="remaining_pool_spectrum_rebalance",
@@ -2002,204 +2849,416 @@ def plan_stage3_state_machine(
                     "completed_phases": list(completed_phases),
                     "spectrum_audit": dict(spectrum_audit or {}),
                     "external_products_are_round_local": True,
+                    **dict(external_diagnostics),
                 },
                 runtime={
                     **_runtime_with_pool(phase_eval, pool),
                     "iteration_topology_ledger": iteration_ledger,
                 },
-            )
+            ), h_tolerance)
     completed_phases.append("remaining_pool_spectrum_rebalance")
+    if resume_phase == "remaining_pool_spectrum_rebalance":
+        resume_phase = "resource_su24_ring_closure"
 
-    su24_profiles = build_su24_resource_role_profiles(nodes, pool)
-    su24_contracts = _su24_ring_contracts(su24_profiles)
-    for contract in su24_contracts:
-        source_status, _ = contract_source_status(
-            iteration_ledger,
-            list(contract.claimed_source_node_ids or contract.source_node_ids or []),
-        )
-        if source_status == "superseded":
-            continue
-        if source_status != "available":
-            continue
-        next_ledger, direct_transaction, direct_proof = _ledger_transaction(
-            ledger=iteration_ledger,
-            contract=contract,
-            phase="resource_su24_ring_closure",
-            H=H_work,
-            special_degree_meta=special_degree_meta,
-        )
-        if direct_transaction is not None:
-            iteration_ledger = next_ledger
-            pool = deepcopy(iteration_ledger.available_ids_by_su)
-            direct_transactions.append(direct_transaction)
-            continue
-        candidate_plan = _transaction_plan(
-            phase_eval=phase_eval,
-            contract=contract,
-            pool=pool,
-            H=H_work,
-            E_target=E_target,
-            max_primary_adjustments=max_primary_adjustments_per_stage,
-            max_h_compensation_ops=max_h_compensation_ops_per_adjustment,
-            h_tolerance=h_tolerance,
-            special_degree_meta=special_degree_meta,
-            su11_rotation_index=rotation_cursor,
-            iteration_ledger=iteration_ledger,
-            prefix_transactions=direct_transactions,
-        )
-        if candidate_plan.ok:
-            candidate_plan.diagnostics["su24_resource_profiles"] = [
-                item.to_dict() for item in su24_profiles
+    su24_initial_pool = deepcopy(pool)
+    su24_groups: List[Any] = []
+    su24_products: List[Dict[str, Any]] = []
+    su24_ring_attempts: List[Dict[str, Any]] = []
+    su24_conversion_rejections: List[Dict[str, Any]] = []
+    su24_profile_records: Dict[int, Dict[str, Any]] = {}
+    su24_rejected_profiles: List[Dict[str, Any]] = []
+    su24_stop_reason = "resource_su24_ring_closure_skipped"
+    su24_remaining_count = len(list(pool.get(24, []) or []))
+    if resume_phase != "residual_resource_self_closure":
+        while su24_remaining_count > 1:
+            su24_profile_audit = audit_raw_su24_resource_profiles(nodes, pool)
+            su24_profiles = list(su24_profile_audit.get("profiles", []) or [])
+            for profile in su24_profiles:
+                su24_profile_records[int(profile.node_id)] = profile.to_dict()
+            su24_rejected_profiles.extend(
+                dict(item or {})
+                for item in list(su24_profile_audit.get("rejected", []) or [])
+            )
+            if not su24_profiles:
+                su24_stop_reason = "pool_su24_ring_no_compatible_profiles"
+                break
+
+            su24_direct_result = assemble_pool_su24_rings(
+                nodes,
+                classification,
+                pool,
+                generation_id=int(getattr(phase_eval, "generation_id", 0) or 0),
+            )
+            su24_ring_attempts.extend(
+                dict(item or {})
+                for item in list(su24_direct_result.get("attempts", []) or [])
+            )
+            direct_su24_products = [
+                dict(item or {})
+                for item in list(su24_direct_result.get("products", []) or [])
+                if dict(item or {})
             ]
-            candidate_plan.diagnostics["su24_ring_contract"] = contract.to_dict()
-            return candidate_plan
-        infeasible_contracts.append({
-            "phase": "resource_su24_ring_closure",
-            "contract_id": int(contract.contract_id),
-            "target_role": str(contract.target_role),
-            "source_node_ids": list(contract.source_node_ids),
-            "required_counts": dict(contract.required_counts),
-            "proof": dict(candidate_plan.phase_result.infeasibility_proof or direct_proof or {}),
-        })
+            if direct_su24_products:
+                iteration_ledger = seed_ledger_topology_state(
+                    iteration_ledger,
+                    completed_products=direct_su24_products,
+                )
+                pool = deepcopy(iteration_ledger.available_ids_by_su)
+                su24_products.extend(direct_su24_products)
+                direct_transactions.extend(
+                    _assembly_product_transactions(
+                        phase_eval,
+                        H_work,
+                        special_degree_meta,
+                        completed_products=direct_su24_products,
+                    )
+                )
+
+            su24_remaining_count = len(list(pool.get(24, []) or []))
+            su24_stop_reason = str(
+                su24_direct_result.get("stop_reason", "")
+                or "pool_su24_ring_templates_exhausted"
+            )
+            if su24_remaining_count <= 1:
+                break
+
+            blocked_attempts = [
+                dict(item or {})
+                for item in list(
+                    su24_direct_result.get("blocked_attempts", [])
+                    or [su24_direct_result.get("blocked_attempt", {})]
+                )
+                if dict(item or {})
+                and dict(dict(item or {}).get("missing_counts", {}) or {})
+            ]
+            remaining_budget = max(
+                0,
+                int(max_primary_adjustments_per_stage) - len(su24_groups),
+            )
+            if not blocked_attempts or remaining_budget <= 0:
+                if remaining_budget <= 0:
+                    su24_stop_reason = "pool_su24_ring_conversion_budget_reached"
+                break
+
+            accepted_conversion_plan: Optional[Stage3AdjustmentPlan] = None
+            accepted_attempt: Dict[str, Any] = {}
+            for attempt_index, blocked_attempt in enumerate(blocked_attempts):
+                contract = _pool_su24_ring_conversion_contract(
+                    blocked_attempt,
+                    contract_id=(
+                        1_000_000
+                        + len(su24_groups) * 1_000
+                        + int(attempt_index)
+                    ),
+                )
+                candidate_plan = _transaction_plan(
+                    phase_eval=phase_eval,
+                    contract=contract,
+                    pool=pool,
+                    H=H_work,
+                    E_target=E_target,
+                    max_primary_adjustments=int(remaining_budget),
+                    max_h_compensation_ops=max_h_compensation_ops_per_adjustment,
+                    h_tolerance=h_tolerance,
+                    special_degree_meta=special_degree_meta,
+                    su11_rotation_index=rotation_cursor,
+                    iteration_ledger=iteration_ledger,
+                    prefix_groups=su24_groups,
+                    accounting_initial_pool=su24_initial_pool,
+                    protected_resource_counts={
+                        int(key): len(list(values or []))
+                        for key, values in dict(
+                            blocked_attempt.get("source_ids_by_su", {}) or {}
+                        ).items()
+                        if str(key).lstrip("-").isdigit()
+                        and list(values or [])
+                    },
+                    forbidden_primary_conversion_signatures=forbidden_resource_conversion_signatures,
+                    reserve_contract_after_conversion=False,
+                )
+                histogram = candidate_plan.histogram_adjustment_plan
+                if candidate_plan.ok and list(histogram.groups or []):
+                    accepted_conversion_plan = candidate_plan
+                    accepted_attempt = dict(blocked_attempt)
+                    break
+                su24_conversion_rejections.append({
+                    "candidate_signature": str(
+                        blocked_attempt.get("candidate_signature", "")
+                    ),
+                    "skeleton_kind": str(blocked_attempt.get("skeleton_kind", "")),
+                    "missing_counts": dict(
+                        blocked_attempt.get("missing_counts", {}) or {}
+                    ),
+                    "proof": dict(
+                        candidate_plan.phase_result.infeasibility_proof or {}
+                    ),
+                })
+
+            if accepted_conversion_plan is None:
+                su24_stop_reason = "pool_su24_ring_all_conversion_candidates_rejected"
+                break
+
+            histogram = accepted_conversion_plan.histogram_adjustment_plan
+            candidate_ledger = dict(
+                getattr(accepted_conversion_plan, "runtime", {}) or {}
+            ).get("iteration_topology_ledger")
+            if candidate_ledger is None:
+                return accepted_conversion_plan
+            iteration_ledger = candidate_ledger
+            pool = deepcopy(iteration_ledger.available_ids_by_su)
+            H_work = histogram.H_after.detach().clone()
+            rotation_cursor = int(histogram.su11_rotation_index_after)
+            su24_groups.extend(list(histogram.groups or []))
+            direct_transactions.extend(
+                list(accepted_conversion_plan.phase_result.transactions or [])
+            )
+            su24_ring_attempts.append({
+                "accepted_conversion_for_candidate": str(
+                    accepted_attempt.get("candidate_signature", "")
+                ),
+                "conversion_group_count": len(list(histogram.groups or [])),
+            })
+            if len(su24_groups) >= int(max_primary_adjustments_per_stage):
+                su24_stop_reason = "pool_su24_ring_conversion_budget_reached"
+                break
+
+        su24_stage_diagnostics = {
+            "su24_stage_completed": bool(
+                su24_stop_reason != "pool_su24_ring_conversion_budget_reached"
+            ),
+            "su24_rebuild_reason": str(su24_stop_reason),
+            "su24_direct_product_count": len(su24_products),
+            "su24_ring_attempts": list(su24_ring_attempts),
+            "su24_conversion_rejections": list(su24_conversion_rejections),
+            "su24_remaining_count": int(len(list(pool.get(24, []) or []))),
+            "su24_resource_profiles": list(su24_profile_records.values()),
+            "su24_rejected_profiles": list(su24_rejected_profiles),
+        }
+        if su24_groups:
+            return _finalize_phase_plan(
+                phase_eval=phase_eval,
+                phase="resource_su24_ring_closure",
+                H_before=H,
+                H_after=H_work,
+                initial_pool=su24_initial_pool,
+                final_pool=pool,
+                groups=list(su24_groups),
+                transactions=list(direct_transactions or []),
+                rotation_before=su11_rotation_index,
+                rotation_after=rotation_cursor,
+                h_tolerance=h_tolerance,
+                stage_diagnostics=dict(su24_stage_diagnostics),
+            )
+    else:
+        su24_stage_diagnostics = {
+            "su24_stage_completed": True,
+            "su24_rebuild_reason": "resource_su24_ring_closure_skipped",
+            "su24_direct_product_count": 0,
+            "su24_ring_attempts": [],
+            "su24_conversion_rejections": [],
+            "su24_remaining_count": int(len(list(pool.get(24, []) or []))),
+            "su24_resource_profiles": [],
+            "su24_rejected_profiles": [],
+        }
     completed_phases.append("resource_su24_ring_closure")
 
-    if list(pool.get(24, []) or []):
-        terminalization_plan = _residual_su24_terminalization_plan(
-            phase_eval=phase_eval,
-            pool=pool,
-            H=H_work,
-            E_target=E_target,
-            h_tolerance=h_tolerance,
-            special_degree_meta=special_degree_meta,
-            su11_rotation_index=rotation_cursor,
-            max_conversions=max_primary_adjustments_per_stage,
-            max_h_compensation_ops=max_h_compensation_ops_per_adjustment,
-        )
-        if terminalization_plan is not None:
-            terminalization_plan.phase_result.transactions = (
-                list(direct_transactions)
-                + list(terminalization_plan.phase_result.transactions or [])
-            )
-            return terminalization_plan
-        proof = {
-            "phase": "residual_resource_self_closure",
-            "reason": "su24_terminalization_h_or_element_infeasible",
-            "failed_contract": "all_remaining_su24_to_su23",
-            "required_counts": {"23": len(pool.get(24, []) or [])},
-            "available_counts": {str(key): len(values) for key, values in pool.items()},
-            "missing_counts": {},
-            "attempted_conversions": [
-                {"node_id": int(node_id), "from_su": 24, "to_su": 23}
-                for node_id in list(pool.get(24, []) or [])[:max_primary_adjustments_per_stage]
-            ],
-            "template_checks": {"su24_ring_contract_count": len(su24_contracts)},
-        }
-        return Stage3AdjustmentPlan(
-            ok=False,
-            reason="phase_resource_infeasible",
-            blocked_reason=str(proof["reason"]),
-            phase="residual_resource_self_closure",
-            plan_kind="residual_su24_terminalization_infeasible",
-            pre_assembly_gate="residual_resource_self_closure",
-            active_subphase="residual_resource_self_closure",
-            phase_result=Stage3PhaseResult(
-                active_phase="residual_resource_self_closure",
-                phase_completed=False,
-                rebuild_required=False,
-                stop_reason="phase_resource_infeasible",
-                infeasibility_proof=proof,
-            ),
-            diagnostics={
-                "stage3_phase": "residual_resource_self_closure",
-                "infeasibility_proof": proof,
-            },
-            runtime={
-                **_runtime_with_pool(phase_eval, pool),
-                "iteration_topology_ledger": iteration_ledger,
-            },
-        )
-
+    residual_initial_pool = deepcopy(pool)
+    residual_groups: List[Any] = []
+    residual_converted_product_count = 0
     flex_bounds = dict(getattr(phase_eval, "flex_bounds", {}) or {})
     flex_counts = dict(getattr(phase_eval, "flex_counts", {}) or {})
-    maximum_flex_capacity = max(
-        0,
-        int(flex_bounds.get("max", 0) or 0) - int(flex_counts.get("final", 0) or 0),
-    )
     assembly_view = dict(getattr(phase_eval, "assembly_view", {}) or {})
     flex_target_plan = dict(assembly_view.get("flex_target_plan", {}) or {})
+    maximum_flex_capacity = max(
+        0,
+        int(flex_bounds.get("max", 0) or 0)
+        - int(flex_counts.get("final", 0) or 0)
+    )
     requested_flex_gap = max(
         int(flex_target_plan.get("remaining_minimum_gap", 0) or 0),
         int(flex_target_plan.get("remaining_preferred_gap", 0) or 0),
     )
-    residual_flex_goal = min(int(maximum_flex_capacity), int(requested_flex_gap))
-    direct_residual_contracts = _residual_contracts(
-        pool,
-        residual_flex_preferred_23=residual_flex_preferred_23,
-        residual_flex_min_23=residual_flex_min_23,
-        residual_side_preferred_23=residual_side_preferred_23,
-        residual_side_min_23=residual_side_min_23,
-        max_flex_chains=residual_flex_goal,
-    )
+    required_flex_goal = min(int(maximum_flex_capacity), int(requested_flex_gap))
     direct_flex_count = 0
-    for contract in direct_residual_contracts:
-        next_ledger, direct_transaction, _ = _ledger_transaction(
-            ledger=iteration_ledger,
-            contract=contract,
-            phase="residual_resource_self_closure",
-            H=H_work,
-            special_degree_meta=special_degree_meta,
+    direct_residual_template_fits: List[Dict[str, Any]] = []
+    residual_candidate_attempts: List[Dict[str, Any]] = []
+    remaining_flex_goal = int(required_flex_goal)
+    remaining_flex_capacity = int(maximum_flex_capacity)
+    tolerated_remaining_ids_by_su = _tolerated_remaining_closure_ids(
+        pool,
+        remaining_flex_goal=remaining_flex_goal,
+    )
+
+    residual_contract_id = 2_000_000
+    while True:
+        tolerated_remaining_ids_by_su = _tolerated_remaining_closure_ids(
+            pool,
+            remaining_flex_goal=remaining_flex_goal,
         )
-        if direct_transaction is not None:
-            iteration_ledger = next_ledger
-            pool = deepcopy(iteration_ledger.available_ids_by_su)
-            direct_transactions.append(direct_transaction)
-            if str(dict(contract.diagnostics or {}).get("product_role", "")) == "residual_flex_chain":
-                direct_flex_count += 1
-            continue
-        return _transaction_plan(
+        residual_remaining_budget = max(
+            0,
+            int(max_primary_adjustments_per_stage) - len(residual_groups),
+        )
+        # Tolerance only suppresses conversions.  Directly executable products
+        # must still be claimed before the final small remainder is accepted.
+        if tolerated_remaining_ids_by_su:
+            residual_remaining_budget = 0
+        next_product = _plan_next_residual_product(
             phase_eval=phase_eval,
-            contract=contract,
-            pool=pool,
-            H=H,
+            iteration_ledger=iteration_ledger,
+            H=H_work,
             E_target=E_target,
-            max_primary_adjustments=max_primary_adjustments_per_stage,
-            max_h_compensation_ops=max_h_compensation_ops_per_adjustment,
             h_tolerance=h_tolerance,
             special_degree_meta=special_degree_meta,
-            su11_rotation_index=su11_rotation_index,
-            iteration_ledger=iteration_ledger,
-            prefix_ops=physical_ops,
-            prefix_transactions=direct_transactions,
+            su11_rotation_index=rotation_cursor,
+            remaining_flex_chains=remaining_flex_goal,
+            residual_flex_preferred_23=residual_flex_preferred_23,
+            residual_flex_min_23=residual_flex_min_23,
+            residual_side_preferred_23=residual_side_preferred_23,
+            residual_side_min_23=residual_side_min_23,
+            max_conversions=residual_remaining_budget,
+            max_h_compensation_ops=max_h_compensation_ops_per_adjustment,
+            contract_id=residual_contract_id,
+            remaining_flex_capacity=remaining_flex_capacity,
+            prefix_groups=residual_groups,
+            accounting_initial_pool=residual_initial_pool,
+            forbidden_primary_conversion_signatures=forbidden_resource_conversion_signatures,
         )
-    remaining_flex_goal = max(0, int(residual_flex_goal) - int(direct_flex_count))
-    residual_fit = _residual_template_fit_plan(
-        phase_eval=phase_eval,
-        pool=pool,
-        H=H_work,
-        E_target=E_target,
-        h_tolerance=h_tolerance,
-        special_degree_meta=special_degree_meta,
-        su11_rotation_index=rotation_cursor,
-        remaining_flex_chains=remaining_flex_goal,
-        residual_flex_preferred_23=residual_flex_preferred_23,
-        residual_flex_min_23=residual_flex_min_23,
-        residual_side_preferred_23=residual_side_preferred_23,
-        residual_side_min_23=residual_side_min_23,
-        max_conversions=max_primary_adjustments_per_stage,
-        max_h_compensation_ops=max_h_compensation_ops_per_adjustment,
-    )
-    if residual_fit is not None:
-        residual_fit.phase_result.transactions = (
-            list(direct_transactions)
-            + list(residual_fit.phase_result.transactions or [])
+        residual_candidate_attempts.extend(
+            list(next_product.get("attempts", []) or [])
         )
-        return residual_fit
+        if str(next_product.get("mode", "")) == "direct":
+            iteration_ledger = next_product["ledger"]
+            pool = deepcopy(iteration_ledger.available_ids_by_su)
+            direct_transactions.append(next_product["transaction"])
+            direct_residual_template_fits.append({
+                "product_role": str(next_product.get("product_role", "")),
+                "chain_23_count": int(next_product.get("chain_23_count", 0) or 0),
+                "required_counts": dict(next_product.get("required_counts", {}) or {}),
+                "conversion_count": 0,
+            })
+            if str(next_product.get("product_role", "")) == "residual_flex_chain":
+                direct_flex_count += 1
+                remaining_flex_goal = max(0, int(remaining_flex_goal) - 1)
+                remaining_flex_capacity = max(0, int(remaining_flex_capacity) - 1)
+            residual_contract_id += 1
+            continue
+        if str(next_product.get("mode", "")) == "conversion":
+            residual_plan = next_product["plan"]
+            residual_histogram = residual_plan.histogram_adjustment_plan
+            candidate_ledger = dict(
+                getattr(residual_plan, "runtime", {}) or {}
+            ).get("iteration_topology_ledger")
+            if candidate_ledger is None:
+                return residual_plan
+            iteration_ledger = candidate_ledger
+            pool = deepcopy(iteration_ledger.available_ids_by_su)
+            H_work = residual_histogram.H_after.detach().clone()
+            residual_groups.extend(list(residual_histogram.groups or []))
+            rotation_cursor = int(residual_histogram.su11_rotation_index_after)
+            direct_transactions.extend(
+                list(residual_plan.phase_result.transactions or [])
+            )
+            residual_converted_product_count += 1
+            direct_residual_template_fits.append({
+                "product_role": str(next_product.get("product_role", "")),
+                "chain_23_count": int(next_product.get("chain_23_count", 0) or 0),
+                "required_counts": dict(next_product.get("required_counts", {}) or {}),
+                "conversion_count": int(residual_histogram.primary_adjustment_count),
+            })
+            if str(next_product.get("product_role", "")) == "residual_flex_chain":
+                direct_flex_count += 1
+                remaining_flex_goal = max(0, int(remaining_flex_goal) - 1)
+                remaining_flex_capacity = max(0, int(remaining_flex_capacity) - 1)
+            residual_contract_id += 1
+            if len(residual_groups) >= int(max_primary_adjustments_per_stage):
+                return _finalize_phase_plan(
+                    phase_eval=phase_eval,
+                    phase="residual_resource_self_closure",
+                    H_before=H,
+                    H_after=H_work,
+                    initial_pool=residual_initial_pool,
+                    final_pool=pool,
+                    groups=residual_groups,
+                    transactions=direct_transactions,
+                    rotation_before=su11_rotation_index,
+                    rotation_after=rotation_cursor,
+                    h_tolerance=h_tolerance,
+                    stage_diagnostics={
+                        **dict(su24_stage_diagnostics),
+                        "residual_stage_completed": False,
+                        "residual_rebuild_reason": "primary_budget_exhausted",
+                        "residual_primary_count": len(residual_groups),
+                        "residual_remaining_budget": 0,
+                        "residual_direct_product_count": len(direct_residual_template_fits) - int(residual_converted_product_count),
+                        "residual_converted_product_count": int(residual_converted_product_count),
+                        "remaining_required_flex_goal": int(remaining_flex_goal),
+                        "residual_candidate_attempts": list(residual_candidate_attempts),
+                    },
+                )
+            continue
+        break
+    remaining_closure_ids_by_su = _remaining_closure_ids_by_su(pool)
     remaining_closure_ids = [
         int(node_id)
-        for su_type in (11, 22, 23)
-        for node_id in list(pool.get(int(su_type), []) or [])
+        for values in remaining_closure_ids_by_su.values()
+        for node_id in values
     ]
-    if remaining_closure_ids:
+    tolerated_remaining_ids_by_su = _tolerated_remaining_closure_ids(
+        pool,
+        remaining_flex_goal=remaining_flex_goal,
+    )
+    if remaining_closure_ids and residual_groups:
+        return _finalize_phase_plan(
+            phase_eval=phase_eval,
+            phase="residual_resource_self_closure",
+            H_before=H,
+            H_after=H_work,
+            initial_pool=residual_initial_pool,
+            final_pool=pool,
+            groups=residual_groups,
+            transactions=direct_transactions,
+            rotation_before=su11_rotation_index,
+            rotation_after=rotation_cursor,
+            h_tolerance=h_tolerance,
+            stage_diagnostics={
+                **dict(su24_stage_diagnostics),
+                "residual_stage_completed": False,
+                "residual_rebuild_reason": "remaining_resources_after_conversion",
+                "residual_primary_count": len(residual_groups),
+                "residual_remaining_budget": max(
+                    0,
+                    int(max_primary_adjustments_per_stage) - len(residual_groups),
+                ),
+                "residual_direct_product_count": len(direct_residual_template_fits) - int(residual_converted_product_count),
+                "residual_converted_product_count": int(residual_converted_product_count),
+                "remaining_required_flex_goal": int(remaining_flex_goal),
+                "remaining_closure_node_ids": list(remaining_closure_ids),
+                "tolerated_remaining_ids_by_su": {
+                    str(key): list(values)
+                    for key, values in tolerated_remaining_ids_by_su.items()
+                },
+                "tolerated_remaining_count": sum(
+                    len(values) for values in tolerated_remaining_ids_by_su.values()
+                ),
+                "direct_residual_template_fits": list(direct_residual_template_fits),
+                "residual_candidate_attempts": list(residual_candidate_attempts),
+            },
+        )
+    if remaining_closure_ids and not tolerated_remaining_ids_by_su:
+        residual_remaining_budget = max(
+            0,
+            int(max_primary_adjustments_per_stage) - len(residual_groups),
+        )
+        tolerated_excess = (
+            len(remaining_closure_ids)
+            if int(remaining_flex_goal) > 0
+            else max(
+                0,
+                len(remaining_closure_ids)
+                - int(MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES),
+            )
+        )
         terminal_plan = _residual_orphan_terminalization_plan(
             phase_eval=phase_eval,
             pool=pool,
@@ -2208,29 +3267,143 @@ def plan_stage3_state_machine(
             h_tolerance=h_tolerance,
             special_degree_meta=special_degree_meta,
             su11_rotation_index=rotation_cursor,
-            max_conversions=max_primary_adjustments_per_stage,
-            max_h_compensation_ops=max_h_compensation_ops_per_adjustment,
+            max_conversions=min(
+                int(residual_remaining_budget),
+                int(tolerated_excess),
+            ),
+            prefix_transactions=direct_transactions,
         )
         if terminal_plan is not None:
-            terminal_plan.phase_result.transactions = (
-                list(direct_transactions)
-                + list(terminal_plan.phase_result.transactions or [])
+            terminal_histogram = terminal_plan.histogram_adjustment_plan
+            iteration_ledger = _ledger_after_histogram_conversions(
+                iteration_ledger,
+                terminal_histogram,
             )
-            return terminal_plan
+            pool = deepcopy(iteration_ledger.available_ids_by_su)
+            H_work = terminal_histogram.H_after.detach().clone()
+            residual_groups.extend(list(terminal_histogram.groups or []))
+            rotation_cursor = int(terminal_histogram.su11_rotation_index_after)
+            direct_transactions.extend(
+                list(terminal_plan.phase_result.transactions or [])
+            )
+            remaining_closure_ids_by_su = _remaining_closure_ids_by_su(pool)
+            remaining_closure_ids = [
+                int(node_id)
+                for values in remaining_closure_ids_by_su.values()
+                for node_id in values
+            ]
+            tolerated_remaining_ids_by_su = _tolerated_remaining_closure_ids(
+                pool,
+                remaining_flex_goal=remaining_flex_goal,
+            )
+            if (
+                remaining_closure_ids
+                and not tolerated_remaining_ids_by_su
+                and len(residual_groups) < int(max_primary_adjustments_per_stage)
+            ):
+                proof = {
+                    "phase": "residual_resource_self_closure",
+                    "reason": "residual_terminalization_left_unhandled_resources",
+                    "failed_contract": {
+                        "phase": "residual_resource_self_closure",
+                        "contract_kind": "residual_terminalization",
+                        "target_role": "orphan_22_23_via_11_then_aromatic_rotation",
+                        "source_node_ids": list(remaining_closure_ids),
+                    },
+                    "available_counts": {
+                        str(key): len(values) for key, values in pool.items()
+                    },
+                    "remaining_node_ids": list(remaining_closure_ids),
+                }
+                return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+                    ok=False,
+                    reason="phase_resource_infeasible",
+                    blocked_reason=str(proof["reason"]),
+                    phase="residual_resource_self_closure",
+                    plan_kind="residual_terminal_conversion_infeasible",
+                    pre_assembly_gate="residual_resource_self_closure",
+                    active_subphase="residual_resource_self_closure",
+                    phase_result=Stage3PhaseResult(
+                        active_phase="residual_resource_self_closure",
+                        phase_completed=False,
+                        rebuild_required=False,
+                        stop_reason="phase_resource_infeasible",
+                        infeasibility_proof=proof,
+                    ),
+                    diagnostics={
+                        "stage3_phase": "residual_resource_self_closure",
+                        "infeasibility_proof": proof,
+                        **dict(su24_stage_diagnostics),
+                    },
+                    runtime={
+                        **_runtime_with_pool(phase_eval, pool),
+                        "iteration_topology_ledger": iteration_ledger,
+                    },
+                ), h_tolerance)
+            return _finalize_phase_plan(
+                phase_eval=phase_eval,
+                phase="residual_resource_self_closure",
+                H_before=H,
+                H_after=H_work,
+                initial_pool=residual_initial_pool,
+                final_pool=pool,
+                groups=residual_groups,
+                transactions=direct_transactions,
+                rotation_before=su11_rotation_index,
+                rotation_after=rotation_cursor,
+                h_tolerance=h_tolerance,
+                stage_diagnostics={
+                    **dict(su24_stage_diagnostics),
+                    "residual_stage_completed": bool(
+                        not remaining_closure_ids or tolerated_remaining_ids_by_su
+                    ),
+                    "residual_rebuild_reason": (
+                        "residual_stage_completed_after_conversion"
+                        if not remaining_closure_ids
+                        else "tolerated_remaining_resources_after_conversion"
+                        if tolerated_remaining_ids_by_su
+                        else "primary_budget_exhausted"
+                    ),
+                    "residual_primary_count": len(residual_groups),
+                    "residual_remaining_budget": max(
+                        0,
+                        int(max_primary_adjustments_per_stage) - len(residual_groups),
+                    ),
+                    "residual_direct_product_count": len(direct_residual_template_fits) - int(residual_converted_product_count),
+                    "residual_converted_product_count": int(residual_converted_product_count),
+                    "remaining_required_flex_goal": int(remaining_flex_goal),
+                    "tolerated_remaining_ids_by_su": {
+                        str(key): list(values)
+                        for key, values in tolerated_remaining_ids_by_su.items()
+                    },
+                    "tolerated_remaining_count": sum(
+                        len(values) for values in tolerated_remaining_ids_by_su.values()
+                    ),
+                    "direct_residual_template_fits": list(direct_residual_template_fits),
+                    "residual_candidate_attempts": list(residual_candidate_attempts),
+                },
+            )
         proof = {
             "phase": "residual_resource_self_closure",
             "reason": "residual_terminal_conversion_infeasible",
-            "failed_contract": "orphan_22_23_to_11_then_11_to_13_12",
+            "failed_contract": {
+                "phase": "residual_resource_self_closure",
+                "contract_kind": "residual_terminalization",
+                "target_role": "orphan_22_23_via_11_then_aromatic_rotation",
+                "source_node_ids": list(remaining_closure_ids),
+            },
             "required_counts": {},
             "available_counts": {str(key): len(values) for key, values in pool.items()},
             "missing_counts": {},
             "attempted_conversions": [
                 {"node_id": int(node_id), "reason": "residual_terminal_conversion"}
-                for node_id in remaining_closure_ids[:max_primary_adjustments_per_stage]
+                for node_id in remaining_closure_ids[:residual_remaining_budget]
             ],
             "template_checks": {"residual_template_executable": False},
+            "direct_residual_template_fits": list(direct_residual_template_fits),
+            "residual_candidate_attempts": list(residual_candidate_attempts),
         }
-        return Stage3AdjustmentPlan(
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
             ok=False,
             reason="phase_resource_infeasible",
             blocked_reason=str(proof["reason"]),
@@ -2245,29 +3418,53 @@ def plan_stage3_state_machine(
                 stop_reason="phase_resource_infeasible",
                 infeasibility_proof=proof,
             ),
-            diagnostics={"stage3_phase": "residual_resource_self_closure", "infeasibility_proof": proof},
+            diagnostics={
+                "stage3_phase": "residual_resource_self_closure",
+                "infeasibility_proof": proof,
+                **dict(su24_stage_diagnostics),
+            },
             runtime={
                 **_runtime_with_pool(phase_eval, pool),
                 "iteration_topology_ledger": iteration_ledger,
             },
+        ), h_tolerance)
+    if residual_groups:
+        return _finalize_phase_plan(
+            phase_eval=phase_eval,
+            phase="residual_resource_self_closure",
+            H_before=H,
+            H_after=H_work,
+            initial_pool=residual_initial_pool,
+            final_pool=pool,
+            groups=residual_groups,
+            transactions=direct_transactions,
+            rotation_before=su11_rotation_index,
+            rotation_after=rotation_cursor,
+            h_tolerance=h_tolerance,
+            stage_diagnostics={
+                **dict(su24_stage_diagnostics),
+                "residual_stage_completed": True,
+                "residual_rebuild_reason": "residual_stage_completed_after_conversion",
+                "residual_primary_count": len(residual_groups),
+                "residual_remaining_budget": max(
+                    0,
+                    int(max_primary_adjustments_per_stage) - len(residual_groups),
+                ),
+                "residual_direct_product_count": len(direct_residual_template_fits) - int(residual_converted_product_count),
+                "residual_converted_product_count": int(residual_converted_product_count),
+                "remaining_required_flex_goal": int(remaining_flex_goal),
+                "direct_residual_template_fits": list(direct_residual_template_fits),
+                "residual_candidate_attempts": list(residual_candidate_attempts),
+            },
         )
     completed_phases.append("residual_resource_self_closure")
 
-    profiles = build_su24_resource_role_profiles(nodes, pool)
-    residual_proof = _residual_infeasibility_proof(
-        pool=pool,
-        H=H_work,
-        E_target=E_target,
-        h_tolerance=h_tolerance,
-        special_degree_meta=special_degree_meta,
-        remaining_flex_chains=remaining_flex_goal,
-        residual_flex_preferred_23=residual_flex_preferred_23,
-        residual_flex_min_23=residual_flex_min_23,
-        residual_side_preferred_23=residual_side_preferred_23,
-        residual_side_min_23=residual_side_min_23,
-        max_conversions=max_primary_adjustments_per_stage,
+    tolerated_remaining_ids_by_su = _tolerated_remaining_closure_ids(
+        pool,
+        remaining_flex_goal=remaining_flex_goal,
     )
-    has_available_pool = any(list(values or []) for values in pool.values())
+
+    profiles = build_su24_resource_role_profiles(nodes, pool)
     classification_view = dict(getattr(phase_eval, "classification_view", {}) or {})
     classification_failures = {
         "unclassified_nodes": list(classification_view.get("unclassified_nodes", []) or []),
@@ -2277,8 +3474,44 @@ def plan_stage3_state_machine(
     classification_ok = not any(classification_failures.values())
     pending_contracts_final = list(getattr(iteration_ledger, "pending_contracts", []) or [])
     ownership_conflicts = list(getattr(iteration_ledger, "conflicts", []) or [])
+    classified_fragment_ids = {
+        int(dict(item or {}).get("fragment_id"))
+        for item in list(classification_view.get("fragments", []) or [])
+        if dict(item or {}).get("fragment_id") is not None
+    }
+    completed_fragment_ids = {
+        int(value)
+        for product in list(getattr(iteration_ledger, "completed_products", []) or [])
+        for value in list(dict(product or {}).get("source_fragment_ids", []) or [])
+    }
+    pending_fragment_ids = {
+        int(value)
+        for contract in pending_contracts_final
+        for value in list(dict(contract or {}).get("source_fragment_ids", []) or [])
+    }
+    fragment_coverage = {
+        "classified_fragment_ids": sorted(classified_fragment_ids),
+        "completed_fragment_ids": sorted(completed_fragment_ids),
+        "pending_fragment_ids": sorted(pending_fragment_ids),
+        "uncovered_fragment_ids": sorted(
+            classified_fragment_ids - completed_fragment_ids - pending_fragment_ids
+        ),
+        "unknown_completed_fragment_ids": sorted(completed_fragment_ids - classified_fragment_ids),
+        "unknown_pending_fragment_ids": sorted(pending_fragment_ids - classified_fragment_ids),
+    }
+    fragment_coverage_ok = not any(
+        list(fragment_coverage[key] or [])
+        for key in (
+            "uncovered_fragment_ids",
+            "unknown_completed_fragment_ids",
+            "unknown_pending_fragment_ids",
+        )
+    )
     flex_enforced = bool(dict(getattr(phase_eval, "flex_audit", {}) or {}).get("enforced", False))
-    flex_final = int(flex_counts.get("final", 0) or 0) + int(direct_flex_count)
+    flex_final = (
+        int(flex_counts.get("final", 0) or 0)
+        + int(direct_flex_count)
+    )
     flex_ok = bool(
         not flex_enforced
         or (
@@ -2287,7 +3520,13 @@ def plan_stage3_state_machine(
             <= int(flex_bounds.get("max", 0) or 0)
         )
     )
-    if not classification_ok or pending_contracts_final or ownership_conflicts or not flex_ok:
+    if (
+        not classification_ok
+        or pending_contracts_final
+        or ownership_conflicts
+        or not fragment_coverage_ok
+        or not flex_ok
+    ):
         proof = {
             "phase": "complete",
             "reason": "stage3_completion_invariants_failed",
@@ -2316,10 +3555,12 @@ def plan_stage3_state_machine(
             },
             "classification_failures": classification_failures,
             "ownership_conflicts": ownership_conflicts,
+            "fragment_coverage": fragment_coverage,
             "flex_bounds": dict(flex_bounds),
             "flex_final": int(flex_final),
+            "direct_residual_template_fits": list(direct_residual_template_fits),
         }
-        return Stage3AdjustmentPlan(
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
             ok=False,
             reason="phase_resource_infeasible",
             blocked_reason=str(proof["reason"]),
@@ -2340,12 +3581,13 @@ def plan_stage3_state_machine(
                 "stage3_phase": "complete",
                 "completed_phases": completed_phases,
                 "infeasibility_proof": proof,
+                **dict(su24_stage_diagnostics),
             },
             runtime={
                 **_runtime_with_pool(phase_eval, pool),
                 "iteration_topology_ledger": iteration_ledger,
             },
-        )
+        ), h_tolerance)
     phase_result = Stage3PhaseResult(
         active_phase="complete",
         phase_completed=True,
@@ -2353,9 +3595,9 @@ def plan_stage3_state_machine(
         symbolic_topology_count=len(direct_transactions),
         transactions=list(direct_transactions),
         stop_reason="stage3_complete",
-        infeasibility_proof=residual_proof if has_available_pool else {},
+        infeasibility_proof={},
     )
-    return Stage3AdjustmentPlan(
+    return _annotate_h_soft_rule(Stage3AdjustmentPlan(
         ok=True,
         reason="stage3_complete",
         phase="complete",
@@ -2367,17 +3609,46 @@ def plan_stage3_state_machine(
             "stage3_phase": "complete",
             "completed_phases": completed_phases,
             "sequential_single_topology": True,
+            **dict(external_diagnostics),
+            **dict(su24_stage_diagnostics),
             "su24_resource_profiles": [item.to_dict() for item in profiles],
             "residual_flex_preferred_23": int(residual_flex_preferred_23),
             "residual_flex_min_23": int(residual_flex_min_23),
             "residual_side_preferred_23": int(residual_side_preferred_23),
             "residual_side_min_23": int(residual_side_min_23),
+            "tolerated_unassembled_resource_limit": int(
+                MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES
+            ),
+            "tolerated_remaining_ids_by_su": {
+                str(key): list(values)
+                for key, values in tolerated_remaining_ids_by_su.items()
+            },
+            "tolerated_remaining_count": sum(
+                len(values) for values in tolerated_remaining_ids_by_su.values()
+            ),
             "infeasible_contracts": list(infeasible_contracts),
             "stale_identity_contracts": list(stale_identity_contracts),
-            "residual_infeasibility_proof": residual_proof if has_available_pool else {},
+            "residual_infeasibility_proof": {},
+            "tolerated_remaining_proof": (
+                {
+                    "reason": "tolerated_unassembled_closure_resources",
+                    "remaining_ids_by_su": {
+                        str(key): list(values)
+                        for key, values in tolerated_remaining_ids_by_su.items()
+                    },
+                    "remaining_count": sum(
+                        len(values)
+                        for values in tolerated_remaining_ids_by_su.values()
+                    ),
+                }
+                if tolerated_remaining_ids_by_su
+                else {}
+            ),
+            "direct_residual_template_fits": list(direct_residual_template_fits),
+            "fragment_coverage": fragment_coverage,
         },
         runtime={
             **_runtime_with_pool(phase_eval, pool),
             "iteration_topology_ledger": iteration_ledger,
         },
-    )
+    ), h_tolerance)

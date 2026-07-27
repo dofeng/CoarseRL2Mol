@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 from ...shared.coarse_graph import E_SU, NUM_SU_TYPES
 from ...shared.inverse_common import (
     _NodeV3, HOP1_PORT_COMBINATIONS,
+    SU_CONNECTION_DEGREE,
     SPECIAL_DEGREE_PRIORS,
     allocate_special_degree_counts,
     rebuild_su19_partition_meta,
@@ -30,6 +31,7 @@ from ..hop1_adjuster import (
     build_motif_usage_from_pairs,
 )
 from .layer1_eval import Layer1NmrEvaluator
+from .layer1_completion_solver import Layer1CompletionSolver
 from .layer1_refiner import Layer1Refiner
 
 
@@ -69,24 +71,72 @@ class Layer1Assigner:
         )
         self._runtime_nodes_ref: Optional[List[_NodeV3]] = None
         self._node_ids_by_su: Dict[int, List[int]] = {}
-        self._empty_ids_by_su: Dict[int, Set[int]] = {}
-        self._incomplete_ids_by_su: Dict[int, Set[int]] = {}
         self._available_ids_by_su: Dict[int, Set[int]] = {}
         self._port_pattern_cache: Dict[Tuple[int, Optional[int]], Any] = {}
         self._edge_semantics_cache: Dict[Tuple[int, int, Optional[int]], bool] = {}
         self._can_add_hop1_cache: Dict[Tuple[Any, Any], bool] = {}
-        self._graph_edit_version = 0
-        self._last_special_capacity_diagnostics: Dict[str, Any] = {}
+        self._carbon_su_set = {
+            int(i)
+            for i in range(int(self.E_SU.shape[0]))
+            if float(self.E_SU[int(i), 0].detach().cpu().item()) > 0.0
+        }
+        self._hop1_templates_by_su: Dict[int, Tuple[Tuple[int, ...], ...]] = {}
+        self._enforce_hop1_template_contract = False
+
+    def _configure_hop1_template_contract(self, lib_path: Optional[str]) -> None:
+        lib_index = self._nmr_evaluator.get_library_index(lib_path)
+        center_to_hop1 = dict(lib_index.get('center_to_hop1', {}) or {})
+        self._hop1_templates_by_su = {
+            int(center_su): tuple(sorted({
+                tuple(sorted(int(x) for x in tuple(hop1_ms)))
+                for hop1_ms in list(hop1_sets or [])
+            }))
+            for center_su, hop1_sets in center_to_hop1.items()
+        }
+        missing_centers = sorted(
+            int(su) for su in self._carbon_su_set
+            if not self._hop1_templates_by_su.get(int(su))
+        )
+        if missing_centers:
+            raise RuntimeError(
+                "Layer1 template library has no exact 1-hop templates for carbon "
+                f"SU types: {missing_centers}"
+            )
+        self._enforce_hop1_template_contract = True
+        self._reset_layer1_search_caches()
+
+    def _hop1_template_feasible(self,
+                                node: _NodeV3,
+                                neighbor_su: Optional[int] = None,
+                                require_exact: bool = False) -> bool:
+        if not bool(self._enforce_hop1_template_contract):
+            return True
+        center_su = int(getattr(node, 'su_type', -1))
+        if center_su not in self._carbon_su_set:
+            return True
+        current = Counter({
+            int(su): int(count)
+            for su, count in Counter(getattr(node, 'hop1_su', {}) or {}).items()
+            if int(count) > 0
+        })
+        if neighbor_su is not None:
+            current[int(neighbor_su)] += 1
+        current_ms = tuple(sorted(current.elements()))
+        templates = self._hop1_templates_by_su.get(center_su, ())
+        if bool(require_exact):
+            return current_ms in templates
+        target_degree = self._node_target_degree(node)
+        for template_ms in templates:
+            if target_degree is not None and len(template_ms) != int(target_degree):
+                continue
+            template_counter = Counter(template_ms)
+            if all(int(template_counter.get(su, 0)) >= int(count) for su, count in current.items()):
+                return True
+        return False
 
     def _reset_layer1_search_caches(self) -> None:
         self._edge_semantics_cache = {}
         self._can_add_hop1_cache = {}
-
-    def _bump_graph_edit_version(self) -> None:
-        try:
-            self._graph_edit_version = int(getattr(self, '_graph_edit_version', 0)) + 1
-        except Exception:
-            self._graph_edit_version = 1
 
     def _runtime_index_matches(self, nodes: List[_NodeV3]) -> bool:
         return nodes is self._runtime_nodes_ref
@@ -101,17 +151,9 @@ class Layer1Assigner:
         if su < 0:
             return
 
-        empty_bucket = self._empty_ids_by_su.setdefault(int(su), set())
-        incomplete_bucket = self._incomplete_ids_by_su.setdefault(int(su), set())
         available_bucket = self._available_ids_by_su.setdefault(int(su), set())
-        empty_bucket.discard(int(node_id))
-        incomplete_bucket.discard(int(node_id))
         available_bucket.discard(int(node_id))
 
-        if bool(node.is_hop1_empty()):
-            empty_bucket.add(int(node_id))
-        if (not bool(node.is_hop1_empty())) and (not bool(node.is_hop1_complete())):
-            incomplete_bucket.add(int(node_id))
         if int(node.remaining_hop1_slots()) > 0:
             available_bucket.add(int(node_id))
 
@@ -119,8 +161,6 @@ class Layer1Assigner:
         self._reset_layer1_search_caches()
         self._runtime_nodes_ref = nodes
         ids_by_su: Dict[int, List[int]] = defaultdict(list)
-        self._empty_ids_by_su = defaultdict(set)
-        self._incomplete_ids_by_su = defaultdict(set)
         self._available_ids_by_su = defaultdict(set)
         for node in nodes:
             nid = int(getattr(node, 'global_id', -1))
@@ -453,7 +493,13 @@ class Layer1Assigner:
     def _node_target_degree(node: _NodeV3) -> Optional[int]:
         try:
             val = getattr(node, 'target_hop1_degree', None)
-            return int(val) if val is not None else None
+            if val is not None:
+                return int(val)
+            su_type = int(getattr(node, 'su_type', -1))
+            if su_type in {19, 20, 21}:
+                return None
+            degree = SU_CONNECTION_DEGREE.get(su_type)
+            return int(degree) if degree is not None else None
         except Exception:
             return None
 
@@ -1562,15 +1608,6 @@ class Layer1Assigner:
             return None
         return self._choose_fixed_candidate(center, candidates, priority_list, nodes=nodes)
 
-    def _complete_required_external_anchors(self,
-                                            nodes: List[_NodeV3],
-                                            su_types: List[int]) -> None:
-        self._refiner.complete_required_external_anchors(
-            assigner=self,
-            nodes=nodes,
-            su_types=su_types,
-        )
-
     @staticmethod
     def _print_consistency_errors(errors: List[str], prefix: str, limit: int = 8) -> None:
         if not errors:
@@ -1586,20 +1623,8 @@ class Layer1Assigner:
     def _is_soft_consistency_error(msg: str) -> bool:
         text = str(msg)
         if ('实际连接度' in text and '目标连接度' in text):
-            # 19/20/21 encode mode-specific anchor degrees.  A missing edge
-            # changes d1/d2/d3 semantics, so it must not be accepted as a soft
-            # tail-gap.
-            for special_su in (19, 20, 21):
-                if f"(SU{int(special_su)})" in text:
-                    return False
-            return True
+            return False
         if '未优先连接SU9' in text:
-            return True
-        if '(SU11): 缺少必需外接锚点' in text:
-            return True
-        if '(SU11): 固定锚点边数不足' in text:
-            return True
-        if '(SU11): 固定锚点边数超过目标上限' in text:
             return True
         return False
 
@@ -1675,6 +1700,14 @@ class Layer1Assigner:
             if target_degree is not None and int(n.get_hop1_degree()) != int(target_degree):
                 errors.append(
                     f"节点{n.global_id}(SU{n.su_type}): 实际连接度{n.get_hop1_degree()} != 目标连接度{target_degree}"
+                )
+            if (
+                int(getattr(n, 'su_type', -1)) in self._carbon_su_set
+                and not self._hop1_template_feasible(n, require_exact=True)
+            ):
+                errors.append(
+                    f"节点{n.global_id}(SU{n.su_type}): 精确1-hop模板不存在, "
+                    f"hop1={list(hop1_counter_to_multiset(n.hop1_su))}"
                 )
         
         # 6. 检查 per-port 连接规则合规性
@@ -1842,6 +1875,22 @@ class Layer1Assigner:
                         f"羰基节点{n.global_id}(SU{n.su_type}): hop1={sorted(neighbor_types)} 未优先连接SU9"
                     )
 
+        # Fixed-role edges may change identity during spectral swaps, but the
+        # role cardinality itself is a hard invariant.
+        for n in nodes:
+            if int(getattr(n, 'su_type', -1)) != 9:
+                continue
+            carbonyl_neighbors = [
+                int(nid)
+                for nid in list(getattr(n, 'hop1_ids', []) or [])
+                if 0 <= int(nid) < len(nodes) and int(nodes[int(nid)].su_type) in {0, 1, 2, 3}
+            ]
+            if len(carbonyl_neighbors) != 1:
+                errors.append(
+                    f"节点{n.global_id}(SU9): 羰基固定角色边必须恰好一个, "
+                    f"carbonyl_neighbors={carbonyl_neighbors}"
+                )
+
         # 7.5 检查逐边语义合法性
         seen_edges: Set[Tuple[int, int]] = set()
         for n in nodes:
@@ -1914,7 +1963,12 @@ class Layer1Assigner:
                     partition = None
                     if int(su_type) in {19, 20, 21} and target_degree is not None:
                         target_fixed_anchor_count = 1
-                special_source = 'layer0_special_degree_meta' if target_degree is not None else None
+                if int(su_type) not in {19, 20, 21}:
+                    target_degree = int(SU_CONNECTION_DEGREE.get(int(su_type), 4))
+                if int(su_type) in {19, 20, 21}:
+                    special_source = 'layer0_special_degree_meta' if target_degree is not None else None
+                else:
+                    special_source = 'fixed_su_connection_degree'
                 node = _NodeV3(
                     global_id=global_id,
                     su_type=su_type,
@@ -1929,6 +1983,7 @@ class Layer1Assigner:
         
         return nodes
 
+    @staticmethod
     def _edge_is_fixed(node1: _NodeV3, node2: _NodeV3) -> bool:
         return bool(
             int(node2.global_id) in set(getattr(node1, 'fixed_hop1_ids', set()) or set())
@@ -1966,6 +2021,10 @@ class Layer1Assigner:
             return False
         if self._violates_forbidden_p_pair_connection(nodes, node1, node2):
             return False
+        if not self._hop1_template_feasible(node1, int(node2.su_type)):
+            return False
+        if not self._hop1_template_feasible(node2, int(node1.su_type)):
+            return False
         
         # 添加互为1-hop（SU类型计数）
         node1.hop1_su[node2.su_type] += 1
@@ -1977,7 +2036,6 @@ class Layer1Assigner:
         if bool(lock):
             node1.fixed_hop1_ids.add(int(id2))
             node2.fixed_hop1_ids.add(int(id1))
-        self._bump_graph_edit_version()
         self._refresh_runtime_node_entry(nodes, int(id1))
         self._refresh_runtime_node_entry(nodes, int(id2))
         # Cache keys include each endpoint's neighbor ids/types and remaining
@@ -2019,7 +2077,6 @@ class Layer1Assigner:
         node2.hop1_ids.remove(id1)
         node1.fixed_hop1_ids.discard(int(id2))
         node2.fixed_hop1_ids.discard(int(id1))
-        self._bump_graph_edit_version()
         self._refresh_runtime_node_entry(nodes, int(id1))
         self._refresh_runtime_node_entry(nodes, int(id2))
         return True
@@ -2062,7 +2119,6 @@ class Layer1Assigner:
 
     def _can_add_hop1_connection(self, nodes: List[_NodeV3], node1: _NodeV3, node2: _NodeV3) -> bool:
         key = (
-            int(getattr(self, '_graph_edit_version', 0)),
             self._can_add_state_signature(nodes, node1),
             self._can_add_state_signature(nodes, node2),
         )
@@ -2155,274 +2211,19 @@ class Layer1Assigner:
             if not can_match_ports_partial(proposed2, port_sets2, center_node=node2):
                 return False
 
+        if not self._hop1_template_feasible(node1, int(node2.su_type)):
+            return False
+        if not self._hop1_template_feasible(node2, int(node1.su_type)):
+            return False
+
         return True
 
-    def _repair_remaining_hop1_slots(self,
-                                     nodes: List[_NodeV3],
-                                     max_iters: Optional[int] = 64) -> None:
-        self._refiner.repair_remaining_hop1_slots(
-            assigner=self,
-            nodes=nodes,
-            max_iters=max_iters,
-        )
-
-    def _special_capacity_snapshot(self, nodes: List[_NodeV3]) -> Dict[str, Any]:
-        rows: List[Dict[str, Any]] = []
-        unique_capacity: Dict[int, int] = {}
-        rejection_counts: Counter = Counter()
-        for center in nodes:
-            if int(getattr(center, 'su_type', -1)) not in {19, 20, 21}:
-                continue
-            gap = max(0, int(center.remaining_hop1_slots()))
-            if gap <= 0:
-                continue
-            candidate_ids: List[int] = []
-            for candidate in nodes:
-                if int(candidate.global_id) == int(center.global_id):
-                    continue
-                if int(candidate.remaining_hop1_slots()) <= 0:
-                    rejection_counts['no_remaining_slot'] += 1
-                    continue
-                if not self._can_add_hop1_connection(nodes, center, candidate):
-                    rejection_counts['connection_rule'] += 1
-                    continue
-                candidate_ids.append(int(candidate.global_id))
-                unique_capacity[int(candidate.global_id)] = max(
-                    int(unique_capacity.get(int(candidate.global_id), 0)),
-                    int(candidate.remaining_hop1_slots()),
-                )
-            rows.append({
-                'node_id': int(center.global_id),
-                'su_type': int(center.su_type),
-                'subtype': str(getattr(center, 'special_degree_source', '') or ''),
-                'degree_gap': int(gap),
-                'candidate_count': int(len(candidate_ids)),
-                'candidate_ids': candidate_ids,
-                'target_degree': int(getattr(center, 'target_hop1_degree', 0) or 0),
-                'anchor_mode': str(getattr(center, 'special_anchor_mode', '') or ''),
-            })
-        total_gap = int(sum(int(row['degree_gap']) for row in rows))
-        total_capacity = int(sum(int(value) for value in unique_capacity.values()))
-        return {
-            'variant': int(getattr(self, '_build_variant', 0)),
-            'nodes': rows,
-            'total_degree_gap': total_gap,
-            'unique_candidate_capacity': total_capacity,
-            'rejection_counts': dict(rejection_counts),
-        }
-
-    @staticmethod
-    def _special_mrv_key(row: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
-        subtype = str(row.get('subtype', '') or '')
-        degree = int(row.get('target_degree', 0) or 0)
-        mode = str(row.get('anchor_mode', '') or '')
-        return (
-            int(row.get('candidate_count', 0)),
-            -int(row.get('degree_gap', 0)),
-            -int(degree >= 3),
-            -int(mode.startswith('double')),
-            int(row.get('node_id', -1)),
-        )
-
-    def _raise_special_capacity_infeasible(self, snapshot: Dict[str, Any], reason: str) -> None:
-        diagnostics = dict(snapshot or {})
-        diagnostics['reason'] = str(reason)
-        self._last_special_capacity_diagnostics = diagnostics
-        compact = {
-            'reason': str(reason),
-            'variant': int(diagnostics.get('variant', 0)),
-            'total_degree_gap': int(diagnostics.get('total_degree_gap', 0)),
-            'unique_candidate_capacity': int(diagnostics.get('unique_candidate_capacity', 0)),
-            'nodes': list(diagnostics.get('nodes', []) or []),
-            'rejection_counts': dict(diagnostics.get('rejection_counts', {}) or {}),
-        }
-        raise RuntimeError(f"special_port_capacity_infeasible: {compact}")
-
-    def _complete_special_nodes_mrv(self, nodes: List[_NodeV3]) -> None:
-        while True:
-            snapshot = self._special_capacity_snapshot(nodes)
-            rows = list(snapshot.get('nodes', []) or [])
-            if not rows:
-                self._last_special_capacity_diagnostics = snapshot
-                return
-            impossible = [row for row in rows if int(row['candidate_count']) < int(row['degree_gap'])]
-            if impossible:
-                snapshot['nodes'] = impossible
-                self._raise_special_capacity_infeasible(snapshot, 'per_node_candidate_shortage')
-            if int(snapshot['unique_candidate_capacity']) < int(snapshot['total_degree_gap']):
-                self._raise_special_capacity_infeasible(snapshot, 'global_unique_slot_shortage')
-
-            row = sorted(rows, key=self._special_mrv_key)[0]
-            center = nodes[int(row['node_id'])]
-            candidates = [nodes[int(node_id)] for node_id in list(row['candidate_ids'])]
-            candidates = sorted(
-                candidates,
-                key=lambda node: (
-                    -int(node.remaining_hop1_slots()),
-                    int(node.su_type),
-                    (int(node.global_id) + int(self._build_variant)) % max(1, len(nodes)),
-                ),
-            )
-            committed = False
-            for candidate in candidates:
-                if not self._add_bidirectional_hop1(nodes, int(center.global_id), int(candidate.global_id)):
-                    continue
-                after = self._special_capacity_snapshot(nodes)
-                after_rows = list(after.get('nodes', []) or [])
-                feasible = (
-                    all(int(item['candidate_count']) >= int(item['degree_gap']) for item in after_rows)
-                    and int(after.get('unique_candidate_capacity', 0)) >= int(after.get('total_degree_gap', 0))
-                )
-                if feasible:
-                    committed = True
-                    break
-                self._remove_bidirectional_hop1_with_force(
-                    nodes,
-                    int(center.global_id),
-                    int(candidate.global_id),
-                    force=True,
-                )
-            if not committed:
-                self._raise_special_capacity_infeasible(snapshot, 'no_capacity_preserving_edge')
-    
     def _get_nodes_by_su_type(self, nodes: List[_NodeV3], su_type: int) -> List[_NodeV3]:
         """获取指定SU类型的所有节点"""
         if self._runtime_index_matches(nodes):
             ids = list(self._node_ids_by_su.get(int(su_type), []))
             return [nodes[int(i)] for i in ids]
         return [n for n in nodes if n.su_type == su_type]
-    
-    def _get_empty_hop1_nodes(self, nodes: List[_NodeV3], su_types: List[int]) -> List[_NodeV3]:
-        """获取指定SU类型中1-hop为空的节点"""
-        if self._runtime_index_matches(nodes):
-            result: List[_NodeV3] = []
-            for su_type in su_types:
-                ids = sorted(int(i) for i in self._empty_ids_by_su.get(int(su_type), set()))
-                result.extend(nodes[int(i)] for i in ids)
-            return result
-        result = []
-        for su_type in su_types:
-            for n in nodes:
-                if n.su_type == su_type and n.is_hop1_empty():
-                    result.append(n)
-        return result
-    
-    def _get_incomplete_hop1_nodes(self, nodes: List[_NodeV3], su_types: List[int]) -> List[_NodeV3]:
-        """获取指定SU类型中1-hop不完整（有分配但未满）的节点"""
-        if self._runtime_index_matches(nodes):
-            result: List[_NodeV3] = []
-            for su_type in su_types:
-                ids = sorted(int(i) for i in self._incomplete_ids_by_su.get(int(su_type), set()))
-                result.extend(nodes[int(i)] for i in ids)
-            return result
-        result = []
-        for su_type in su_types:
-            for n in nodes:
-                if n.su_type == su_type and not n.is_hop1_empty() and not n.is_hop1_complete():
-                    result.append(n)
-        return result
-    
-    def _get_available_nodes(self, nodes: List[_NodeV3], su_types: List[int]) -> List[_NodeV3]:
-        """获取指定SU类型中还有空闲1-hop槽位的节点"""
-        if self._runtime_index_matches(nodes):
-            result: List[_NodeV3] = []
-            for su_type in su_types:
-                ids = sorted(int(i) for i in self._available_ids_by_su.get(int(su_type), set()))
-                result.extend(nodes[int(i)] for i in ids)
-            return result
-        result = []
-        for su_type in su_types:
-            for n in nodes:
-                if n.su_type == su_type and n.remaining_hop1_slots() > 0:
-                    result.append(n)
-        return result
-
-    def _complete_nodes_round_robin(self,
-                                    nodes: List[_NodeV3],
-                                    target_nodes: List[_NodeV3],
-                                    candidate_types: List[int],
-                                    priority_list: List[int],
-                                    salt: int = 0) -> None:
-        """
-        每轮每个节点最多补一条边，避免前排节点过早吃光高优先级候选，导致局部 motif 坍缩。
-        """
-        round_idx = 0
-        while True:
-            active_nodes = [n for n in target_nodes if not n.is_hop1_complete()]
-            if not active_nodes:
-                break
-
-            progressed = False
-            motif_usage = build_motif_usage_from_pairs(
-                (int(node.su_type), hop1_counter_to_multiset(getattr(node, 'hop1_su', {}) or {}))
-                for node in nodes
-            )
-            ordered_nodes = self._maybe_shuffle_nodes(active_nodes, salt=int(salt) + int(round_idx))
-            for node in ordered_nodes:
-                if node.is_hop1_complete():
-                    continue
-
-                candidate_types_eff = list(candidate_types)
-                priority_eff = list(priority_list)
-                required_external = self._required_external_candidates_for_node(node)
-                if required_external:
-                    if not self._has_required_external_for_node(node, nodes):
-                        candidate_types_eff = [t for t in candidate_types_eff if int(t) in set(required_external)]
-                        priority_eff = [t for t in priority_eff if int(t) in set(required_external)]
-                        if not candidate_types_eff:
-                            candidate_types_eff = list(required_external)
-                        if not priority_eff:
-                            priority_eff = list(required_external)
-
-                empty_candidates = self._get_empty_hop1_nodes(nodes, candidate_types_eff)
-                empty_candidates = [
-                    n for n in empty_candidates
-                    if n.global_id != node.global_id and n.remaining_hop1_slots() > 0
-                ]
-                if empty_candidates:
-                    target = self._choose_weighted_candidate(
-                        node,
-                        empty_candidates,
-                        priority_eff,
-                        nodes=nodes,
-                        motif_usage=motif_usage,
-                    )
-                else:
-                    available_candidates = self._get_available_nodes(nodes, candidate_types_eff)
-                    available_candidates = [n for n in available_candidates if n.global_id != node.global_id]
-                    target = self._choose_weighted_candidate(node, available_candidates, priority_eff, nodes=nodes, motif_usage=motif_usage) \
-                        if available_candidates else None
-
-                if target is None:
-                    continue
-
-                old_center_ms = hop1_counter_to_multiset(getattr(node, 'hop1_su', {}) or {})
-                old_target_ms = hop1_counter_to_multiset(getattr(target, 'hop1_su', {}) or {})
-                self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
-                new_center_ms = hop1_counter_to_multiset(getattr(node, 'hop1_su', {}) or {})
-                new_target_ms = hop1_counter_to_multiset(getattr(target, 'hop1_su', {}) or {})
-
-                center_key_old = (int(node.su_type), tuple(old_center_ms))
-                center_key_new = (int(node.su_type), tuple(new_center_ms))
-                target_key_old = (int(target.su_type), tuple(old_target_ms))
-                target_key_new = (int(target.su_type), tuple(new_target_ms))
-                if old_center_ms:
-                    motif_usage[center_key_old] -= 1
-                    if int(motif_usage[center_key_old]) <= 0:
-                        motif_usage.pop(center_key_old, None)
-                if old_target_ms:
-                    motif_usage[target_key_old] -= 1
-                    if int(motif_usage[target_key_old]) <= 0:
-                        motif_usage.pop(target_key_old, None)
-                if new_center_ms:
-                    motif_usage[center_key_new] += 1
-                if new_target_ms:
-                    motif_usage[target_key_new] += 1
-                progressed = True
-
-            if not progressed:
-                break
-            round_idx += 1
     
     def _choose_weighted_candidate(self,
                                    center: _NodeV3,
@@ -2891,10 +2692,11 @@ class Layer1Assigner:
         )
     
     def _assign_fixed_carbonyl(self, nodes: List[_NodeV3]):
-        """e) 0/1/2/3羰基端 -> 必须先消耗所有9号，再分配其他类型
+        """e) Assign only the mandatory carbonyl neighbor of every SU9.
         
         核心规则：每个SU9的port3={0,1,2,3}，必须恰好有一个羰基邻居。
-        因此羰基节点必须先强制消耗所有SU9，然后再用加权随机填充剩余槽位。
+        普通羰基端口由全局补全求解器统一处理，不能在固定阶段提前
+        消耗 SU23/24/25 等资源。
         """
         su0_nodes = self._get_nodes_by_su_type(nodes, 0)
         su1_nodes = self._get_nodes_by_su_type(nodes, 1)
@@ -2902,22 +2704,6 @@ class Layer1Assigner:
         su3_nodes = self._get_nodes_by_su_type(nodes, 3)
         su9_nodes = [n for n in self._get_nodes_by_su_type(nodes, 9) if n.remaining_hop1_slots() > 0]
         
-        def _available_by_types(center: _NodeV3, types: List[int]) -> List[_NodeV3]:
-            out = []
-            for n in nodes:
-                if int(n.su_type) not in set(int(x) for x in types):
-                    continue
-                if int(n.global_id) == int(center.global_id):
-                    continue
-                if int(n.global_id) in center.hop1_ids:
-                    continue
-                if int(n.remaining_hop1_slots()) <= 0:
-                    continue
-                if not self._can_add_hop1_connection(nodes, center, n):
-                    continue
-                out.append(n)
-            return out
-
         # ---- 阶段1：先给每个0/1/2/3尽量分一个9号 ----
         first_round = self._maybe_shuffle_nodes(list(su0_nodes) + list(su1_nodes) + list(su2_nodes) + list(su3_nodes), salt=401)
         for carb in first_round:
@@ -2942,57 +2728,20 @@ class Layer1Assigner:
                     break
                 self._add_bidirectional_hop1(nodes, n3.global_id, su9.global_id)
 
-        # ---- 阶段2：填充羰基节点的剩余槽位（非SU9类型） ----
-        pri_su3 = [23, 24, 25, 22, 19, 20, 21, 14, 15, 17]
-        pri_su0 = [23, 24, 25, 22, 14, 15, 17]
-        pri_su2 = [23, 24, 25, 22, 19, 20, 21, 14, 15, 17]
-        pri_su1 = [23, 24, 25, 19, 20, 21, 14, 15, 17]
-
-        for n3 in su3_nodes:
-            needed = n3.remaining_hop1_slots()
-            for _ in range(max(0, int(needed))):
-                cands = _available_by_types(n3, pri_su3)
-                t = self._choose_weighted_candidate(n3, cands, pri_su3, nodes=nodes)
-                if t is None:
-                    break
-                self._add_bidirectional_hop1(nodes, n3.global_id, t.global_id)
-
-        for n0 in su0_nodes:
-            needed = n0.remaining_hop1_slots()
-            for _ in range(max(0, int(needed))):
-                current = self._current_neighbor_types(nodes, n0)
-                if not any(int(x) in {6, 20} for x in current):
-                    cands = _available_by_types(n0, [6, 20])
-                    t = self._choose_weighted_candidate(n0, cands, [6, 20], nodes=nodes)
-                else:
-                    cands = _available_by_types(n0, pri_su0)
-                    t = self._choose_weighted_candidate(n0, cands, pri_su0, nodes=nodes)
-                if t is None:
-                    break
-                self._add_bidirectional_hop1(nodes, n0.global_id, t.global_id)
-
-        for n2 in su2_nodes:
-            needed = n2.remaining_hop1_slots()
-            for _ in range(max(0, int(needed))):
-                current = self._current_neighbor_types(nodes, n2)
-                if not any(int(x) in {5, 19} for x in current):
-                    cands = _available_by_types(n2, [5, 19])
-                    t = self._choose_weighted_candidate(n2, cands, [5, 19], nodes=nodes)
-                else:
-                    cands = _available_by_types(n2, pri_su2)
-                    t = self._choose_weighted_candidate(n2, cands, pri_su2, nodes=nodes)
-                if t is None:
-                    break
-                self._add_bidirectional_hop1(nodes, n2.global_id, t.global_id)
-
-        for n1 in su1_nodes:
-            needed = n1.remaining_hop1_slots()
-            for _ in range(max(0, int(needed))):
-                cands = _available_by_types(n1, pri_su1)
-                t = self._choose_weighted_candidate(n1, cands, pri_su1, nodes=nodes)
-                if t is None:
-                    break
-                self._add_bidirectional_hop1(nodes, n1.global_id, t.global_id)
+        invalid_su9 = []
+        for su9 in su9_nodes:
+            carbonyl_count = sum(
+                1
+                for neighbor_id in list(su9.hop1_ids or [])
+                if int(nodes[int(neighbor_id)].su_type) in {0, 1, 2, 3}
+            )
+            if carbonyl_count != 1:
+                invalid_su9.append((int(su9.global_id), int(carbonyl_count)))
+        if invalid_su9:
+            raise RuntimeError(
+                "[Carbonyl Fixed Assign] SU9 fixed-role matching incomplete: "
+                + str(invalid_su9[:8])
+            )
 
     def _assign_unsaturated_pairs(self, nodes: List[_NodeV3]):
         """f) 14/15/16双键配对，17/18三键配对
@@ -3019,7 +2768,9 @@ class Layer1Assigner:
                 if candidates:
                     right = candidates[0]
                     paired.update((left.global_id, right.global_id))
-                    self._add_bidirectional_hop1(nodes, left.global_id, right.global_id)
+                    self._add_bidirectional_hop1(
+                        nodes, left.global_id, right.global_id, lock=True
+                    )
 
         pair_from_pools(su16_nodes, su15_nodes)
         pair_from_pools(su15_nodes, su16_nodes)
@@ -3046,7 +2797,9 @@ class Layer1Assigner:
                 paired.add(node1.global_id)
                 continue
             paired.update((node1.global_id, partner.global_id))
-            self._add_bidirectional_hop1(nodes, node1.global_id, partner.global_id)
+            self._add_bidirectional_hop1(
+                nodes, node1.global_id, partner.global_id, lock=True
+            )
         
         # 三键配对 (17, 18) - 17的不饱和端连接度=1，18的连接度=1
         su17_nodes = self._get_nodes_by_su_type(nodes, 17)
@@ -3062,7 +2815,9 @@ class Layer1Assigner:
                         break
                 if partner_idx is not None:
                     n18 = su18_nodes.pop(partner_idx)
-                    self._add_bidirectional_hop1(nodes, n17.global_id, n18.global_id)
+                    self._add_bidirectional_hop1(
+                        nodes, n17.global_id, n18.global_id, lock=True
+                    )
         
         # 如果还有剩余的17且port2未填充（即没有17/18邻居），才做17-17配对
         # SU17端口规则: [{芳香}, {17, 18}]，port2只能放17或18
@@ -3082,54 +2837,28 @@ class Layer1Assigner:
             if partner_idx is None:
                 continue
             n2 = remaining_17_no_triple.pop(partner_idx)
-            self._add_bidirectional_hop1(nodes, n1.global_id, n2.global_id)
-    
-    def _assign_heterocyclic_NS(self, nodes: List[_NodeV3]):
-        """f2) 26号杂环N和30号杂环S的1-hop分配（连接度=2）"""
-        aromatic_priority = [13, 11, 12, 10, 5, 6, 7, 8, 9]
-        
-        # 处理26号杂环N（连接度=2）
-        su26_nodes = self._get_nodes_by_su_type(nodes, 26)
-        for node in su26_nodes:
-            needed = node.remaining_hop1_slots()
-            for _ in range(needed):
-                # 优先选择空1-hop且有剩余槽位的芳香节点
-                candidates = self._get_empty_hop1_nodes(nodes, aromatic_priority)
-                candidates = [n for n in candidates if n.global_id != node.global_id and n.remaining_hop1_slots() > 0]
-                
-                if not candidates:
-                    # 没有空节点，选择有剩余槽位的不完整节点
-                    candidates = self._get_available_nodes(nodes, aromatic_priority)
-                    candidates = [n for n in candidates if n.global_id != node.global_id]
-                
-                if candidates:
-                    target = self._choose_weighted_candidate(node, candidates, aromatic_priority, nodes=nodes)
-                    if target is None:
-                        break
-                    self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
-                else:
-                    break
-        
-        # 处理30号杂环S（连接度=2）
-        su30_nodes = self._get_nodes_by_su_type(nodes, 30)
-        for node in su30_nodes:
-            needed = node.remaining_hop1_slots()
-            for _ in range(needed):
-                # 优先选择空1-hop且有剩余槽位的芳香节点
-                candidates = self._get_empty_hop1_nodes(nodes, aromatic_priority)
-                candidates = [n for n in candidates if n.global_id != node.global_id and n.remaining_hop1_slots() > 0]
-                
-                if not candidates:
-                    candidates = self._get_available_nodes(nodes, aromatic_priority)
-                    candidates = [n for n in candidates if n.global_id != node.global_id]
-                
-                if candidates:
-                    target = self._choose_weighted_candidate(node, candidates, aromatic_priority, nodes=nodes)
-                    if target is None:
-                        break
-                    self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
-                else:
-                    break
+            self._add_bidirectional_hop1(
+                nodes, n1.global_id, n2.global_id, lock=True
+            )
+
+        invalid_unsaturated = []
+        for node in list(su14_nodes) + list(su15_nodes) + list(su16_nodes):
+            pair_count = sum(
+                int(count) for su, count in node.hop1_su.items() if int(su) in {14, 15, 16}
+            )
+            if pair_count != 1:
+                invalid_unsaturated.append((int(node.global_id), int(node.su_type), int(pair_count)))
+        for node in list(su17_nodes) + list(self._get_nodes_by_su_type(nodes, 18)):
+            pair_count = sum(
+                int(count) for su, count in node.hop1_su.items() if int(su) in {17, 18}
+            )
+            if pair_count != 1:
+                invalid_unsaturated.append((int(node.global_id), int(node.su_type), int(pair_count)))
+        if invalid_unsaturated:
+            raise RuntimeError(
+                "[Unsaturated Fixed Assign] fixed-role matching incomplete: "
+                + str(invalid_unsaturated[:8])
+            )
     
     def _assign_aryl_connections(self, nodes: List[_NodeV3]):
         """f3) 10号芳基取代碳的port3={10}分配
@@ -3150,243 +2879,30 @@ class Layer1Assigner:
         while len(su10_need_port3) >= 2:
             n1 = su10_need_port3.pop(0)
             n2 = su10_need_port3.pop(0)
-            self._add_bidirectional_hop1(nodes, n1.global_id, n2.global_id)
+            self._add_bidirectional_hop1(
+                nodes, n1.global_id, n2.global_id, lock=True
+            )
+        invalid_su10 = [
+            (int(node.global_id), int(node.hop1_su.get(10, 0)))
+            for node in su10_nodes
+            if int(node.hop1_su.get(10, 0)) != 1
+        ]
+        if invalid_su10:
+            raise RuntimeError(
+                "[SU10 Fixed Assign] 10-10 fixed-role matching incomplete: "
+                + str(invalid_su10[:8])
+            )
         
     # ========================================================================
-    # Layer1: 完成1-hop分配方法（g-i）
+    # Layer1: 强制边、全局补全、结构验收和差谱调整
     # ========================================================================
     
-    def _complete_aromatic_hop1(self, nodes: List[_NodeV3]):
-        """g) 完成芳香结构的互为1-hop（5/6/7/8/9需要完成剩余连接）"""
-        aromatic_types = [5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 30]
-        priority_list = [13, 12, 11, 10, 5, 6, 7, 8, 9, 26, 30]
-
-        # 先补齐必需外接锚点，避免7/5/6/8/9先被普通芳香位填满。
-        self._complete_required_external_anchors(nodes, [5, 6, 7, 8, 9])
-        
-        # 处理5/6/7/8/9（这些与杂原子互为1-hop后需要补全）
-        for su_type in [8, 7, 6, 5, 9]:
-            incomplete_nodes = self._get_incomplete_hop1_nodes(nodes, [su_type])
-            self._complete_nodes_round_robin(
-                nodes,
-                incomplete_nodes,
-                aromatic_types,
-                priority_list,
-                salt=700 + int(su_type),
-            )
-    
-    def _complete_aliphatic_hetero_hop1(self, nodes: List[_NodeV3]):
-        """g2) 完成19/20/21号脂肪杂原子碳的剩余1-hop
-
-        X/N/S/O 固定锚点已经在前面的专用阶段分配完成；这里仅补全这些
-        节点的非固定锚点端口。
-        """
-        # 非固定锚点补全优先级（不含 SU16 和 SU18）
-        priority_list = [23, 11, 22, 24, 25, 19, 20, 21, 2, 3, 1, 0, 14, 15, 17]
-
-        # 再次补齐必需固定锚点，避免 19/20/21 被普通脂肪/芳香连接提前占满。
-        self._complete_required_external_anchors(nodes, [19, 20, 21])
-        
-        # 对严格 special 节点使用 MRV：每次优先处理合法候选最少的节点，
-        # 避免普通 round-robin 提前消耗最后的兼容端口。
-        while True:
-            incomplete_nodes = [
-                node for node in nodes
-                if int(getattr(node, 'su_type', -1)) in {19, 20, 21}
-                and int(node.remaining_hop1_slots()) > 0
-            ]
-            if not incomplete_nodes:
-                break
-
-            ranked = []
-            for node in incomplete_nodes:
-                candidates = [
-                    candidate for candidate in self._get_available_nodes(nodes, priority_list)
-                    if int(candidate.global_id) != int(node.global_id)
-                    and self._can_add_hop1_connection(nodes, node, candidate)
-                ]
-                target_degree = int(getattr(node, 'target_hop1_degree', 0) or 0)
-                is_double = int(str(getattr(node, 'special_anchor_mode', '') or '').startswith('double'))
-                ranked.append((
-                    len(candidates),
-                    -int(node.remaining_hop1_slots()),
-                    -int(target_degree),
-                    -int(is_double),
-                    int(node.global_id),
-                    node,
-                    candidates,
-                ))
-            ranked.sort(key=lambda item: item[:5])
-            _, _, _, _, _, node, candidates = ranked[0]
-            if not candidates:
-                break
-            target = self._choose_weighted_candidate(
-                node,
-                candidates,
-                priority_list,
-                nodes=nodes,
-            )
-            if target is None or not self._add_bidirectional_hop1(nodes, node.global_id, target.global_id):
-                break
-    
-    def _complete_unsaturated_saturated_end(self, nodes: List[_NodeV3]):
-        """h) 完成不饱和结构的饱和端和4号腈"""
-        # SU14 端口1/2: {23,24,25,22,19,20,21,2,1,0,3,4} (脂肪碳优先级)
-        # SU15 端口1:   {23,24,25,22,19,20,21,2,1,0,3,4} (脂肪碳优先级)
-        # SU17 端口1:   {23,24,25,19,20,21,2,0,3}        (饱和/羰基优先级)
-        pri_14_15 = [23, 24, 25, 22, 19, 20, 21, 2, 1, 0, 3, 4]
-        pri_17 = [23, 24, 25, 19, 20, 21, 2, 0, 3]
-        
-        for su_type in [17, 14, 15]:
-            incomplete_nodes = self._get_incomplete_hop1_nodes(nodes, [su_type])
-            priority_list = pri_17 if su_type == 17 else pri_14_15
-            
-            for node in incomplete_nodes:
-                needed = node.remaining_hop1_slots()
-                
-                for _ in range(needed):
-                    # 优先选择空1-hop且有剩余槽位的候选
-                    empty_candidates = self._get_empty_hop1_nodes(nodes, priority_list)
-                    empty_candidates = [n for n in empty_candidates if n.global_id != node.global_id and n.remaining_hop1_slots() > 0]
-                    
-                    if empty_candidates:
-                        target = self._choose_weighted_candidate(node, empty_candidates, priority_list, nodes=nodes)
-                        if target is None:
-                            break
-                    else:
-                        # 选择有剩余槽位的节点
-                        available_candidates = self._get_available_nodes(nodes, priority_list)
-                        available_candidates = [n for n in available_candidates if n.global_id != node.global_id]
-                        if available_candidates:
-                            target = self._choose_weighted_candidate(node, available_candidates, priority_list, nodes=nodes)
-                            if target is None:
-                                break
-                        else:
-                            break
-                    
-                    self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
-        
-        # 4号腈（连接度=1）端口: [{23,24,25}]
-        su4_nodes = self._get_nodes_by_su_type(nodes, 4)
-        priority_list = [23, 24, 25]
-        
-        for node in su4_nodes:
-            if node.is_hop1_empty():
-                # 优先选择空1-hop且有剩余槽位的候选
-                empty_candidates = self._get_empty_hop1_nodes(nodes, priority_list)
-                empty_candidates = [n for n in empty_candidates if n.global_id != node.global_id and n.remaining_hop1_slots() > 0]
-                
-                if empty_candidates:
-                    target = self._choose_weighted_candidate(node, empty_candidates, priority_list, nodes=nodes)
-                else:
-                    # 选择有剩余槽位的节点
-                    available_candidates = self._get_available_nodes(nodes, priority_list)
-                    available_candidates = [n for n in available_candidates if n.global_id != node.global_id]
-                    if available_candidates:
-                        target = self._choose_weighted_candidate(node, available_candidates, priority_list, nodes=nodes)
-                    else:
-                        continue
-
-                if target is None:
-                    continue
-                
-                self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
-    
-    def _complete_remaining_aliphatic_aromatic(self, nodes: List[_NodeV3]):
-        """i) 完成剩余脂肪碳(22-25)和芳香碳(10-13)"""
-        for terminal_su, partner_su in ((16, 15), (18, 17)):
-            terminal_nodes = [
-                node for node in nodes
-                if int(node.su_type) == int(terminal_su) and int(node.remaining_hop1_slots()) > 0
-            ]
-            for node in terminal_nodes:
-                candidates = [
-                    candidate for candidate in nodes
-                    if int(candidate.su_type) == int(partner_su)
-                    and int(candidate.global_id) != int(node.global_id)
-                    and int(candidate.remaining_hop1_slots()) > 0
-                    and self._can_add_hop1_connection(nodes, node, candidate)
-                ]
-                if not candidates:
-                    continue
-                candidates.sort(key=lambda candidate: (int(candidate.get_hop1_degree()), int(candidate.global_id)))
-                self._add_bidirectional_hop1(nodes, int(node.global_id), int(candidates[0].global_id))
-
-        # 先强制补全 11 号的外接脂肪/不饱和端口，避免 19/20/21 与 22/23/24/25
-        # 在后续普通补全中被早早占满，导致 SU11 长期停在无外接锚点状态。
-        self._complete_required_external_anchors(nodes, [11])
-        
-        # 先完成22号（末端，连接度=1）
-        # SU22 端口: [{25,24,19,20,21,23,11,2,3,1,0,14,15,17}]
-        su22_empty = self._get_empty_hop1_nodes(nodes, [22])
-        priority_list = [23, 24, 25, 11, 19, 20, 21, 2, 3, 1, 0, 14, 15, 17]
-        
-        for node in su22_empty:
-            empty_candidates = self._get_empty_hop1_nodes(nodes, priority_list)
-            empty_candidates = [n for n in empty_candidates if n.global_id != node.global_id and n.remaining_hop1_slots() > 0]
-            
-            if empty_candidates:
-                target = self._choose_weighted_candidate(node, empty_candidates, priority_list, nodes=nodes)
-            else:
-                available_candidates = self._get_available_nodes(nodes, priority_list)
-                available_candidates = [n for n in available_candidates if n.global_id != node.global_id]
-                if available_candidates:
-                    target = self._choose_weighted_candidate(node, available_candidates, priority_list, nodes=nodes)
-                else:
-                    continue
-
-            if target is None:
-                continue
-            
-            self._add_bidirectional_hop1(nodes, node.global_id, target.global_id)
-        
-        # 完成23号（连接度=2）- 包括空节点和不完整节点
-        su23_nodes = [n for n in nodes if n.su_type == 23 and not n.is_hop1_complete()]
-        priority_list = [23, 11, 22, 24, 25, 19, 20, 21, 2, 3, 1, 0, 14, 15, 17]
-        self._complete_nodes_round_robin(
-            nodes,
-            su23_nodes,
-            priority_list,
-            priority_list,
-            salt=821,
-        )
-        
-        # 完成24号和25号（连接度=3/4）
-        for su_type in [24, 25]:
-            incomplete_nodes = [n for n in nodes if n.su_type == su_type and not n.is_hop1_complete()]
-            self._complete_nodes_round_robin(
-                nodes,
-                incomplete_nodes,
-                priority_list,
-                priority_list,
-                salt=840 + int(su_type),
-            )
-
-        # 22-25/15/17 的占用在前面已经变化，这里再补一次 11 号必需外接锚点，
-        # 让后续芳香互补阶段只处理其余两个芳香端口。
-        self._complete_required_external_anchors(nodes, [11])
-
-        # 完成芳香结构（10-13互相补全，候选池包含全部芳香类型以满足SU10等端口规则）
-        aromatic_types = [5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 30]
-        aromatic_priority = [13, 12, 11, 10, 5, 6, 7, 8, 9, 26, 30]
-        
-        for su_type in [11, 10, 12, 13]:
-            incomplete_nodes = [n for n in nodes if n.su_type == su_type and not n.is_hop1_complete()]
-            self._complete_nodes_round_robin(
-                nodes,
-                incomplete_nodes,
-                aromatic_types,
-                aromatic_priority,
-                salt=900 + int(su_type),
-            )
- 
     def layer1_assign(self, H_init: torch.Tensor, S_target: torch.Tensor,
                       E_target: torch.Tensor,
                       eval_nmr: bool = True,
                       eval_output_dir: Optional[str] = None,
                       eval_lib_path: Optional[str] = None,
                       eval_hwhm: float = 1.0,
-                      eval_allow_approx: bool = True,
                       build_variant: int = 0,
                       enable_carbonyl_joint_adjust: bool = True,
                       carbonyl_joint_iterations: int = 3,
@@ -3403,20 +2919,20 @@ class Layer1Assigner:
                       hop1_adjust_region_order: Optional[List[str]] = None,
                       hop1_adjust_max_moves_per_region: int = 8,
                       hop1_adjust_max_full_evals: int = 32,
-                      profile: str = 'initial',
-                      local_swap_max_attempts: int = 64,
-                      initial_enable_spectral_refine: bool = True,
-                      initial_hop1_adjust_iterations: int = 6,
-                      initial_hop1_adjust_max_candidate_trials: int = 240) -> List[_NodeV3]:
+                      hop1_adjust_min_r2_gain: float = 1e-4,
+                      hop1_completion_max_backtracks: Optional[int] = None,
+                      hop1_completion_branch_limit: Optional[int] = None,
+                      enable_hop1_diversity_refine: bool = True,
+                      hop1_diversity_max_moves: int = 12,
+                      hop1_diversity_max_trials: int = 96) -> List[_NodeV3]:
         """
         Layer1: 为每个中心SU分配1-hop邻居
         
         职责（仅限1-hop分配，不涉及SU直方图调整）：
-        1. 初始化分配：按a-i顺序进行固定连接的初始分配
-        2. 互为1-hop：维护双向连接关系
-        3. 合理分散：优先使用空1-hop节点，避免少数节点相互连接
-        4. 兜底修复：补全所有剩余的1-hop槽位
-        5. 可选的1-hop调整：基于差谱分析优化1-hop分配（enable_hop1_adjust=True）
+        1. 原子分配全部强制身份边和固定角色边。
+        2. 用全局 MRV/前向检查/有界回溯补全所有普通端口。
+        3. 对完整精确模板图执行结构验收。
+        4. 可选地基于差谱事务式调整1-hop分配。
         
         SU直方图的调整（羰基互转、SU9、O/N/S/X等）由Layer4负责。
         
@@ -3428,7 +2944,6 @@ class Layer1Assigner:
             eval_output_dir: 评估结果输出目录
             eval_lib_path: 子图库路径
             eval_hwhm: 谱峰半高宽
-            eval_allow_approx: 是否允许近似匹配
             enable_carbonyl_joint_adjust: 是否启用羰基-锚点联合调整
             carbonyl_joint_iterations: 联合调整最大迭代次数
             carbonyl_joint_max_adjustments: 每轮最大换边次数
@@ -3438,8 +2953,11 @@ class Layer1Assigner:
             hop1_adjust_iterations: 1-hop调整最大迭代次数
             hop1_neg_threshold: 负峰阈值
             hop1_pos_threshold: 正峰阈值
-            profile: initial执行谱图细化；rebuild只执行结构构图。
-            local_swap_max_attempts: 特殊节点局部换边修复预算。
+            hop1_completion_max_backtracks: 全局补全最大回溯次数；None表示不限制。
+            hop1_completion_branch_limit: 每一步最多尝试的伙伴数；None表示不限制。
+            enable_hop1_diversity_refine: 是否在完整图上执行事务式1-hop多样性换位。
+            hop1_diversity_max_moves: 多样性细化最多接受的换位次数。
+            hop1_diversity_max_trials: 多样性细化最多尝试的严格换位次数。
         """
         device = self.device
         H_init = H_init.to(device)
@@ -3447,14 +2965,7 @@ class Layer1Assigner:
         E_target = E_target.to(device)
         self._current_E_target = E_target
         self._build_variant = int(build_variant)
-        profile = str(profile or 'initial').strip().lower()
-        if profile not in {'initial', 'rebuild'}:
-            raise ValueError(f"unsupported Layer1 profile: {profile}")
-        spectral_refine_enabled = bool(profile == 'initial' and initial_enable_spectral_refine)
-        enable_carbonyl_joint_adjust = bool(enable_carbonyl_joint_adjust and spectral_refine_enabled)
-        enable_hop1_adjust = bool(enable_hop1_adjust and spectral_refine_enabled)
-        hop1_adjust_iterations = int(initial_hop1_adjust_iterations)
-        hop1_adjust_max_candidate_trials = int(initial_hop1_adjust_max_candidate_trials)
+        self._configure_hop1_template_contract(eval_lib_path)
     
         # 初始化全局节点池
         nodes = self._initialize_node_pool(H_init)
@@ -3464,7 +2975,6 @@ class Layer1Assigner:
         print("="*60)
 
         layer1_t0 = time.perf_counter()
-
         def _timed_step(label: str, fn, rebuild_index: bool = True) -> None:
             step_t0 = time.perf_counter()
             fn()
@@ -3479,21 +2989,30 @@ class Layer1Assigner:
         _timed_step("c fixed_amine_N", lambda: self._assign_fixed_amine_N(nodes))
         _timed_step("d fixed_ether_O", lambda: self._assign_fixed_ether_O(nodes))
         _timed_step("e fixed_carbonyl", lambda: self._assign_fixed_carbonyl(nodes))
-        _timed_step("e2 special_mrv_capacity", lambda: self._complete_special_nodes_mrv(nodes))
         _timed_step("f unsaturated_pairs", lambda: self._assign_unsaturated_pairs(nodes))
-        _timed_step("f2 heterocyclic_NS", lambda: self._assign_heterocyclic_NS(nodes))
         _timed_step("f3 aryl_connections", lambda: self._assign_aryl_connections(nodes), rebuild_index=False)
-        _timed_step("g aromatic_hop1", lambda: self._complete_aromatic_hop1(nodes), rebuild_index=False)
-        _timed_step("g2 aliphatic_hetero_hop1", lambda: self._complete_aliphatic_hetero_hop1(nodes), rebuild_index=False)
-        _timed_step("h unsaturated_saturated_end", lambda: self._complete_unsaturated_saturated_end(nodes), rebuild_index=False)
-        _timed_step("i remaining_aliphatic_aromatic", lambda: self._complete_remaining_aliphatic_aromatic(nodes), rebuild_index=False)
-        _timed_step(
-            "i2 repair_remaining_hop1_slots",
-            lambda: self._repair_remaining_hop1_slots(
-                nodes,
-                max_iters=local_swap_max_attempts,
-            ),
-            rebuild_index=False,
+        self._init_runtime_node_index(nodes)
+        fixed_edge_count = sum(len(node.hop1_ids) for node in nodes) // 2
+        fixed_open_ports = sum(int(node.remaining_hop1_slots()) for node in nodes)
+        print(
+            "  [Layer1 Fixed Phase] "
+            f"edges={fixed_edge_count}, open_ports={fixed_open_ports}"
+        )
+        solver = Layer1CompletionSolver(
+            assigner=self,
+            nodes=nodes,
+            deadline=None,
+            max_backtracks=hop1_completion_max_backtracks,
+            branch_limit=hop1_completion_branch_limit,
+        )
+        completion_summary = solver.solve()
+        self._last_completion_diagnostics = dict(completion_summary)
+        print(
+            "  [Layer1 Global Completion] "
+            f"edges={int(completion_summary.get('edges_added', 0))}, "
+            f"backtracks={int(completion_summary.get('backtracks', 0))}, "
+            f"elapsed={float(completion_summary.get('elapsed_s', 0.0)):.2f}s, "
+            f"stop={completion_summary.get('stop_reason', 'unknown')}"
         )
     
         # 一致性验证
@@ -3507,19 +3026,55 @@ class Layer1Assigner:
         check_elapsed = time.perf_counter() - check_t0
         if float(check_elapsed) >= 0.05:
             print(f"  [Layer1 Timing] consistency_check: {check_elapsed:.2f}s")
-        accept_ok, accept_meta = self.assess_consistency_acceptance(
-            errors,
-            max_soft_errors=DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS,
-        )
         if not is_valid:
             print(f"  ⚠ 图结构存在{len(errors)}个不一致")
             self._print_consistency_errors(errors, prefix='Layer1')
-        if bool(accept_ok) and int(accept_meta.get('n_soft', 0)) > 0:
-            print(
-                "  [Layer1 Soft Acceptance] "
-                f"soft={int(accept_meta.get('n_soft', 0))}/{int(accept_meta.get('max_soft_errors', 0))}"
+        hard_structure_invalid = bool(errors)
+        if hard_structure_invalid:
+            raise RuntimeError(
+                "layer1_global_completion_invalid: "
+                + " | ".join(str(error) for error in list(errors or [])[:8])
             )
-        hard_structure_invalid = bool(int(accept_meta.get('n_hard', 0)) > 0)
+
+        if bool(enable_hop1_diversity_refine):
+            diversity_t0 = time.perf_counter()
+            pre_diversity_nodes = copy.deepcopy(nodes)
+            try:
+                nodes, diversity_summary = self._refiner.diversify_hop1_motifs(
+                    nodes=nodes,
+                    E_target=E_target,
+                    output_dir=eval_output_dir,
+                    max_moves=int(hop1_diversity_max_moves),
+                    max_trials=int(hop1_diversity_max_trials),
+                    deadline_monotonic=None,
+                )
+                diversity_ok, diversity_errors = self.validate_graph_consistency(
+                    nodes=nodes,
+                    H=H_init,
+                    E_target=E_target,
+                    verbose=False,
+                )
+                if not bool(diversity_ok) or diversity_errors:
+                    nodes = pre_diversity_nodes
+                    print(
+                        "  [Hop1多样性细化回退] "
+                        f"结构校验失败, errors={len(diversity_errors)}"
+                    )
+                else:
+                    diversity_moves = int(diversity_summary.get('adjustments', 0))
+                    if diversity_moves > 0:
+                        print(
+                            "  [Hop1多样性细化] "
+                            f"moves={diversity_moves}, "
+                            f"trials={int(diversity_summary.get('trials', 0))}, "
+                            f"stop={diversity_summary.get('stop_reason', 'unknown')}"
+                        )
+            except Exception as e:
+                nodes = pre_diversity_nodes
+                print(f"  [Hop1多样性细化失败] {e}")
+            diversity_elapsed = time.perf_counter() - diversity_t0
+            if float(diversity_elapsed) >= 0.05:
+                print(f"  [Layer1 Timing] hop1_diversity_refine: {diversity_elapsed:.2f}s")
 
         if (
             eval_lib_path
@@ -3535,11 +3090,12 @@ class Layer1Assigner:
                     E_target=E_target,
                     lib_path=eval_lib_path,
                     hwhm=eval_hwhm,
-                    allow_approx=eval_allow_approx,
+                    allow_approx=False,
                     max_iterations=int(carbonyl_joint_iterations),
                     max_adjustments_per_iter=int(carbonyl_joint_max_adjustments),
                     pos_rel_threshold=float(carbonyl_joint_pos_threshold),
                     neg_rel_threshold=float(carbonyl_joint_neg_threshold),
+                    deadline_monotonic=None,
                 )
                 n_joint = int(joint_summary.get('adjustments', 0))
                 joint_elapsed = time.perf_counter() - joint_t0
@@ -3553,26 +3109,18 @@ class Layer1Assigner:
                     E_target=E_target,
                     verbose=False,
                 )
-                joint_accept_ok, joint_accept_meta = self.assess_consistency_acceptance(
-                    joint_errors,
-                    max_soft_errors=DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS,
-                )
-                if not joint_accept_ok:
+                if joint_errors:
                     print(f"  [Carbonyl联合调整后校验失败] 回退到调整前状态，errors={len(joint_errors)}")
                     self._print_consistency_errors(joint_errors, prefix='Carbonyl')
                     nodes = pre_joint_nodes
-                elif (not joint_ok) and int(joint_accept_meta.get('n_soft', 0)) > 0:
-                    print(
-                        "  [Carbonyl联合调整后软缺口容忍] "
-                        f"soft={int(joint_accept_meta.get('n_soft', 0))}/{int(joint_accept_meta.get('max_soft_errors', 0))}"
-                    )
             except Exception as e:
+                nodes = pre_joint_nodes
                 print(f"  [Carbonyl联合调整失败] {e}")
         elif bool(enable_carbonyl_joint_adjust) and bool(hard_structure_invalid):
             print("  [Carbonyl联合调整跳过] 当前Layer1图仍存在硬结构约束缺口")
         
         # NMR评估
-        if eval_nmr and eval_lib_path and spectral_refine_enabled:
+        if eval_nmr and eval_lib_path:
             round_metrics = {
                 'r2': 0.0,
                 'r2_carbonyl': 0.0,
@@ -3588,7 +3136,7 @@ class Layer1Assigner:
                     lib_path=eval_lib_path,
                     output_dir=eval_output_dir,
                     hwhm=eval_hwhm,
-                    allow_approx=eval_allow_approx,
+                    allow_approx=False,
                 )
                 nmr_elapsed = time.perf_counter() - nmr_t0
                 if float(nmr_elapsed) >= 0.05:
@@ -3596,7 +3144,10 @@ class Layer1Assigner:
             except Exception as e:
                 print(f"  [NMR评估失败] {e}")
         # 可选的1-hop调整（基于差谱分析，Layer1.5）
-        if enable_hop1_adjust and not bool(hard_structure_invalid):
+        if (
+            enable_hop1_adjust
+            and not bool(hard_structure_invalid)
+        ):
             try:
                 hop1_t0 = time.perf_counter()
                 pre_adjust_nodes = copy.deepcopy(nodes)
@@ -3607,7 +3158,7 @@ class Layer1Assigner:
                     lib_path=eval_lib_path,
                     output_dir=eval_output_dir,
                     hwhm=eval_hwhm,
-                    allow_approx=eval_allow_approx,
+                    allow_approx=False,
                     neg_threshold=hop1_neg_threshold,
                     pos_threshold=hop1_pos_threshold,
                     max_iterations=hop1_adjust_iterations,
@@ -3617,6 +3168,8 @@ class Layer1Assigner:
                     adjustment_groups=hop1_adjust_region_order,
                     max_moves_per_region=hop1_adjust_max_moves_per_region,
                     max_full_evals=hop1_adjust_max_full_evals,
+                    min_r2_gain=hop1_adjust_min_r2_gain,
+                    deadline_monotonic=None,
                 )
                 hop1_elapsed = time.perf_counter() - hop1_t0
                 if float(hop1_elapsed) >= 0.05:
@@ -3624,6 +3177,17 @@ class Layer1Assigner:
                 total_adj = adjust_summary.get('total_adjustments', 0)
                 if total_adj > 0:
                     print(f"  Hop1调整: {total_adj}次")
+                raw_candidates = int(adjust_summary.get('candidate_records_raw', 0))
+                if raw_candidates > 0:
+                    print(
+                        "  [Hop1候选优化] "
+                        f"raw={raw_candidates}, "
+                        f"unique={int(adjust_summary.get('candidate_records_unique', 0))}, "
+                        f"deduplicated={int(adjust_summary.get('candidate_records_deduplicated', 0))}, "
+                        f"cached_failures={int(adjust_summary.get('cached_structural_failures', 0))}, "
+                        f"structural_trials={int(adjust_summary.get('candidate_trials', 0))}, "
+                        f"full_evals={int(adjust_summary.get('full_eval_count', 0))}"
+                    )
                 if bool(adjust_summary.get('budget_exhausted', False)):
                     print(
                         "  [Hop1调整] 已达到候选评估预算，停止继续尝试: "
@@ -3636,20 +3200,12 @@ class Layer1Assigner:
                     E_target=E_target,
                     verbose=False,
                 )
-                adjust_accept_ok, adjust_accept_meta = self.assess_consistency_acceptance(
-                    adjust_errors,
-                    max_soft_errors=DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS,
-                )
-                if not adjust_accept_ok:
+                if adjust_errors:
                     print(f"  [Hop1调整后校验失败] 回退到调整前状态，errors={len(adjust_errors)}")
                     self._print_consistency_errors(adjust_errors, prefix='Hop1')
                     nodes = pre_adjust_nodes
-                elif (not adjust_ok) and int(adjust_accept_meta.get('n_soft', 0)) > 0:
-                    print(
-                        "  [Hop1调整后软缺口容忍] "
-                        f"soft={int(adjust_accept_meta.get('n_soft', 0))}/{int(adjust_accept_meta.get('max_soft_errors', 0))}"
-                    )
             except Exception as e:
+                nodes = pre_adjust_nodes
                 print(f"  [Hop1调整失败] {e}")
         elif bool(enable_hop1_adjust) and bool(hard_structure_invalid):
             print("  [Hop1调整跳过] 当前Layer1图仍存在硬结构约束缺口")
@@ -3664,19 +3220,12 @@ class Layer1Assigner:
         final_check_elapsed = time.perf_counter() - final_check_t0
         if float(final_check_elapsed) >= 0.05:
             print(f"  [Layer1 Timing] final_consistency_check: {final_check_elapsed:.2f}s")
-        final_accept_ok, final_accept_meta = self.assess_consistency_acceptance(
-            final_errors,
-            max_soft_errors=DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS,
-        )
-        final_hard_gap = bool(int(final_accept_meta.get('n_hard', 0)) > 0)
-        final_soft_overflow = bool(int(final_accept_meta.get('n_soft', 0)) > int(final_accept_meta.get('max_soft_errors', 0)))
-        if not final_accept_ok:
+        if final_errors:
             print(f"  [Layer1 Final Check] 仍存在{len(final_errors)}个不一致")
             self._print_consistency_errors(final_errors, prefix='Final')
-        elif (not final_ok) and int(final_accept_meta.get('n_soft', 0)) > 0:
-            print(
-                "  [Layer1 Final Check] 允许少量1-hop软缺口: "
-                f"soft={int(final_accept_meta.get('n_soft', 0))}/{int(final_accept_meta.get('max_soft_errors', 0))}"
+            raise RuntimeError(
+                "layer1_final_validation_failed: "
+                + " | ".join(str(error) for error in list(final_errors or [])[:8])
             )
 
         print(f"Layer1 完成 ({time.perf_counter() - layer1_t0:.2f}s)\n")
@@ -3743,7 +3292,8 @@ class Layer1Assigner:
                                        max_iterations: int = 3,
                                        max_adjustments_per_iter: int = 3,
                                        pos_rel_threshold: float = 0.08,
-                                       neg_rel_threshold: float = 0.08) -> Tuple[List[_NodeV3], Dict[str, object]]:
+                                       neg_rel_threshold: float = 0.08,
+                                       deadline_monotonic: Optional[float] = None) -> Tuple[List[_NodeV3], Dict[str, object]]:
         """
         羰基类型 + SU9/脂肪锚点联合调整。
 
@@ -3768,6 +3318,7 @@ class Layer1Assigner:
             max_adjustments_per_iter=max_adjustments_per_iter,
             pos_rel_threshold=pos_rel_threshold,
             neg_rel_threshold=neg_rel_threshold,
+            deadline_monotonic=deadline_monotonic,
         )
 
     def evaluate_layer1_nmr_with_library(self,
@@ -3805,7 +3356,9 @@ class Layer1Assigner:
                                        max_candidate_nodes_per_su: int = 24,
                                        max_alternatives_per_node: int = 4,
                                        max_moves_per_region: int = 8,
-                                       max_full_evals: int = 32) -> Tuple[List[_NodeV3], Dict]:
+                                       max_full_evals: int = 32,
+                                       min_r2_gain: float = 1e-4,
+                                       deadline_monotonic: Optional[float] = None) -> Tuple[List[_NodeV3], Dict]:
         """
         基于差谱分析调整1-hop连接
         
@@ -3847,5 +3400,7 @@ class Layer1Assigner:
             max_alternatives_per_node=max_alternatives_per_node,
             max_moves_per_region=max_moves_per_region,
             max_full_evals=max_full_evals,
+            min_r2_gain=min_r2_gain,
             adjustment_groups=adjustment_groups,
+            deadline_monotonic=deadline_monotonic,
         )

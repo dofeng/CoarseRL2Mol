@@ -1,4 +1,5 @@
 import copy
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -8,8 +9,20 @@ import torch
 from collections import Counter, defaultdict
 
 from ...paths import Z_LIBRARY_DIR
-from ..hop1_adjuster import Hop1Adjuster
-from ...shared.inverse_common import HOP1_PORT_COMBINATIONS, _NodeV3, check_external_connection_requirement, required_external_candidates_for_node, validate_connection
+from ..hop1_adjuster import (
+    Hop1Adjuster,
+    build_motif_usage_from_pairs,
+    motif_penalty_alpha,
+    multiset_l1_distance,
+)
+from ...shared.coarse_graph import get_su_ppm_range
+from ...shared.inverse_common import (
+    HOP1_PORT_COMBINATIONS,
+    _NodeV3,
+    check_external_connection_requirement,
+    required_external_candidates_for_node,
+    validate_connection,
+)
 from .layer1_eval import Layer1NmrEvaluator
 
 
@@ -44,932 +57,8 @@ class Layer1Refiner:
                 pass
 
     @staticmethod
-    def _node_target_degree(node: _NodeV3) -> Optional[int]:
-        try:
-            val = getattr(node, 'target_hop1_degree', None)
-            return int(val) if val is not None else None
-        except Exception:
-            return None
-
-    def _required_external_candidates_for_node(self, node: _NodeV3) -> Optional[List[int]]:
+    def _required_external_candidates_for_node(node: _NodeV3) -> Optional[List[int]]:
         return required_external_candidates_for_node(node, missing_su19_as_none=True)
-
-    def _required_external_priority(self, center: _NodeV3, required_external: List[int]) -> List[int]:
-        center_su = int(getattr(center, 'su_type', -1))
-        if int(center_su) == 11:
-            preferred = [23, 22, 24, 25, 15, 17, 19, 20, 21]
-            return [int(x) for x in preferred if int(x) in set(int(v) for v in required_external)]
-        return [int(x) for x in list(required_external or [])]
-
-    @staticmethod
-    def _should_lock_required_external_edge(center: _NodeV3) -> bool:
-        return int(getattr(center, 'su_type', -1)) in {5, 6, 7, 8, 9, 19, 20, 21}
-
-    def _required_external_gap(self,
-                               assigner: Any,
-                               node: _NodeV3,
-                               nodes: List[_NodeV3]) -> int:
-        required_external = assigner._required_external_candidates_for_node(node)
-        if not required_external:
-            return 0
-        try:
-            target_count = max(1, int(assigner._node_fixed_anchor_target(node)))
-        except Exception:
-            target_count = 1
-        try:
-            current_count = int(assigner._required_external_count_for_node(node, nodes))
-        except Exception:
-            current_count = 0
-        gap = max(0, int(target_count) - int(current_count))
-        return min(int(gap), int(node.remaining_hop1_slots()))
-
-    def _required_external_candidate_nodes(self,
-                                           assigner: Any,
-                                           nodes: List[_NodeV3],
-                                           center: _NodeV3,
-                                           allow_pending_special: bool) -> List[_NodeV3]:
-        required_external = assigner._required_external_candidates_for_node(center)
-        if not required_external:
-            return []
-        priority = self._required_external_priority(center, required_external)
-        candidate_pool: List[_NodeV3] = []
-        seen_ids: Set[int] = set()
-        for ext_su in priority:
-            for cand in assigner._get_nodes_by_su_type(nodes, int(ext_su)):
-                gid = int(getattr(cand, 'global_id', -1))
-                if int(gid) in seen_ids:
-                    continue
-                seen_ids.add(int(gid))
-                if int(gid) == int(getattr(center, 'global_id', -1)):
-                    continue
-                if int(gid) in set(getattr(center, 'hop1_ids', []) or []):
-                    continue
-                if int(cand.remaining_hop1_slots()) <= 0:
-                    continue
-                if (not bool(allow_pending_special)) and assigner._has_pending_required_external(cand, nodes):
-                    continue
-                candidate_pool.append(cand)
-        return list(candidate_pool)
-
-    def _pick_required_external_candidate(self,
-                                          assigner: Any,
-                                          nodes: List[_NodeV3],
-                                          center: _NodeV3,
-                                          allow_pending_special: bool) -> Optional[_NodeV3]:
-        required_external = assigner._required_external_candidates_for_node(center)
-        if not required_external:
-            return None
-        priority = self._required_external_priority(center, required_external)
-        candidate_pool = self._required_external_candidate_nodes(
-            assigner=assigner,
-            nodes=nodes,
-            center=center,
-            allow_pending_special=bool(allow_pending_special),
-        )
-        return assigner._pick_fixed_target(nodes, center, candidate_pool, priority)
-
-    def _complete_required_external_exact(self,
-                                          assigner: Any,
-                                          nodes: List[_NodeV3],
-                                          su_type: int,
-                                          allow_pending_special: bool) -> int:
-        centers = [
-            n for n in list(nodes or [])
-            if int(getattr(n, 'su_type', -1)) == int(su_type)
-            and int(n.remaining_hop1_slots()) > 0
-            and int(self._required_external_gap(assigner, n, nodes)) > 0
-        ]
-        if not centers:
-            return 0
-
-        demands: List[Dict[str, Any]] = []
-        owner_types: Set[int] = set()
-        for center in centers:
-            required_external = assigner._required_external_candidates_for_node(center)
-            if not required_external:
-                continue
-            priority = self._required_external_priority(center, required_external)
-            gap = int(self._required_external_gap(assigner, center, nodes))
-            for demand_idx in range(max(0, gap)):
-                demands.append({
-                    'target_id': int(getattr(center, 'global_id', -1)),
-                    'demand_index': int(demand_idx),
-                    'required': set(int(x) for x in list(required_external or [])),
-                    'priority': list(priority),
-                    'priority_rank': {int(su): int(idx) for idx, su in enumerate(priority)},
-                    'lock_edge': bool(self._should_lock_required_external_edge(center)),
-                })
-            owner_types.update(int(x) for x in list(priority or []))
-        if not demands:
-            return 0
-
-        owner_slots: List[Dict[str, int]] = []
-        for owner_su in sorted(int(x) for x in owner_types):
-            for owner in assigner._get_nodes_by_su_type(nodes, int(owner_su)):
-                if int(owner.remaining_hop1_slots()) <= 0:
-                    continue
-                if (not bool(allow_pending_special)) and assigner._has_pending_required_external(owner, nodes):
-                    continue
-                for slot_idx in range(max(0, int(owner.remaining_hop1_slots()))):
-                    owner_slots.append({
-                        'owner_id': int(getattr(owner, 'global_id', -1)),
-                        'slot_index': int(slot_idx),
-                        'su_type': int(owner_su),
-                    })
-        if not owner_slots:
-            return 0
-
-        work_nodes = copy.deepcopy(nodes)
-        used_slots = [False] * len(owner_slots)
-        owner_d1_usage: Dict[int, int] = defaultdict(int)
-        chosen_edges: List[Tuple[int, int, bool]] = []
-
-        def _candidate_slots(demand_idx: int) -> List[int]:
-            demand = dict(demands[int(demand_idx)] or {})
-            target = work_nodes[int(demand['target_id'])]
-            target_deg = int(assigner._node_target_degree(target) or 0)
-            out: List[int] = []
-            for slot_idx, slot in enumerate(owner_slots):
-                if bool(used_slots[int(slot_idx)]):
-                    continue
-                owner = work_nodes[int(slot['owner_id'])]
-                owner_su = int(getattr(owner, 'su_type', -1))
-                if int(owner_su) not in set(int(x) for x in demand.get('required', set()) or set()):
-                    continue
-                if int(owner.global_id) == int(target.global_id):
-                    continue
-                if int(owner.global_id) in set(getattr(target, 'hop1_ids', []) or []):
-                    continue
-                if int(owner.remaining_hop1_slots()) <= 0 or int(target.remaining_hop1_slots()) <= 0:
-                    continue
-                if (not bool(allow_pending_special)) and assigner._has_pending_required_external(owner, work_nodes):
-                    continue
-                if int(owner_su) == 29 and int(getattr(target, 'su_type', -1)) == 19 and int(target_deg) == 1:
-                    if int(owner_d1_usage.get(int(owner.global_id), 0)) >= 1:
-                        continue
-                if not assigner._can_add_hop1_connection(work_nodes, owner, target):
-                    continue
-                out.append(int(slot_idx))
-            out.sort(
-                key=lambda idx: (
-                    int(demand.get('priority_rank', {}).get(int(owner_slots[int(idx)]['su_type']), len(demand.get('priority', [])))),
-                    -int(work_nodes[int(owner_slots[int(idx)]['owner_id'])].remaining_hop1_slots()),
-                    int(owner_slots[int(idx)]['owner_id']),
-                    int(owner_slots[int(idx)]['slot_index']),
-                )
-            )
-            return out
-
-        def _demand_key(demand_idx: int, options: List[int]) -> Tuple[int, int, int, int, int, int]:
-            demand = dict(demands[int(demand_idx)] or {})
-            target = work_nodes[int(demand['target_id'])]
-            su_i = int(getattr(target, 'su_type', -1))
-            target_deg = int(assigner._node_target_degree(target) or 0)
-            fixed_target = int(assigner._node_fixed_anchor_target(target))
-            return (
-                int(len(options)),
-                0 if int(su_i) in {19, 20, 21, 5, 6, 7, 8, 9} else 1,
-                -int(fixed_target),
-                int(target_deg),
-                int(getattr(target, 'global_id', 0)),
-                int(demand.get('demand_index', 0)),
-            )
-
-        def _dfs(remaining: List[int]) -> bool:
-            if not remaining:
-                return True
-
-            best_idx: Optional[int] = None
-            best_opts: Optional[List[int]] = None
-            best_key: Optional[Tuple[int, int, int, int, int, int]] = None
-            for demand_idx in list(remaining):
-                opts = _candidate_slots(int(demand_idx))
-                if not opts:
-                    return False
-                key = _demand_key(int(demand_idx), opts)
-                if best_key is None or tuple(key) < tuple(best_key):
-                    best_idx = int(demand_idx)
-                    best_opts = list(opts)
-                    best_key = tuple(key)
-                    if int(len(best_opts)) <= 1:
-                        break
-
-            if best_idx is None or best_opts is None:
-                return False
-
-            next_remaining = [int(x) for x in remaining if int(x) != int(best_idx)]
-            demand = dict(demands[int(best_idx)] or {})
-            target_id = int(demand['target_id'])
-            target = work_nodes[int(target_id)]
-            target_deg = int(assigner._node_target_degree(target) or 0)
-
-            for slot_idx in list(best_opts):
-                owner_id = int(owner_slots[int(slot_idx)]['owner_id'])
-                owner = work_nodes[int(owner_id)]
-                if not assigner._add_bidirectional_hop1(work_nodes, int(owner_id), int(target_id), lock=False):
-                    continue
-                used_slots[int(slot_idx)] = True
-                inc_d1 = (
-                    int(getattr(owner, 'su_type', -1)) == 29 and
-                    int(getattr(target, 'su_type', -1)) == 19 and
-                    int(target_deg) == 1
-                )
-                if bool(inc_d1):
-                    owner_d1_usage[int(owner_id)] += 1
-                chosen_edges.append((int(owner_id), int(target_id), bool(demand.get('lock_edge', False))))
-                if _dfs(next_remaining):
-                    return True
-                chosen_edges.pop()
-                if bool(inc_d1):
-                    owner_d1_usage[int(owner_id)] -= 1
-                    if int(owner_d1_usage[int(owner_id)]) <= 0:
-                        owner_d1_usage.pop(int(owner_id), None)
-                assigner._remove_bidirectional_hop1_with_force(
-                    work_nodes,
-                    int(owner_id),
-                    int(target_id),
-                    force=True,
-                )
-                used_slots[int(slot_idx)] = False
-            return False
-
-        matched = 0
-        if _dfs([int(i) for i in range(len(demands))]):
-            for owner_id, target_id, lock_flag in list(chosen_edges):
-                if int(owner_id) in set(getattr(nodes[int(target_id)], 'hop1_ids', []) or []):
-                    continue
-                if not assigner._add_bidirectional_hop1(
-                    nodes,
-                    int(owner_id),
-                    int(target_id),
-                    lock=bool(lock_flag),
-                ):
-                    continue
-                matched += 1
-            return int(matched)
-        return 0
-
-    def _complete_required_external_greedy_mrv(self,
-                                               assigner: Any,
-                                               nodes: List[_NodeV3],
-                                               su_type: int,
-                                               allow_pending_special: bool,
-                                               max_steps: Optional[int] = None) -> int:
-        applied = 0
-        limit = int(max_steps) if max_steps is not None else max(8, len(nodes) * 2)
-        steps = 0
-        while steps < int(limit):
-            steps += 1
-            centers = [
-                n for n in list(nodes or [])
-                if int(getattr(n, 'su_type', -1)) == int(su_type)
-                and int(n.remaining_hop1_slots()) > 0
-                and int(self._required_external_gap(assigner, n, nodes)) > 0
-            ]
-            if not centers:
-                break
-
-            center_choices: List[Tuple[int, int, int, _NodeV3, Optional[_NodeV3]]] = []
-            for center in centers:
-                candidate_pool = self._required_external_candidate_nodes(
-                    assigner=assigner,
-                    nodes=nodes,
-                    center=center,
-                    allow_pending_special=bool(allow_pending_special),
-                )
-                candidate = self._pick_required_external_candidate(
-                    assigner=assigner,
-                    nodes=nodes,
-                    center=center,
-                    allow_pending_special=bool(allow_pending_special),
-                )
-                if candidate is None:
-                    continue
-                center_choices.append((
-                    int(len(candidate_pool)),
-                    -int(self._required_external_gap(assigner, center, nodes)),
-                    int(getattr(center, 'global_id', 0)),
-                    center,
-                    candidate,
-                ))
-            if not center_choices:
-                break
-
-            center_choices.sort(key=lambda x: (int(x[0]), int(x[1]), int(x[2])))
-            _, _, _, center, candidate = center_choices[0]
-            if not assigner._add_bidirectional_hop1(
-                nodes,
-                int(getattr(center, 'global_id', -1)),
-                int(getattr(candidate, 'global_id', -1)),
-                lock=bool(self._should_lock_required_external_edge(center)),
-            ):
-                continue
-            applied += 1
-        return int(applied)
-
-    def complete_required_external_anchors(self,
-                                           assigner: Any,
-                                           nodes: List[_NodeV3],
-                                           su_types: List[int],
-                                           max_rounds: int = 4) -> None:
-        """
-        Stronger version of required-anchor filling.
-
-        We retry in multiple rounds and, for SU11, prefer cheaper external
-        aliphatic/unsaturated donors before consuming scarcer 19/20/21 nodes.
-        """
-        target_types = [int(x) for x in list(su_types or [])]
-        special_exact_types = {5, 6, 7, 8, 19, 20, 21}
-        for round_idx in range(max(1, int(max_rounds))):
-            progressed = False
-            ordered_types = sorted(
-                set(int(x) for x in target_types),
-                key=lambda su: (0 if int(su) in special_exact_types else 1, int(su)),
-            )
-            for allow_pending_special in (False, True):
-                for su_type in ordered_types:
-                    delta = 0
-                    if int(su_type) in special_exact_types:
-                        delta = self._complete_required_external_exact(
-                            assigner=assigner,
-                            nodes=nodes,
-                            su_type=int(su_type),
-                            allow_pending_special=bool(allow_pending_special),
-                        )
-                    if int(delta) <= 0:
-                        delta = self._complete_required_external_greedy_mrv(
-                            assigner=assigner,
-                            nodes=nodes,
-                            su_type=int(su_type),
-                            allow_pending_special=bool(allow_pending_special),
-                            max_steps=max(4, len(target_types) * 2),
-                        )
-                    if int(delta) > 0:
-                        progressed = True
-            if not bool(progressed):
-                break
-
-    def repair_remaining_hop1_slots(self,
-                                    assigner: Any,
-                                    nodes: List[_NodeV3],
-                                    max_iters: Optional[int] = 64) -> None:
-        """
-        Final structural repair pass for Layer1.
-
-        First fill direct legal residual edges, then run a bounded local
-        split/swap search only when strict SU19/20/21 degree gaps remain.
-        """
-        self.repair_remaining_hop1_slots_fast(
-            assigner=assigner,
-            nodes=nodes,
-            max_rounds=max_iters,
-        )
-        strict_remaining = [
-            node for node in nodes
-            if int(getattr(node, 'su_type', -1)) in {19, 20, 21}
-            and int(node.remaining_hop1_slots()) > 0
-        ]
-        if not strict_remaining:
-            assigner._last_local_swap_diagnostics = {
-                'attempted_swaps': 0,
-                'max_attempts': int(max_iters or 0),
-                'remaining_special_gaps': [],
-                'ok': True,
-            }
-            return
-
-        remaining = list(strict_remaining)
-        if not remaining:
-            assigner._last_local_swap_diagnostics = {
-                'attempted_swaps': 0,
-                'max_attempts': int(max_iters or 0),
-                'remaining_special_gaps': [],
-                'ok': True,
-            }
-            return
-
-        try:
-            max_iters_eff = int(max_iters) if max_iters is not None else 0
-        except Exception:
-            max_iters_eff = 600
-        if int(max_iters_eff) <= 0:
-            max_iters_eff = len(remaining) * 20
-        iters = 0
-
-        def _can_direct_connect(u: _NodeV3, v: _NodeV3) -> bool:
-            if u.global_id == v.global_id:
-                return False
-            if v.global_id in u.hop1_ids:
-                return False
-            if u.remaining_hop1_slots() <= 0 or v.remaining_hop1_slots() <= 0:
-                return False
-            return assigner._can_add_hop1_connection(nodes, u, v)
-
-        def _is_locked(n: _NodeV3) -> bool:
-            return int(getattr(n, 'su_type', -1)) in {27, 28, 29, 31, 32}
-
-        def _has_pending_external(n: _NodeV3, graph_nodes: List[_NodeV3]) -> bool:
-            return bool(assigner._has_pending_required_external(n, graph_nodes))
-
-        def _make_local_work_nodes(src_nodes: List[_NodeV3], affected_ids: List[int]) -> List[_NodeV3]:
-            work_nodes = list(src_nodes)
-            for nid in sorted(set(int(x) for x in affected_ids)):
-                if 0 <= int(nid) < len(src_nodes):
-                    work_nodes[int(nid)] = copy.deepcopy(src_nodes[int(nid)])
-            return work_nodes
-
-        def _repair_priority(node: _NodeV3) -> Tuple[int, int, int, int, int]:
-            current_deg = int(node.get_hop1_degree())
-            target_deg = assigner._node_target_degree(node)
-            deficit = int(node.remaining_hop1_slots())
-            if target_deg is not None:
-                deficit = max(int(deficit), max(0, int(target_deg) - int(current_deg)))
-            missing_required = 1 if assigner._has_pending_required_external(node, nodes) else 0
-            su_i = int(getattr(node, 'su_type', -1))
-            su11_missing_external = int(su_i == 11 and missing_required > 0)
-            special_missing = int(su_i in {19, 20, 21} and missing_required > 0)
-            return (
-                -int(su11_missing_external),
-                -int(special_missing),
-                -int(missing_required),
-                -int(deficit),
-                int(getattr(node, 'global_id', 0)),
-            )
-
-        def _node_degree_gap(node: _NodeV3, graph_nodes: List[_NodeV3]) -> int:
-            _ = graph_nodes
-            current_deg = int(node.get_hop1_degree())
-            target_deg = assigner._node_target_degree(node)
-            if target_deg is not None:
-                return max(0, int(target_deg) - int(current_deg))
-            return max(0, int(node.remaining_hop1_slots()))
-
-        def _node_penalty(node: _NodeV3, graph_nodes: List[_NodeV3]) -> int:
-            su_i = int(getattr(node, 'su_type', -1))
-            required_gap = int(self._required_external_gap(assigner, node, graph_nodes))
-            degree_gap = int(_node_degree_gap(node, graph_nodes))
-            rem_slots = int(node.remaining_hop1_slots())
-            special_weight = 120 if int(su_i) in {19, 20, 21, 5, 6, 7, 8, 9} else 80 if int(su_i) == 11 else 18
-            degree_weight = 14 if int(su_i) in {19, 20, 21, 11, 5, 6, 7, 8, 9} else 4
-            return (
-                int(required_gap) * int(special_weight) +
-                int(degree_gap) * int(degree_weight) +
-                int(rem_slots)
-            )
-
-        def _score_nodes(graph_nodes: List[_NodeV3], node_ids: List[int]) -> int:
-            uniq_ids = sorted(set(int(x) for x in list(node_ids or [])))
-            total = 0
-            for nid in uniq_ids:
-                if 0 <= int(nid) < len(graph_nodes):
-                    total += int(_node_penalty(graph_nodes[int(nid)], graph_nodes))
-            return int(total)
-
-        def _try_fill_pending_external(center: _NodeV3) -> bool:
-            if int(center.remaining_hop1_slots()) <= 0:
-                return False
-            if not _has_pending_external(center, nodes):
-                return False
-
-            for allow_pending_special in (False, True):
-                target = self._pick_required_external_candidate(
-                    assigner=assigner,
-                    nodes=nodes,
-                    center=center,
-                    allow_pending_special=bool(allow_pending_special),
-                )
-                if target is not None:
-                    if not assigner._add_bidirectional_hop1(
-                        nodes,
-                        int(center.global_id),
-                        int(target.global_id),
-                        lock=bool(self._should_lock_required_external_edge(center)),
-                    ):
-                        continue
-                    return True
-
-            if int(getattr(center, 'su_type', -1)) != 11:
-                return False
-
-            required_external = assigner._required_external_candidates_for_node(center) or []
-            priority = self._required_external_priority(center, list(required_external))
-            best_move: Optional[Tuple[int, int, int]] = None
-            best_gain = 0
-            ordinary_rewire_types = {15, 17, 22, 23, 24, 25}
-
-            seen_owner_ids: Set[int] = set()
-            for ext_su in priority:
-                for owner in assigner._get_nodes_by_su_type(nodes, int(ext_su)):
-                    owner_id = int(getattr(owner, 'global_id', -1))
-                    if int(owner_id) in seen_owner_ids:
-                        continue
-                    seen_owner_ids.add(int(owner_id))
-                    if int(owner_id) == int(center.global_id):
-                        continue
-                    if int(owner_id) in set(getattr(center, 'hop1_ids', []) or []):
-                        continue
-                    if int(getattr(owner, 'su_type', -1)) not in ordinary_rewire_types:
-                        continue
-                    if int(owner.remaining_hop1_slots()) > 0:
-                        continue
-
-                    for old_nb_id in list(getattr(owner, 'hop1_ids', []) or []):
-                        old_nb_i = int(old_nb_id)
-                        if old_nb_i < 0 or old_nb_i >= len(nodes):
-                            continue
-                        old_nb = nodes[int(old_nb_i)]
-                        if _is_locked(old_nb) or _has_pending_external(old_nb, nodes):
-                            continue
-                        if assigner._edge_is_fixed(owner, old_nb):
-                            continue
-
-                        affected_ids = [int(center.global_id), int(owner_id), int(old_nb_i)]
-                        before_score = _score_nodes(nodes, affected_ids)
-                        work_nodes = _make_local_work_nodes(nodes, affected_ids)
-                        if not assigner._remove_bidirectional_hop1(work_nodes, int(owner_id), int(old_nb_i)):
-                            continue
-                        center_w = work_nodes[int(center.global_id)]
-                        owner_w = work_nodes[int(owner_id)]
-                        if not assigner._can_add_hop1_connection(work_nodes, owner_w, center_w):
-                            continue
-                        if not assigner._add_bidirectional_hop1(work_nodes, int(owner_id), int(center.global_id), lock=False):
-                            continue
-                        after_score = _score_nodes(work_nodes, affected_ids)
-                        gain = int(before_score - after_score)
-                        if int(gain) <= 0:
-                            continue
-                        if int(self._required_external_gap(assigner, center_w, work_nodes)) >= int(self._required_external_gap(assigner, center, nodes)):
-                            continue
-                        if best_move is None or int(gain) > int(best_gain):
-                            best_move = (int(owner_id), int(old_nb_i), int(center.global_id))
-                            best_gain = int(gain)
-
-            if best_move is None:
-                return False
-
-            owner_id, old_nb_id, center_id = best_move
-            if not assigner._remove_bidirectional_hop1(nodes, int(owner_id), int(old_nb_id)):
-                return False
-            if not assigner._add_bidirectional_hop1(
-                nodes,
-                int(owner_id),
-                int(center_id),
-                lock=False,
-            ):
-                assigner._add_bidirectional_hop1(nodes, int(owner_id), int(old_nb_id), lock=False)
-                return False
-            return True
-
-        def _try_rewire_for_special_degree_gap(center: _NodeV3) -> bool:
-            """Borrow one ordinary non-fixed edge to close a special-anchor degree gap."""
-            if int(getattr(center, 'su_type', -1)) not in {19, 20, 21}:
-                return False
-            if int(center.remaining_hop1_slots()) <= 0:
-                return False
-            if _has_pending_external(center, nodes):
-                return False
-            if int(_node_degree_gap(center, nodes)) <= 0:
-                return False
-
-            protected_su = {5, 6, 7, 8, 9, 19, 20, 21, 27, 28, 29, 31, 32}
-            terminal_su = {1, 4, 16, 18, 22, 28, 32}
-            best_move: Optional[Tuple[int, int, int]] = None
-            best_gain: Optional[int] = None
-
-            for owner in list(nodes or []):
-                owner_id = int(getattr(owner, 'global_id', -1))
-                if int(owner_id) == int(center.global_id):
-                    continue
-                if int(owner_id) in set(getattr(center, 'hop1_ids', []) or []):
-                    continue
-                if int(getattr(owner, 'su_type', -1)) in protected_su:
-                    continue
-                if int(owner.remaining_hop1_slots()) > 0:
-                    continue
-                if _has_pending_external(owner, nodes):
-                    continue
-
-                for old_nb_id in list(getattr(owner, 'hop1_ids', []) or []):
-                    old_nb_i = int(old_nb_id)
-                    if old_nb_i < 0 or old_nb_i >= len(nodes):
-                        continue
-                    old_nb = nodes[int(old_nb_i)]
-                    if int(getattr(old_nb, 'su_type', -1)) in protected_su:
-                        continue
-                    if int(getattr(old_nb, 'su_type', -1)) in terminal_su:
-                        continue
-                    if _has_pending_external(old_nb, nodes):
-                        continue
-                    if assigner._edge_is_fixed(owner, old_nb):
-                        continue
-
-                    affected_ids = [int(center.global_id), int(owner_id), int(old_nb_i)]
-                    before_score = _score_nodes(nodes, affected_ids)
-                    work_nodes = _make_local_work_nodes(nodes, affected_ids)
-                    if not assigner._remove_bidirectional_hop1(work_nodes, int(owner_id), int(old_nb_i)):
-                        continue
-                    owner_w = work_nodes[int(owner_id)]
-                    center_w = work_nodes[int(center.global_id)]
-                    old_nb_w = work_nodes[int(old_nb_i)]
-                    if not assigner._can_add_hop1_connection(work_nodes, owner_w, center_w):
-                        continue
-                    if not assigner._add_bidirectional_hop1(work_nodes, int(owner_id), int(center.global_id), lock=False):
-                        continue
-                    if int(_node_degree_gap(center_w, work_nodes)) >= int(_node_degree_gap(center, nodes)):
-                        continue
-                    after_score = _score_nodes(work_nodes, affected_ids)
-                    # Do not trade a special-anchor hard gap for another special
-                    # or fixed-anchor gap; owner/old_nb are filtered above, so a
-                    # positive local score gain is enough to make this safe.
-                    gain = int(before_score - after_score)
-                    if int(gain) <= 0:
-                        continue
-                    if best_gain is None or int(gain) > int(best_gain):
-                        _ = old_nb_w
-                        best_move = (int(owner_id), int(old_nb_i), int(center.global_id))
-                        best_gain = int(gain)
-
-            if best_move is None:
-                return False
-
-            owner_id, old_nb_id, center_id = best_move
-            if not assigner._remove_bidirectional_hop1(nodes, int(owner_id), int(old_nb_id)):
-                return False
-            if not assigner._add_bidirectional_hop1(nodes, int(owner_id), int(center_id), lock=False):
-                assigner._add_bidirectional_hop1(nodes, int(owner_id), int(old_nb_id), lock=False)
-                return False
-            return True
-
-        while iters < max_iters_eff:
-            iters += 1
-            self.complete_required_external_anchors(assigner, nodes, [11, 19, 20, 21, 5, 6, 7, 8, 9], max_rounds=1)
-            remaining = [n for n in nodes if n.remaining_hop1_slots() > 0]
-            if not remaining:
-                break
-
-            remaining.sort(key=_repair_priority)
-            progressed = False
-
-            for u in remaining:
-                if _try_fill_pending_external(u):
-                    progressed = True
-                    break
-                if _try_rewire_for_special_degree_gap(u):
-                    progressed = True
-                    break
-
-                # 1) direct connect
-                direct_candidates = [v for v in remaining if int(v.global_id) != int(u.global_id) and _can_direct_connect(u, v)]
-                if direct_candidates:
-                    best_direct: Optional[Tuple[int, int]] = None
-                    best_gain = None
-                    for v in list(direct_candidates):
-                        affected_ids = [int(u.global_id), int(v.global_id)]
-                        before_score = _score_nodes(nodes, affected_ids)
-                        work_nodes = _make_local_work_nodes(nodes, affected_ids)
-                        if not assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(v.global_id), lock=False):
-                            continue
-                        after_score = _score_nodes(work_nodes, affected_ids)
-                        gain = int(before_score - after_score)
-                        if best_gain is None or int(gain) > int(best_gain):
-                            best_gain = int(gain)
-                            best_direct = (int(u.global_id), int(v.global_id))
-                    if best_direct is not None and int(best_gain or 0) >= 0:
-                        if not assigner._add_bidirectional_hop1(nodes, int(best_direct[0]), int(best_direct[1])):
-                            continue
-                        progressed = True
-                        break
-
-                # 2) split one edge into two edges centered on u
-                if int(u.remaining_hop1_slots()) >= 2:
-                    preferred_edge_types = {10, 11, 12, 13}
-                    edge_endpoints = []
-                    for a in nodes:
-                        if _is_locked(a) or _has_pending_external(a, nodes):
-                            continue
-                        for b_id in list(getattr(a, 'hop1_ids', []) or []):
-                            if int(b_id) <= int(a.global_id):
-                                continue
-                            b = nodes[int(b_id)]
-                            if _is_locked(b) or _has_pending_external(b, nodes):
-                                continue
-                            edge_endpoints.append((a, b))
-
-                    found_split = False
-                    for only_preferred in (True, False):
-                        for a, b in edge_endpoints:
-                            if only_preferred and (int(a.su_type) not in preferred_edge_types or int(b.su_type) not in preferred_edge_types):
-                                continue
-                            if int(a.global_id) in set(getattr(u, 'hop1_ids', []) or []):
-                                continue
-                            if int(b.global_id) in set(getattr(u, 'hop1_ids', []) or []):
-                                continue
-
-                            work_nodes = _make_local_work_nodes(nodes, [int(u.global_id), int(a.global_id), int(b.global_id)])
-                            before_score = _score_nodes(nodes, [int(u.global_id), int(a.global_id), int(b.global_id)])
-                            ok = assigner._remove_bidirectional_hop1(work_nodes, int(a.global_id), int(b.global_id))
-                            if not ok:
-                                continue
-                            u_w = work_nodes[int(u.global_id)]
-                            a_w = work_nodes[int(a.global_id)]
-                            b_w = work_nodes[int(b.global_id)]
-                            if not assigner._can_add_hop1_connection(work_nodes, u_w, a_w):
-                                continue
-                            if not assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(a.global_id)):
-                                continue
-                            u_w = work_nodes[int(u.global_id)]
-                            if not assigner._can_add_hop1_connection(work_nodes, u_w, b_w):
-                                continue
-                            if not assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(b.global_id), lock=False):
-                                continue
-                            after_score = _score_nodes(work_nodes, [int(u.global_id), int(a.global_id), int(b.global_id)])
-                            if int(after_score) >= int(before_score):
-                                continue
-
-                            ok = assigner._remove_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
-                            if not ok:
-                                continue
-                            if not assigner._add_bidirectional_hop1(nodes, int(u.global_id), int(a.global_id)):
-                                assigner._add_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
-                                continue
-                            if not assigner._add_bidirectional_hop1(nodes, int(u.global_id), int(b.global_id)):
-                                assigner._remove_bidirectional_hop1_with_force(nodes, int(u.global_id), int(a.global_id), force=True)
-                                assigner._add_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
-                                continue
-                            found_split = True
-                            progressed = True
-                            break
-                        if found_split:
-                            break
-                    if found_split:
-                        break
-
-                # 3) two-edge swap
-                found_swap = False
-                for v in remaining:
-                    if int(u.global_id) == int(v.global_id):
-                        continue
-                    if int(u.remaining_hop1_slots()) <= 0 or int(v.remaining_hop1_slots()) <= 0:
-                        continue
-                    for a in nodes:
-                        if int(a.remaining_hop1_slots()) != 0:
-                            continue
-                        if _is_locked(a) or _has_pending_external(a, nodes):
-                            continue
-                        if int(a.global_id) in {int(u.global_id), int(v.global_id)}:
-                            continue
-                        if int(a.global_id) in set(getattr(u, 'hop1_ids', []) or []):
-                            continue
-
-                        for b_id in list(getattr(a, 'hop1_ids', []) or []):
-                            b = nodes[int(b_id)]
-                            if int(b.remaining_hop1_slots()) != 0:
-                                continue
-                            if _is_locked(b) or _has_pending_external(b, nodes):
-                                continue
-                            if int(b.global_id) in {int(u.global_id), int(v.global_id)}:
-                                continue
-                            if int(b.global_id) in set(getattr(v, 'hop1_ids', []) or []):
-                                continue
-
-                            work_nodes = _make_local_work_nodes(nodes, [int(u.global_id), int(v.global_id), int(a.global_id), int(b.global_id)])
-                            before_score = _score_nodes(nodes, [int(u.global_id), int(v.global_id), int(a.global_id), int(b.global_id)])
-                            ok = assigner._remove_bidirectional_hop1(work_nodes, int(a.global_id), int(b.global_id))
-                            if not ok:
-                                continue
-                            u_w = work_nodes[int(u.global_id)]
-                            v_w = work_nodes[int(v.global_id)]
-                            a_w = work_nodes[int(a.global_id)]
-                            b_w = work_nodes[int(b.global_id)]
-                            if not assigner._can_add_hop1_connection(work_nodes, u_w, a_w):
-                                continue
-                            if not assigner._add_bidirectional_hop1(work_nodes, int(u.global_id), int(a.global_id)):
-                                continue
-                            if not assigner._can_add_hop1_connection(work_nodes, v_w, b_w):
-                                continue
-                            if not assigner._add_bidirectional_hop1(work_nodes, int(v.global_id), int(b.global_id), lock=False):
-                                continue
-                            after_score = _score_nodes(work_nodes, [int(u.global_id), int(v.global_id), int(a.global_id), int(b.global_id)])
-                            if int(after_score) >= int(before_score):
-                                continue
-
-                            ok = assigner._remove_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
-                            if not ok:
-                                continue
-                            if not assigner._add_bidirectional_hop1(nodes, int(u.global_id), int(a.global_id)):
-                                assigner._add_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
-                                continue
-                            if not assigner._add_bidirectional_hop1(nodes, int(v.global_id), int(b.global_id)):
-                                assigner._remove_bidirectional_hop1_with_force(nodes, int(u.global_id), int(a.global_id), force=True)
-                                assigner._add_bidirectional_hop1(nodes, int(a.global_id), int(b.global_id))
-                                continue
-                            found_swap = True
-                            progressed = True
-                            break
-                        if found_swap:
-                            break
-                    if found_swap:
-                        break
-                if found_swap:
-                    break
-
-            if not bool(progressed):
-                break
-
-        final_gaps = [
-            {
-                'node_id': int(getattr(node, 'global_id', -1)),
-                'su_type': int(getattr(node, 'su_type', -1)),
-                'degree_gap': int(node.remaining_hop1_slots()),
-                'target_degree': int(getattr(node, 'target_hop1_degree', 0) or 0),
-                'anchor_mode': str(getattr(node, 'special_anchor_mode', '') or ''),
-            }
-            for node in nodes
-            if int(getattr(node, 'su_type', -1)) in {19, 20, 21}
-            and int(node.remaining_hop1_slots()) > 0
-        ]
-        assigner._last_local_swap_diagnostics = {
-            'attempted_swaps': int(iters),
-            'max_attempts': int(max_iters_eff),
-            'remaining_special_gaps': final_gaps,
-            'ok': not bool(final_gaps),
-        }
-
-    def repair_remaining_hop1_slots_fast(self,
-                                         assigner: Any,
-                                         nodes: List[_NodeV3],
-                                         max_rounds: Optional[int] = 600) -> None:
-        """
-        Bounded structural cleanup used by default.
-
-        This intentionally avoids split-edge and two-edge swap searches.  It
-        only performs actions that are local and cheap:
-        - refill required external anchors;
-        - directly connect two nodes that both have free slots and satisfy
-          endpoint rules.
-        """
-        try:
-            max_rounds_eff = int(max_rounds) if max_rounds is not None else 0
-        except Exception:
-            max_rounds_eff = 600
-        if int(max_rounds_eff) <= 0:
-            max_rounds_eff = 600
-
-        def _has_pending_external(n: _NodeV3, graph_nodes: List[_NodeV3]) -> bool:
-            return bool(assigner._has_pending_required_external(n, graph_nodes))
-
-        def _node_priority(node: _NodeV3) -> Tuple[int, int, int, int]:
-            su_i = int(getattr(node, 'su_type', -1))
-            pending = int(_has_pending_external(node, nodes))
-            rem = int(node.remaining_hop1_slots())
-            special = int(su_i in {5, 6, 7, 8, 9, 11, 19, 20, 21})
-            return (-pending, -special, -rem, int(getattr(node, 'global_id', 0)))
-
-        def _can_direct_connect(u: _NodeV3, v: _NodeV3) -> bool:
-            if int(u.global_id) == int(v.global_id):
-                return False
-            if int(v.global_id) in set(getattr(u, 'hop1_ids', []) or []):
-                return False
-            if int(u.remaining_hop1_slots()) <= 0 or int(v.remaining_hop1_slots()) <= 0:
-                return False
-            return bool(assigner._can_add_hop1_connection(nodes, u, v))
-
-        rounds = 0
-        while rounds < int(max_rounds_eff):
-            rounds += 1
-            before_open = sum(max(0, int(n.remaining_hop1_slots())) for n in nodes)
-            self.complete_required_external_anchors(
-                assigner,
-                nodes,
-                [11, 19, 20, 21, 5, 6, 7, 8, 9],
-                max_rounds=1,
-            )
-            remaining = [n for n in nodes if int(n.remaining_hop1_slots()) > 0]
-            if not remaining:
-                break
-            remaining.sort(key=_node_priority)
-
-            progressed = False
-            for u in remaining:
-                if int(u.remaining_hop1_slots()) <= 0:
-                    continue
-                candidates = [
-                    v for v in remaining
-                    if int(v.global_id) != int(u.global_id)
-                    and int(v.remaining_hop1_slots()) > 0
-                    and _can_direct_connect(u, v)
-                ]
-                if not candidates:
-                    continue
-                candidates.sort(key=_node_priority)
-                v = candidates[0]
-                if assigner._add_bidirectional_hop1(nodes, int(u.global_id), int(v.global_id)):
-                    progressed = True
-                    break
-
-            after_open = sum(max(0, int(n.remaining_hop1_slots())) for n in nodes)
-            if not bool(progressed) and int(after_open) >= int(before_open):
-                break
 
     def _partition_aware_external_requirement(self,
                                               node: _NodeV3,
@@ -1023,20 +112,185 @@ class Layer1Refiner:
                     continue
         except Exception:
             out = {}
+        for su_type in (11, 12, 13, 22, 23, 24):
+            coarse_lo, coarse_hi = get_su_ppm_range(int(su_type))
+            out[int(su_type)] = {
+                'mu_median': 0.5 * (float(coarse_lo) + float(coarse_hi)),
+                'mu_min': float(coarse_lo),
+                'mu_max': float(coarse_hi),
+            }
         self._su_common_ranges_cache = out
         return out
 
     @staticmethod
     def _region_specs() -> List[Tuple[str, float, float, List[int]]]:
         return [
-            ('aliphatic', 0.0, 90.0, [22, 23, 24, 25, 19, 20, 21]),
-            ('aromatic', 90.0, 160.0, [13, 12, 11, 10, 9, 5, 6, 7, 8, 14, 15, 16, 17, 18, 4]),
+            ('aromatic', 90.0, 160.0, [13, 12, 11, 10, 9, 5, 6, 7, 8]),
             ('carbonyl', 160.0, 240.0, [1, 2, 3, 0]),
+            ('unsaturated', 90.0, 160.0, [14, 15, 16, 17, 18, 4]),
+            ('aliphatic', 0.0, 90.0, [22, 23, 24, 25, 19, 20, 21]),
         ]
 
     @staticmethod
     def _ranges_overlap(lo1: float, hi1: float, lo2: float, hi2: float) -> bool:
         return not (float(hi1) < float(lo2) or float(hi2) < float(lo1))
+
+    @staticmethod
+    def _alternative_resource_shortage(nodes_by_su: Dict[int, List[int]],
+                                       center_su: int,
+                                       hop1_tuple: Tuple[int, ...]) -> Dict[int, int]:
+        needed = Counter(int(x) for x in tuple(hop1_tuple))
+        shortages: Dict[int, int] = {}
+        for su_type, count in needed.items():
+            available = int(len(nodes_by_su.get(int(su_type), [])))
+            if int(su_type) == int(center_su):
+                available = max(0, int(available) - 1)
+            if int(count) > int(available):
+                shortages[int(su_type)] = int(count) - int(available)
+        return shortages
+
+    @staticmethod
+    def _motif_concentration(usage: Counter) -> float:
+        return float(sum(
+            float(motif_penalty_alpha(int(center_su))) * float(count * max(0, count - 1))
+            for (center_su, _hop1), count in usage.items()
+        ))
+
+    def diversify_hop1_motifs(self,
+                               nodes: List[_NodeV3],
+                               E_target: torch.Tensor,
+                               output_dir: Optional[str] = None,
+                               max_moves: int = 12,
+                               max_trials: int = 96,
+                               deadline_monotonic: Optional[float] = None) -> Tuple[List[_NodeV3], Dict[str, object]]:
+        adjuster = Hop1Adjuster(
+            port_combinations=HOP1_PORT_COMBINATIONS,
+            validate_connection_fn=validate_connection,
+            external_requirement_fn=check_external_connection_requirement,
+            external_requirement_node_fn=self._partition_aware_external_requirement,
+        )
+        nodes_by_su: Dict[int, List[int]] = defaultdict(list)
+        for node in nodes:
+            nodes_by_su[int(node.su_type)].append(int(node.global_id))
+
+        eligible_sus = {5, 10, 11, 12, 13, 22, 23, 24, 25}
+        accepted: List[Dict[str, object]] = []
+        trials = 0
+        stop_reason = 'no_improving_swap'
+        while len(accepted) < max(0, int(max_moves)) and trials < max(0, int(max_trials)):
+            if deadline_monotonic is not None and time.perf_counter() >= float(deadline_monotonic):
+                stop_reason = 'deadline'
+                break
+            usage = build_motif_usage_from_pairs(
+                (
+                    int(node.su_type),
+                    tuple(sorted(int(x) for x in Counter(getattr(node, 'hop1_su', {}) or {}).elements())),
+                )
+                for node in nodes
+            )
+            concentration_before = self._motif_concentration(usage)
+            hotspots = sorted(
+                (
+                    (int(count), int(center_su), tuple(hop1_tuple))
+                    for (center_su, hop1_tuple), count in usage.items()
+                    if int(center_su) in eligible_sus and int(count) > 1 and tuple(hop1_tuple)
+                ),
+                key=lambda item: (-item[0], item[1], item[2]),
+            )
+            improved = False
+            for hotspot_count, center_su, current_hop1 in hotspots:
+                alternatives = [
+                    dict(entry)
+                    for entry in adjuster.hop1_by_su.get(int(center_su), [])
+                    if tuple(entry.get('hop1_tuple', ())) != tuple(current_hop1)
+                    and len(tuple(entry.get('hop1_tuple', ()))) == len(tuple(current_hop1))
+                    and not self._alternative_resource_shortage(
+                        nodes_by_su,
+                        int(center_su),
+                        tuple(int(x) for x in tuple(entry.get('hop1_tuple', ()))),
+                    )
+                ]
+                alternatives.sort(key=lambda entry: (
+                    int(usage.get((int(center_su), tuple(entry['hop1_tuple'])), 0)),
+                    int(multiset_l1_distance(tuple(current_hop1), tuple(entry['hop1_tuple']))),
+                    abs(float(entry.get('mu_median', 0.0))),
+                    tuple(entry['hop1_tuple']),
+                ))
+                if not alternatives:
+                    continue
+                center_nodes = [
+                    node for node in nodes
+                    if int(node.su_type) == int(center_su)
+                    and tuple(sorted(int(x) for x in Counter(node.hop1_su).elements())) == tuple(current_hop1)
+                ]
+                center_nodes.sort(key=lambda node: -int(node.global_id))
+                for center_node in center_nodes:
+                    for alternative in alternatives:
+                        if trials >= int(max_trials):
+                            stop_reason = 'trial_budget'
+                            break
+                        if deadline_monotonic is not None and time.perf_counter() >= float(deadline_monotonic):
+                            stop_reason = 'deadline'
+                            break
+                        trials += 1
+                        result = adjuster.execute_hop1_replacement(
+                            nodes=nodes,
+                            target_node_id=int(center_node.global_id),
+                            new_hop1_tuple=tuple(int(x) for x in tuple(alternative['hop1_tuple'])),
+                            E_target=E_target,
+                            dry_run=False,
+                            nodes_by_su=nodes_by_su,
+                            return_undo_state=True,
+                        )
+                        if not bool(result.get('success', False)):
+                            continue
+                        undo_state = result.pop('_undo_state', None)
+                        if undo_state is None:
+                            raise RuntimeError('successful diversity swap did not provide undo state')
+                        usage_after = build_motif_usage_from_pairs(
+                            (
+                                int(node.su_type),
+                                tuple(sorted(int(x) for x in Counter(getattr(node, 'hop1_su', {}) or {}).elements())),
+                            )
+                            for node in nodes
+                        )
+                        concentration_after = self._motif_concentration(usage_after)
+                        if float(concentration_after) < float(concentration_before) - 1e-9:
+                            accepted.append({
+                                'move': int(len(accepted) + 1),
+                                'global_id': int(center_node.global_id),
+                                'center_su': int(center_su),
+                                'old_hop1': tuple(current_hop1),
+                                'new_hop1': tuple(alternative['hop1_tuple']),
+                                'hotspot_count_before': int(hotspot_count),
+                                'concentration_before': float(concentration_before),
+                                'concentration_after': float(concentration_after),
+                                'affected_nodes': list(result.get('affected_nodes', []) or []),
+                            })
+                            improved = True
+                            break
+                        self._restore_hop1_state(nodes, undo_state)
+                    if improved or trials >= int(max_trials) or stop_reason == 'deadline':
+                        break
+                if improved or trials >= int(max_trials) or stop_reason == 'deadline':
+                    break
+            if not improved:
+                if trials >= int(max_trials):
+                    stop_reason = 'trial_budget'
+                break
+
+        if len(accepted) >= max(0, int(max_moves)) and int(max_moves) > 0:
+            stop_reason = 'move_budget'
+        if output_dir and accepted:
+            out = Path(output_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(accepted).to_csv(out / 'layer1_hop1_diversity_moves.csv', index=False)
+        return nodes, {
+            'adjustments': int(len(accepted)),
+            'trials': int(trials),
+            'stop_reason': str(stop_reason),
+            'details': accepted,
+        }
 
     def _rank_su_types_for_positive_peaks(self,
                                           priority_list: List[int],
@@ -1229,7 +483,8 @@ class Layer1Refiner:
                                        max_iterations: int = 3,
                                        max_adjustments_per_iter: int = 3,
                                        pos_rel_threshold: float = 0.08,
-                                       neg_rel_threshold: float = 0.08) -> Tuple[List[_NodeV3], Dict[str, object]]:
+                                       neg_rel_threshold: float = 0.08,
+                                       deadline_monotonic: Optional[float] = None) -> Tuple[List[_NodeV3], Dict[str, object]]:
         if lib_path is None:
             return nodes, {'adjustments': 0, 'iterations': 0, 'details': [], 'reason': 'missing_lib'}
 
@@ -1242,7 +497,11 @@ class Layer1Refiner:
 
         all_moves: List[Dict[str, object]] = []
         diagnostics: List[Dict[str, object]] = []
+        deadline_exhausted = False
         for iter_idx in range(max(1, int(max_iterations))):
+            if deadline_monotonic is not None and time.perf_counter() >= float(deadline_monotonic):
+                deadline_exhausted = True
+                break
             diff_info = self.evaluator.compute_difference_spectrum(
                 nodes=nodes,
                 S_target=S_target,
@@ -1308,6 +567,9 @@ class Layer1Refiner:
             iter_moves: List[Dict[str, object]] = []
             used_centers = set()
             for cand in candidates:
+                if deadline_monotonic is not None and time.perf_counter() >= float(deadline_monotonic):
+                    deadline_exhausted = True
+                    break
                 if len(iter_moves) >= int(max_adjustments_per_iter):
                     break
                 if int(cand['center_id']) in used_centers:
@@ -1336,6 +598,8 @@ class Layer1Refiner:
             'iterations': int(len(diagnostics)),
             'details': all_moves,
             'diagnostics': diagnostics,
+            'deadline_exhausted': bool(deadline_exhausted),
+            'reason': 'deadline' if deadline_exhausted else 'complete',
         }
 
     def adjust_hop1_based_on_spectrum(self,
@@ -1354,7 +618,9 @@ class Layer1Refiner:
                                       max_candidate_nodes_per_su: int = 24,
                                       max_alternatives_per_node: int = 4,
                                       max_moves_per_region: int = 8,
-                                      max_full_evals: int = 32) -> Tuple[List[_NodeV3], Dict[str, object]]:
+                                      max_full_evals: int = 32,
+                                      min_r2_gain: float = 1e-4,
+                                      deadline_monotonic: Optional[float] = None) -> Tuple[List[_NodeV3], Dict[str, object]]:
         device = self.device
         if output_dir:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -1374,6 +640,9 @@ class Layer1Refiner:
 
         total_adjustments = 0
         total_candidate_trials = 0
+        raw_candidate_records = 0
+        unique_candidate_records = 0
+        cached_structural_failures = 0
         candidate_trial_budget = int(max_candidate_trials or 0)
         if candidate_trial_budget <= 0:
             candidate_trial_budget = 10**9
@@ -1390,14 +659,58 @@ class Layer1Refiner:
         best_nodes = copy.deepcopy(nodes)
         region_summaries: List[Dict[str, object]] = []
         budget_exhausted = False
+        deadline_exhausted = False
+        graph_revision = 0
+        structural_failure_cache: Set[Tuple[int, int, Tuple[int, ...]]] = set()
+        nodes_by_su: Dict[int, List[int]] = defaultdict(list)
+        for node in nodes:
+            nodes_by_su[int(node.su_type)].append(int(node.global_id))
 
-        for region_name, region_lo, region_hi, priority_list in self._region_specs():
-            if wanted_groups and str(region_name).lower() not in set(wanted_groups):
-                continue
+        region_specs = list(self._region_specs())
+        if wanted_groups:
+            specs_by_name = {
+                str(spec[0]).lower(): spec
+                for spec in region_specs
+            }
+            region_specs = [
+                specs_by_name[name]
+                for name in wanted_groups
+                if name in specs_by_name
+            ]
+
+        region_count = max(1, int(len(region_specs)))
+        candidate_quota_base, candidate_quota_extra = divmod(int(candidate_trial_budget), region_count)
+        full_eval_quota_base, full_eval_quota_extra = divmod(int(full_eval_budget), region_count)
+        candidate_quota_carry = 0
+        full_eval_quota_carry = 0
+
+        for region_index, (region_name, region_lo, region_hi, priority_list) in enumerate(region_specs):
+            if deadline_monotonic is not None and time.perf_counter() >= float(deadline_monotonic):
+                budget_exhausted = True
+                deadline_exhausted = True
+                break
+            candidate_quota = int(candidate_quota_base + (1 if region_index < candidate_quota_extra else 0))
+            full_eval_quota = int(full_eval_quota_base + (1 if region_index < full_eval_quota_extra else 0))
+            region_candidate_limit = min(
+                int(candidate_trial_budget),
+                int(total_candidate_trials + candidate_quota + candidate_quota_carry),
+            )
+            region_full_eval_limit = min(
+                int(full_eval_budget),
+                int(full_eval_count + full_eval_quota + full_eval_quota_carry),
+            )
+            region_candidate_start = int(total_candidate_trials)
+            region_full_eval_start = int(full_eval_count)
             region_adjustments = 0
             region_details: List[Dict[str, object]] = []
             stop_reason = 'max_iterations'
+            region_budget_exhausted = False
             for region_iter in range(max(1, int(max_iterations))):
+                if deadline_monotonic is not None and time.perf_counter() >= float(deadline_monotonic):
+                    stop_reason = 'layer1_deadline_exhausted'
+                    budget_exhausted = True
+                    deadline_exhausted = True
+                    break
                 if int(region_adjustments) >= int(moves_per_region_cap):
                     stop_reason = 'region_move_budget_exhausted'
                     break
@@ -1405,9 +718,17 @@ class Layer1Refiner:
                     stop_reason = 'candidate_trial_budget_exhausted'
                     budget_exhausted = True
                     break
+                if int(total_candidate_trials) >= int(region_candidate_limit):
+                    stop_reason = 'region_candidate_trial_budget_exhausted'
+                    region_budget_exhausted = True
+                    break
                 if int(full_eval_count) >= int(full_eval_budget):
                     stop_reason = 'full_eval_budget_exhausted'
                     budget_exhausted = True
+                    break
+                if int(full_eval_count) >= int(region_full_eval_limit):
+                    stop_reason = 'region_full_eval_budget_exhausted'
+                    region_budget_exhausted = True
                     break
                 snapshot = self.evaluator.build_eval_snapshot(
                     nodes=nodes,
@@ -1449,14 +770,24 @@ class Layer1Refiner:
                     positive_peaks=pos_peaks,
                     fallback_window=(float(region_lo), float(region_hi)),
                 )
+                motif_usage = build_motif_usage_from_pairs(
+                    (
+                        int(node.su_type),
+                        tuple(sorted(int(x) for x in Counter(getattr(node, 'hop1_su', {}) or {}).elements())),
+                    )
+                    for node in nodes
+                )
 
                 accepted_move: Optional[Dict[str, object]] = None
-                candidate_records: List[Dict[str, object]] = []
+                candidate_records_by_key: Dict[Tuple[int, Tuple[int, ...]], Dict[str, object]] = {}
                 for neg_peak in list(neg_peaks[: max(1, min(5, len(neg_peaks)))]):
                     neg_nodes_all = adjuster.find_nodes_in_peak_region(nodes, node_peak_rows, neg_peak)
                     for su_type in su_priority:
                         cand_nodes = [x for x in neg_nodes_all if int(x['center_su']) == int(su_type)]
-                        cand_nodes.sort(key=lambda x: int(x['global_id']))
+                        cand_nodes.sort(key=lambda x: (
+                            -int(motif_usage.get((int(x['center_su']), tuple(x['hop1_ms'])), 0)),
+                            int(x['global_id']),
+                        ))
                         cand_nodes = cand_nodes[:candidate_cap]
                         for node_info in cand_nodes:
                             for pos_peak in list(pos_peaks[: max(1, min(5, len(pos_peaks)))]):
@@ -1464,6 +795,7 @@ class Layer1Refiner:
                                     int(node_info['center_su']),
                                     tuple(node_info['hop1_ms']),
                                     (float(pos_peak.ppm_min), float(pos_peak.ppm_max)),
+                                    motif_usage=motif_usage,
                                 )
                                 if not alternatives:
                                     reject_summaries.append({
@@ -1477,9 +809,37 @@ class Layer1Refiner:
                                         'reason': 'no_alternative_hop1_template',
                                     })
                                     continue
-                                for alt in alternatives[: min(int(alternative_cap), len(alternatives))]:
+                                feasible_alternatives: List[Dict[str, object]] = []
+                                for alt in alternatives:
+                                    resource_shortage = self._alternative_resource_shortage(
+                                        nodes_by_su,
+                                        int(node_info['center_su']),
+                                        tuple(int(x) for x in tuple(alt['hop1_tuple'])),
+                                    )
+                                    if resource_shortage:
+                                        reject_summaries.append({
+                                            'region': str(region_name),
+                                            'iteration': int(region_iter + 1),
+                                            'global_id': int(node_info['global_id']),
+                                            'center_su': int(node_info['center_su']),
+                                            'old_hop1': tuple(node_info['hop1_ms']),
+                                            'new_hop1': tuple(alt['hop1_tuple']),
+                                            'neg_window': (float(neg_peak.ppm_min), float(neg_peak.ppm_max)),
+                                            'pos_window': (float(pos_peak.ppm_min), float(pos_peak.ppm_max)),
+                                            'resource_shortage': dict(sorted(resource_shortage.items())),
+                                            'reason': 'alternative_resource_unavailable',
+                                        })
+                                        continue
+                                    feasible_alternatives.append(alt)
+                                    if len(feasible_alternatives) >= int(alternative_cap):
+                                        break
+                                for alt in feasible_alternatives:
                                     pos_center = 0.5 * (float(pos_peak.ppm_min) + float(pos_peak.ppm_max))
-                                    candidate_records.append({
+                                    target_usage = int(motif_usage.get(
+                                        (int(node_info['center_su']), tuple(int(x) for x in tuple(alt['hop1_tuple']))),
+                                        0,
+                                    ))
+                                    candidate_record = {
                                         'node_info': node_info,
                                         'neg_peak': neg_peak,
                                         'pos_peak': pos_peak,
@@ -1487,30 +847,58 @@ class Layer1Refiner:
                                         'rank': (
                                             -abs(float(neg_peak.intensity)),
                                             abs(float(alt.get('mu_median', pos_center)) - float(pos_center)),
+                                            int(target_usage),
+                                            -float(alt.get('score', 0.0)),
                                             int(node_info['global_id']),
                                         ),
-                                    })
+                                    }
+                                    raw_candidate_records += 1
+                                    candidate_key = (
+                                        int(node_info['global_id']),
+                                        tuple(int(x) for x in tuple(alt['hop1_tuple'])),
+                                    )
+                                    previous = candidate_records_by_key.get(candidate_key)
+                                    if previous is None or candidate_record['rank'] < previous['rank']:
+                                        candidate_records_by_key[candidate_key] = candidate_record
+                candidate_records = list(candidate_records_by_key.values())
+                unique_candidate_records += int(len(candidate_records))
                 candidate_records.sort(key=lambda x: x['rank'])
 
                 for rec in candidate_records:
+                    if deadline_monotonic is not None and time.perf_counter() >= float(deadline_monotonic):
+                        budget_exhausted = True
+                        deadline_exhausted = True
+                        break
                     if int(total_candidate_trials) >= int(candidate_trial_budget):
                         budget_exhausted = True
+                        break
+                    if int(total_candidate_trials) >= int(region_candidate_limit):
+                        region_budget_exhausted = True
                         break
                     node_info = rec['node_info']
                     neg_peak = rec['neg_peak']
                     pos_peak = rec['pos_peak']
                     alt = rec['alt']
+                    replacement_key = (
+                        int(graph_revision),
+                        int(node_info['global_id']),
+                        tuple(int(x) for x in tuple(alt['hop1_tuple'])),
+                    )
+                    if replacement_key in structural_failure_cache:
+                        cached_structural_failures += 1
+                        continue
                     total_candidate_trials += 1
-                    prev_state = self._capture_hop1_state(nodes)
                     result = adjuster.execute_hop1_replacement(
                         nodes=nodes,
                         target_node_id=int(node_info['global_id']),
                         new_hop1_tuple=tuple(alt['hop1_tuple']),
                         E_target=E_target,
                         dry_run=False,
+                        nodes_by_su=nodes_by_su,
+                        return_undo_state=True,
                     )
                     if not bool(result.get('success', False)):
-                        self._restore_hop1_state(nodes, prev_state)
+                        structural_failure_cache.add(replacement_key)
                         reject_summaries.append({
                             'region': str(region_name),
                             'iteration': int(region_iter + 1),
@@ -1523,23 +911,38 @@ class Layer1Refiner:
                             'reason': str(result.get('error', 'strict_swap_failed')),
                         })
                         continue
+                    prev_state = result.pop('_undo_state', None)
+                    if prev_state is None:
+                        raise RuntimeError("successful 1-hop replacement did not provide undo state")
                     if int(full_eval_count) >= int(full_eval_budget):
                         self._restore_hop1_state(nodes, prev_state)
                         budget_exhausted = True
                         break
-                    snapshot_try = self.evaluator.build_eval_snapshot(
-                        nodes=nodes,
-                        S_target=S_target,
-                        lib_path=lib_path,
-                        hwhm=hwhm,
-                        allow_approx=bool(allow_approx),
-                    )
+                    if int(full_eval_count) >= int(region_full_eval_limit):
+                        self._restore_hop1_state(nodes, prev_state)
+                        region_budget_exhausted = True
+                        break
+                    try:
+                        snapshot_try = self.evaluator.build_eval_snapshot(
+                            nodes=nodes,
+                            S_target=S_target,
+                            lib_path=lib_path,
+                            hwhm=hwhm,
+                            allow_approx=bool(allow_approx),
+                        )
+                    except Exception:
+                        self._restore_hop1_state(nodes, prev_state)
+                        raise
                     full_eval_count += 1
                     diff_try = np.asarray(snapshot_try.get('diff', []), dtype=np.float64)
                     ppm_try = np.asarray(snapshot_try.get('ppm', []), dtype=np.float64)
                     loss_after = self._region_abs_loss(ppm_try, diff_try, float(region_lo), float(region_hi))
                     r2_after = float(snapshot_try.get('r2', r2))
-                    if float(loss_after) < float(loss_before) - 1e-9 and float(r2_after) >= float(r2) - 1e-6:
+                    r2_gain = float(r2_after) - float(r2)
+                    if (
+                        float(loss_after) < float(loss_before) - 1e-9
+                        and float(r2_gain) >= max(0.0, float(min_r2_gain))
+                    ):
                         accepted_move = {
                             'region': str(region_name),
                             'iteration': int(region_iter + 1),
@@ -1555,6 +958,7 @@ class Layer1Refiner:
                             'loss_after': float(loss_after),
                             'r2_before': float(r2),
                             'r2_after': float(r2_after),
+                            'r2_gain': float(r2_gain),
                             'neg_window': (float(neg_peak.ppm_min), float(neg_peak.ppm_max)),
                             'pos_window': (float(pos_peak.ppm_min), float(pos_peak.ppm_max)),
                             'affected_nodes': list(result.get('affected_nodes', []) or []),
@@ -1574,15 +978,27 @@ class Layer1Refiner:
                         'loss_after': float(loss_after),
                         'r2_before': float(r2),
                         'r2_after': float(r2_after),
-                        'reason': 'loss_or_r2_not_improved',
+                        'r2_gain': float(r2_gain),
+                        'required_r2_gain': max(0.0, float(min_r2_gain)),
+                        'reason': (
+                            'r2_gain_below_threshold'
+                            if float(r2_gain) < max(0.0, float(min_r2_gain))
+                            else 'region_loss_not_improved'
+                        ),
                     })
 
                 if accepted_move is None:
-                    stop_reason = 'candidate_trial_budget_exhausted' if bool(budget_exhausted) else 'no_valid_structural_swap'
+                    if bool(budget_exhausted):
+                        stop_reason = 'candidate_trial_budget_exhausted'
+                    elif bool(region_budget_exhausted):
+                        stop_reason = 'region_budget_exhausted'
+                    else:
+                        stop_reason = 'no_valid_structural_swap'
                     break
 
                 region_adjustments += 1
                 total_adjustments += 1
+                graph_revision += 1
                 region_details.append(dict(accepted_move))
                 iteration_summaries.append(dict(accepted_move))
 
@@ -1591,8 +1007,14 @@ class Layer1Refiner:
                 'window': (float(region_lo), float(region_hi)),
                 'adjustments': int(region_adjustments),
                 'stop_reason': str(stop_reason),
+                'candidate_trials': int(total_candidate_trials - region_candidate_start),
+                'candidate_trial_quota': int(region_candidate_limit - region_candidate_start),
+                'full_evals': int(full_eval_count - region_full_eval_start),
+                'full_eval_quota': int(region_full_eval_limit - region_full_eval_start),
                 'details': region_details,
             })
+            candidate_quota_carry = max(0, int(region_candidate_limit - total_candidate_trials))
+            full_eval_quota_carry = max(0, int(region_full_eval_limit - full_eval_count))
             if bool(budget_exhausted):
                 break
 
@@ -1618,6 +1040,7 @@ class Layer1Refiner:
                         'loss_after': float(move.get('loss_after', 0.0)),
                         'r2_before': float(move.get('r2_before', 0.0)),
                         'r2_after': float(move.get('r2_after', 0.0)),
+                        'r2_gain': float(move.get('r2_gain', 0.0)),
                     })
                 pd.DataFrame(rows).to_csv(str(out / 'layer1_hop1_adjust_moves.csv'), index=False)
                 reject_rows = []
@@ -1635,6 +1058,8 @@ class Layer1Refiner:
                         'loss_after': rec.get('loss_after', ''),
                         'r2_before': rec.get('r2_before', ''),
                         'r2_after': rec.get('r2_after', ''),
+                        'r2_gain': rec.get('r2_gain', ''),
+                        'required_r2_gain': rec.get('required_r2_gain', ''),
                         'reason': str(rec.get('reason', '')),
                     })
                 pd.DataFrame(reject_rows).to_csv(str(out / 'layer1_hop1_adjust_rejects.csv'), index=False)
@@ -1682,10 +1107,16 @@ class Layer1Refiner:
             'adjuster_stats': dict(adjuster.stats),
             'candidate_trials': int(total_candidate_trials),
             'candidate_trial_budget': int(candidate_trial_budget),
+            'candidate_records_raw': int(raw_candidate_records),
+            'candidate_records_unique': int(unique_candidate_records),
+            'candidate_records_deduplicated': int(raw_candidate_records - unique_candidate_records),
+            'cached_structural_failures': int(cached_structural_failures),
             'rejects': int(len(reject_summaries)),
             'full_eval_count': int(full_eval_count),
             'full_eval_budget': int(full_eval_budget),
             'moves_per_region_budget': int(moves_per_region_cap),
+            'min_r2_gain': max(0.0, float(min_r2_gain)),
             'budget_exhausted': bool(budget_exhausted),
+            'deadline_exhausted': bool(deadline_exhausted),
         }
         return selected_nodes, summary

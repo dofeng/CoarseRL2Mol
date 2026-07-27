@@ -1,4 +1,3 @@
-import copy
 import numpy as np
 import pandas as pd
 import torch
@@ -376,13 +375,6 @@ class Hop1Adjuster:
                 if not bool(ok):
                     return False
 
-        # SU31 must prioritize consuming SU7 when available; allow 31:[7,7]
-        # even if the current hop1 template table does not contain that motif.
-        if int(center_su) == 31:
-            cnt = Counter(int(x) for x in neighbor_types)
-            if int(cnt.get(7, 0)) >= 1:
-                return True
-
         # 严格模式：如果该SU在模板范围表中出现过，则要求新hop1 multiset必须存在于模板表
         # 这样可保证级联更新后的节点仍然是“数据库里出现过的1-hop模式”
         if self.hop1_by_su.get(center_su):
@@ -650,7 +642,9 @@ class Hop1Adjuster:
                                   target_node_id: int,
                                   new_hop1_tuple: Tuple[int, ...],
                                   E_target: Optional[torch.Tensor] = None,
-                                  dry_run: bool = False) -> Dict:
+                                  dry_run: bool = False,
+                                  nodes_by_su: Optional[Mapping[int, Sequence[int]]] = None,
+                                  return_undo_state: bool = False) -> Dict:
         """
         执行1-hop替换，处理互为1-hop的级联更新
         
@@ -660,6 +654,8 @@ class Hop1Adjuster:
             new_hop1_tuple: 新的1-hop组合
             E_target: 目标边集（可选）
             dry_run: 是否仅模拟执行
+            nodes_by_su: 可复用的 SU -> 节点ID 索引
+            return_undo_state: 成功提交时是否返回轻量回滚状态
         
         Returns:
             执行结果字典
@@ -706,16 +702,19 @@ class Hop1Adjuster:
                 result['error'] = f"新的1-hop组合不满足状态感知端口规则: {tuple(new_hop1_tuple)}"
                 return result
         
-        nodes_by_su = defaultdict(list)
-        for n in nodes:
-            nodes_by_su[int(n.su_type)].append(int(n.global_id))
+        if nodes_by_su is None:
+            nodes_by_su_local: Mapping[int, Sequence[int]] = defaultdict(list)
+            for n in nodes:
+                nodes_by_su_local[int(n.su_type)].append(int(n.global_id))
+        else:
+            nodes_by_su_local = nodes_by_su
 
         # 检查新的1-hop是否可行
         # 1. 检查SU类型是否存在于当前节点池
         needed_sus = Counter(new_hop1_tuple)
         
         for su_type, count in needed_sus.items():
-            available_count = int(len(nodes_by_su.get(int(su_type), [])))
+            available_count = int(len(nodes_by_su_local.get(int(su_type), [])))
             if available_count < int(count):
                 result['error'] = f"SU类型{su_type}数量不足（需要{count}，可用{available_count}）"
                 return result
@@ -723,19 +722,21 @@ class Hop1Adjuster:
         # 2. 通过“2-edge swap”执行严格换位：
         #    remove (t-u) + (v-w), add (t-v) + (u-w)
         try:
-            ok, affected = self._execute_strict_swaps(
+            ok, affected, undo_state = self._execute_strict_swaps(
                 nodes,
                 target_node,
                 new_hop1_tuple,
                 E_target,
                 dry_run=dry_run,
-                nodes_by_su=nodes_by_su,
+                nodes_by_su=nodes_by_su_local,
             )
             if not ok:
                 result['error'] = '无法找到满足规则的换位方案'
                 return result
             result['success'] = True
             result['affected_nodes'] = affected
+            if bool(return_undo_state) and undo_state is not None:
+                result['_undo_state'] = undo_state
             if not dry_run:
                 self.stats['adjustments_successful'] += 1
         except Exception as e:
@@ -744,100 +745,136 @@ class Hop1Adjuster:
         self.stats['adjustments_attempted'] += 1
         return result
     
+    @staticmethod
+    def _capture_topology_state(nodes: Sequence[Any]) -> List[Tuple[Counter, List[int], Set[int]]]:
+        return [
+            (
+                Counter(getattr(node, 'hop1_su', {}) or {}),
+                list(getattr(node, 'hop1_ids', []) or []),
+                set(getattr(node, 'fixed_hop1_ids', set()) or set()),
+            )
+            for node in nodes
+        ]
+
+    @staticmethod
+    def _restore_topology_state(nodes: Sequence[Any],
+                                state: Sequence[Tuple[Counter, List[int], Set[int]]]) -> None:
+        for node, (hop1_su, hop1_ids, fixed_hop1_ids) in zip(nodes, state):
+            node.hop1_su = Counter(hop1_su)
+            node.hop1_ids = list(hop1_ids)
+            try:
+                node.fixed_hop1_ids = set(fixed_hop1_ids)
+            except Exception:
+                pass
+
     def _execute_strict_swaps(self,
                                nodes: List,
                                target_node,
                                new_hop1_tuple: Tuple[int, ...],
                                E_target: Optional[torch.Tensor],
                                dry_run: bool,
-                               nodes_by_su: Optional[Dict[int, List[int]]] = None) -> Tuple[bool, List[int]]:
+                               nodes_by_su: Optional[Mapping[int, Sequence[int]]] = None
+                               ) -> Tuple[
+                                   bool,
+                                   List[int],
+                                   Optional[List[Tuple[Counter, List[int], Set[int]]]],
+                               ]:
         t = int(target_node.global_id)
-        work_nodes = copy.deepcopy(nodes)
+        topology_state = self._capture_topology_state(nodes)
+        work_nodes = nodes
         work_target = work_nodes[t]
-        old_types = self._get_neighbor_types(work_nodes, work_target)
-        new_types = list(int(x) for x in list(new_hop1_tuple))
+        committed = False
+        try:
+            old_types = self._get_neighbor_types(work_nodes, work_target)
+            new_types = list(int(x) for x in list(new_hop1_tuple))
 
-        rem_counter = Counter(old_types) - Counter(new_types)
-        add_counter = Counter(new_types) - Counter(old_types)
-        if sum(rem_counter.values()) != sum(add_counter.values()):
-            return False, []
+            rem_counter = Counter(old_types) - Counter(new_types)
+            add_counter = Counter(new_types) - Counter(old_types)
+            if sum(rem_counter.values()) != sum(add_counter.values()):
+                return False, [], None
 
-        removals: List[int] = []
-        for su_type, cnt in rem_counter.items():
-            cnt = int(cnt)
-            if cnt <= 0:
-                continue
-            cand_ids = [int(nid) for nid in list(work_target.hop1_ids) if int(work_nodes[int(nid)].su_type) == int(su_type)]
-            if len(cand_ids) < cnt:
-                return False, []
-            removals.extend(cand_ids[:cnt])
-
-        additions: List[int] = []
-        for su_type, cnt in add_counter.items():
-            additions.extend([int(su_type)] * int(cnt))
-
-        affected_all: Set[int] = set([t])
-
-        if nodes_by_su is None:
-            nodes_by_su = defaultdict(list)
-            for n in work_nodes:
-                nodes_by_su[int(n.su_type)].append(int(n.global_id))
-
-        cascade_updates = 0
-        for add_su in additions:
-            if not removals:
-                return False, []
-            u = int(removals.pop(0))
-
-            ok = False
-            for v in nodes_by_su.get(int(add_su), []):
-                v = int(v)
-                if v == t or v == u:
+            removals: List[int] = []
+            for su_type, cnt in rem_counter.items():
+                cnt = int(cnt)
+                if cnt <= 0:
                     continue
-                if v in work_target.hop1_ids:
-                    continue
+                cand_ids = [
+                    int(nid)
+                    for nid in list(work_target.hop1_ids)
+                    if int(work_nodes[int(nid)].su_type) == int(su_type)
+                ]
+                if len(cand_ids) < cnt:
+                    return False, [], None
+                removals.extend(cand_ids[:cnt])
 
-                success, w, aff = self._try_two_edge_swap(work_nodes, t=t, u=u, v=v, E_target=E_target)
-                if not success:
-                    continue
+            additions: List[int] = []
+            for su_type, cnt in add_counter.items():
+                additions.extend([int(su_type)] * int(cnt))
 
-                ok = True
-                affected_all.update(set(aff))
-                self._remove_hop1_edge(work_nodes, t, u)
-                self._remove_hop1_edge(work_nodes, v, w)
-                if not self._add_hop1_edge(work_nodes, t, v):
-                    return False, []
-                if not self._add_hop1_edge(work_nodes, u, w):
-                    return False, []
-                cascade_updates += int(len(set(aff)))
-                break
+            affected_all: Set[int] = {t}
+            if nodes_by_su is None:
+                nodes_by_su = defaultdict(list)
+                for n in work_nodes:
+                    nodes_by_su[int(n.su_type)].append(int(n.global_id))
 
-            if not ok:
-                return False, []
+            cascade_updates = 0
+            for add_su in additions:
+                if not removals:
+                    return False, [], None
+                u = int(removals.pop(0))
 
-        final_types = self._get_neighbor_types(work_nodes, work_nodes[t])
-        if Counter(final_types) != Counter(new_types):
-            return False, []
-        if not self._is_hop1_valid_types(
-            int(work_nodes[t].su_type),
-            final_types,
-            E_target,
-            center_node=work_nodes[t],
-            neighbor_nodes=self._get_neighbor_nodes(work_nodes, work_nodes[t]),
-        ):
-            return False, []
+                ok = False
+                for v in nodes_by_su.get(int(add_su), []):
+                    v = int(v)
+                    if v == t or v == u:
+                        continue
+                    if v in work_target.hop1_ids:
+                        continue
 
-        if not dry_run:
-            for orig, updated in zip(nodes, work_nodes):
-                orig.hop1_su = Counter(updated.hop1_su)
-                orig.hop1_ids = list(updated.hop1_ids)
-                try:
-                    orig.fixed_hop1_ids = set(getattr(updated, 'fixed_hop1_ids', set()) or set())
-                except Exception:
-                    pass
-            self.stats['cascade_updates'] += int(cascade_updates)
+                    success, w, aff = self._try_two_edge_swap(
+                        work_nodes,
+                        t=t,
+                        u=u,
+                        v=v,
+                        E_target=E_target,
+                    )
+                    if not success:
+                        continue
 
-        return True, list(sorted(affected_all))
+                    ok = True
+                    affected_all.update(set(aff))
+                    self._remove_hop1_edge(work_nodes, t, u)
+                    self._remove_hop1_edge(work_nodes, v, w)
+                    if not self._add_hop1_edge(work_nodes, t, v):
+                        return False, [], None
+                    if not self._add_hop1_edge(work_nodes, u, w):
+                        return False, [], None
+                    cascade_updates += int(len(set(aff)))
+                    break
+
+                if not ok:
+                    return False, [], None
+
+            final_types = self._get_neighbor_types(work_nodes, work_nodes[t])
+            if Counter(final_types) != Counter(new_types):
+                return False, [], None
+            if not self._is_hop1_valid_types(
+                int(work_nodes[t].su_type),
+                final_types,
+                E_target,
+                center_node=work_nodes[t],
+                neighbor_nodes=self._get_neighbor_nodes(work_nodes, work_nodes[t]),
+            ):
+                return False, [], None
+
+            committed = not bool(dry_run)
+            if committed:
+                self.stats['cascade_updates'] += int(cascade_updates)
+            undo_state = topology_state if committed else None
+            return True, list(sorted(affected_all)), undo_state
+        finally:
+            if bool(dry_run) or not bool(committed):
+                self._restore_topology_state(nodes, topology_state)
 
     def _try_two_edge_swap(self,
                             nodes: List,

@@ -54,8 +54,84 @@ def test_fixed_partition_meta_can_forbid_fixed_side_classification() -> None:
     )
 
 
+def test_su19_requires_explicit_valid_anchor_partition() -> None:
+    center = make_node(
+        1400,
+        19,
+        target_hop1_degree=3,
+        special_anchor_mode="single",
+        special_anchor_partition=None,
+        target_fixed_anchor_count=1,
+    )
+
+    result = classify_topology_units([center])
+
+    assert any(
+        int(item.get("node_id", -1)) == 1400
+        and str(item.get("reason", "")) == "su19_anchor_partition_missing"
+        for item in list(result.classification_rejects or [])
+    )
+
+
+def test_su19_thio_partition_rejects_ether_connector() -> None:
+    center = make_node(
+        1401,
+        19,
+        target_hop1_degree=3,
+        special_anchor_mode="single",
+        special_anchor_partition="thio",
+        target_fixed_anchor_count=1,
+    )
+    connector = make_node(1429, 29)
+    aromatic = make_node(1405, 5)
+    anchor = make_node(1411, 11)
+    open_unit = make_node(1423, 23)
+    connect(center, connector, fixed=True)
+    connect(connector, aromatic)
+    connect(center, anchor)
+    connect(center, open_unit)
+
+    result = classify_topology_units([center, connector, aromatic, anchor, open_unit])
+
+    assert _fragment_by_class(result, "24_AB_M") is None
+    assert any(
+        str(item.get("reason", "")) == "su19_partition_connector_mismatch:thio:29"
+        for item in list(result.classification_rejects or [])
+    )
+
+
+def test_su19_thio_partition_accepts_su31_connector() -> None:
+    center = make_node(
+        1402,
+        19,
+        target_hop1_degree=3,
+        special_anchor_mode="single",
+        special_anchor_partition="thio",
+        target_fixed_anchor_count=1,
+    )
+    connector = make_node(1431, 31)
+    aromatic = make_node(1407, 7)
+    anchor = make_node(1412, 11)
+    open_unit = make_node(1424, 23)
+    connect(center, connector, fixed=True)
+    connect(connector, aromatic)
+    connect(center, anchor)
+    connect(center, open_unit)
+
+    result = classify_topology_units([center, connector, aromatic, anchor, open_unit])
+
+    assert _fragment_by_class(result, "24_AB_M") is not None
+
+
 def test_classifier_creates_24_ab_n_with_realization_modes() -> None:
-    center = make_node(301, 19, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
+    center = make_node(
+        301,
+        19,
+        target_hop1_degree=3,
+        special_anchor_mode="single",
+        special_anchor_partition="thio",
+        target_fixed_anchor_count=1,
+    )
     connector = make_node(331, 31)
     side_single19d2 = make_node(401, 19, target_hop1_degree=2, special_anchor_mode="single")
     pool_11 = make_node(11, 11)
@@ -74,7 +150,7 @@ def test_classifier_creates_24_ab_n_with_realization_modes() -> None:
 def test_classifier_prefers_m_primary_for_double19d3() -> None:
     center = make_node(302, 19, target_hop1_degree=3, special_anchor_mode="double", target_fixed_anchor_count=2)
     connector_2 = make_node(2, 2)
-    connector_31 = make_node(31, 31)
+    connector_31 = make_node(31, 29)
     aromatic_9 = make_node(9, 9)
     side_single19d2 = make_node(402, 19, target_hop1_degree=2, special_anchor_mode="single")
     pool_11 = make_node(11, 11)
@@ -280,7 +356,7 @@ def test_classifier_covers_single19d3_with_fixed_28_and_open_neighbors() -> None
     ]
 
 
-def test_classifier_keeps_raw_24_in_resource_pool_when_neighbors_exist() -> None:
+def test_classifier_keeps_connected_raw_24_as_real_resource() -> None:
     center = make_node(324, 24)
     pool_11 = make_node(11, 11)
     open_23 = make_node(23, 23)
@@ -290,15 +366,20 @@ def test_classifier_keeps_raw_24_in_resource_pool_when_neighbors_exist() -> None
     result = classify_topology_units([center, pool_11, open_23])
     assert not any(str(fragment.class_type) in {"24_A", "24_B", "24_C", "24_D"} for fragment in result.fragments)
     assert result.resource_pool["remaining_ids_by_su"]["24"] == [324]
+    assert not any(
+        int(item.get("node_id", -1)) == 324
+        for item in list(result.classification_rejects or [])
+    )
 
 
-def test_classifier_rejects_incomplete_raw_24_with_one_neighbor() -> None:
+def test_classifier_keeps_incomplete_raw_24_in_resource_pool() -> None:
     center = make_node(1324, 24)
     open_23 = make_node(1323, 23)
     connect(center, open_23)
 
     result = classify_topology_units([center, open_23])
     assert _fragment_by_class(result, "24_C") is None
+    assert result.resource_pool["remaining_ids_by_su"]["24"] == [1324]
 
 
 def test_classifier_projects_reciprocal_14_15_atomic_pair() -> None:
@@ -311,6 +392,23 @@ def test_classifier_projects_reciprocal_14_15_atomic_pair() -> None:
     assert fragment is not None
     assert fragment.claimed_node_ids == [1414, 1415]
     assert [slot.kind for slot in fragment.branch_contracts] == ["H"]
+
+
+def test_like24_open_aliphatic_neighbors_remain_unowned_pool_resources() -> None:
+    center = make_node(1514, 14)
+    partner = make_node(1515, 15)
+    left_open = make_node(1523, 23)
+    right_open = make_node(1524, 23)
+    connect(center, partner)
+    connect(center, left_open)
+    connect(partner, right_open)
+
+    result = classify_topology_units([center, partner, left_open, right_open])
+    fragment = _fragment_by_class(result, "24_C")
+
+    assert fragment is not None
+    assert fragment.claimed_node_ids == [1514, 1515]
+    assert result.resource_pool["remaining_ids_by_su"]["23"] == [1523, 1524]
 
 
 def test_classifier_keeps_fixed_14_15_pair_atomic() -> None:
@@ -546,7 +644,7 @@ def test_classifier_allows_non_11_aromatic_terminal_path_capability() -> None:
     assert list(evidence.get("ring_roles", []) or []) == []
 
 
-def test_classifier_does_not_create_external_ring_contract_for_raw_24() -> None:
+def test_classifier_does_not_create_external_ring_contract_for_connected_raw_24() -> None:
     center = make_node(1300, 24)
     pool_11 = make_node(1301, 11)
     open_23 = make_node(1302, 23)
@@ -558,6 +656,10 @@ def test_classifier_does_not_create_external_ring_contract_for_raw_24() -> None:
     assert result.resource_pool["remaining_ids_by_su"]["24"] == [1300]
     assert result.resource_pool["remaining_ids_by_su"]["11"] == [1301]
     assert result.resource_pool["remaining_ids_by_su"]["23"] == [1302]
+    assert not any(
+        int(item.get("node_id", -1)) == 1300
+        for item in list(result.classification_rejects or [])
+    )
 
 
 def test_ring_like24_units_are_mapped_by_fragment_type_not_center_count() -> None:
@@ -584,7 +686,14 @@ def test_classifier_marks_only_closed_mainline_like24_as_explicit_flex() -> None
     connect(closed_center, pool_11)
     connect(closed_center, open_23)
 
-    open_center = make_node(301, 19, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
+    open_center = make_node(
+        301,
+        19,
+        target_hop1_degree=3,
+        special_anchor_mode="single",
+        special_anchor_partition="thio",
+        target_fixed_anchor_count=1,
+    )
     open_connector = make_node(331, 31)
     side_single19d2 = make_node(401, 19, target_hop1_degree=2, special_anchor_mode="single")
     pool_11_b = make_node(111, 11)

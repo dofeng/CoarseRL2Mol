@@ -1,21 +1,22 @@
-import torch
-import torch.nn.functional as F
-import numpy as np
-import pandas as pd
-from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from ...shared.coarse_graph import NUM_SU_TYPES, PPM_AXIS, E_SU
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn.functional as F
+
+from ...shared.coarse_graph import E_SU, NUM_SU_TYPES, PPM_AXIS, get_su_ppm_range
 from ...shared.inverse_common import (
     _NodeV3,
-    lorentzian_spectrum,
     evaluate_spectrum_reconstruction,
-    multiset_diff_nodes,
-    multiset_from_counter,
+    lorentzian_spectrum,
 )
 
+
 class Layer3Estimator:
+    """Optimize z inside each node's fixed Layer2 template."""
+
     def __init__(self, device: torch.device, vae_model=None, lib_path: Optional[str] = None):
         self.device = device
         self.vae = vae_model
@@ -29,65 +30,118 @@ class Layer3Estimator:
             return self._template_cache
         if not self.lib_path:
             return None
-        p = Path(self.lib_path)
-        if not p.exists():
+        path = Path(self.lib_path)
+        if not path.exists():
             return None
         try:
             try:
-                lib = torch.load(str(p), map_location='cpu', weights_only=True)
-            except TypeError:
-                lib = torch.load(str(p), map_location='cpu')
-            except Exception:
-                lib = torch.load(str(p), map_location='cpu')
-        except Exception as e:
+                lib = torch.load(str(path), map_location='cpu', weights_only=True)
+            except (TypeError, RuntimeError):
+                lib = torch.load(str(path), map_location='cpu', weights_only=False)
+        except Exception as exc:
             import logging
-            logging.warning(f"Failed to load template library from {p}: {e}")
+            logging.warning(f"Failed to load template library from {path}: {exc}")
             return None
         if not isinstance(lib, dict):
             return None
-        self._template_cache = {
-            'templates': lib.get('templates', {}),
-            'center_index': lib.get('center_index', {}),
-        }
+        self._template_cache = {'templates': lib.get('templates', {})}
         return self._template_cache
 
     def _global_embed_from_elements(self, E_target: torch.Tensor) -> torch.Tensor:
-        device = self.device
-        e = E_target.to(device).view(1, -1)
-        if float(e.max().item()) > 1.1:
-            s = e.sum(dim=1, keepdim=True).clamp(min=1.0)
-            e = e / s
-        if self.vae is not None:
-            try:
-                g = self.vae.global_mlp(e)
-                return 0.02 * g
-            except Exception as e:
-                import logging
-                logging.warning(f"Failed to compute global embedding: {e}")
-        return torch.zeros((1, 2), dtype=torch.float, device=device)
-
-    def _decode_mu_pi_from_z(self, center_su: int, z_vec: torch.Tensor, g_embed: torch.Tensor) -> Optional[Tuple[float, float]]:
         if self.vae is None:
-            return None
-        device = self.device
+            raise RuntimeError("Layer3 requires a G2S model")
+        e = E_target.to(self.device).view(1, -1)
+        if float(e.max().item()) > 1.1:
+            e = e / e.sum(dim=1, keepdim=True).clamp(min=1.0)
         try:
-            su_feat = F.one_hot(
-                torch.tensor([int(center_su)], dtype=torch.long, device=device),
-                num_classes=NUM_SU_TYPES,
-            ).float()
-            z = z_vec.to(device).view(1, -1)
-            pred = self.vae.decoder(su_feat, z, g_embed)
-            mu_pred = float(pred[:, 0].detach().item())
-            pi_pred = float(F.softplus(pred[:, 1]).detach().item())
-            return mu_pred, pi_pred
-        except Exception:
-            return None
+            with torch.inference_mode():
+                embedding = 0.02 * self.vae.global_mlp(e)
+        except Exception as exc:
+            raise RuntimeError(f"Layer3 failed to compute the G2S global embedding: {exc}") from exc
+        if embedding.ndim != 2 or int(embedding.shape[0]) != 1 or not bool(torch.isfinite(embedding).all()):
+            raise RuntimeError(
+                f"Layer3 received an invalid G2S global embedding with shape={tuple(embedding.shape)}"
+            )
+        return embedding
 
-    def _segment_mask(self, ppm_axis: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+    def _decode_mu_batch(self,
+                         center_sus: List[int],
+                         z_vectors: List[torch.Tensor],
+                         g_embed: torch.Tensor,
+                         context: str) -> torch.Tensor:
+        if self.vae is None:
+            raise RuntimeError("Layer3 requires a G2S model")
+        if len(center_sus) != len(z_vectors):
+            raise RuntimeError(
+                f"Layer3 {context} decoder input mismatch: "
+                f"center_sus={len(center_sus)}, z_vectors={len(z_vectors)}"
+            )
+        if not z_vectors:
+            return torch.empty(0, dtype=torch.float, device=self.device)
+
+        normalized_z: List[torch.Tensor] = []
+        latent_dim: Optional[int] = None
+        for index, z_vec in enumerate(z_vectors):
+            if not torch.is_tensor(z_vec) or int(z_vec.numel()) <= 0:
+                raise RuntimeError(f"Layer3 {context} has missing z at index={index}")
+            z_flat = z_vec.detach().to(self.device).float().reshape(-1)
+            if not bool(torch.isfinite(z_flat).all()):
+                raise RuntimeError(f"Layer3 {context} has non-finite z at index={index}")
+            if latent_dim is None:
+                latent_dim = int(z_flat.numel())
+            elif int(z_flat.numel()) != int(latent_dim):
+                raise RuntimeError(
+                    f"Layer3 {context} has inconsistent z dimensions: "
+                    f"expected={latent_dim}, actual={int(z_flat.numel())}, index={index}"
+                )
+            normalized_z.append(z_flat)
+
+        z_batch = torch.stack(normalized_z, dim=0)
+        su_index = torch.tensor(center_sus, dtype=torch.long, device=self.device)
+        if bool(((su_index < 0) | (su_index >= NUM_SU_TYPES)).any()):
+            raise RuntimeError(f"Layer3 {context} contains an invalid center SU")
+        su_feat = F.one_hot(su_index, num_classes=NUM_SU_TYPES).float()
+        if int(g_embed.shape[0]) == 1:
+            global_batch = g_embed.expand(int(z_batch.shape[0]), -1)
+        elif int(g_embed.shape[0]) == int(z_batch.shape[0]):
+            global_batch = g_embed
+        else:
+            raise RuntimeError(
+                f"Layer3 {context} global embedding batch mismatch: "
+                f"g={int(g_embed.shape[0])}, z={int(z_batch.shape[0])}"
+            )
+
+        try:
+            with torch.inference_mode():
+                pred = self.vae.decoder(su_feat, z_batch, global_batch)
+        except Exception as exc:
+            raise RuntimeError(f"Layer3 {context} G2S decoding failed: {exc}") from exc
+        if pred.ndim != 2 or int(pred.shape[0]) != len(z_vectors) or int(pred.shape[1]) < 1:
+            raise RuntimeError(
+                f"Layer3 {context} G2S decoder returned invalid shape={tuple(pred.shape)}"
+            )
+        mu = pred[:, 0].detach()
+        if not bool(torch.isfinite(mu).all()):
+            raise RuntimeError(f"Layer3 {context} G2S decoder returned non-finite chemical shifts")
+        return mu
+
+    def _decode_nodes(self,
+                      carbon_nodes: List[_NodeV3],
+                      g_embed: torch.Tensor,
+                      context: str) -> torch.Tensor:
+        return self._decode_mu_batch(
+            [int(node.su_type) for node in carbon_nodes],
+            [getattr(node, 'z_vec', None) for node in carbon_nodes],
+            g_embed,
+            context=context,
+        )
+
+    @staticmethod
+    def _segment_mask(ppm_axis: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
         return (ppm_axis >= float(lo)) & (ppm_axis <= float(hi))
 
-    def _segment_abs(self, diff: torch.Tensor, mask: torch.Tensor) -> float:
-        # Optimized to avoid item() sync on GPU if diff is on CPU
+    @staticmethod
+    def _segment_abs(diff: torch.Tensor, mask: torch.Tensor) -> float:
         if not bool(mask.any()):
             return float('inf')
         return float(torch.sum(torch.abs(diff[mask])))
@@ -98,152 +152,71 @@ class Layer3Estimator:
                            mask: torch.Tensor,
                            top_k: int,
                            min_sep_ppm: float) -> List[float]:
-        if not bool(mask.any()):
+        idxs = torch.nonzero(mask & (diff < 0), as_tuple=False).view(-1)
+        if int(idxs.numel()) <= 0:
             return []
-        idxs = torch.nonzero(mask, as_tuple=False).view(-1)
-        seg = diff[idxs]
-        if seg.numel() <= 0:
-            return []
-
-        neg_mask = seg < 0
-        if not bool(neg_mask.any()):
-            return []
-
-        neg_idxs = idxs[neg_mask]
-        neg_vals = seg[neg_mask]
-        order = torch.argsort(neg_vals)  # more negative first
-
+        order = torch.argsort(diff[idxs])
         selected: List[float] = []
-        k = max(1, int(top_k))
-        sep = float(min_sep_ppm)
-
-        for j in order:
-            try:
-                base_idx = int(neg_idxs[j])
-            except Exception:
-                continue
-            ppm = float(ppm_axis[base_idx])
-            if sep > 0 and any(abs(ppm - p0) < sep for p0 in selected):
+        for order_idx in order:
+            ppm = float(ppm_axis[int(idxs[int(order_idx)])])
+            if any(abs(ppm - old) < float(min_sep_ppm) for old in selected):
                 continue
             selected.append(ppm)
-            if len(selected) >= k:
+            if len(selected) >= max(1, int(top_k)):
                 break
         return selected
 
-    def _best_positive_in_range(self, diff: torch.Tensor, ppm_axis: torch.Tensor, lo: float, hi: float) -> Optional[Tuple[float, float]]:
-        m = self._segment_mask(ppm_axis, lo, hi)
-        if not bool(m.any()):
+    def _best_positive_in_range(self,
+                                diff: torch.Tensor,
+                                ppm_axis: torch.Tensor,
+                                lo: float,
+                                hi: float) -> Optional[Tuple[float, float]]:
+        mask = self._segment_mask(ppm_axis, lo, hi)
+        idxs = torch.nonzero(mask, as_tuple=False).view(-1)
+        if int(idxs.numel()) <= 0:
             return None
-        idxs = torch.nonzero(m, as_tuple=False).view(-1)
-        seg = diff[idxs]
-        if seg.numel() <= 0:
+        values = diff[idxs]
+        value, local_idx = torch.max(values, dim=0)
+        if float(value) <= 0.0:
             return None
-        vmax, max_idx = torch.max(seg, dim=0)
-        if float(vmax) <= 0.0:
-            return None
-        i = int(idxs[max_idx])
-        return float(ppm_axis[i]), float(vmax)
-
-    def _mu_sorted_candidates(self, mu_samples: torch.Tensor, target_mu: float, top_k: int) -> List[int]:
-        if mu_samples is None or int(mu_samples.numel()) <= 0:
-            return []
-        mu = mu_samples.detach().cpu().numpy().astype(np.float64)
-        d = np.abs(mu - float(target_mu))
-        order = np.argsort(d)
-        out: List[int] = []
-        for idx in order[: max(1, int(top_k))]:
-            out.append(int(idx))
-        return out
-
-    def _peak(self, mu: float, pi: float, ppm_axis: torch.Tensor, hwhm: float) -> torch.Tensor:
-        mus = torch.tensor([float(mu)], dtype=torch.float, device=ppm_axis.device)
-        if bool(getattr(self, 'unit_peak_intensity', False)):
-            pis = torch.ones(1, dtype=torch.float, device=ppm_axis.device)
-        else:
-            pis = torch.tensor([float(pi)], dtype=torch.float, device=ppm_axis.device)
-        return lorentzian_spectrum(mus, pis, ppm_axis, hwhm=float(hwhm))
-
-    def _build_recon(self, nodes: List[_NodeV3], ppm_axis: torch.Tensor, hwhm: float) -> Tuple[torch.Tensor, Dict[int, torch.Tensor]]:
-        peak_cache: Dict[int, torch.Tensor] = {}
-        recon = torch.zeros_like(ppm_axis)
-        try:
-            s = float(getattr(self, 'intensity_scale', 1.0))
-        except Exception as e:
-            import logging
-            logging.debug(f"Failed to get intensity_scale: {e}")
-            s = 1.0
-        for n in nodes:
-            su = int(n.su_type)
-            try:
-                is_carbon = float(E_SU[int(su), 0].detach().cpu().item()) > 0.0
-            except Exception as e:
-                import logging
-                logging.debug(f"Failed to check if SU is carbon: {e}")
-                is_carbon = False
-            if not bool(is_carbon):
-                continue
-            mu = float(getattr(n, 'mu', 0.0))
-            pi = float(getattr(n, 'pi', 0.0))
-            if float(mu) == 0.0 or float(pi) <= 0.0:
-                continue
-            pi_eff = 1.0 if bool(getattr(self, 'unit_peak_intensity', False)) else float(pi) * float(s)
-            pk = self._peak(mu, pi_eff, ppm_axis, hwhm=float(hwhm))
-            peak_cache[int(n.global_id)] = pk
-            recon = recon + pk
-        return recon, peak_cache
+        axis_idx = int(idxs[int(local_idx)])
+        return float(ppm_axis[axis_idx]), float(value)
 
     @staticmethod
-    def _sync_template_metadata(node: _NodeV3,
-                                template: Optional[Dict],
-                                sample_idx: Optional[int] = None,
-                                match_mode: Optional[str] = None) -> None:
-        score_components = getattr(node, 'score_components', None)
-        if not isinstance(score_components, dict):
-            return
-        if match_mode is not None:
-            score_components['layer2_match_mode'] = str(match_mode)
-        if isinstance(template, dict):
-            score_components['layer2_template_mu'] = (
-                float(template.get('center_mu'))
-                if template.get('center_mu') is not None else None
-            )
-            score_components['layer2_template_sample_count'] = int(template.get('sample_count', 0))
-        else:
-            score_components['layer2_template_mu'] = None
-            score_components['layer2_template_sample_count'] = 0
-        score_components['layer2_sample_idx'] = (
-            int(sample_idx) if sample_idx is not None else None
+    def _mu_sorted_candidates(mu_samples: torch.Tensor,
+                              target_mu: float,
+                              top_k: int) -> List[int]:
+        if not torch.is_tensor(mu_samples) or int(mu_samples.numel()) <= 0:
+            return []
+        distances = np.abs(mu_samples.detach().cpu().numpy().astype(np.float64) - float(target_mu))
+        return [int(idx) for idx in np.argsort(distances)[:max(1, int(top_k))]]
+
+    @staticmethod
+    def _peak(mu: float, ppm_axis: torch.Tensor, hwhm: float) -> torch.Tensor:
+        return lorentzian_spectrum(
+            torch.tensor([float(mu)], dtype=torch.float, device=ppm_axis.device),
+            torch.ones(1, dtype=torch.float, device=ppm_axis.device),
+            ppm_axis,
+            hwhm=float(hwhm),
         )
 
-    def _is_h2_approx_node(self, n: _NodeV3) -> bool:
-        tpl_key = getattr(n, 'template_key', None)
-        if not (isinstance(tpl_key, tuple) and len(tpl_key) == 3):
-            return False
-        try:
-            hop1_obs = multiset_from_counter(getattr(n, 'hop1_su', Counter()) or Counter())
-            hop2_obs = multiset_from_counter(getattr(n, 'hop2_su', Counter()) or Counter())
-        except Exception as e:
-            import logging
-            logging.debug(f"Failed to get node hop multisets: {e}")
-            return False
-        try:
-            tpl_h1 = tuple(tpl_key[1])
-            tpl_h2 = tuple(tpl_key[2])
-        except Exception as e:
-            import logging
-            logging.debug(f"Invalid template key format: {e}")
-            return False
-        if tuple(tpl_h1) != tuple(hop1_obs):
-            return False
-        return tuple(tpl_h2) != tuple(hop2_obs)
-
-    @staticmethod
-    def _is_any_approx_node(n: _NodeV3) -> bool:
-        try:
-            mode = str((getattr(n, 'score_components', {}) or {}).get('layer2_match_mode', '') or '')
-        except Exception:
-            mode = ''
-        return bool(mode.startswith('approx'))
+    def _build_recon(self,
+                     nodes: List[_NodeV3],
+                     ppm_axis: torch.Tensor,
+                     hwhm: float) -> Tuple[torch.Tensor, Dict[int, torch.Tensor]]:
+        peak_cache: Dict[int, torch.Tensor] = {}
+        recon = torch.zeros_like(ppm_axis)
+        for node in nodes:
+            su_type = int(node.su_type)
+            if float(E_SU[su_type, 0].detach().cpu().item()) <= 0.0:
+                continue
+            mu = float(getattr(node, 'mu', 0.0))
+            if not np.isfinite(mu) or mu <= 0.0:
+                continue
+            peak = self._peak(mu, ppm_axis, hwhm=float(hwhm))
+            peak_cache[int(node.global_id)] = peak
+            recon = recon + peak
+        return recon, peak_cache
 
     def layer3_adjust_templates(
         self,
@@ -258,460 +231,297 @@ class Layer3Estimator:
         top_k_samples: int = 8,
         neg_top_k_peaks: int = 10,
         neg_peak_min_sep_ppm: float = 0.8,
-        enable_approx_hop2_template_adjust: bool = True,
-        approx_hop2_max_iters: Optional[int] = None,
-        approx_hop2_max_diff_nodes: int = 5,
-        approx_hop2_top_k_templates: int = 80,
-        use_g2s_decoder: bool = False,
         verbose: bool = True,
     ) -> Tuple[List[_NodeV3], float]:
         lib = self._get_template_library()
         templates = (lib or {}).get('templates', {}) if isinstance(lib, dict) else {}
+        if not templates:
+            raise RuntimeError("Layer3 template library is unavailable or empty")
+        if self.vae is None:
+            raise RuntimeError("Layer3 requires G2S decoding for every z candidate")
+        if hasattr(self.vae, 'eval'):
+            self.vae.eval()
 
-        device = self.device
-        ppm_axis = PPM_AXIS.to(device)
-        S_t = S_target.to(device).view(-1)
-
+        ppm_axis = PPM_AXIS.to(self.device)
+        target = S_target.to(self.device).view(-1)
         g_embed = self._global_embed_from_elements(E_target)
+        carbon_nodes: List[_NodeV3] = []
+        fixed_template_keys: Dict[int, Tuple] = {}
+        unique_template_keys: Dict[Tuple, int] = {}
+        coverage_errors: List[str] = []
 
-        recon, peak_cache = self._build_recon(nodes, ppm_axis, hwhm=float(hwhm))
-        moves: List[Dict] = []
-        total_z_moves = 0
-        total_template_moves = 0
+        for node in nodes:
+            su_type = int(node.su_type)
+            if float(E_SU[su_type, 0].detach().cpu().item()) <= 0.0:
+                continue
+            carbon_nodes.append(node)
+            template_key = getattr(node, 'template_key', None)
+            template = templates.get(template_key) if isinstance(template_key, tuple) else None
+            if not isinstance(template, dict):
+                coverage_errors.append(f"node={int(node.global_id)} has no fixed Layer2 template")
+                continue
+            samples = template.get('samples', {}) or {}
+            z_samples = samples.get('z')
+            if not torch.is_tensor(z_samples) or int(z_samples.numel()) <= 0:
+                coverage_errors.append(
+                    f"node={int(node.global_id)} template={template_key} has no z sample bank"
+                )
+                continue
+            if z_samples.ndim == 1:
+                z_samples = z_samples.view(1, -1)
+            if z_samples.ndim != 2 or int(z_samples.shape[0]) <= 0:
+                coverage_errors.append(
+                    f"node={int(node.global_id)} template={template_key} has invalid "
+                    f"z sample shape={tuple(z_samples.shape)}"
+                )
+                continue
+            fixed_template_keys[int(node.global_id)] = template_key
+            unique_template_keys[template_key] = int(su_type)
+            node.pi = 1.0
 
-        if bool(verbose):
-            print("\n" + "=" * 60)
-            print("Layer3: 潜变量z与模板优化")
-            print("=" * 60)
-            print(
-                "  [Layer3 start] "
-                f"nodes={len(nodes)}, max_iters={int(max_iters)}, "
-                f"approx_template_adjust={bool(enable_approx_hop2_template_adjust)}, "
-                f"approx_iters={approx_hop2_max_iters}, "
-                f"use_g2s_decoder={bool(use_g2s_decoder)}"
+        if coverage_errors:
+            raise RuntimeError("Layer3 fixed-template coverage failed: " + " | ".join(coverage_errors[:8]))
+
+        decoded_template_mu: Dict[Tuple, torch.Tensor] = {}
+        for template_key, center_su in sorted(unique_template_keys.items(), key=lambda item: repr(item[0])):
+            template = templates[template_key]
+            z_samples = template['samples']['z']
+            if z_samples.ndim == 1:
+                z_samples = z_samples.view(1, -1)
+            decoded_template_mu[template_key] = self._decode_mu_batch(
+                [int(center_su)] * int(z_samples.shape[0]),
+                [z_samples[index] for index in range(int(z_samples.shape[0]))],
+                g_embed,
+                context=f"template={template_key} sample bank",
             )
 
-        regions = [
-            (0.0, 90.0, [22, 23, 24, 25, 19, 20, 21]),
-            (90.0, 160.0, [13, 12, 11, 10, 9, 5, 6, 7, 8, 14, 15, 16, 17, 18, 4]),
-            (160.0, 240.0, [1, 2, 3, 0]),
-        ]
+        entry_mu = self._decode_nodes(carbon_nodes, g_embed, context="entry all-node decode")
+        for node, mu_tensor in zip(carbon_nodes, entry_mu):
+            mu_value = float(mu_tensor.item())
+            node.mu = mu_value
+            node.pi = 1.0
+            score_components = getattr(node, 'score_components', None)
+            if isinstance(score_components, dict):
+                score_components['layer3_spectral_source'] = 'g2s_layer3'
+                score_components['spectral_source'] = 'g2s_layer3'
+                score_components['layer3_decoder_mu'] = mu_value
 
-        for region_lo, region_hi, pri_su in regions:
-            if bool(verbose):
-                print(f"  [Layer3 region] {float(region_lo):.1f}-{float(region_hi):.1f} ppm 开始")
-            region_z_moves = 0
-            region_tpl_moves = 0
-            region_stop_reason = 'completed'
-            for _ in range(max(1, int(max_iters))):
-                diff = S_t - recon
-                region_mask = self._segment_mask(ppm_axis, float(region_lo), float(region_hi))
-                loss_before = self._segment_abs(diff, region_mask)
-                neg_ppm_candidates = self._top_negative_ppms(
-                    diff=diff,
-                    ppm_axis=ppm_axis,
-                    mask=region_mask,
-                    top_k=int(neg_top_k_peaks),
-                    min_sep_ppm=float(neg_peak_min_sep_ppm),
-                )
-                if not neg_ppm_candidates:
-                    region_stop_reason = 'no_negative_peaks'
-                    break
-
-                accepted = False
-                for neg_ppm in neg_ppm_candidates:
-                    for su_type in pri_su:
-                        cand_nodes = [
-                            n for n in nodes
-                            if int(n.su_type) == int(su_type)
-                            and abs(float(getattr(n, 'mu', 0.0)) - float(neg_ppm)) <= float(neg_assign_window)
-                        ]
-                        cand_nodes.sort(key=lambda n: int(n.global_id))
-
-                        for n in cand_nodes:
-                            tpl_key = getattr(n, 'template_key', None)
-                            if tpl_key is None:
-                                continue
-                            tpl = templates.get(tpl_key)
-                            if not isinstance(tpl, dict):
-                                continue
-                            samples = tpl.get('samples', {})
-                            if not isinstance(samples, dict):
-                                continue
-                            z_samples = samples.get('z', None)
-                            mu_samples = samples.get('mu', None)
-                            pi_samples = samples.get('pi', None)
-                            if z_samples is None or mu_samples is None or pi_samples is None:
-                                continue
-                            if int(mu_samples.numel()) <= 0:
-                                continue
-
-                            mu_min = float(tpl.get('mu_min', 0.0))
-                            mu_max = float(tpl.get('mu_max', 0.0))
-                            lo = max(float(region_lo), float(mu_min), float(neg_ppm) - float(pos_search_window))
-                            hi = min(float(region_hi), float(mu_max), float(neg_ppm) + float(pos_search_window))
-                            if hi <= lo:
-                                continue
-
-                            best_pos = self._best_positive_in_range(diff, ppm_axis, lo, hi)
-                            if best_pos is None:
-                                continue
-                            pos_ppm, pos_val = best_pos
-
-                            cand_idx = self._mu_sorted_candidates(mu_samples, float(pos_ppm), top_k=int(top_k_samples))
-                            if not cand_idx:
-                                continue
-
-                            old_mu = float(getattr(n, 'mu', 0.0))
-                            old_pi = float(getattr(n, 'pi', 0.0))
-                            old_z = getattr(n, 'z_vec', None)
-                            old_peak = peak_cache.get(int(n.global_id), None)
-
-                            mu_samples_cpu = mu_samples.detach().cpu().numpy()
-                            pi_samples_cpu = pi_samples.detach().cpu().numpy()
-
-                            for sidx in cand_idx:
-                                try:
-                                    z_cand = z_samples[int(sidx)].detach().clone().to(device)
-                                    mu_lib = float(mu_samples_cpu[int(sidx)])
-                                    pi_lib = float(pi_samples_cpu[int(sidx)])
-                                except Exception:
-                                    continue
-
-                                decoded = (
-                                    self._decode_mu_pi_from_z(int(n.su_type), z_cand, g_embed)
-                                    if bool(use_g2s_decoder)
-                                    else None
-                                )
-                                if decoded is not None:
-                                    mu_new, pi_new = decoded
-                                else:
-                                    mu_new, pi_new = mu_lib, max(1e-6, pi_lib)
-                                if bool(getattr(self, 'unit_peak_intensity', False)):
-                                    pi_new = 1.0
-
-                                pk_new = self._peak(mu_new, pi_new, ppm_axis, hwhm=float(hwhm))
-                                recon_try = recon
-                                if old_peak is not None:
-                                    recon_try = recon_try - old_peak
-                                recon_try = recon_try + pk_new
-
-                                diff_try = S_t - recon_try
-                                loss_try = self._segment_abs(diff_try, region_mask)
-
-                                if float(loss_try) < float(loss_before) - 1e-9:
-                                    n.z_vec = z_cand
-                                    n.mu = float(mu_new)
-                                    n.pi = float(pi_new)
-                                    self._sync_template_metadata(
-                                        n,
-                                        tpl,
-                                        sample_idx=int(sidx),
-                                    )
-                                    try:
-                                        if getattr(n, 'z_history', None) is not None and isinstance(n.z_history, list):
-                                            n.z_history.append(z_cand.detach().clone())
-                                    except Exception:
-                                        pass
-
-                                    peak_cache[int(n.global_id)] = pk_new
-                                    recon = recon_try
-                                    region_z_moves += 1
-                                    moves.append({
-                                        'move_type': 'z_sample',
-                                        'region_lo': float(region_lo),
-                                        'region_hi': float(region_hi),
-                                        'neg_ppm': float(neg_ppm),
-                                        'pos_ppm': float(pos_ppm),
-                                        'pos_val': float(pos_val),
-                                        'global_id': int(n.global_id),
-                                        'su_type': int(n.su_type),
-                                        'old_mu': float(old_mu),
-                                        'new_mu': float(mu_new),
-                                        'sample_idx': int(sidx),
-                                        'loss_before': float(loss_before),
-                                        'loss_after': float(loss_try),
-                                        'template_key': str(tpl_key),
-                                    })
-                                    accepted = True
-                                    break
-
-                            if accepted:
-                                break
-
-                        if accepted:
-                            break
-
-                    if accepted:
-                        break
-
-                if not accepted:
-                    region_stop_reason = 'no_z_move_accepted'
-                    break
-
-            if not bool(enable_approx_hop2_template_adjust):
-                total_z_moves += int(region_z_moves)
-                total_template_moves += int(region_tpl_moves)
-                continue
-
-            max_tpl_iters = int(max(1, int(approx_hop2_max_iters) if approx_hop2_max_iters is not None else int(max_iters)))
-            max_dn = int(max(1, int(approx_hop2_max_diff_nodes)))
-            max_tpl_k = int(max(1, int(approx_hop2_top_k_templates)))
-
-            for _ in range(max_tpl_iters):
-                diff = S_t - recon
-                region_mask = self._segment_mask(ppm_axis, float(region_lo), float(region_hi))
-                loss_before = self._segment_abs(diff, region_mask)
-                neg_ppm_candidates = self._top_negative_ppms(
-                    diff=diff,
-                    ppm_axis=ppm_axis,
-                    mask=region_mask,
-                    top_k=int(neg_top_k_peaks),
-                    min_sep_ppm=float(neg_peak_min_sep_ppm),
-                )
-                if not neg_ppm_candidates:
-                    if region_stop_reason == 'completed':
-                        region_stop_reason = 'no_negative_peaks_after_z'
-                    break
-
-                accepted = False
-                for neg_ppm in neg_ppm_candidates:
-                    base_lo = max(float(region_lo), float(neg_ppm) - float(pos_search_window))
-                    base_hi = min(float(region_hi), float(neg_ppm) + float(pos_search_window))
-                    if base_hi <= base_lo:
-                        continue
-
-                    for su_type in pri_su:
-                        cand_nodes = [
-                            n for n in nodes
-                            if int(n.su_type) == int(su_type)
-                            and abs(float(getattr(n, 'mu', 0.0)) - float(neg_ppm)) <= float(neg_assign_window)
-                            and (self._is_h2_approx_node(n) or self._is_any_approx_node(n))
-                        ]
-                        cand_nodes.sort(key=lambda n: int(n.global_id))
-
-                        for n in cand_nodes:
-                            tpl_key_old = getattr(n, 'template_key', None)
-                            if not (isinstance(tpl_key_old, tuple) and len(tpl_key_old) == 3):
-                                continue
-
-                            try:
-                                center_su = int(n.su_type)
-                                hop1_obs = multiset_from_counter(getattr(n, 'hop1_su', Counter()) or Counter())
-                                hop2_obs = multiset_from_counter(getattr(n, 'hop2_su', Counter()) or Counter())
-                                tpl_h2_old = tuple(tpl_key_old[2])
-                                diff_old = multiset_diff_nodes(tuple(hop2_obs), tuple(tpl_h2_old))
-                            except Exception:
-                                continue
-
-                            center_index = (lib or {}).get('center_index', {}) if isinstance(lib, dict) else {}
-                            cand_keys_raw = center_index.get(int(center_su), []) if isinstance(center_index, dict) else []
-
-                            candidates: List[Tuple[int, int, Tuple]] = []
-                            for k in cand_keys_raw:
-                                kt = tuple(k) if not isinstance(k, tuple) else k
-                                if not (isinstance(kt, tuple) and len(kt) == 3):
-                                    continue
-                                if kt == tpl_key_old:
-                                    continue
-                                try:
-                                    h1_t = tuple(kt[1])
-                                    h2_t = tuple(kt[2])
-                                except Exception:
-                                    continue
-                                if tuple(h1_t) != tuple(hop1_obs):
-                                    continue
-                                dn = multiset_diff_nodes(tuple(hop2_obs), tuple(h2_t))
-                                if dn <= 0 or dn > max_dn:
-                                    continue
-                                tpl = templates.get(kt)
-                                if not isinstance(tpl, dict):
-                                    continue
-                                sc = int(tpl.get('sample_count', 0))
-                                if sc <= 0:
-                                    continue
-                                candidates.append((int(dn), -int(sc), kt))
-
-                            if not candidates:
-                                continue
-
-                            candidates.sort()
-                            if int(diff_old) > 0:
-                                candidates = [c for c in candidates if int(c[0]) <= max(int(diff_old), 1)] + [c for c in candidates if int(c[0]) > max(int(diff_old), 1)]
-                            candidates = candidates[:max_tpl_k]
-
-                            old_mu = float(getattr(n, 'mu', 0.0))
-                            old_pi = float(getattr(n, 'pi', 0.0))
-                            old_z = getattr(n, 'z_vec', None)
-                            old_peak = peak_cache.get(int(n.global_id), None)
-
-                            for dn, _neg_sc, kt in candidates:
-                                tpl = templates.get(kt)
-                                if not isinstance(tpl, dict):
-                                    continue
-                                samples = tpl.get('samples', {})
-                                if not isinstance(samples, dict):
-                                    continue
-                                z_samples = samples.get('z', None)
-                                mu_samples = samples.get('mu', None)
-                                pi_samples = samples.get('pi', None)
-                                if z_samples is None or mu_samples is None or pi_samples is None:
-                                    continue
-                                if int(mu_samples.numel()) <= 0:
-                                    continue
-
-                                mu_min = float(tpl.get('mu_min', 0.0))
-                                mu_max = float(tpl.get('mu_max', 0.0))
-                                lo = max(float(base_lo), float(mu_min))
-                                hi = min(float(base_hi), float(mu_max))
-                                if hi <= lo:
-                                    continue
-
-                                best_pos = self._best_positive_in_range(diff, ppm_axis, lo, hi)
-                                if best_pos is None:
-                                    continue
-                                pos_ppm, pos_val = best_pos
-
-                                cand_idx = self._mu_sorted_candidates(mu_samples, float(pos_ppm), top_k=int(top_k_samples))
-                                if not cand_idx:
-                                    continue
-
-                                mu_samples_cpu = mu_samples.detach().cpu().numpy()
-                                pi_samples_cpu = pi_samples.detach().cpu().numpy()
-
-                                for sidx in cand_idx:
-                                    try:
-                                        z_cand = z_samples[int(sidx)].detach().clone().to(device)
-                                        mu_lib = float(mu_samples_cpu[int(sidx)])
-                                        pi_lib = float(pi_samples_cpu[int(sidx)])
-                                    except Exception:
-                                        continue
-
-                                    decoded = (
-                                        self._decode_mu_pi_from_z(int(n.su_type), z_cand, g_embed)
-                                        if bool(use_g2s_decoder)
-                                        else None
-                                    )
-                                    if decoded is not None:
-                                        mu_new, pi_new = decoded
-                                    else:
-                                        mu_new, pi_new = mu_lib, max(1e-6, pi_lib)
-                                    if bool(getattr(self, 'unit_peak_intensity', False)):
-                                        pi_new = 1.0
-
-                                    pk_new = self._peak(mu_new, pi_new, ppm_axis, hwhm=float(hwhm))
-                                    recon_try = recon
-                                    if old_peak is not None:
-                                        recon_try = recon_try - old_peak
-                                    recon_try = recon_try + pk_new
-
-                                    diff_try = S_t - recon_try
-                                    loss_try = self._segment_abs(diff_try, region_mask)
-
-                                    if float(loss_try) < float(loss_before) - 1e-9:
-                                        n.template_key = kt
-                                        n.z_vec = z_cand
-                                        n.mu = float(mu_new)
-                                        n.pi = float(pi_new)
-                                        self._sync_template_metadata(
-                                            n,
-                                            tpl,
-                                            sample_idx=int(sidx),
-                                            match_mode='approx_h2',
-                                        )
-                                        try:
-                                            if getattr(n, 'z_history', None) is not None and isinstance(n.z_history, list):
-                                                n.z_history.append(z_cand.detach().clone())
-                                        except Exception:
-                                            pass
-
-                                        peak_cache[int(n.global_id)] = pk_new
-                                        recon = recon_try
-                                        region_tpl_moves += 1
-                                        moves.append({
-                                            'move_type': 'approx_hop2_template',
-                                            'region_lo': float(region_lo),
-                                            'region_hi': float(region_hi),
-                                            'neg_ppm': float(neg_ppm),
-                                            'pos_ppm': float(pos_ppm),
-                                            'pos_val': float(pos_val),
-                                            'global_id': int(n.global_id),
-                                            'su_type': int(n.su_type),
-                                            'old_mu': float(old_mu),
-                                            'new_mu': float(mu_new),
-                                            'sample_idx': int(sidx),
-                                            'loss_before': float(loss_before),
-                                            'loss_after': float(loss_try),
-                                            'old_template_key': str(tpl_key_old),
-                                            'new_template_key': str(kt),
-                                            'hop2_diff_nodes': int(dn),
-                                        })
-                                        accepted = True
-                                        break
-
-                                if accepted:
-                                    break
-
-                            if accepted:
-                                break
-
-                            if tpl_key_old is not None:
-                                n.template_key = tpl_key_old
-                            if old_z is not None:
-                                n.z_vec = old_z
-                            n.mu = float(old_mu)
-                            n.pi = float(old_pi)
-                            if old_peak is not None:
-                                peak_cache[int(n.global_id)] = old_peak
-
-                        if accepted:
-                            break
-
-                    if accepted:
-                        break
-
-                if not accepted:
-                    if region_stop_reason in {'completed', 'no_z_move_accepted'}:
-                        region_stop_reason = 'no_template_move_accepted'
-                    break
-
-            total_z_moves += int(region_z_moves)
-            total_template_moves += int(region_tpl_moves)
-            if bool(verbose):
-                print(
-                    f"  [Layer3 region] {float(region_lo):.1f}-{float(region_hi):.1f} ppm 完成: "
-                    f"z_moves={int(region_z_moves)}, template_moves={int(region_tpl_moves)}, "
-                    f"stop={region_stop_reason}"
-                )
-
-        eval_info = evaluate_spectrum_reconstruction(
-            S_t,
+        recon, peak_cache = self._build_recon(nodes, ppm_axis, hwhm=float(hwhm))
+        eval_current = evaluate_spectrum_reconstruction(
+            target,
             recon,
             ppm_axis=ppm_axis,
             fit_scale=True,
             nonnegative_alpha=True,
         )
-        S_fit = eval_info['S_fit']
-        diff = eval_info['S_target'] - S_fit
-        r2 = float(eval_info.get('r2', 0.0))
-        alpha = float(eval_info.get('alpha', 1.0))
-        
+        current_r2 = float(eval_current.get('r2', 0.0))
+        full_mask = torch.ones_like(ppm_axis, dtype=torch.bool)
+        moves: List[Dict] = []
+        stop_reason = 'max_iters'
+
+        if verbose:
+            print("\n" + "=" * 60)
+            print("Layer3: 固定模板潜变量 z 优化")
+            print("=" * 60)
+            print(
+                f"  [Layer3 start] nodes={len(nodes)}, carbon_nodes={len(carbon_nodes)}, "
+                f"max_iters={int(max_iters)}, initial_r2={current_r2:.4f}"
+            )
+
+        for _ in range(max(0, int(max_iters))):
+            diff = eval_current['S_target'] - eval_current['S_fit']
+            negative_ppms = self._top_negative_ppms(
+                diff,
+                ppm_axis,
+                full_mask,
+                top_k=int(neg_top_k_peaks),
+                min_sep_ppm=float(neg_peak_min_sep_ppm),
+            )
+            if not negative_ppms:
+                stop_reason = 'no_negative_peaks'
+                break
+
+            best_move: Optional[Dict] = None
+            for negative_ppm in negative_ppms:
+                candidate_nodes = [
+                    node for node in carbon_nodes
+                    if abs(float(node.mu) - float(negative_ppm)) <= float(neg_assign_window)
+                ]
+                candidate_nodes.sort(
+                    key=lambda node: (abs(float(node.mu) - float(negative_ppm)), int(node.global_id))
+                )
+                for node in candidate_nodes:
+                    template_key = fixed_template_keys[int(node.global_id)]
+                    template = templates[template_key]
+                    samples = template['samples']
+                    z_samples = samples['z']
+                    if z_samples.ndim == 1:
+                        z_samples = z_samples.view(1, -1)
+                    decoded_mu_samples = decoded_template_mu[template_key]
+                    coarse_lo, coarse_hi = get_su_ppm_range(int(node.su_type))
+                    search_lo = max(float(coarse_lo), float(negative_ppm) - float(pos_search_window))
+                    search_hi = min(float(coarse_hi), float(negative_ppm) + float(pos_search_window))
+                    if search_hi <= search_lo:
+                        continue
+                    positive = self._best_positive_in_range(diff, ppm_axis, search_lo, search_hi)
+                    if positive is None:
+                        continue
+                    positive_ppm, positive_value = positive
+                    sample_indices = self._mu_sorted_candidates(
+                        decoded_mu_samples,
+                        positive_ppm,
+                        top_k=int(top_k_samples),
+                    )
+                    old_peak = peak_cache.get(int(node.global_id))
+                    if old_peak is None:
+                        continue
+
+                    for sample_idx in sample_indices:
+                        z_candidate = z_samples[int(sample_idx)].detach().clone().to(self.device)
+                        old_z = getattr(node, 'z_vec', None)
+                        if (
+                            torch.is_tensor(old_z)
+                            and int(old_z.numel()) == int(z_candidate.numel())
+                            and torch.equal(
+                                old_z.detach().to(self.device).reshape(-1),
+                                z_candidate.reshape(-1),
+                            )
+                        ):
+                            continue
+                        mu_candidate = float(decoded_mu_samples[int(sample_idx)].item())
+                        if not (float(coarse_lo) <= float(mu_candidate) <= float(coarse_hi)):
+                            continue
+
+                        peak_candidate = self._peak(mu_candidate, ppm_axis, hwhm=float(hwhm))
+                        recon_candidate = recon - old_peak + peak_candidate
+                        eval_candidate = evaluate_spectrum_reconstruction(
+                            target,
+                            recon_candidate,
+                            ppm_axis=ppm_axis,
+                            fit_scale=True,
+                            nonnegative_alpha=True,
+                        )
+                        r2_candidate = float(eval_candidate.get('r2', 0.0))
+                        if r2_candidate <= current_r2 + 1e-9:
+                            continue
+                        residual_candidate = self._segment_abs(
+                            eval_candidate['S_target'] - eval_candidate['S_fit'],
+                            full_mask,
+                        )
+                        rank = (r2_candidate, -residual_candidate)
+                        if best_move is None or rank > best_move['rank']:
+                            best_move = {
+                                'rank': rank,
+                                'node': node,
+                                'template_key': template_key,
+                                'z': z_candidate,
+                                'mu': float(mu_candidate),
+                                'peak': peak_candidate,
+                                'recon': recon_candidate,
+                                'eval': eval_candidate,
+                                'sample_idx': int(sample_idx),
+                                'negative_ppm': float(negative_ppm),
+                                'positive_ppm': float(positive_ppm),
+                                'positive_value': float(positive_value),
+                                'coarse_lo': float(coarse_lo),
+                                'coarse_hi': float(coarse_hi),
+                            }
+
+            if best_move is None:
+                stop_reason = 'no_r2_improving_z_move'
+                break
+
+            node = best_move['node']
+            old_mu = float(node.mu)
+            old_r2 = float(current_r2)
+            node.z_vec = best_move['z']
+            node.mu = float(best_move['mu'])
+            node.pi = 1.0
+            score_components = getattr(node, 'score_components', None)
+            if isinstance(score_components, dict):
+                score_components['layer3_sample_idx'] = int(best_move['sample_idx'])
+                score_components['layer3_spectral_source'] = 'g2s_layer3'
+                score_components['spectral_source'] = 'g2s_layer3'
+                score_components['layer3_decoder_mu'] = float(best_move['mu'])
+            if isinstance(getattr(node, 'z_history', None), list):
+                node.z_history.append(best_move['z'].detach().clone())
+
+            peak_cache[int(node.global_id)] = best_move['peak']
+            recon = best_move['recon']
+            eval_current = best_move['eval']
+            current_r2 = float(eval_current.get('r2', 0.0))
+            moves.append({
+                'move_type': 'fixed_template_z',
+                'global_id': int(node.global_id),
+                'su_type': int(node.su_type),
+                'template_key': str(best_move['template_key']),
+                'sample_idx': int(best_move['sample_idx']),
+                'negative_ppm': float(best_move['negative_ppm']),
+                'positive_ppm': float(best_move['positive_ppm']),
+                'positive_value': float(best_move['positive_value']),
+                'coarse_lo': float(best_move['coarse_lo']),
+                'coarse_hi': float(best_move['coarse_hi']),
+                'old_mu': old_mu,
+                'new_mu': float(best_move['mu']),
+                'r2_before': old_r2,
+                'r2_after': current_r2,
+            })
+
+        for node in carbon_nodes:
+            if getattr(node, 'template_key', None) != fixed_template_keys[int(node.global_id)]:
+                raise RuntimeError(f"Layer3 changed fixed template for node={int(node.global_id)}")
+
+        exit_mu = self._decode_nodes(carbon_nodes, g_embed, context="exit all-node decode")
+        max_decode_error = 0.0
+        for node, mu_tensor in zip(carbon_nodes, exit_mu):
+            decoded_mu = float(mu_tensor.item())
+            stored_mu = float(getattr(node, 'mu', float('nan')))
+            error = abs(stored_mu - decoded_mu)
+            max_decode_error = max(max_decode_error, error)
+            if not np.isfinite(error) or error > 1e-5:
+                raise RuntimeError(
+                    f"Layer3 final G2S consistency failed for node={int(node.global_id)}: "
+                    f"stored_mu={stored_mu}, decoded_mu={decoded_mu}, error={error}"
+                )
+            node.mu = decoded_mu
+            node.pi = 1.0
+            score_components = getattr(node, 'score_components', None)
+            if isinstance(score_components, dict):
+                score_components['layer3_spectral_source'] = 'g2s_layer3'
+                score_components['spectral_source'] = 'g2s_layer3'
+                score_components['layer3_decoder_mu'] = decoded_mu
+                score_components['layer3_final_decode_error'] = float(error)
+
+        recon, peak_cache = self._build_recon(nodes, ppm_axis, hwhm=float(hwhm))
+        eval_current = evaluate_spectrum_reconstruction(
+            target,
+            recon,
+            ppm_axis=ppm_axis,
+            fit_scale=True,
+            nonnegative_alpha=True,
+        )
+        spectrum_fit = eval_current['S_fit']
+        spectrum_diff = eval_current['S_target'] - spectrum_fit
+        r2 = float(eval_current.get('r2', 0.0))
+        alpha = float(eval_current.get('alpha', 1.0))
+
         if output_dir:
             out = Path(output_dir)
             out.mkdir(parents=True, exist_ok=True)
-            df_spec = pd.DataFrame({
+            pd.DataFrame({
                 'ppm': ppm_axis.detach().cpu().numpy(),
-                'target': S_t.detach().cpu().numpy(),
+                'target': target.detach().cpu().numpy(),
                 'reconstructed_raw': recon.detach().cpu().numpy(),
-                'reconstructed': S_fit.detach().cpu().numpy(),
-                'difference': diff.detach().cpu().numpy(),
-                'alpha': np.full(int(ppm_axis.numel()), float(alpha), dtype=np.float64),
-            })
-            df_spec.to_csv(str(out / 'layer3_spectrum.csv'), index=False)
+                'reconstructed': spectrum_fit.detach().cpu().numpy(),
+                'difference': spectrum_diff.detach().cpu().numpy(),
+                'alpha': np.full(int(ppm_axis.numel()), alpha, dtype=np.float64),
+            }).to_csv(str(out / 'layer3_spectrum.csv'), index=False)
+            pd.DataFrame(moves).to_csv(str(out / 'layer3_z_moves.csv'), index=False)
 
         print(
-            f"  最终调整结果: z_moves={int(total_z_moves)}, "
-            f"template_moves={int(total_template_moves)}, R²={r2:.4f}, α={alpha:.4f}"
+            f"  最终调整结果: z_moves={len(moves)}, template_moves=0, "
+            f"stop={stop_reason}, max_decode_error={max_decode_error:.2e}, "
+            f"R²={r2:.4f}, α={alpha:.4f}"
         )
         print("Layer3 完成\n")
-        return nodes, float(r2)
+        return nodes, r2

@@ -9,11 +9,6 @@ import torch
 from ...shared.inverse_common import _NodeV3
 from .stage3_models import Stage3AdjustmentApplyResult, Stage3AdjustmentPlan
 
-def is_request_only_stage3_op(op: Any) -> bool:
-    del op
-    return False
-
-
 def _normalize_plan(plan: Any) -> Stage3AdjustmentPlan:
     if isinstance(plan, Stage3AdjustmentPlan):
         return plan
@@ -68,30 +63,12 @@ def _conservation_summary(nodes: List[_NodeV3], H: torch.Tensor) -> Dict[str, An
     }
 
 
-def _request_counts(op: Dict[str, Any]) -> Dict[str, int]:
-    for key in ("requested_counts", "unresolved_counts", "resource_request", "minimum_resource_request"):
-        value = op.get(key)
-        if isinstance(value, dict):
-            return {
-                str(su): max(0, int(count))
-                for su, count in value.items()
-                if int(count) > 0
-            }
-    delta = dict(op.get("delta", {}) or {})
-    return {
-        str(su): int(count)
-        for su, count in delta.items()
-        if int(count) > 0
-    }
-
-
 def apply_stage3_node_adjustments(
     nodes: List[_NodeV3],
     H: torch.Tensor,
     plan: Any,
 ) -> Stage3AdjustmentApplyResult:
     plan_obj = _normalize_plan(plan)
-    request_ops: List[Dict[str, Any]] = []
     requested_counts: Dict[str, int] = {
         str(key): int(value)
         for key, value in dict(plan_obj.requested_counts or {}).items()
@@ -102,17 +79,6 @@ def apply_stage3_node_adjustments(
         for key, value in dict(plan_obj.unresolved_counts or {}).items()
         if int(value) > 0
     }
-    for bundle in list(plan_obj.adjustment_bundles or []):
-        bundle_dict = bundle.to_dict() if hasattr(bundle, "to_dict") else dict(bundle or {})
-        for raw_op in list(bundle_dict.get("bundle_ops", []) or []):
-            op = raw_op.to_dict() if hasattr(raw_op, "to_dict") else dict(raw_op or {})
-            if not is_request_only_stage3_op(op):
-                continue
-            request_ops.append(op)
-            for su_key, count in _request_counts(op).items():
-                requested_counts[su_key] = max(int(requested_counts.get(su_key, 0)), int(count))
-                unresolved_counts[su_key] = max(int(unresolved_counts.get(su_key, 0)), int(count))
-
     from .histogram_adjustment import build_histogram_adjustment_plan
 
     histogram_plan = getattr(plan_obj, "histogram_adjustment_plan", None)
@@ -125,7 +91,7 @@ def apply_stage3_node_adjustments(
     from .histogram_adjustment import apply_histogram_adjustment_plan
 
     result = apply_histogram_adjustment_plan(H=H, histogram_plan=histogram_plan, nodes=nodes)
-    result.request_ops = list(request_ops)
+    result.request_ops = []
     result.requested_counts = dict(requested_counts or result.requested_counts or {})
     result.unresolved_counts = dict(unresolved_counts or result.unresolved_counts or {})
     return result

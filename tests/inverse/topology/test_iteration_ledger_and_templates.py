@@ -4,21 +4,50 @@ import pytest
 import torch
 
 from model.inverse.topology import classify_topology_units, plan_stage3_resource_adjustments
+from model.inverse.topology.assembly_external import (
+    ExternalTopologyAssembler,
+    assemble_pool_su24_rings,
+)
 from model.inverse.topology.iteration_ledger import (
     assign_contract_slots,
     build_iteration_ledger,
     contract_source_status,
     seed_ledger_topology_state,
+    slot_sequence,
 )
-from model.inverse.topology.stage3_models import TopologyClosureContract, TopologyClosureSlot
+from model.inverse.topology.resource_profiles import (
+    alternative_closure_required_counts,
+    closure_sequences,
+    minimum_closure_required_counts,
+)
+from model.inverse.topology.stage3_models import (
+    AtomicAdjustmentGroup,
+    HistogramAdjustmentPlan,
+    HistogramConversion,
+    TopologyClosureContract,
+    TopologyClosureSlot,
+)
 from model.inverse.topology.stage3_state_machine import (
+    _bind_real_node_ids,
+    _pool_su24_ring_conversion_contract,
+    _transaction_plan,
     _residual_contracts,
-    _su24_ring_contracts,
     build_su24_resource_role_profiles,
     plan_stage3_state_machine,
 )
 from model.inverse.topology.phase_eval import _canonical_stage3_contracts, build_stage3_phase_evaluation
 from tests.inverse.topology.helpers import connect, make_node
+
+
+def test_closure_profiles_define_short_defaults_and_long_alternatives() -> None:
+    assert closure_sequences("H") == [[23, 22], [23, 23, 22]]
+    assert closure_sequences("F1") == [[23, 11], [23, 23, 11]]
+    assert closure_sequences("F2") == [[23, 22], [23, 23, 22]]
+    assert closure_sequences("FIXED22") == [[22]]
+    assert slot_sequence("H") == [23, 22]
+    assert slot_sequence("F1") == [23, 11]
+    assert minimum_closure_required_counts("H") == {23: 1, 22: 1}
+    assert alternative_closure_required_counts("H") == [{23: 2, 22: 1}]
 
 
 def test_canonical_contract_flow_uses_actual_assembly_slots_for_selected_flex_owner() -> None:
@@ -73,8 +102,8 @@ def test_canonical_contract_preserves_structural_ring_blocker() -> None:
         **assembly_blocker,
         "contract_kind": "structural_blocker",
         "target_role": "flex_chain",
-        "reason": "supplemental_flex_candidate_not_selected",
-        "blocker_kind": "supplemental_flex_candidate_not_selected",
+        "reason": "lower_priority_flex_overlay",
+        "blocker_kind": "lower_priority_flex_overlay",
         "diagnostics": {"selected_for_target": False},
     }
 
@@ -92,9 +121,9 @@ def test_canonical_contract_preserves_structural_ring_blocker() -> None:
 @pytest.mark.parametrize(
     ("left_su", "right_su", "branch_count", "mainline_count"),
     [
-        (14, 14, 2, 0),
-        (14, 15, 1, 0),
-        (14, 16, 1, 0),
+        (14, 14, 2, 2),
+        (14, 15, 1, 2),
+        (14, 16, 1, 2),
         (15, 15, 0, 2),
         (15, 16, 0, 2),
         (17, 17, 0, 2),
@@ -201,27 +230,138 @@ def test_slot_transaction_rolls_back_when_second_slot_is_short() -> None:
     assert all(slot.assigned_resource_ids == [] for slot in contract.mainline_slots)
 
 
-def test_su24_templates_are_role_matched_and_ordered() -> None:
-    nodes = [make_node(index, 24) for index in range(10, 14)]
-    fixed_cap = make_node(99, 11)
-    connect(nodes[2], fixed_cap, fixed=True)
-    nodes.append(fixed_cap)
+def test_su24_resource_profiles_are_exact_and_remain_node_bound() -> None:
+    nodes = []
+    fixtures = (
+        (make_node(10, 24), (make_node(100, 11), make_node(101, 23), make_node(102, 0))),
+        (make_node(11, 24), (make_node(110, 11), make_node(111, 22), make_node(112, 23))),
+        (make_node(12, 24), (make_node(120, 23), make_node(121, 0), make_node(122, 2))),
+        (make_node(13, 24), (make_node(130, 1), make_node(131, 23), make_node(132, 3))),
+    )
+    for center, neighbors in fixtures:
+        nodes.append(center)
+        nodes.extend(neighbors)
+        for neighbor in neighbors:
+            connect(center, neighbor)
     pool = {24: [10, 11, 12, 13]}
 
     profiles = build_su24_resource_role_profiles(nodes, pool)
-    contracts = _su24_ring_contracts(profiles)
 
-    assert profiles
+    assert [profile.node_id for profile in profiles] == [10, 11, 12, 13]
+    assert [profile.role for profile in profiles] == ["A", "B", "C", "D"]
     assert all(profile.allowed_ring_slots for profile in profiles)
-    priorities = [contract.priority for contract in contracts]
-    assert priorities == sorted(priorities)
-    assert all(contract.contract_kind == "ring_partner" for contract in contracts)
-    assert all(contract.target_role == "fatty_ring" for contract in contracts)
-    assert {contract.expected_topology for contract in contracts} >= {
-        "resource_su24_side_ring",
-        "resource_su24_upper_lower_ring",
-        "resource_su24_fused_ring",
+    assert all(profile.roles == [profile.role] for profile in profiles)
+    assert all(profile.available_roles == [profile.role] for profile in profiles)
+
+
+def test_pool_su24_conversion_contract_binds_selected_sources_and_only_claims_generic_gap() -> None:
+    attempt = {
+        "template_priority": 1,
+        "ring_template": "side_ring_plan",
+        "selected_source_node_ids": [10, 11, 20, 21],
+        "selected_su24_ids": [10, 11],
+        "required_counts": {11: 2, 22: 3, 23: 4, 24: 2},
+        "generic_required_sequence": [22, 23, 23],
+        "missing_counts": {22: 1},
     }
+
+    contract = _pool_su24_ring_conversion_contract(attempt, contract_id=901)
+
+    assert contract.source_node_ids == [10, 11, 20, 21]
+    assert contract.claimed_source_node_ids == [10, 11, 20, 21]
+    assert contract.required_counts == {11: 2, 22: 3, 23: 4, 24: 2}
+    assert len(contract.mainline_slots) == 1
+    assert contract.mainline_slots[0].required_su_sequence == [22, 23, 23]
+    assert contract.diagnostics["conversion_only"] is True
+    assert contract.diagnostics["pool_su24_ring_attempt"]["selected_su24_ids"] == [10, 11]
+
+
+def test_conversion_binding_never_uses_selected_ring_source_as_donor() -> None:
+    conversion = HistogramConversion(from_su=24, to_su=22, count=1)
+    histogram = HistogramAdjustmentPlan(
+        groups=[AtomicAdjustmentGroup(primary_op=conversion)]
+    )
+
+    pool_after = _bind_real_node_ids(
+        histogram,
+        {24: [100, 101, 102, 103], 22: []},
+        protected_node_ids=[100, 101, 102],
+    )
+
+    assert conversion.node_ids == [103]
+    assert pool_after[24] == [100, 101, 102]
+    assert pool_after[22] == [103]
+
+
+def test_pool_su24_shortage_converts_only_unselected_real_su24() -> None:
+    nodes = []
+    shared_open = [make_node(node_id, 23) for node_id in (200, 201, 202)]
+    for center_id, cap_id in ((100, 10), (101, 11)):
+        center = make_node(center_id, 24)
+        cap = make_node(cap_id, 11)
+        for neighbor in (cap, shared_open[0], shared_open[1]):
+            connect(center, neighbor)
+        nodes.extend([center, cap])
+    for center_id in (102, 103, 104, 105, 106):
+        center = make_node(center_id, 24)
+        for neighbor in shared_open:
+            connect(center, neighbor)
+        nodes.append(center)
+    nodes.extend(shared_open)
+    nodes.extend(make_node(node_id, 23) for node_id in (203, 204, 205))
+    nodes.extend(make_node(node_id, 22) for node_id in (300, 301, 302))
+
+    classification = classify_topology_units(nodes)
+    pool = {
+        int(key): list(values)
+        for key, values in classification.resource_pool["remaining_ids_by_su"].items()
+    }
+    assembler = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    assembler.pool_only_su24_ring_mode = True
+    blocked = next(
+        attempt
+        for attempt, _ in assembler._pool_su24_ring_plan_candidates()
+        if len(list(attempt.get("selected_su24_ids", []) or [])) == 6
+        and dict(attempt.get("missing_counts", {}) or {}) == {22: 1}
+    )
+    assert blocked["selected_su24_ids"] == [100, 101, 102, 103, 104, 105]
+    assert blocked["missing_counts"] == {22: 1}
+
+    phase_eval = build_stage3_phase_evaluation(nodes, classification=classification)
+    ledger = build_iteration_ledger(nodes, resource_ids_by_su=pool)
+    H = torch.zeros(40, dtype=torch.long)
+    for node in nodes:
+        H[int(node.su_type)] += 1
+    plan = _transaction_plan(
+        phase_eval=phase_eval,
+        contract=_pool_su24_ring_conversion_contract(blocked),
+        pool=pool,
+        H=H,
+        E_target=None,
+        max_primary_adjustments=10,
+        max_h_compensation_ops=0,
+        h_tolerance=0.06,
+        special_degree_meta=None,
+        iteration_ledger=ledger,
+        protected_resource_counts={24: 6},
+        accounting_initial_pool=pool,
+        reserve_contract_after_conversion=False,
+    )
+
+    assert plan.ok is True
+    assert plan.reason == "stage3_rebuild_required"
+    conversions = [
+        group.primary_op for group in plan.histogram_adjustment_plan.groups
+    ]
+    assert [
+        (item.from_su, item.to_su, item.node_ids)
+        for item in conversions
+    ] == [(24, 22, [106])]
+    assert plan.runtime["iteration_topology_ledger"].completed_products == []
 
 
 @pytest.mark.parametrize(
@@ -255,6 +395,121 @@ def test_residual_flex_preferred_minimum_and_priority(
     assert flex.mainline_slots[0].required_su_sequence == (
         [11] + [23] * expected_first_length + [11]
     )
+
+
+def test_residual_flex_uses_only_the_deferred_target_gap(monkeypatch) -> None:
+    phase_eval = build_stage3_phase_evaluation(
+        [], classification=classify_topology_units([])
+    )
+    phase_eval.flex_bounds = {"min": 2, "max": 5}
+    phase_eval.flex_counts = {"final": 2}
+    phase_eval.assembly_view["flex_target_plan"] = {
+        "remaining_minimum_gap": 0,
+        "remaining_preferred_gap": 0,
+    }
+    captured = {}
+
+    def capture_next_residual(*, remaining_flex_chains, **kwargs):
+        captured["remaining_flex_chains"] = remaining_flex_chains
+        return {"mode": "none", "attempts": []}
+
+    monkeypatch.setattr(
+        "model.inverse.topology.stage3_state_machine._plan_next_residual_product",
+        capture_next_residual,
+    )
+    monkeypatch.setattr(
+        "model.inverse.topology.stage3_state_machine._evaluate_external_phases",
+        lambda **_kwargs: phase_eval,
+    )
+
+    plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=torch.zeros(40, dtype=torch.long),
+        nodes=[],
+        enable_post_external_spectrum=False,
+    )
+
+    assert captured["remaining_flex_chains"] == 0
+
+
+def test_fresh_residual_target_uses_only_current_flex_and_inventory(monkeypatch) -> None:
+    nodes = [
+        make_node(1, 11),
+        make_node(2, 11),
+        make_node(3, 23),
+        make_node(4, 23),
+    ]
+    phase_eval = build_stage3_phase_evaluation(
+        nodes,
+        classification=classify_topology_units(nodes),
+    )
+    phase_eval.canonical_contracts = []
+    phase_eval.flex_bounds = {"min": 2, "max": 5}
+    phase_eval.flex_counts = {"final": 1}
+    phase_eval.assembly_view["flex_target_plan"] = {
+        "remaining_minimum_gap": 1,
+        "remaining_preferred_gap": 1,
+    }
+    phase_eval.flex_audit["enforced"] = True
+    captured = {}
+
+    def capture_next_residual(*, remaining_flex_chains, iteration_ledger, **kwargs):
+        captured["remaining_flex_chains"] = remaining_flex_chains
+        captured["available_ids_by_su"] = {
+            int(key): list(values)
+            for key, values in iteration_ledger.available_ids_by_su.items()
+        }
+        return {"mode": "none", "attempts": []}
+
+    monkeypatch.setattr(
+        "model.inverse.topology.stage3_state_machine._plan_next_residual_product",
+        capture_next_residual,
+    )
+    monkeypatch.setattr(
+        "model.inverse.topology.stage3_state_machine._evaluate_external_phases",
+        lambda **_kwargs: phase_eval,
+    )
+    plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=torch.tensor([0] * 40, dtype=torch.long),
+        nodes=nodes,
+        enable_post_external_spectrum=False,
+    )
+
+    assert captured["remaining_flex_chains"] == 1
+    available_ids = {
+        node_id
+        for ids in captured["available_ids_by_su"].values()
+        for node_id in ids
+    }
+    assert available_ids == {1, 2, 3, 4}
+
+
+def test_completed_product_claim_type_mismatch_is_a_ledger_conflict() -> None:
+    node = make_node(1, 23)
+    ledger = build_iteration_ledger(
+        [node],
+        resource_ids_by_su={23: [1]},
+    )
+
+    seeded = seed_ledger_topology_state(
+        ledger,
+        completed_products=[{
+            "product_id": "residual:2000000",
+            "phase": "residual_resource_self_closure",
+            "product_role": "residual_side_chain",
+            "claimed_resource_ids_by_su": {"11": [1]},
+        }],
+    )
+
+    assert seeded.available_ids_by_su[23] == [1]
+    assert seeded.conflicts == [{
+        "node_id": 1,
+        "reason": "completed_product_su_type_mismatch",
+        "product_id": "residual:2000000",
+        "claimed_su_type": 11,
+        "actual_su_type": 23,
+    }]
 
 
 def test_direct_stage3_ledger_closure_does_not_mutate_hop1() -> None:
@@ -366,10 +621,10 @@ def test_blocked_contract_allows_later_direct_contract_but_prevents_false_comple
                     "slot_id": "side:2:F1",
                     "kind": "FIXED22",
                     "anchor_node_id": 2,
-                    "required_su_sequence": [11],
+                    "required_su_sequence": [22],
                 }],
                 "branch_slots": [],
-                "required_counts": {"11": 1},
+                "required_counts": {"22": 1},
                 "expected_topology": "",
                 "reason": "mainline_resource_closure",
                 "blocker_kind": "",
@@ -384,6 +639,9 @@ def test_blocked_contract_allows_later_direct_contract_but_prevents_false_comple
 
     plan = plan_stage3_state_machine(phase_eval=phase_eval, H=H, nodes=nodes)
 
-    assert plan.reason == "phase_resource_infeasible"
+    assert plan.reason == "stage3_rebuild_required"
+    assert plan.phase == "external_topology_assembly"
+    assert plan.phase_result.phase_completed is False
+    assert plan.diagnostics["external_rebuild_reason"] == "external_blocker_after_conversion"
     assert any(item.contract_id == 2 and item.committed for item in plan.phase_result.transactions)
-    assert plan.phase_result.infeasibility_proof["reason"] == "stage3_completion_invariants_failed"
+    assert plan.phase_result.infeasibility_proof == {}

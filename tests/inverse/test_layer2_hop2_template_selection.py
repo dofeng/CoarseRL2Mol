@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from collections import Counter
 
+import torch
+
 from model.inverse.layer2.inverse_layer2 import Layer2Estimator
+from model.shared.coarse_graph import PPM_AXIS
+from model.shared.inverse_common import _NodeV3
 
 
 class _Node:
@@ -78,13 +82,57 @@ def test_approx_template_uses_hop2_difference_tier_then_mu_prior() -> None:
         target_h2,
         130.0,
         lib,
-        max_hop2_diff_nodes=2,
     )
 
     assert selected == key_near_mu
     assert mode == "approx_h2"
     assert meta["hop2_match_tier"] == 1
     assert meta["mu_diff"] == 2.0
+
+
+def test_approx_template_progresses_beyond_old_two_node_cap() -> None:
+    estimator = Layer2Estimator.__new__(Layer2Estimator)
+    exact_h1 = (11, 13)
+    target_h2 = (5, 23, 13)
+    farther_h2 = (5, 5, 5, 13, 13, 23)
+    key = (13, exact_h1, farther_h2)
+    lib = {
+        "templates": {key: {"center_mu": 128.0, "sample_count": 10}},
+        "center_hop1_index": {
+            (13, exact_h1): [(key, exact_h1, farther_h2, 10, 128.0)]
+        },
+    }
+
+    selected, mode, meta = estimator._select_template_key(
+        13,
+        exact_h1,
+        target_h2,
+        130.0,
+        lib,
+    )
+
+    assert selected == key
+    assert mode == "approx_h2"
+    assert meta["hop2_match_tier"] > 2
+
+
+def test_approx_template_never_changes_layer1_environment() -> None:
+    estimator = Layer2Estimator.__new__(Layer2Estimator)
+    lib = {
+        "templates": {(13, (11, 12), (5,)): {"center_mu": 128.0}},
+        "center_hop1_index": {},
+    }
+
+    selected, mode, _meta = estimator._select_template_key(
+        13,
+        (11, 13),
+        (5,),
+        130.0,
+        lib,
+    )
+
+    assert selected is None
+    assert mode == "missing"
 
 
 def test_layer1_node_mu_has_priority_over_library_aggregate_prior() -> None:
@@ -103,3 +151,46 @@ def test_layer1_node_mu_has_priority_over_library_aggregate_prior() -> None:
     prior = estimator._resolve_layer1_mu_prior(node, 13, (11, 13), lib)
 
     assert prior == 128.0
+
+
+def test_layer2_keeps_center_z_and_always_uses_template_center_mu() -> None:
+    key = (22, (), ())
+    template = {
+        "center_z": torch.tensor([1.0]),
+        "center_mu": 12.0,
+        "center_sample_idx": 0,
+        "sample_count": 1,
+        "samples": {
+            "z": torch.tensor([[2.0]]),
+            "mu": torch.tensor([24.0]),
+            "pi": torch.tensor([3.0]),
+        },
+    }
+    estimator = Layer2Estimator(device=torch.device("cpu"))
+    estimator._template_cache = {
+        "templates": {key: template},
+        "center_hop1_index": {(22, ()): [(key, (), (), 1, 12.0)]},
+    }
+    node = _NodeV3(global_id=0, su_type=22)
+    node.mu = 12.0
+
+    result = estimator.layer2_assign(
+        [node],
+        S_target=torch.zeros_like(PPM_AXIS),
+        E_target=torch.zeros(6),
+    )
+
+    assert torch.equal(result[0].z_vec, torch.tensor([1.0]))
+    assert result[0].mu == 12.0
+    assert result[0].pi == 1.0
+    assert result[0].score_components["layer2_spectral_source"] == "layer2_template_center_mu"
+    assert result[0].score_components["spectral_source"] == "layer2_template_center_mu"
+    assert estimator.stats["selected_spectral_source"] == "template"
+    assert estimator.stats["spectral_contract"] == "template_center_mu"
+
+
+def test_layer2_decoder_configuration_is_not_part_of_the_api() -> None:
+    parameters = __import__('inspect').signature(Layer2Estimator.layer2_assign).parameters
+
+    assert "layer2_decoder_max_mu_delta" not in parameters
+    assert "layer2_use_g2s_decoder" not in parameters

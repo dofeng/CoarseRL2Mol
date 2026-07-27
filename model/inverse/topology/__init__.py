@@ -40,7 +40,7 @@ try:
         Stage3WorkflowResult,
         TopologyAssemblyResult,
     )
-    from .workflow import plan_stage3_resource_adjustments
+    from .workflow import audit_stage3_topology, plan_stage3_resource_adjustments
 except ModuleNotFoundError as exc:
     if str(exc).strip() != "No module named 'torch'":
         raise
@@ -60,5 +60,6 @@ else:
         "assemble_topology_units",
         "build_stage3_phase_evaluation",
         "plan_stage3_resource_adjustments",
+        "audit_stage3_topology",
         "apply_stage3_node_adjustments",
     ])

@@ -159,7 +159,7 @@ def _normalized_anchor_mode(node: _NodeV3) -> str:
 
 
 def _normalized_partition(node: _NodeV3) -> str:
-    return str(getattr(node, "special_anchor_partition", "") or "").strip()
+    return str(getattr(node, "special_anchor_partition", "") or "").strip().lower()
 
 
 def _target_degree(node: _NodeV3) -> int:
@@ -298,11 +298,6 @@ def is_abstract_open_nonfixed_semantic(value: Any) -> bool:
     )
 
 
-def is_visible_mainline_nonfixed_semantic(value: Any) -> bool:
-    del value
-    return False
-
-
 def _build_neighbor_tokens(
     node: _NodeV3,
     nodes_by_id: Dict[int, _NodeV3],
@@ -316,7 +311,9 @@ def _build_neighbor_tokens(
             continue
         neighbor = nodes_by_id.get(nid)
         if neighbor is None:
-            continue
+            raise ValueError(
+                f"node {int(getattr(node, 'global_id', -1))} references missing hop1 node {nid}"
+            )
         out.append(NeighborToken(
             node_id=int(nid),
             su_type=int(getattr(neighbor, "su_type", -1)),

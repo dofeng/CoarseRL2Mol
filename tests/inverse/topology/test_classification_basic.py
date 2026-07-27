@@ -59,7 +59,7 @@ def test_classifier_puts_unclaimed_pool_nodes_into_resource_pool() -> None:
     assert dict(pool.get("remaining_counts", {}) or {}).get("24") == 1
 
 
-def test_classifier_keeps_nonfixed_open_su23_as_evidence_and_resource() -> None:
+def test_classifier_keeps_nonfixed_open_su23_as_owned_real_evidence() -> None:
     center = make_node(10, 3)
     aromatic = make_node(11, 9)
     abstract_open = make_node(12, 23)
@@ -72,4 +72,4 @@ def test_classifier_keeps_nonfixed_open_su23_as_evidence_and_resource() -> None:
     assert "B" in _class_types(result)
     fragment = next(item for item in result.fragments if str(item.class_type) == "B")
     assert 12 in list(fragment.claimed_node_ids or [])
-    assert list(dict(pool.get("remaining_ids_by_su", {}) or {}).get("23", []) or []) == [12]
+    assert list(dict(pool.get("remaining_ids_by_su", {}) or {}).get("23", []) or []) == []

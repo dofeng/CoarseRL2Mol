@@ -216,6 +216,18 @@ SU_PPM_RANGES = {
     'Halogen_X': (-1, 1),
 }
 
+
+def get_su_ppm_range(su_type: int) -> tuple[float, float]:
+    """Return the authoritative coarse ppm range for an SU type."""
+    su_i = int(su_type)
+    if su_i < 0 or su_i >= len(SU_DEFS):
+        raise ValueError(f"invalid SU type: {su_i}")
+    su_name = str(SU_DEFS[su_i][0])
+    if su_name not in SU_PPM_RANGES:
+        raise KeyError(f"missing coarse ppm range for SU{su_i} ({su_name})")
+    low, high = SU_PPM_RANGES[su_name]
+    return float(low), float(high)
+
 _ppm_list = []
 for name, _ in SU_DEFS:
     low, high = SU_PPM_RANGES.get(name, (0, 300))

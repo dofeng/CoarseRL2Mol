@@ -11,7 +11,10 @@ class DummyNode:
         self.fixed_hop1_ids = set()
         self.target_hop1_degree = kwargs.get("target_hop1_degree")
         self.special_anchor_mode = kwargs.get("special_anchor_mode")
-        self.special_anchor_partition = kwargs.get("special_anchor_partition")
+        self.special_anchor_partition = kwargs.get(
+            "special_anchor_partition",
+            "ether" if int(su_type) == 19 else None,
+        )
         self.target_fixed_anchor_count = kwargs.get("target_fixed_anchor_count")
         self.special_degree_source = kwargs.get("special_degree_source")
 

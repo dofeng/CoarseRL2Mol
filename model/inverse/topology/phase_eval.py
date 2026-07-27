@@ -11,6 +11,7 @@ from ...shared.inverse_common import _NodeV3
 from .aromatic_clusters import generate_aromatic_clusters
 from .classification.classifier import classify_topology_units
 from .classification.classification_models import TopologyClassificationResult
+from .iteration_ledger import required_counts_from_slots
 from .round_context import build_stage3_round_context, ownership_public_view
 from .stage3_models import (
     Stage3FlexDecision,
@@ -66,11 +67,18 @@ def build_stage3_topology_metrics(
         for key, value in dict(assembly_dict.get("unresolved_counts", shortage) or {}).items()
         if int(value) > 0
     }
-    scenario = str(decision_dict.get("scenario", "in_range") or "in_range")
-    effective = int(decision_dict.get("effective_flex_count", 0) or 0)
-    lower = int(decision_dict.get("lower_bound", 0) or 0)
-    upper = int(decision_dict.get("upper_bound", 0) or 0)
-    flex_gap = max(0, lower - effective) if scenario == "below_range" else max(0, effective - upper)
+    flex_counts = dict(assembly_dict.get("flex_counts", {}) or {})
+    flex_bounds = dict(assembly_dict.get("flex_bounds", {}) or {})
+    effective = int(
+        flex_counts.get("final", decision_dict.get("effective_flex_count", 0)) or 0
+    )
+    lower = int(flex_bounds.get("min", decision_dict.get("lower_bound", 0)) or 0)
+    upper = int(flex_bounds.get("max", decision_dict.get("upper_bound", 0)) or 0)
+    flex_gap = (
+        max(0, int(lower) - int(effective), int(effective) - int(upper))
+        if bool(flex_bounds.get("enforced", False))
+        else 0
+    )
     active_subphase = str(
         assembly_dict.get("active_phase")
         or assembly_dict.get("active_subphase")
@@ -202,6 +210,22 @@ def _fragment_flex_reconcile_profile(fragment: Any) -> Dict[str, Any]:
         priority = int(evidence.get("flex_reconcile_priority", 99) or 99)
     except Exception:
         priority = 99
+    mainline_resource_template = {
+        str(key): int(value)
+        for key, value in required_counts_from_slots(
+            list(getattr(fragment, "open_mainline_slots", []) or [])
+        ).items()
+        if int(value) > 0
+    }
+    branch_resource_template = {
+        str(key): int(value)
+        for key, value in required_counts_from_slots(
+            list(getattr(fragment, "branch_contracts", []) or [])
+        ).items()
+        if int(value) > 0
+    }
+    total_resource_template = Counter(mainline_resource_template)
+    total_resource_template.update(branch_resource_template)
     return {
         "fragment_id": int(getattr(fragment, "fragment_id", -1)),
         "class_type": str(getattr(fragment, "class_type", "") or ""),
@@ -230,16 +254,65 @@ def _fragment_flex_reconcile_profile(fragment: Any) -> Dict[str, Any]:
         "open_fixed_branch_contract_count": int(evidence.get("flex_range_open_fixed_branch_contract_count", 0) or 0),
         "supports_explicit_mainline": bool(evidence.get("flex_range_supports_explicit_mainline", False)),
         "supports_supplemental_mainline": bool(evidence.get("flex_range_supports_supplemental_mainline", False)),
-        "resource_template": {
-            str(key): int(value)
-            for key, value in dict(evidence.get("flex_range_resource_template", {}) or {}).items()
-            if int(value) > 0
-        },
+        "resource_template": dict(total_resource_template),
+        "mainline_resource_template": dict(mainline_resource_template),
+        "branch_resource_template": dict(branch_resource_template),
         "source_node_ids": [
             int(value)
             for value in list(getattr(fragment, "source_node_ids", []) or [])
         ],
     }
+
+
+def _supplemental_flex_candidate_groups(
+    profiles: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    b_like = [
+        dict(item or {})
+        for item in list(profiles or [])
+        if str(dict(item or {}).get("candidate_kind", "")) == "b_like_open"
+    ]
+    d_like = [
+        dict(item or {})
+        for item in list(profiles or [])
+        if str(dict(item or {}).get("candidate_kind", "")) == "d_like_open"
+    ]
+    groups: List[Dict[str, Any]] = []
+
+    while len(b_like) >= 2:
+        pair = [b_like.pop(0), b_like.pop(0)]
+        resource_template: Counter = Counter()
+        for item in pair:
+            resource_template.update(dict(item.get("branch_resource_template", {}) or {}))
+        fragment_ids = [int(item.get("fragment_id", -1)) for item in pair]
+        groups.append({
+            "group_id": "b_pair:" + ":".join(str(value) for value in fragment_ids),
+            "strategy": "b_plus_b",
+            "fragment_ids": fragment_ids,
+            "contribution_count": 1,
+            "resource_template": dict(resource_template),
+        })
+
+    for item in d_like:
+        fragment_id = int(item.get("fragment_id", -1))
+        groups.append({
+            "group_id": f"d_single:{fragment_id}",
+            "strategy": "d_double_closure",
+            "fragment_ids": [fragment_id],
+            "contribution_count": 1,
+            "resource_template": dict(item.get("resource_template", {}) or {}),
+        })
+
+    for item in b_like:
+        fragment_id = int(item.get("fragment_id", -1))
+        groups.append({
+            "group_id": f"b_single:{fragment_id}",
+            "strategy": "b_single_closure",
+            "fragment_ids": [fragment_id],
+            "contribution_count": 1,
+            "resource_template": dict(item.get("resource_template", {}) or {}),
+        })
+    return groups
 
 
 def _profile_counts_as_strict_explicit_flex(profile: Dict[str, Any]) -> bool:
@@ -248,6 +321,8 @@ def _profile_counts_as_strict_explicit_flex(profile: Dict[str, Any]) -> bool:
         bool(item.get("counts_as_explicit", False))
         and bool(item.get("supports_explicit_mainline", False))
         and bool(item.get("mainline_closed", False))
+        and int(item.get("open_fixed_branch_contract_count", 0) or 0) == 0
+        and not dict(item.get("branch_resource_template", {}) or {})
         and str(item.get("preferred_product_type", "") or "") == "flex_chain"
         and str(item.get("candidate_kind", "") or "") == "explicit_flex"
     )
@@ -315,6 +390,16 @@ def _compute_flex_audit(
                     for key, value in dict(profile.get("resource_template", {}) or {}).items()
                     if int(value) > 0
                 },
+                "mainline_resource_template": {
+                    str(key): int(value)
+                    for key, value in dict(profile.get("mainline_resource_template", {}) or {}).items()
+                    if int(value) > 0
+                },
+                "branch_resource_template": {
+                    str(key): int(value)
+                    for key, value in dict(profile.get("branch_resource_template", {}) or {}).items()
+                    if int(value) > 0
+                },
                 "source_node_ids": [
                     int(value)
                     for value in list(profile.get("source_node_ids", []) or [])
@@ -333,6 +418,9 @@ def _compute_flex_audit(
         for profile in list(supplemental_candidate_profiles or [])
         if int(profile.get("fragment_id", -1)) >= 0
     ]
+    supplemental_candidate_groups = _supplemental_flex_candidate_groups(
+        supplemental_candidate_profiles
+    )
     explicit_flex_count_raw = int(len(hard_explicit_ids))
 
     flex_upper = int(flex_upper_raw)
@@ -353,6 +441,7 @@ def _compute_flex_audit(
         else max(int(flex_lower), min(int(flex_upper), int(flex_target)))
     )
     selected_profiles: List[Dict[str, Any]] = []
+    selected_groups: List[Dict[str, Any]] = []
     blocked_reason = ""
     if not bool(enforce):
         blocked_reason = ""
@@ -362,24 +451,40 @@ def _compute_flex_audit(
         blocked_reason = "flex_window_invalid"
         target_flex_count = int(explicit_flex_count)
     if str(scenario) == "below_range" and str(blocked_reason) != "flex_window_invalid":
-        selected_profiles = list(supplemental_candidate_profiles or [])[
+        selected_groups = list(supplemental_candidate_groups or [])[
             :max(0, int(target_flex_count) - int(explicit_flex_count))
+        ]
+        selected_group_fragment_ids = [
+            int(fragment_id)
+            for group in selected_groups
+            for fragment_id in list(group.get("fragment_ids", []) or [])
+        ]
+        profile_by_id = {
+            int(item.get("fragment_id", -1)): dict(item or {})
+            for item in supplemental_candidate_profiles
+        }
+        selected_profiles = [
+            profile_by_id[int(fragment_id)]
+            for fragment_id in selected_group_fragment_ids
+            if int(fragment_id) in profile_by_id
         ]
         # Candidate exhaustion is not a pre-assembly blocker. The remaining
         # minimum/preferred gap is carried into residual planning.
 
     selected_fragment_ids = [int(item.get("fragment_id", -1)) for item in selected_profiles]
-    minimum_selected_count = min(
-        len(selected_profiles),
+    minimum_selected_group_count = min(
+        len(selected_groups),
         max(0, int(flex_lower) - int(explicit_flex_count)),
     )
     hard_selected_fragment_ids = [
-        int(item.get("fragment_id", -1))
-        for item in selected_profiles[:minimum_selected_count]
+        int(fragment_id)
+        for group in selected_groups[:minimum_selected_group_count]
+        for fragment_id in list(group.get("fragment_ids", []) or [])
     ]
     preferred_selected_fragment_ids = [
-        int(item.get("fragment_id", -1))
-        for item in selected_profiles[minimum_selected_count:]
+        int(fragment_id)
+        for group in selected_groups[minimum_selected_group_count:]
+        for fragment_id in list(group.get("fragment_ids", []) or [])
     ]
     selected_node_ids = sorted({
         int(node_id)
@@ -387,7 +492,7 @@ def _compute_flex_audit(
         for node_id in list(item.get("source_node_ids", []) or [])
     })
     required_resource_counts: Counter = Counter()
-    for item in selected_profiles:
+    for item in selected_groups:
         required_resource_counts.update({
             str(key): int(value)
             for key, value in dict(item.get("resource_template", {}) or {}).items()
@@ -413,12 +518,15 @@ def _compute_flex_audit(
         "flex_window_source_after_trim": str(source),
         "flex_window_error_after_trim": str(error),
         "bridgehead_info": tuple(int(x) for x in bridgehead_info),
+        "histogram_su12_count": int(counts.get(12, 0)),
         "explicit_flex_count": int(explicit_flex_count),
         "explicit_flex_count_raw": int(explicit_flex_count_raw),
         "hard_explicit_flex_fragment_ids": list(hard_explicit_ids),
         "supplemental_flex_candidate_ids": list(supplemental_candidate_ids),
         "supplemental_flex_candidate_profiles": list(supplemental_candidate_profiles),
+        "supplemental_flex_candidate_groups": list(supplemental_candidate_groups),
         "selected_candidate_fragment_ids": list(selected_fragment_ids),
+        "selected_candidate_groups": list(selected_groups),
         "hard_selected_candidate_fragment_ids": list(hard_selected_fragment_ids),
         "preferred_selected_candidate_fragment_ids": list(preferred_selected_fragment_ids),
         "selected_candidate_node_ids": list(selected_node_ids),
@@ -433,10 +541,10 @@ def _compute_flex_audit(
         "minimum_flex_gap": max(0, int(flex_lower) - int(explicit_flex_count)),
         "preferred_flex_gap": max(0, int(target_flex_count) - int(explicit_flex_count)),
         "maximum_flex_capacity": max(0, int(flex_upper) - int(explicit_flex_count)),
-        "external_candidate_capacity": int(len(supplemental_candidate_profiles)),
-        "external_planned_addition": int(len(selected_profiles)),
+        "external_candidate_capacity": int(len(supplemental_candidate_groups)),
+        "external_planned_addition": int(len(selected_groups)),
         "external_capacity_exhausted": bool(
-            int(len(supplemental_candidate_profiles)) < max(0, int(target_flex_count) - int(explicit_flex_count))
+            int(len(supplemental_candidate_groups)) < max(0, int(target_flex_count) - int(explicit_flex_count))
         ),
         "above_range_excess": max(0, int(explicit_flex_count) - int(flex_upper)),
         "blocked_reason": str(blocked_reason),
@@ -595,9 +703,9 @@ def _flex_reconciliation_contracts(
 ) -> List[Dict[str, Any]]:
     scenario = str(dict(flex_audit or {}).get("scenario", "") or "")
     blocked_reason = str(dict(flex_audit or {}).get("blocked_reason", "") or "")
-    explicit_count = int(dict(flex_audit or {}).get("explicit_flex_count", 0) or 0)
-    target_count = int(dict(flex_audit or {}).get("target_flex_count", 0) or 0)
-    flex_gap = max(0, int(target_count) - int(explicit_count))
+    explicit_count = int(
+        dict(flex_audit or {}).get("explicit_flex_count", 0) or 0
+    )
     contracts: List[Dict[str, Any]] = []
     if str(blocked_reason) == "flex_window_invalid":
         contracts.append({
@@ -633,75 +741,98 @@ def _flex_reconciliation_contracts(
             for item in list(dict(flex_audit or {}).get("supplemental_flex_candidate_profiles", []) or [])
             if dict(item or {})
         ]
-        selected_ids = {
-            int(value)
-            for value in list(dict(flex_audit or {}).get("selected_candidate_fragment_ids", []) or [])
+        selected_groups = [
+            dict(item or {})
+            for item in list(dict(flex_audit or {}).get("selected_candidate_groups", []) or [])
+            if dict(item or {})
+        ]
+        selected_group_by_fragment = {
+            int(fragment_id): group
+            for group in selected_groups
+            for fragment_id in list(group.get("fragment_ids", []) or [])
         }
+        emitted_group_ids: set[str] = set()
         for item in list(candidate_profiles or []):
             fragment_id = int(item.get("fragment_id", -1))
             if fragment_id < 0:
                 continue
             fragment = fragments_by_id.get(int(fragment_id))
-            required_counts = (
-                {
+            selected_group = selected_group_by_fragment.get(int(fragment_id))
+            selected_for_target = selected_group is not None
+            if not selected_for_target:
+                continue
+            if selected_for_target:
+                group_id = str(selected_group.get("group_id", "") or "")
+                if group_id in emitted_group_ids:
+                    continue
+                emitted_group_ids.add(group_id)
+                group_fragment_ids = [
+                    int(value) for value in list(selected_group.get("fragment_ids", []) or [])
+                ]
+                group_fragments = [
+                    fragments_by_id[value]
+                    for value in group_fragment_ids
+                    if value in fragments_by_id
+                ]
+                required_counts = {
                     str(key): int(value)
-                    for key, value in dict(item.get("resource_template", {}) or {}).items()
+                    for key, value in dict(selected_group.get("resource_template", {}) or {}).items()
                     if int(value) > 0
                 }
-                if int(fragment_id) in selected_ids else {}
-            )
-            contracts.append({
-                "contract_id": int(fragment_id),
-                "contract_kind": "mainline_closure" if required_counts else "structural_blocker",
-                "target_role": "flex_chain",
-                "source_fragment_ids": [int(fragment_id)],
-                "source_fragment_classes": [str(getattr(fragment, "class_type", item.get("class_type", "")))],
-                "claimed_source_node_ids": [
+                is_composition = str(selected_group.get("strategy", "")) == "b_plus_b"
+                source_fragment_ids = list(group_fragment_ids)
+                source_fragment_classes = [
+                    str(getattr(value, "class_type", "")) for value in group_fragments
+                ]
+                claimed_source_node_ids = sorted({
                     int(value)
-                    for value in list(getattr(fragment, "claimed_node_ids", []) or item.get("source_node_ids", []) or [])
-                ],
-                "context_node_ids": [int(value) for value in list(getattr(fragment, "context_node_ids", []) or [])],
-                "mainline_slots": [
+                    for group_fragment in group_fragments
+                    for value in list(getattr(group_fragment, "claimed_node_ids", []) or [])
+                })
+                context_node_ids = sorted({
+                    int(value)
+                    for group_fragment in group_fragments
+                    for value in list(getattr(group_fragment, "context_node_ids", []) or [])
+                })
+                mainline_slots = [] if is_composition else [
                     slot.to_dict() if hasattr(slot, "to_dict") else dict(slot or {})
-                    for slot in list(getattr(fragment, "open_mainline_slots", []) or [])
-                ],
-                "branch_slots": [
+                    for group_fragment in group_fragments
+                    for slot in list(getattr(group_fragment, "open_mainline_slots", []) or [])
+                ]
+                branch_slots = [
                     slot.to_dict() if hasattr(slot, "to_dict") else dict(slot or {})
-                    for slot in list(getattr(fragment, "branch_contracts", []) or [])
-                ],
+                    for group_fragment in group_fragments
+                    for slot in list(getattr(group_fragment, "branch_contracts", []) or [])
+                ]
+                contract_kind = "fragment_composition" if is_composition else "mainline_closure"
+                expected_topology = "+".join(
+                    str(getattr(value, "topology_template", "") or "")
+                    for value in group_fragments
+                )
+                reason = "supplemental_flex_candidate"
+                blocker_kind = ""
+            contracts.append({
+                "contract_id": min(source_fragment_ids or [int(fragment_id)]),
+                "contract_kind": str(contract_kind),
+                "target_role": "flex_chain",
+                "source_fragment_ids": list(source_fragment_ids),
+                "source_fragment_classes": list(source_fragment_classes),
+                "claimed_source_node_ids": list(claimed_source_node_ids),
+                "context_node_ids": list(context_node_ids),
+                "mainline_slots": list(mainline_slots),
+                "branch_slots": list(branch_slots),
                 "required_counts": dict(required_counts),
-                "expected_topology": str(getattr(fragment, "topology_template", "") or ""),
-                "reason": "supplemental_flex_candidate" if required_counts else "supplemental_flex_candidate_not_selected",
-                "blocker_kind": "" if required_counts else "supplemental_flex_candidate_not_selected",
+                "expected_topology": str(expected_topology),
+                "reason": str(reason),
+                "blocker_kind": str(blocker_kind),
                 "diagnostics": {
                     "scenario": str(scenario),
                     "candidate_main_kind": str(item.get("main_kind", "")),
                     "candidate_count_role": str(item.get("count_role", "")),
                     "candidate_kind": str(item.get("candidate_kind", "")),
                     "candidate_priority": int(item.get("priority", 99) or 99),
-                    "selected_for_target": bool(int(fragment_id) in selected_ids),
-                },
-            })
-        if int(flex_gap) > int(len(selected_ids)):
-            contracts.append({
-                "contract_id": -1001,
-                "contract_kind": "structural_blocker",
-                "target_role": "flex_chain",
-                "source_fragment_ids": [],
-                "source_fragment_classes": [],
-                "claimed_source_node_ids": [],
-                "context_node_ids": [],
-                "mainline_slots": [],
-                "branch_slots": [],
-                "required_counts": {},
-                "expected_topology": "",
-                "reason": "supplemental_flex_candidate_shortfall",
-                "blocker_kind": "supplemental_flex_candidate_shortfall",
-                "diagnostics": {
-                    "scenario": str(scenario),
-                    "flex_gap": int(flex_gap),
-                    "selected_candidate_count": int(len(selected_ids)),
-                    "uncovered_gap": int(max(0, int(flex_gap) - int(len(selected_ids)))),
+                    "selected_for_target": bool(selected_for_target),
+                    "selection_group": dict(selected_group or {}),
                 },
             })
         return contracts
@@ -725,7 +856,7 @@ def _flex_reconciliation_contracts(
                 "explicit_count": int(explicit_count),
                 "flex_upper": int(dict(flex_audit or {}).get("flex_upper", 0) or 0),
                 "flex_excess": int(max(0, int(explicit_count) - int(dict(flex_audit or {}).get("flex_upper", 0) or 0))),
-                "allowed_conversion_order": ["12_to_11", "10_pair_to_11"],
+                "scored_conversion_candidates": ["12_to_11", "10_pair_to_11_pair"],
             },
         })
         return contracts
@@ -1127,6 +1258,7 @@ def _assemble_external_only(
     flex_audit: Dict[str, Any],
     S_target: Any = None,
     E_target: Any = None,
+    generation_id: int = 0,
 ) -> TopologyAssemblyResult:
     from .assembly_external import assemble_external_topologies
 
@@ -1136,6 +1268,7 @@ def _assemble_external_only(
         S_target=S_target,
         E_target=E_target,
         flex_audit=flex_audit,
+        generation_id=int(generation_id),
     )
 
 
@@ -1145,13 +1278,13 @@ def assemble_topology_units(
     fixed_partition_meta: Optional[Dict[str, Any]] = None,
     S_target: Any = None,
     E_target: Any = None,
+    flex_audit: Optional[Dict[str, Any]] = None,
+    generation_id: int = 0,
 ) -> TopologyAssemblyResult:
     del fixed_partition_meta
     classification_dict = classification.to_dict()
-    flex_audit = _compute_flex_audit(
-        list(nodes or []),
-        classification,
-        enforce=True,
+    flex_audit = dict(flex_audit or {}) or _compute_flex_audit(
+        list(nodes or []), classification, enforce=True
     )
     decision = Stage3FlexDecision(
         scenario=str(flex_audit.get("scenario", "in_range") or "in_range"),
@@ -1180,10 +1313,44 @@ def assemble_topology_units(
             S_target=S_target,
             E_target=E_target,
             flex_audit=flex_audit,
+            generation_id=int(generation_id),
         )
+    assembled_flex_counts = dict(getattr(result, "flex_counts", {}) or {})
+    assembled_flex_bounds = dict(getattr(result, "flex_bounds", {}) or {})
+    effective_flex_count = int(
+        assembled_flex_counts.get(
+            "final", flex_audit.get("explicit_flex_count", 0)
+        )
+        or 0
+    )
+    lower_bound = int(
+        assembled_flex_bounds.get("min", flex_audit.get("flex_lower", 0)) or 0
+    )
+    upper_bound = int(
+        assembled_flex_bounds.get("max", flex_audit.get("flex_upper", 0)) or 0
+    )
+    if not bool(flex_audit.get("enforced", False)):
+        assembled_scenario = "in_range"
+    elif int(effective_flex_count) < int(lower_bound):
+        assembled_scenario = "below_range"
+    elif int(effective_flex_count) > int(upper_bound):
+        assembled_scenario = "above_range"
+    else:
+        assembled_scenario = "in_range"
+    decision.scenario = str(assembled_scenario)
+    decision.effective_flex_count = int(effective_flex_count)
+    decision.lower_bound = int(lower_bound)
+    decision.upper_bound = int(upper_bound)
     result.flex_decision = decision.to_dict()
+    resource_demand = dict(getattr(result, "resource_demand", {}) or {})
     result.requested_counts = {
-        str(key): int(value) for key, value in dict(decision.required_resource_counts or {}).items()
+        str(key): int(value)
+        for key, value in dict(
+            resource_demand.get("hard_required_counts", {})
+            or decision.required_resource_counts
+            or {}
+        ).items()
+        if int(value) > 0
     }
     ledger = result.resource_ledger.to_dict() if hasattr(result.resource_ledger, "to_dict") else dict(result.resource_ledger or {})
     shortages = {

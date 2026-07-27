@@ -3,13 +3,19 @@ from __future__ import annotations
 from copy import deepcopy
 
 import numpy as np
+import pytest
 import torch
 
 from model.inverse.topology.classification.classifier import classify_topology_units
 from model.inverse.topology.conversion_solver import apply_stage3_node_adjustments
 from model.inverse.topology.phase_eval import PHASE_SEQUENCE, _compute_flex_audit, build_stage3_phase_evaluation
 from model.inverse.topology.round_context import round_context_invariants
-from model.inverse.topology.spectrum_rebalance import apply_spectrum_candidate, generate_spectrum_candidates
+from model.inverse.topology.spectrum_rebalance import (
+    DEFAULT_SPECTRUM_WINDOWS,
+    apply_spectrum_candidate,
+    generate_spectrum_candidates,
+    spectrum_candidate_balance_penalty,
+)
 from model.inverse.topology.stage3_state_machine import _residual_contracts, plan_stage3_state_machine
 from model.inverse.topology.stage3_models import (
     Stage3AdjustmentPlan,
@@ -26,6 +32,16 @@ def _histogram(nodes):
     for node in nodes:
         H[int(node.su_type)] += 1
     return H
+
+
+def _nodes_from_histogram(H):
+    nodes = []
+    global_id = 0
+    for su_type, count in enumerate(torch.clamp(H.detach().cpu(), min=0).long().tolist()):
+        for _ in range(int(count)):
+            nodes.append(make_node(global_id, su_type))
+            global_id += 1
+    return nodes
 
 
 def test_phase_evaluation_is_pure_and_builds_round_ownership() -> None:
@@ -95,13 +111,169 @@ def test_spectrum_candidates_use_only_remaining_ids_and_do_not_reserve_su24() ->
         aromatic_donor_ids_by_su={10: [], 12: [], 13: []},
         candidate_limit=8,
         max_primary_adjustments=10,
+        E_target=torch.tensor([500.0, 520.0]),
     )
 
     assert candidates
-    first = candidates[0]
-    assert all(int(op["node_id"]) in {101, 102} for op in first.operations)
-    assert all(int(op["from_su"]) == 23 and int(op["to_su"]) == 24 for op in first.operations)
+    atomic = candidates[0]
+    assert all(int(op["node_id"]) in {101, 102} for candidate in candidates for op in candidate.operations)
+    assert all(
+        int(op["from_su"]) == 23 and int(op["to_su"]) == 24
+        for candidate in candidates for op in candidate.operations
+    )
+    assert atomic.primary_adjustment_count == 1
+    assert atomic.diagnostics["bundle_kind"] == "atomic"
     assert audit["does_not_reserve_su24"] is True
+
+
+def test_spectrum_windows_match_authoritative_su_ranges() -> None:
+    assert DEFAULT_SPECTRUM_WINDOWS == {
+        11: (139.0, 165.0, 139.0, 165.0),
+        12: (126.0, 142.0, 126.0, 142.0),
+        13: (100.0, 131.0, 100.0, 131.0),
+        22: (8.0, 25.0, 8.0, 25.0),
+        23: (10.0, 45.0, 10.0, 45.0),
+        24: (15.0, 60.0, 15.0, 60.0),
+    }
+
+
+def test_spectrum_bundle_uses_atomic_progressive_and_full_candidates() -> None:
+    H = torch.zeros(600, dtype=torch.long)
+    H[13] = 460
+    H[22] = 20
+    ppm = np.linspace(0.0, 200.0, 2001)
+    diff = np.zeros_like(ppm)
+    diff[(ppm >= 136.0) & (ppm <= 145.0)] = 8.0
+    diff[(ppm >= 10.0) & (ppm <= 21.0)] = -8.0
+
+    candidates, audit = generate_spectrum_candidates(
+        H=H,
+        difference_spectrum={"ppm": ppm, "diff": diff, "r2": 0.5},
+        closure_pool_ids_by_su={22: list(range(100, 120))},
+        aromatic_donor_ids_by_su={},
+        candidate_limit=4,
+        max_primary_adjustments=10,
+        E_target=torch.tensor([500.0, 520.0]),
+    )
+
+    assert [candidate.primary_adjustment_count for candidate in candidates] == [1, 4, 7, 10]
+    assert all(int(op["from_su"]) == 22 for candidate in candidates for op in candidate.operations)
+    assert all(int(op["to_su"]) in {11, 12} for candidate in candidates for op in candidate.operations)
+    assert candidates[0].diagnostics["bundle_strategy"] == "direct_difference_spectrum_proportion"
+    assert candidates[0].diagnostics["bundle_kind"] == "atomic"
+    assert candidates[-1].diagnostics["bundle_kind"] == "full"
+    assert audit["carbon_batch_cap"] == 10
+    assert audit["effective_batch_cap"] == 10
+    assert audit["ranking_policy"] == "atomic_then_progressive_direct_proportional_bundles"
+    assert audit["spectrum_first_ranking"] is True
+    assert audit["h_soft_window_aware_ranking"] is True
+
+
+def test_spectrum_bundle_compensates_low_h_with_remaining_su11_only_outside_window() -> None:
+    H = torch.zeros(600, dtype=torch.long)
+    H[11] = 8
+    H[13] = 474
+    H[22] = 10
+    H[23] = 8
+    ppm = np.linspace(0.0, 200.0, 2001)
+    diff = np.zeros_like(ppm)
+    diff[(ppm >= 136.0) & (ppm <= 145.0)] = 8.0
+    diff[(ppm >= 10.0) & (ppm <= 21.0)] = -8.0
+
+    candidates, audit = generate_spectrum_candidates(
+        H=H,
+        difference_spectrum={"ppm": ppm, "diff": diff, "r2": 0.5},
+        closure_pool_ids_by_su={
+            11: list(range(200, 208)),
+            22: list(range(100, 110)),
+        },
+        aromatic_donor_ids_by_su={},
+        candidate_limit=2,
+        max_primary_adjustments=10,
+        max_h_compensation_ops=8,
+        E_target=torch.tensor([500.0, 520.0]),
+    )
+
+    assert len(candidates) == 2
+    atomic, full = candidates
+    assert full.candidate_id.startswith("spectrum:proportional_full:10:")
+    assert full.primary_adjustment_count == 10
+    assert full.diagnostics["h_compensation_count"] == 8
+    assert full.diagnostics["h_compensation"]["h_after_primary"] == pytest.approx(490.0)
+    assert full.diagnostics["h_compensation"]["h_after_compensation"] == pytest.approx(506.0)
+    assert full.diagnostics["h_compensation"]["complete"] is True
+    assert len(full.operations) == 18
+    assert all(
+        int(op["from_su"]) == 11 and int(op["to_su"]) == 23
+        for op in full.operations[10:]
+    )
+    assert len({int(op["node_id"]) for op in full.operations}) == 18
+
+    assert atomic.primary_adjustment_count == 1
+    assert atomic.diagnostics["h_compensation_count"] == 0
+    assert atomic.diagnostics["h_compensation"]["h_after_primary"] == pytest.approx(517.0)
+    assert atomic.diagnostics["h_compensation"]["reason"] == "not_required"
+    assert audit["max_h_compensation_ops"] == 8
+
+
+def test_spectrum_peak_prominence_can_dominate_mixed_signed_window() -> None:
+    H = torch.zeros(40, dtype=torch.long)
+    H[22] = 2
+    ppm = np.linspace(0.0, 200.0, 2001)
+    diff = np.zeros_like(ppm)
+    diff[(ppm >= 129.0) & (ppm <= 145.0)] = -1.0
+    diff[np.argmin(np.abs(ppm - 140.0))] = 50.0
+    diff[(ppm >= 10.0) & (ppm <= 21.0)] = -2.0
+
+    candidates, audit = generate_spectrum_candidates(
+        H=H,
+        difference_spectrum={"ppm": ppm, "diff": diff, "r2": 0.5},
+        closure_pool_ids_by_su={22: [100, 101]},
+        aromatic_donor_ids_by_su={},
+        candidate_limit=1,
+        E_target=torch.tensor([500.0, 520.0]),
+    )
+
+    assert len(candidates) == 1
+    assert all(int(op["from_su"]) == 22 for op in candidates[0].operations)
+    assert all(int(op["to_su"]) in {11, 12} for op in candidates[0].operations)
+    assert audit["urgency_by_su"]["11"]["direction"] == "deficit"
+    assert audit["urgency_by_su"]["11"]["deficit_score"] > audit["urgency_by_su"]["11"]["surplus_score"]
+
+
+def test_spectrum_bundle_apportions_multiple_sources_and_targets() -> None:
+    H = torch.zeros(600, dtype=torch.long)
+    H[22] = 20
+    H[23] = 20
+    ppm = np.linspace(0.0, 200.0, 2001)
+    diff = np.zeros_like(ppm)
+    diff[(ppm >= 10.0) & (ppm <= 21.0)] = -8.0
+    diff[(ppm >= 26.0) & (ppm <= 29.0)] = -4.0
+    diff[(ppm >= 136.0) & (ppm <= 145.0)] = 8.0
+    diff[(ppm >= 105.0) & (ppm <= 121.0)] = 4.0
+
+    candidates, _ = generate_spectrum_candidates(
+        H=H,
+        difference_spectrum={"ppm": ppm, "diff": diff},
+        closure_pool_ids_by_su={
+            22: list(range(100, 120)),
+            23: list(range(200, 220)),
+        },
+        aromatic_donor_ids_by_su={},
+        candidate_limit=2,
+        max_primary_adjustments=10,
+        E_target=torch.tensor([500.0, 520.0]),
+    )
+
+    full = candidates[-1]
+    source_counts = full.diagnostics["source_counts"]
+    target_counts = full.diagnostics["target_counts"]
+    assert full.primary_adjustment_count == 10
+    assert int(source_counts["22"]) > int(source_counts["23"])
+    assert int(target_counts["11"]) >= int(target_counts["13"])
+    assert sum(int(value) for value in source_counts.values()) == 10
+    assert sum(int(value) for value in target_counts.values()) == 10
+    assert sum(int(value) for value in full.diagnostics["conversion_counts"].values()) == 10
 
 
 def test_spectrum_candidate_application_changes_su_only_and_preserves_hop1() -> None:
@@ -119,6 +291,7 @@ def test_spectrum_candidate_application_changes_su_only_and_preserves_hop1() -> 
         closure_pool_ids_by_su={23: [101], 24: []},
         aromatic_donor_ids_by_su={},
         candidate_limit=1,
+        E_target=torch.tensor([50.0, 0.0]),
     )
     before_hop1_ids = deepcopy(node.hop1_ids)
     before_hop1_su = deepcopy(node.hop1_su)
@@ -132,8 +305,8 @@ def test_spectrum_candidate_application_changes_su_only_and_preserves_hop1() -> 
     assert H_after[23].item() == 0 and H_after[24].item() == 1
 
 
-def test_residual_flex_contract_prefers_three_and_never_uses_one_su23() -> None:
-    pool = {11: [1, 2, 3, 4], 22: [], 23: [10, 11, 12, 13, 14], 24: []}
+def test_residual_flex_contract_prefers_three_then_uses_legal_one_su23_fallback() -> None:
+    pool = {11: [1, 2, 3, 4], 22: [], 23: [10, 11, 12, 13], 24: []}
     contracts = _residual_contracts(
         pool,
         residual_flex_preferred_23=3,
@@ -145,7 +318,7 @@ def test_residual_flex_contract_prefers_three_and_never_uses_one_su23() -> None:
     assert flex
     lengths = [int(item.required_counts[23]) for item in flex]
     assert lengths[0] == 3
-    assert all(length >= 2 for length in lengths)
+    assert lengths == [3, 1]
 
 
 def test_above_range_uses_authorized_donor_then_requires_rebuild() -> None:
@@ -194,7 +367,7 @@ def test_above_range_uses_authorized_donor_then_requires_rebuild() -> None:
     } == before_hop1
 
 
-def test_remaining_su24_requires_rebuild_before_completion() -> None:
+def test_one_remaining_su24_is_tolerated_without_rebuild() -> None:
     nodes = [make_node(1, 24)]
     plan = plan_stage3_resource_adjustments(
         _histogram(nodes),
@@ -202,10 +375,227 @@ def test_remaining_su24_requires_rebuild_before_completion() -> None:
         enable_post_external_spectrum=False,
     )
 
+    assert plan.reason == "stage3_complete"
+    assert plan.plan_kind == "stage3_state_machine_complete"
+    assert plan.phase == "complete"
+    assert plan.phase_result.rebuild_required is False
+    assert plan.diagnostics["tolerated_remaining_ids_by_su"] == {"24": [1]}
+
+
+def _external_budget_fixture():
+    nodes = [make_node(10, 12), make_node(11, 12), make_node(12, 13)]
+    phase = build_stage3_phase_evaluation(
+        nodes,
+        classification=classify_topology_units(nodes),
+    )
+    phase.flex_reconciliation_block_reason = ""
+    phase.flex_audit = {"enforced": False}
+    phase.canonical_contracts = [
+        {
+            "contract_id": index,
+            "contract_kind": "mainline_closure",
+            "target_role": role,
+            "source_fragment_ids": [],
+            "claimed_source_node_ids": [],
+            "context_node_ids": [],
+            "mainline_slots": [],
+            "branch_slots": [],
+            "required_counts": {"11": 1},
+            "expected_topology": f"external-{index}",
+            "reason": "test_external_budget",
+            "blocker_kind": "",
+            "diagnostics": {},
+        }
+        for index, role in enumerate(
+            ("flex_chain", "fatty_ring", "side_chain"),
+            start=1,
+        )
+    ]
+    return nodes, phase
+
+
+def test_external_resource_conversion_forces_fresh_physical_assembly(monkeypatch) -> None:
+    nodes, phase = _external_budget_fixture()
+    monkeypatch.setattr(
+        "model.inverse.topology.stage3_state_machine._evaluate_external_phases",
+        lambda **kwargs: kwargs["phase_eval"],
+    )
+
+    plan = plan_stage3_state_machine(
+        phase_eval=phase,
+        H=_histogram(nodes),
+        nodes=nodes,
+        E_target=torch.tensor([0.0, 2.0]),
+        enable_post_external_spectrum=False,
+        max_primary_adjustments_per_stage=10,
+    )
+
     assert plan.reason == "stage3_rebuild_required"
-    assert plan.plan_kind == "residual_su24_to_su23_terminalization"
-    assert plan.phase == "residual_resource_self_closure"
-    assert plan.phase_result.rebuild_required is True
+    assert plan.phase == "external_topology_assembly"
+    assert plan.histogram_adjustment_plan.primary_adjustment_count == 1
+    assert plan.phase_result.phase_completed is False
+    assert plan.diagnostics["external_stage_completed"] is False
+    assert plan.diagnostics["physical_materialization_required_after_rebuild"] is True
+    assert plan.diagnostics["external_rebuild_reason"] == (
+        "resource_conversion_requires_fresh_assembly"
+    )
+    assert all(
+        transaction.claimed_resource_ids == {}
+        and transaction.product_node_ids == []
+        and transaction.slot_assignments == []
+        for transaction in plan.phase_result.transactions
+        if transaction.transaction_origin != "assembly_snapshot"
+    )
+
+
+def test_available_resources_do_not_upgrade_pending_contract_to_product(monkeypatch) -> None:
+    nodes = [make_node(1, 11)]
+    phase = build_stage3_phase_evaluation(
+        nodes,
+        classification=classify_topology_units(nodes),
+    )
+    phase.flex_reconciliation_block_reason = ""
+    phase.flex_audit = {"enforced": False}
+    phase.canonical_contracts = [{
+        "contract_id": 7,
+        "contract_kind": "mainline_closure",
+        "target_role": "flex_chain",
+        "source_fragment_ids": [],
+        "claimed_source_node_ids": [],
+        "context_node_ids": [],
+        "mainline_slots": [{
+            "slot_id": "external:7:right:F1",
+            "kind": "F1",
+            "anchor_node_id": -1,
+            "required_su_sequence": [11],
+            "state": "OPEN",
+        }],
+        "branch_slots": [],
+        "required_counts": {"11": 1},
+        "expected_topology": "OPEN-11",
+        "reason": "main_pool_shortage",
+        "blocker_kind": "",
+        "diagnostics": {"materialization_failure": {"validation_reason": "test"}},
+    }]
+    monkeypatch.setattr(
+        "model.inverse.topology.stage3_state_machine._evaluate_external_phases",
+        lambda **kwargs: kwargs["phase_eval"],
+    )
+
+    plan = plan_stage3_state_machine(
+        phase_eval=phase,
+        H=_histogram(nodes),
+        nodes=nodes,
+        enable_post_external_spectrum=False,
+    )
+
+    assert plan.reason == "phase_resource_infeasible"
+    failed = plan.phase_result.infeasibility_proof["failed_contract"]
+    assert failed["proof"]["reason"] == "external_physical_materialization_failed"
+    assert failed["proof"]["missing_counts"] == {}
+    assert plan.diagnostics["external_stage_completed"] is False
+
+
+def test_open_or_provisional_external_product_cannot_complete_stage3(monkeypatch) -> None:
+    nodes = [make_node(1, 11)]
+    phase = build_stage3_phase_evaluation(
+        nodes,
+        classification=classify_topology_units(nodes),
+    )
+    phase.flex_reconciliation_block_reason = ""
+    phase.flex_audit = {"enforced": False}
+    phase.assembly_view = {
+        **dict(phase.assembly_view or {}),
+        "products": [{
+            "product_id": "provisional:1",
+            "product_type": "flex_chain",
+            "fixed_source_node_ids": [],
+            "claimed_resource_ids_by_su": {"11": [1]},
+            "topology_notation": "OPEN-11",
+            "node_id_notation": "OPEN-1",
+            "closed": False,
+            "provisional": True,
+        }],
+    }
+    monkeypatch.setattr(
+        "model.inverse.topology.stage3_state_machine._evaluate_external_phases",
+        lambda **kwargs: kwargs["phase_eval"],
+    )
+
+    plan = plan_stage3_state_machine(
+        phase_eval=phase,
+        H=_histogram(nodes),
+        nodes=nodes,
+        enable_post_external_spectrum=False,
+    )
+
+    assert plan.reason == "phase_resource_infeasible"
+    assert plan.blocked_reason == "external_physical_product_validation_failed"
+    errors = plan.phase_result.infeasibility_proof["materialization_errors"]
+    assert errors[0]["reasons"] == [
+        "product_not_closed",
+        "provisional_product_forbidden",
+        "topology_not_fully_materialized",
+        "node_identity_not_fully_materialized",
+    ]
+
+
+def test_external_conversion_budget_does_not_mark_pending_roles_complete(monkeypatch) -> None:
+    nodes, phase = _external_budget_fixture()
+    monkeypatch.setattr(
+        "model.inverse.topology.stage3_state_machine._evaluate_external_phases",
+        lambda **kwargs: kwargs["phase_eval"],
+    )
+
+    plan = plan_stage3_state_machine(
+        phase_eval=phase,
+        H=_histogram(nodes),
+        nodes=nodes,
+        E_target=torch.tensor([0.0, 2.0]),
+        enable_post_external_spectrum=False,
+        max_primary_adjustments_per_stage=2,
+    )
+
+    assert plan.reason == "stage3_rebuild_required"
+    assert plan.phase == "external_topology_assembly"
+    assert plan.histogram_adjustment_plan.primary_adjustment_count == 1
+    assert plan.phase_result.phase_completed is False
+    assert plan.diagnostics["external_stage_completed"] is False
+    assert plan.diagnostics["external_remaining_pending"] == 3
+    assert plan.diagnostics["external_rebuild_reason"] == (
+        "resource_conversion_requires_fresh_assembly"
+    )
+
+
+def test_residual_does_not_synthesize_products_from_only_aromatic_donors(monkeypatch) -> None:
+    nodes = [make_node(node_id, 12) for node_id in range(1, 9)]
+    phase = build_stage3_phase_evaluation(
+        nodes,
+        classification=classify_topology_units(nodes),
+    )
+    phase.flex_reconciliation_block_reason = ""
+    phase.flex_audit = {"enforced": False}
+    phase.flex_bounds = {}
+    phase.flex_counts = {}
+    phase.canonical_contracts = []
+    monkeypatch.setattr(
+        "model.inverse.topology.stage3_state_machine._evaluate_external_phases",
+        lambda **kwargs: kwargs["phase_eval"],
+    )
+
+    plan = plan_stage3_state_machine(
+        phase_eval=phase,
+        H=_histogram(nodes),
+        nodes=nodes,
+        E_target=torch.tensor([0.0, 1.0]),
+        enable_post_external_spectrum=False,
+        max_primary_adjustments_per_stage=10,
+    )
+
+    assert plan.reason == "stage3_complete"
+    assert plan.phase == "complete"
+    assert plan.histogram_adjustment_plan is None
+    assert plan.phase_result.primary_adjustment_count == 0
 
 
 def _spectrum_fixture():
@@ -222,7 +612,7 @@ class _SpectrumAdjuster:
         self.candidates = list(candidate) if isinstance(candidate, (list, tuple)) else [candidate]
 
     def plan_topology_resource_adjustments(self, **kwargs):
-        if kwargs.get("skip_post_external_spectrum"):
+        if kwargs.get("post_external_resume_phase") != "remaining_pool_spectrum_rebalance":
             return Stage3AdjustmentPlan(
                 ok=True,
                 reason="stage3_complete",
@@ -259,27 +649,119 @@ def test_block_c_accepts_only_significant_spectrum_candidate() -> None:
         primary_adjustment_count=1,
     )
 
+    def rebuild(**kwargs):
+        return (
+            _nodes_from_histogram(kwargs["H_seed"]),
+            kwargs["H_seed"],
+            {
+                "ppm": ppm,
+                "diff": improved,
+                "r2": 0.56,
+                "source_stage": "layer2",
+                "spectral_contract": "template_center_mu",
+                "evaluation_hwhm": 1.0,
+            },
+            0.56,
+        )
+
     result = run_block_c_resource_adjustment_loop_impl(
         _SpectrumAdjuster(candidate),
         H,
         [node],
         E_target=None,
-        difference_spectrum={"ppm": ppm, "diff": diff, "r2": 0.50},
-        rebuild_fn=lambda **kwargs: (
-            kwargs["identity_seed_nodes"],
-            kwargs["H_seed"],
-            {"ppm": ppm, "diff": improved, "r2": 0.56},
-            0.56,
-        ),
+        difference_spectrum={
+            "ppm": ppm,
+            "diff": diff,
+            "r2": 0.50,
+            "source_stage": "layer2",
+            "spectral_contract": "template_center_mu",
+            "evaluation_hwhm": 1.0,
+            "effective_build_variant": 7,
+        },
+        rebuild_fn=rebuild,
         validate_fn=lambda **_kwargs: (True, "ok"),
-        max_stage3_iterations=1,
         spectrum_min_r2_gain=0.02,
-        spectrum_min_window_loss_gain=0.1,
     )
 
     assert result.accepted_cycles == 1
     assert result.nodes[0].su_type == 24
-    assert result.cycles[0].acceptance_reason == "significant_r2_and_window_gain"
+    assert result.nodes[0].global_id == 0
+    assert result.cycles[0].acceptance_reason == "layer2_r2_gain_threshold_met"
+    assert result.cycles[0].diagnostics["baseline_layer2_r2"] == 0.50
+    assert result.cycles[0].diagnostics["baseline_build_variant"] == 7
+
+
+def test_block_c_rejects_post_layer3_spectrum_as_layer2_baseline() -> None:
+    ppm, diff, _ = _spectrum_fixture()
+    node = make_node(101, 23)
+    H = _histogram([node])
+    candidate = Stage3SpectrumCandidate(
+        candidate_id="wrong-baseline-stage",
+        histogram_signature="wrong-baseline-stage-histogram",
+        inverse_signature="wrong-baseline-stage-inverse",
+        operations=[{"node_id": 101, "from_su": 23, "to_su": 24}],
+        target_su_types=[23, 24],
+        primary_adjustment_count=1,
+    )
+    rebuild_calls = []
+
+    result = run_block_c_resource_adjustment_loop_impl(
+        _SpectrumAdjuster(candidate),
+        H,
+        [node],
+        E_target=None,
+        difference_spectrum={
+            "ppm": ppm,
+            "diff": diff,
+            "r2": 0.80,
+            "source_stage": "post_layer3",
+        },
+        rebuild_fn=lambda **kwargs: rebuild_calls.append(kwargs) or (),
+        validate_fn=lambda **_kwargs: (True, "ok"),
+    )
+
+    assert result.accepted_cycles == 0
+    assert rebuild_calls == []
+    baseline = result.cycles[0].plan["diagnostics"]["spectrum_layer2_baseline"]
+    assert baseline["valid"] is False
+    assert baseline["reason"] == "spectrum_baseline_is_not_layer2"
+
+
+def test_block_c_rejects_mixed_layer2_spectral_contract() -> None:
+    ppm, diff, _ = _spectrum_fixture()
+    node = make_node(101, 23)
+    H = _histogram([node])
+    candidate = Stage3SpectrumCandidate(
+        candidate_id="mixed-contract",
+        histogram_signature="mixed-contract-histogram",
+        inverse_signature="mixed-contract-inverse",
+        operations=[{"node_id": 101, "from_su": 23, "to_su": 24}],
+        target_su_types=[23, 24],
+        primary_adjustment_count=1,
+    )
+    rebuild_calls = []
+
+    result = run_block_c_resource_adjustment_loop_impl(
+        _SpectrumAdjuster(candidate),
+        H,
+        [node],
+        E_target=None,
+        difference_spectrum={
+            "ppm": ppm,
+            "diff": diff,
+            "r2": 0.80,
+            "source_stage": "layer2",
+            "spectral_contract": "g2s_layer3",
+        },
+        rebuild_fn=lambda **kwargs: rebuild_calls.append(kwargs) or (),
+        validate_fn=lambda **_kwargs: (True, "ok"),
+    )
+
+    assert result.accepted_cycles == 0
+    assert rebuild_calls == []
+    baseline = result.cycles[0].plan["diagnostics"]["spectrum_layer2_baseline"]
+    assert baseline["valid"] is False
+    assert baseline["reason"] == "spectrum_baseline_contract_mismatch"
 
 
 def test_block_c_restores_context_for_selected_best_spectrum_candidate() -> None:
@@ -312,9 +794,16 @@ def test_block_c_restores_context_for_selected_best_spectrum_candidate() -> None
             context["candidate"] = "last"
             r2 = 0.55
         return (
-            kwargs["identity_seed_nodes"],
+            _nodes_from_histogram(kwargs["H_seed"]),
             kwargs["H_seed"],
-            {"ppm": ppm, "diff": improved, "r2": r2},
+            {
+                "ppm": ppm,
+                "diff": improved,
+                "r2": r2,
+                "source_stage": "layer2",
+                "spectral_contract": "template_center_mu",
+                "evaluation_hwhm": 1.0,
+            },
             r2,
         )
 
@@ -323,14 +812,19 @@ def test_block_c_restores_context_for_selected_best_spectrum_candidate() -> None
         H,
         [node],
         E_target=None,
-        difference_spectrum={"ppm": ppm, "diff": diff, "r2": 0.50},
+        difference_spectrum={
+            "ppm": ppm,
+            "diff": diff,
+            "r2": 0.50,
+            "source_stage": "layer2",
+            "spectral_contract": "template_center_mu",
+            "evaluation_hwhm": 1.0,
+        },
         rebuild_fn=rebuild,
         validate_fn=lambda **_kwargs: (True, "ok"),
         context_snapshot_fn=lambda: dict(context),
         context_restore_fn=lambda snapshot: (context.clear(), context.update(snapshot)),
-        max_stage3_iterations=1,
         spectrum_min_r2_gain=0.02,
-        spectrum_min_window_loss_gain=0.1,
     )
 
     assert result.accepted_cycles == 1
@@ -356,9 +850,16 @@ def test_block_c_rolls_back_weak_spectrum_candidate_and_continues() -> None:
     def weak_rebuild(**kwargs):
         context["candidate"] = "weak"
         return (
-            kwargs["identity_seed_nodes"],
+            _nodes_from_histogram(kwargs["H_seed"]),
             kwargs["H_seed"],
-            {"ppm": ppm, "diff": improved, "r2": 0.501},
+            {
+                "ppm": ppm,
+                "diff": improved,
+                "r2": 0.501,
+                "source_stage": "layer2",
+                "spectral_contract": "template_center_mu",
+                "evaluation_hwhm": 1.0,
+            },
             0.501,
         )
 
@@ -367,14 +868,19 @@ def test_block_c_rolls_back_weak_spectrum_candidate_and_continues() -> None:
         H,
         [node],
         E_target=None,
-        difference_spectrum={"ppm": ppm, "diff": diff, "r2": 0.50},
+        difference_spectrum={
+            "ppm": ppm,
+            "diff": diff,
+            "r2": 0.50,
+            "source_stage": "layer2",
+            "spectral_contract": "template_center_mu",
+            "evaluation_hwhm": 1.0,
+        },
         rebuild_fn=weak_rebuild,
         validate_fn=lambda **_kwargs: (True, "ok"),
         context_snapshot_fn=lambda: dict(context),
         context_restore_fn=lambda snapshot: (context.clear(), context.update(snapshot)),
-        max_stage3_iterations=1,
         spectrum_min_r2_gain=0.02,
-        spectrum_min_window_loss_gain=0.1,
     )
 
     assert result.stop_reason == "stage3_complete"
@@ -383,3 +889,157 @@ def test_block_c_rolls_back_weak_spectrum_candidate_and_continues() -> None:
     assert context == {"candidate": "baseline"}
     rejected = result.cycles[0].plan["diagnostics"]["rejected_spectrum_candidates"]
     assert rejected[0]["significant"] is False
+
+
+def test_block_c_uses_saved_layer2_baseline_without_noop_rebuild() -> None:
+    ppm, diff, improved = _spectrum_fixture()
+    node = make_node(101, 23)
+    H = _histogram([node])
+    candidate = Stage3SpectrumCandidate(
+        candidate_id="variant-only",
+        histogram_signature="variant-only-histogram",
+        inverse_signature="variant-only-inverse",
+        operations=[{"node_id": 101, "from_su": 23, "to_su": 24}],
+        target_su_types=[23, 24],
+        primary_adjustment_count=1,
+    )
+
+    rebuild_phases = []
+
+    def rebuild(**kwargs):
+        rebuild_phases.append(kwargs["phase"])
+        assert kwargs["build_variant"] == 7
+        return (
+            _nodes_from_histogram(kwargs["H_seed"]),
+            kwargs["H_seed"],
+            {
+                "ppm": ppm,
+                "diff": improved,
+                "r2": 0.56,
+                "source_stage": "layer2",
+                "spectral_contract": "template_center_mu",
+                "evaluation_hwhm": 1.0,
+            },
+            0.56,
+        )
+
+    result = run_block_c_resource_adjustment_loop_impl(
+        _SpectrumAdjuster(candidate),
+        H,
+        [node],
+        E_target=None,
+        difference_spectrum={
+            "ppm": ppm,
+            "diff": diff,
+            "r2": 0.50,
+            "source_stage": "layer2",
+            "spectral_contract": "template_center_mu",
+            "evaluation_hwhm": 1.0,
+            "effective_build_variant": 7,
+        },
+        rebuild_fn=rebuild,
+        validate_fn=lambda **_kwargs: (True, "ok"),
+        spectrum_min_r2_gain=0.02,
+    )
+
+    assert result.accepted_cycles == 1
+    assert rebuild_phases == ["remaining_pool_spectrum_rebalance"]
+    accepted = result.cycles[0].diagnostics["evaluated_candidates"][0]
+    assert accepted["r2_before"] == 0.50
+    assert accepted["r2_after"] == 0.56
+    assert accepted["r2_gain"] == pytest.approx(0.06)
+
+
+def test_block_c_spectrum_gain_outranks_h_balance_penalty(
+    monkeypatch,
+) -> None:
+    nodes = [make_node(100 + index, 22) for index in range(10)]
+    H = torch.zeros(600, dtype=torch.long)
+    H[13] = 490
+    H[22] = 10
+    candidate = Stage3SpectrumCandidate(
+        candidate_id="spectrum:22:11:10",
+        histogram_signature="h-loss-histogram",
+        inverse_signature="h-loss-inverse",
+        operations=[
+            {"node_id": 100 + index, "from_su": 22, "to_su": 11}
+            for index in range(10)
+        ],
+        target_su_types=[11, 22],
+        primary_adjustment_count=10,
+    )
+    monkeypatch.setattr(
+        "model.inverse.layer4.inverse_layer4_block_c.spectrum_window_loss",
+        lambda diff, _types: 0.0 if dict(diff or {}).get("trial") else 10.0,
+    )
+
+    def rebuild(**kwargs):
+        return (
+            _nodes_from_histogram(kwargs["H_seed"]),
+            kwargs["H_seed"],
+            {
+                "r2": 0.56,
+                "trial": True,
+                "source_stage": "layer2",
+                "spectral_contract": "template_center_mu",
+                "evaluation_hwhm": 1.0,
+            },
+            0.56,
+        )
+
+    result = run_block_c_resource_adjustment_loop_impl(
+        _SpectrumAdjuster(candidate),
+        H,
+        nodes,
+        E_target=torch.tensor([0.0, 520.0]),
+        difference_spectrum={
+            "r2": 0.50,
+            "source_stage": "layer2",
+            "spectral_contract": "template_center_mu",
+            "evaluation_hwhm": 1.0,
+        },
+        rebuild_fn=rebuild,
+        validate_fn=lambda **_kwargs: (True, "ok"),
+        spectrum_min_r2_gain=0.05,
+    )
+
+    assert result.stop_reason == "stage3_complete"
+    assert result.accepted_cycles == 1
+    assert int(result.H[22].item()) == 0
+    assert int(result.H[11].item()) == 10
+    diagnostics = result.cycles[0].diagnostics
+    assert diagnostics["r2_gain"] > 0.05
+    assert diagnostics["balance_penalty"] > 0.0
+    assert diagnostics["balanced_r2_gain"] < 0.05
+    assert diagnostics["required_r2_gain"] == 0.05
+
+
+def test_spectrum_h_balance_is_unpenalized_inside_three_percent_window() -> None:
+    H_before = torch.zeros(600, dtype=torch.long)
+    H_before[13] = 502
+    H_before[22] = 5
+    H_after_four = H_before.detach().clone()
+    H_after_four[22] -= 4
+    H_after_four[11] += 4
+    H_after_five = H_before.detach().clone()
+    H_after_five[22] -= 5
+    H_after_five[11] += 5
+
+    inside = spectrum_candidate_balance_penalty(
+        H_before=H_before,
+        H_after=H_after_four,
+        E_target=torch.tensor([0.0, 520.0]),
+    )
+    outside = spectrum_candidate_balance_penalty(
+        H_before=H_before,
+        H_after=H_after_five,
+        E_target=torch.tensor([0.0, 520.0]),
+    )
+
+    assert inside["h_before"] == 517.0
+    assert inside["h_after"] == 505.0
+    assert inside["h_penalty"] == 0.0
+    assert inside["h_compensation_suppressed_within_window"] is True
+    assert outside["h_after"] == 502.0
+    assert outside["h_penalty"] > 0.0
+    assert outside["h_compensation_required"] is True

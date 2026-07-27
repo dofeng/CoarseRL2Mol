@@ -37,7 +37,7 @@ def test_double19d2_supports_all_major_component_combinations() -> None:
     # M + N -> B+
     center_b = make_node(520, 19, target_hop1_degree=2, special_anchor_mode="double", target_fixed_anchor_count=2)
     c2_b = make_node(522, 2)
-    c31_b = make_node(531, 31)
+    c31_b = make_node(531, 29)
     b9 = make_node(5299, 9)
     b_side = make_node(540, 19, target_hop1_degree=2, special_anchor_mode="single")
     connect(center_b, c2_b, fixed=True)

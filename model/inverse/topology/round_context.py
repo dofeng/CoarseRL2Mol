@@ -56,7 +56,8 @@ def _fixed_fragment_ids(fragment: Dict[str, Any]) -> Tuple[Set[int], Set[int]]:
     source_ids = _ids(fragment.get("source_node_ids", []) or [])
     claimed_ids = _ids(fragment.get("claimed_node_ids", []) or [])
     context_ids = _ids(fragment.get("context_node_ids", []) or [])
-    fixed_ids = _ids(evidence.get("fixed_hop1_ids", []) or [])
+    evidence_fixed_ids = _ids(evidence.get("fixed_hop1_ids", []) or [])
+    fixed_ids = set(evidence_fixed_ids)
     fixed_ids.update(_ids(evidence.get("fixed_source_node_ids", []) or []))
     fixed_ids.update(_ids(evidence.get("center_node_ids", []) or []))
     # atomic_group_ids names groups; ownership follows their explicit members.
@@ -79,16 +80,19 @@ def _fixed_fragment_ids(fragment: Dict[str, Any]) -> Tuple[Set[int], Set[int]]:
         if item.get("node_id") is not None and bool(item.get("is_fixed", False))
     )
 
-    # A fragment center is always owned. Neighbor IDs are owned only when the
-    # classifier explicitly claimed them or marked them fixed/atomic.
+    # Evidence can mention neighboring support nodes that the classifier
+    # deliberately released. Only explicit source/claim members are owned by
+    # this fragment; released evidence neighbors remain support context.
+    explicit_owned_ids = source_ids | claimed_ids
+    released_evidence_ids = fixed_ids - explicit_owned_ids
+    fixed_ids.intersection_update(explicit_owned_ids)
     fragment_id = fragment.get("fragment_id")
     if fragment_id is not None:
         try:
             fixed_ids.add(int(fragment_id))
         except (TypeError, ValueError):
             pass
-    fixed_ids.intersection_update(source_ids | claimed_ids | fixed_ids)
-    context_ids.update(nonfixed_neighbor_ids)
+    context_ids.update(nonfixed_neighbor_ids | released_evidence_ids)
     context_ids.difference_update(fixed_ids)
     return fixed_ids, context_ids
 
@@ -316,7 +320,10 @@ def claim_round_product(
     for node_id in sorted(all_ids):
         owner = working.ownership_by_node_id.get(int(node_id))
         allowed = (
-            {Stage3OwnershipState.FIXED_TOPOLOGY_CORE.value}
+            {
+                Stage3OwnershipState.FIXED_TOPOLOGY_CORE.value,
+                Stage3OwnershipState.SUPPORT_CONTEXT.value,
+            }
             if int(node_id) in fixed_ids
             else {
                 Stage3OwnershipState.REMAINING_CLOSURE_RESOURCE.value,
@@ -377,6 +384,7 @@ def mark_round_pending_contracts(
             if owner is None or str(owner.state) not in {
                 Stage3OwnershipState.FIXED_TOPOLOGY_CORE.value,
                 Stage3OwnershipState.PENDING_TOPOLOGY.value,
+                Stage3OwnershipState.SUPPORT_CONTEXT.value,
             }:
                 invalid.append({
                     "node_id": int(node_id),

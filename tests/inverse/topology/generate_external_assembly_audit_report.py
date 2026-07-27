@@ -155,7 +155,6 @@ def _build_audit_section(fixture_csv: Path) -> str:
         E_target=None,
         rebuild_fn=lambda **kwargs: (nodes, kwargs["H_seed"], {}, 0.0),
         validate_fn=lambda **kwargs: (True, "ok"),
-        max_stage3_iterations=3,
         max_primary_adjustments_per_stage=10,
     )
     workflow_lines = [

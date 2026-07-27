@@ -77,23 +77,19 @@ class Layer1NmrEvaluator:
             center_su, hop1_ms, _ = key
             try:
                 center_i = int(center_su)
-                hop1_tuple = tuple(int(x) for x in tuple(hop1_ms))
+                hop1_tuple = tuple(sorted(int(x) for x in tuple(hop1_ms)))
             except Exception:
-                continue
-
-            mu_s = tpl.get('samples', {}).get('mu', None)
-            pi_s = tpl.get('samples', {}).get('pi', None)
-            if mu_s is None or pi_s is None:
-                continue
-            if not torch.is_tensor(mu_s) or not torch.is_tensor(pi_s):
-                continue
-            if int(mu_s.numel()) <= 0 or int(pi_s.numel()) <= 0:
                 continue
 
             sample_count = int(tpl.get('sample_count', 0))
             center_mu = float(tpl.get('center_mu', 0.0))
             if sample_count <= 0:
-                sample_count = int(mu_s.numel()) if int(mu_s.numel()) > 0 else 1
+                mu_s = tpl.get('samples', {}).get('mu', None)
+                sample_count = (
+                    int(mu_s.numel())
+                    if torch.is_tensor(mu_s) and int(mu_s.numel()) > 0
+                    else 1
+                )
             if center_mu == 0.0:
                 continue
 
@@ -101,7 +97,6 @@ class Layer1NmrEvaluator:
             if agg_key not in agg:
                 agg[agg_key] = {
                     'mu_values': [],
-                    'pi_values': [],
                     'weights': [],
                     'mu_min': float(tpl.get('mu_min', center_mu)),
                     'mu_max': float(tpl.get('mu_max', center_mu)),
@@ -111,16 +106,6 @@ class Layer1NmrEvaluator:
 
             entry = agg[agg_key]
             entry['mu_values'].append(float(center_mu))
-            try:
-                center_pi = float(tpl.get('center_pi', 0.0))
-            except Exception:
-                center_pi = 0.0
-            if center_pi <= 0.0:
-                try:
-                    center_pi = float(torch.median(pi_s.detach().float()).item())
-                except Exception:
-                    center_pi = 1.0
-            entry['pi_values'].append(float(max(1e-6, center_pi)))
             entry['weights'].append(float(sample_count))
             entry['mu_min'] = float(min(float(entry['mu_min']), float(tpl.get('mu_min', center_mu))))
             entry['mu_max'] = float(max(float(entry['mu_max']), float(tpl.get('mu_max', center_mu))))
@@ -128,16 +113,13 @@ class Layer1NmrEvaluator:
 
         for entry in agg.values():
             mu_values = np.asarray(entry.get('mu_values', []), dtype=np.float64)
-            pi_values = np.asarray(entry.get('pi_values', []), dtype=np.float64)
             weights = np.asarray(entry.get('weights', []), dtype=np.float64)
-            if mu_values.size == 0 or pi_values.size == 0 or weights.size == 0:
+            if mu_values.size == 0 or weights.size == 0:
                 continue
             order = np.argsort(mu_values)
             mu_sorted = mu_values[order]
-            pi_sorted = pi_values[order]
             w_sorted = np.maximum(weights[order], 1e-8)
             entry['mu_sorted'] = mu_sorted
-            entry['pi_sorted'] = pi_sorted
             entry['w_sorted'] = w_sorted
             entry['cdf'] = np.cumsum(w_sorted) / float(np.sum(w_sorted))
 
@@ -200,10 +182,9 @@ class Layer1NmrEvaluator:
                 continue
 
             mu_sorted = np.asarray(info.get('mu_sorted', []), dtype=np.float64)
-            pi_sorted = np.asarray(info.get('pi_sorted', []), dtype=np.float64)
             w_sorted = np.asarray(info.get('w_sorted', []), dtype=np.float64)
             cdf = np.asarray(info.get('cdf', []), dtype=np.float64)
-            if mu_sorted.size == 0 or pi_sorted.size == 0 or w_sorted.size == 0 or cdf.size == 0:
+            if mu_sorted.size == 0 or w_sorted.size == 0 or cdf.size == 0:
                 for node in group_nodes:
                     assignments[int(node.global_id)] = {
                         'mu': None,
@@ -218,15 +199,12 @@ class Layer1NmrEvaluator:
                     }
                 continue
 
-            ordered_nodes = sorted(group_nodes, key=lambda n: int(getattr(n, 'global_id', 0)))
-            n_nodes = len(ordered_nodes)
-            for idx, node in enumerate(ordered_nodes):
-                q = (idx + 0.5) / max(1.0, float(n_nodes))
-                pick = int(np.searchsorted(cdf, q, side='left'))
-                pick = min(max(pick, 0), len(mu_sorted) - 1)
+            pick = int(np.searchsorted(cdf, 0.5, side='left'))
+            pick = min(max(pick, 0), len(mu_sorted) - 1)
+            for node in group_nodes:
                 assignments[int(node.global_id)] = {
                     'mu': float(mu_sorted[pick]),
-                    'pi': float(max(1e-6, pi_sorted[pick])),
+                    'pi': 1.0,
                     'meta': {
                         'matched': True,
                         'approx_used': approx_used,

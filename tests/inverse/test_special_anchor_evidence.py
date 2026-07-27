@@ -5,6 +5,7 @@ import torch
 
 from model.inverse.layer4.inverse_layer4_block_b import adjust_special_anchor_count_impl
 from model.inverse.special_anchor_evidence import (
+    SU19_DOUBLE_EVIDENCE_WINDOWS,
     SU19_DOUBLE_SUPPORT_WEIGHT,
     split_su19_double_area,
     weighted_su19_double_area,
@@ -20,27 +21,26 @@ def _band_area(band_lo: float, band_hi: float):
     return area
 
 
-def test_su19_double_support_windows_cover_low_d2_and_high_d3_tails() -> None:
+def test_su19_double_support_windows_exclude_global_extreme_tails() -> None:
     low_d2 = weighted_su19_double_area(_band_area(63.5, 65.5), "double_d2")
     high_d3 = weighted_su19_double_area(_band_area(105.2, 106.2), "double_d3")
 
-    assert low_d2 > 0.0
-    assert high_d3 > 0.0
-    assert SU19_DOUBLE_SUPPORT_WEIGHT == 0.35
+    assert low_d2 == 0.0
+    assert high_d3 == 0.0
+    assert SU19_DOUBLE_SUPPORT_WEIGHT == 0.15
 
 
-def test_su19_double_overlap_is_counted_once_before_mode_split() -> None:
-    raw_d2 = weighted_su19_double_area(_band_area(92.0, 94.0), "double_d2")
-    raw_d3 = weighted_su19_double_area(_band_area(92.0, 94.0), "double_d3")
-    split = split_su19_double_area(_band_area(92.0, 94.0))
+def test_su19_double_cores_are_disjoint_at_stats_midpoint() -> None:
+    d2_core = SU19_DOUBLE_EVIDENCE_WINDOWS["double_d2"]["core"]
+    d3_core = SU19_DOUBLE_EVIDENCE_WINDOWS["double_d3"]["core"]
 
-    assert abs(sum(split.values()) - max(raw_d2, raw_d3)) < 1e-9
-    assert split["double_d2"] > 0.0
-    assert split["double_d3"] > 0.0
+    assert d2_core == (83.21875, 94.125)
+    assert d3_core == (95.96875, 101.8125)
+    assert float(d2_core[1]) < float(d3_core[0])
 
 
-def test_su19_double_union_keeps_both_nonoverlapping_support_tails() -> None:
-    bands = [(63.5, 64.5), (105.0, 106.0)]
+def test_su19_double_union_counts_each_exclusive_core_once() -> None:
+    bands = [(88.0, 89.0), (98.0, 99.0)]
 
     def area(lo: float, hi: float) -> float:
         return sum(
@@ -50,7 +50,7 @@ def test_su19_double_union_keeps_both_nonoverlapping_support_tails() -> None:
 
     split = split_su19_double_area(area)
 
-    assert abs(sum(split.values()) - 0.7) < 1e-9
+    assert abs(sum(split.values()) - 2.0) < 1e-9
     assert split["double_d2"] > 0.0
     assert split["double_d3"] > 0.0
 
@@ -130,6 +130,61 @@ def test_block_b_can_generate_double19d3_from_two_single19d3_nodes() -> None:
     assert int(meta["counts_after"]["double_d3"]) == 1
 
 
+class _FourSingleD3Adjuster(_CountAdjuster):
+    def _get_special_anchor_mode_meta(self, H):
+        del H
+        return {
+            19: {
+                "ether_single": {1: 0, 2: 0, 3: 4},
+                "ether_double": {2: 0, 3: 0},
+                "thio_single": {1: 0, 2: 0, 3: 0},
+                "thio_double": {2: 0, 3: 0},
+            }
+        }
+
+    def _get_special_degree_meta(self, H):
+        del H
+        return {19: {1: 0, 2: 0, 3: 4}}
+
+
+def test_block_b_adds_at_most_one_double19_before_rebuild() -> None:
+    anchors = [
+        make_node(
+            index,
+            19,
+            target_hop1_degree=3,
+            special_anchor_mode="single",
+            special_anchor_partition="ether",
+        )
+        for index in range(1, 5)
+    ]
+    terminals = [make_node(index, 28) for index in range(10, 14)]
+    for anchor, terminal in zip(anchors, terminals):
+        connect(anchor, terminal, fixed=True)
+    nodes = anchors + terminals
+    adjuster = _FourSingleD3Adjuster(nodes)
+    H = torch.zeros(33, dtype=torch.long)
+    H[19] = 4
+    H[28] = 4
+    H[29] = 1
+
+    H_after, moves, meta = adjust_special_anchor_count_impl(
+        adjuster,
+        H,
+        ppm=np.asarray([98.0]),
+        diff=np.asarray([1.0]),
+        su_type=19,
+        nodes=nodes,
+        anchor_partition="ether",
+        max_moves=4,
+        peak_rel_threshold=0.0,
+    )
+
+    assert int(H_after[19].item()) == 3
+    assert sum("[forward]" in move["op"] for move in moves) == 1
+    assert int(meta["counts_after"]["double_d3"]) == 1
+
+
 class _D2CountAdjuster(_CountAdjuster):
     def _get_special_anchor_mode_meta(self, H):
         del H
@@ -148,9 +203,8 @@ class _D2CountAdjuster(_CountAdjuster):
 
     def _window_stats(self, ppm, diff, lo, hi):
         del ppm, diff
-        if float(lo) < 67.0 and float(hi) > 90.0:
-            value = 22.0 if float(lo) < 65.0 else 20.0
-            return {"pos": value, "neg": 0.0, "abs": value}
+        if 83.0 <= float(lo) <= 84.0 and 94.0 <= float(hi) <= 95.5:
+            return {"pos": 20.0, "neg": 0.0, "abs": 20.0}
         if 59.0 <= float(lo) <= 61.0 and float(hi) <= 71.0:
             return {"pos": 0.0, "neg": 8.0, "abs": 8.0}
         if float(hi) <= 35.0:

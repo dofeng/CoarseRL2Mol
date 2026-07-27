@@ -7,6 +7,7 @@ from typing import Tuple, Dict, Any, Optional
 
 from ...shared.inverse_common import (
     SPECIAL_DEGREE_PRIORS,
+    SU_CONNECTION_DEGREE,
     TERMINAL_PORT_BASE_SU,
     allocate_special_degree_counts,
     get_effective_hist_element_vector,
@@ -49,6 +50,7 @@ class Layer0Estimator:
         self.special_degree_meta: Dict[int, Dict[int, int]] = {}
         self.special_partition_meta: Dict[int, Dict[str, Dict[int, int]]] = {}
         self.special_anchor_mode_meta: Dict[int, Dict[str, Dict[int, int]]] = {}
+        self.degree_parity_adjustment: Dict[str, Any] = {}
 
     def _record_fixed_partition_meta(self,
                                      H: torch.Tensor,
@@ -83,12 +85,205 @@ class Layer0Estimator:
                 }
                 for su, parts in dict(special_anchor_mode_meta or self.special_anchor_mode_meta or {}).items()
             },
+            'degree_parity_adjustment': dict(
+                getattr(self, 'degree_parity_adjustment', {}) or {}
+            ),
         }
         self.fixed_partition_meta = dict(meta)
         self.special_degree_meta = dict(meta.get('special_degree_meta', {}) or {})
         self.special_partition_meta = dict(meta.get('special_partition_meta', {}) or {})
         self.special_anchor_mode_meta = dict(meta.get('special_anchor_mode_meta', {}) or {})
+        self.degree_parity_adjustment = dict(meta.get('degree_parity_adjustment', {}) or {})
         return dict(meta)
+
+    def _enforce_even_target_degree_sum(
+        self,
+        H_cpu: torch.Tensor,
+        degree_meta: Dict[int, Dict[int, int]],
+        partition_meta: Dict[int, Dict[str, Dict[int, int]]],
+        anchor_mode_meta: Dict[int, Dict[str, Dict[int, int]]],
+        allow_adjustment: bool = True,
+    ) -> Dict[str, Any]:
+        """Make the node-level target degree sum realizable by an undirected graph."""
+
+        def _target_degree_sum() -> int:
+            total = 0
+            for su_type in range(int(H_cpu.numel())):
+                count = int(H_cpu[int(su_type)].item())
+                if count <= 0:
+                    continue
+                special = dict(degree_meta.get(int(su_type), {}) or {})
+                if special:
+                    total += sum(
+                        int(degree) * int(degree_count)
+                        for degree, degree_count in special.items()
+                    )
+                    continue
+                degree = SU_CONNECTION_DEGREE.get(int(su_type), 0)
+                if isinstance(degree, tuple):
+                    degree = degree[1]
+                total += int(count) * int(degree)
+            return int(total)
+
+        before = int(_target_degree_sum())
+        if int(before) % 2 == 0:
+            return {
+                'adjusted': False,
+                'reason': 'already_even',
+                'target_degree_sum_before': int(before),
+                'target_degree_sum_after': int(before),
+            }
+        if not bool(allow_adjustment):
+            return {
+                'adjusted': False,
+                'reason': 'odd_sum_pending_histogram_parity_repair',
+                'target_degree_sum_before': int(before),
+                'target_degree_sum_after': int(before),
+            }
+
+        # Metadata-only fallback when no element-directed histogram conversion
+        # can fix parity.  It preserves SU counts and fixed-anchor counts.
+        transitions = (
+            (19, 'ether_single', 'ether', 3, 2),
+            (19, 'thio_single', 'thio', 3, 2),
+            (20, 'single', None, 3, 2),
+            (21, 'single', None, 3, 2),
+            (19, 'ether_double', 'ether', 3, 2),
+            (19, 'thio_double', 'thio', 3, 2),
+            (20, 'double', None, 3, 2),
+            (19, 'ether_single', 'ether', 1, 2),
+            (19, 'thio_single', 'thio', 1, 2),
+            (20, 'single', None, 1, 2),
+        )
+        selected = None
+        for su_type, bucket, partition, source_degree, target_degree in transitions:
+            bucket_counts = dict(
+                anchor_mode_meta.get(int(su_type), {}).get(str(bucket), {}) or {}
+            )
+            if int(bucket_counts.get(int(source_degree), 0)) <= 0:
+                continue
+            bucket_counts[int(source_degree)] = int(bucket_counts.get(int(source_degree), 0)) - 1
+            bucket_counts[int(target_degree)] = int(bucket_counts.get(int(target_degree), 0)) + 1
+            anchor_mode_meta.setdefault(int(su_type), {})[str(bucket)] = bucket_counts
+
+            degree_counts = dict(degree_meta.get(int(su_type), {}) or {})
+            degree_counts[int(source_degree)] = int(degree_counts.get(int(source_degree), 0)) - 1
+            degree_counts[int(target_degree)] = int(degree_counts.get(int(target_degree), 0)) + 1
+            degree_meta[int(su_type)] = degree_counts
+
+            if partition is not None:
+                partition_counts = dict(
+                    partition_meta.get(int(su_type), {}).get(str(partition), {}) or {}
+                )
+                partition_counts[int(source_degree)] = int(
+                    partition_counts.get(int(source_degree), 0)
+                ) - 1
+                partition_counts[int(target_degree)] = int(
+                    partition_counts.get(int(target_degree), 0)
+                ) + 1
+                partition_meta.setdefault(int(su_type), {})[str(partition)] = partition_counts
+            selected = {
+                'su_type': int(su_type),
+                'bucket': str(bucket),
+                'partition': partition,
+                'source_degree': int(source_degree),
+                'target_degree': int(target_degree),
+            }
+            break
+
+        after = int(_target_degree_sum())
+        return {
+            'adjusted': bool(selected is not None and int(after) % 2 == 0),
+            'reason': 'adjusted_one_special_degree' if selected is not None else 'no_legal_special_degree_transition',
+            'target_degree_sum_before': int(before),
+            'target_degree_sum_after': int(after),
+            'transition': selected,
+        }
+
+    def _enforce_even_histogram_degree_sum(
+        self,
+        H: torch.Tensor,
+        E_target: torch.Tensor,
+        parity_preview: Dict[str, Any],
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """Repair odd degree parity with an element-directed aromatic conversion."""
+        H_new = torch.clamp(H.clone(), min=0).long()
+        before = int(
+            dict(parity_preview or {}).get(
+                'target_degree_sum_before',
+                dict(parity_preview or {}).get('target_degree_sum_after', 0),
+            )
+            or 0
+        )
+        if int(before) % 2 == 0:
+            return H_new, {
+                'adjusted': False,
+                'reason': 'already_even',
+                'target_degree_sum_before': int(before),
+                'target_degree_sum_after': int(before),
+            }
+
+        try:
+            current_elements = get_effective_hist_element_vector(
+                H_new.detach().cpu(),
+                E_SU_tensor=self.E_SU.detach().cpu(),
+                device=torch.device('cpu'),
+            )
+            predicted_h = int(round(float(current_elements[1].item())))
+            target_h = int(round(float(E_target.detach().cpu()[1].item())))
+        except Exception:
+            predicted_h = 0
+            target_h = 0
+
+        transition = None
+        if int(predicted_h) > int(target_h) and int(H_new[13].item()) > 0:
+            transition = (13, 12)
+        elif int(predicted_h) < int(target_h) and int(H_new[12].item()) > 0:
+            transition = (12, 13)
+
+        if transition is None:
+            return H_new, {
+                'adjusted': False,
+                'reason': 'no_hydrogen_directed_histogram_transition',
+                'target_degree_sum_before': int(before),
+                'target_degree_sum_after': int(before),
+                'predicted_h_before': int(predicted_h),
+                'target_h': int(target_h),
+            }
+
+        source_su, target_su = transition
+        source_degree = SU_CONNECTION_DEGREE.get(int(source_su), 0)
+        target_degree = SU_CONNECTION_DEGREE.get(int(target_su), 0)
+        if isinstance(source_degree, tuple):
+            source_degree = source_degree[1]
+        if isinstance(target_degree, tuple):
+            target_degree = target_degree[1]
+        after = int(before) - int(source_degree) + int(target_degree)
+        if int(after) % 2 != 0:
+            return H_new, {
+                'adjusted': False,
+                'reason': 'histogram_transition_does_not_fix_parity',
+                'target_degree_sum_before': int(before),
+                'target_degree_sum_after': int(after),
+            }
+
+        H_new[int(source_su)] -= 1
+        H_new[int(target_su)] += 1
+        return H_new, {
+            'adjusted': True,
+            'reason': 'converted_histogram_for_degree_parity',
+            'target_degree_sum_before': int(before),
+            'target_degree_sum_after': int(after),
+            'predicted_h_before': int(predicted_h),
+            'predicted_h_after': int(predicted_h + int(self.E_SU[int(target_su), 1].item()) - int(self.E_SU[int(source_su), 1].item())),
+            'target_h': int(target_h),
+            'transition': {
+                'source_su': int(source_su),
+                'target_su': int(target_su),
+                'source_degree': int(source_degree),
+                'target_degree': int(target_degree),
+            },
+        }
 
     def _allocate_special_degree_meta(self,
                                       H: torch.Tensor,
@@ -98,7 +293,8 @@ class Layer0Estimator:
                                       s_fixed_edges_19: Optional[int] = None,
                                       n_fixed_edges_20: Optional[int] = None,
                                       x_fixed_edges_21: Optional[int] = None,
-                                      S_target: Optional[torch.Tensor] = None) -> Dict[int, Dict[int, int]]:
+                                      S_target: Optional[torch.Tensor] = None,
+                                      allow_degree_parity_adjustment: bool = True) -> Dict[int, Dict[int, int]]:
         H_cpu = H.detach().cpu().long()
         meta: Dict[int, Dict[int, int]] = {}
         partition_meta: Dict[int, Dict[str, Dict[int, int]]] = {}
@@ -244,6 +440,13 @@ class Layer0Estimator:
                             for deg in [2, 3]
                         },
                     }
+        self.degree_parity_adjustment = self._enforce_even_target_degree_sum(
+            H_cpu=H_cpu,
+            degree_meta=meta,
+            partition_meta=partition_meta,
+            anchor_mode_meta=anchor_mode_meta,
+            allow_adjustment=bool(allow_degree_parity_adjustment),
+        )
         self.special_degree_meta = {
             int(su): {int(deg): int(cnt) for deg, cnt in degree_map.items()}
             for su, degree_map in meta.items()
@@ -848,7 +1051,40 @@ class Layer0Estimator:
             n_fixed_edges_20=int((amine_meta or {}).get('n20_fixed_edges', H_corrected[20].item() if int(H_corrected.numel()) > 20 else 0)),
             x_fixed_edges_21=int((halogen_meta or {}).get('n21_fixed_edges', H_corrected[21].item() if int(H_corrected.numel()) > 21 else 0)),
             S_target=S_target,
+            allow_degree_parity_adjustment=False,
         )
+        parity_preview = dict(getattr(self, 'degree_parity_adjustment', {}) or {})
+        H_parity, histogram_parity = self._enforce_even_histogram_degree_sum(
+            H_corrected,
+            E_target,
+            parity_preview,
+        )
+        if bool(histogram_parity.get('adjusted', False)):
+            H_corrected = torch.clamp(H_parity, min=0).long()
+            special_degree_meta = self._allocate_special_degree_meta(
+                H_corrected,
+                o_base_19=int((ether_meta or {}).get('o_base_19', 0)),
+                s_reserved_19=int((thio_meta or {}).get('s_reserved_19', 0)),
+                o_fixed_edges_19=int((ether_meta or {}).get('o_fixed_edges_19', (ether_meta or {}).get('o_base_19', 0))),
+                s_fixed_edges_19=int((thio_meta or {}).get('s_fixed_edges_19', (thio_meta or {}).get('s_reserved_19', 0))),
+                n_fixed_edges_20=int((amine_meta or {}).get('n20_fixed_edges', H_corrected[20].item() if int(H_corrected.numel()) > 20 else 0)),
+                x_fixed_edges_21=int((halogen_meta or {}).get('n21_fixed_edges', H_corrected[21].item() if int(H_corrected.numel()) > 21 else 0)),
+                S_target=S_target,
+                allow_degree_parity_adjustment=False,
+            )
+            self.degree_parity_adjustment = dict(histogram_parity)
+        elif int(parity_preview.get('target_degree_sum_before', 0) or 0) % 2 != 0:
+            special_degree_meta = self._allocate_special_degree_meta(
+                H_corrected,
+                o_base_19=int((ether_meta or {}).get('o_base_19', 0)),
+                s_reserved_19=int((thio_meta or {}).get('s_reserved_19', 0)),
+                o_fixed_edges_19=int((ether_meta or {}).get('o_fixed_edges_19', (ether_meta or {}).get('o_base_19', 0))),
+                s_fixed_edges_19=int((thio_meta or {}).get('s_fixed_edges_19', (thio_meta or {}).get('s_reserved_19', 0))),
+                n_fixed_edges_20=int((amine_meta or {}).get('n20_fixed_edges', H_corrected[20].item() if int(H_corrected.numel()) > 20 else 0)),
+                x_fixed_edges_21=int((halogen_meta or {}).get('n21_fixed_edges', H_corrected[21].item() if int(H_corrected.numel()) > 21 else 0)),
+                S_target=S_target,
+                allow_degree_parity_adjustment=True,
+            )
         fixed_partition_meta = self._record_fixed_partition_meta(
             H_corrected,
             ether_meta=ether_meta,

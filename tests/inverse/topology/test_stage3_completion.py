@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from model.inverse.topology import (
+    audit_stage3_topology,
     apply_stage3_node_adjustments,
     assemble_topology_units,
     build_stage3_phase_evaluation,
@@ -21,6 +22,99 @@ def _histogram(nodes, size=40):
     return out
 
 
+def test_fresh_read_only_audit_completes_and_preserves_resource_ids() -> None:
+    nodes = [
+        make_node(1, 11),
+        make_node(2, 22),
+        make_node(3, 23),
+        make_node(4, 23),
+    ]
+    H = _histogram(nodes)
+    H_before = H.detach().clone()
+    node_types_before = [int(node.su_type) for node in nodes]
+
+    audit = audit_stage3_topology(
+        H=H,
+        nodes=nodes,
+        allow_conversions=False,
+        enable_spectrum_rebalance=False,
+    )
+
+    assert audit["ok"] is True
+    assert audit["reason"] == "stage3_complete"
+    assert audit["requires_conversion"] is False
+    assert audit["pending_contracts"] == []
+    assert audit["products"][0]["topology_notation"] == "11-23-23-22"
+    assert audit["resource_accounting"]["ok"] is True
+    accounting = audit["resource_accounting"]
+    aggregate_ids = {
+        int(node_id)
+        for values in accounting["aggregate_ids_after_by_su"].values()
+        for node_id in values
+    }
+    partition_ids = {
+        int(node_id)
+        for field in ("final_remaining_ids_by_su", "committed_claimed_ids_by_su")
+        for values in accounting[field].values()
+        for node_id in values
+    }
+    assert aggregate_ids == partition_ids == {1, 2, 3, 4}
+    assert torch.equal(H, H_before)
+    assert [int(node.su_type) for node in nodes] == node_types_before
+
+
+def test_fresh_read_only_audit_tolerates_one_unassembled_su24() -> None:
+    nodes = [make_node(1, 24)]
+
+    audit = audit_stage3_topology(
+        H=_histogram(nodes),
+        nodes=nodes,
+        allow_conversions=False,
+        enable_spectrum_rebalance=False,
+    )
+
+    assert audit["ok"] is True
+    assert audit["reason"] == "stage3_complete"
+    assert audit["requires_conversion"] is False
+    assert audit["products"] == []
+    assert audit["resource_accounting"]["final_remaining_ids_by_su"][24] == [1]
+    assert audit["plan"]["diagnostics"]["tolerated_remaining_count"] == 1
+
+
+def test_failed_fresh_audit_preserves_real_pending_and_resource_snapshot() -> None:
+    center = make_node(10, 3)
+    aromatic = make_node(11, 9)
+    open_23 = make_node(12, 23)
+    aromatic_donor = make_node(13, 12)
+    connect(center, aromatic)
+    connect(center, open_23)
+    nodes = [center, aromatic, open_23, aromatic_donor]
+
+    audit = audit_stage3_topology(
+        H=_histogram(nodes),
+        nodes=nodes,
+        allow_conversions=False,
+        enable_spectrum_rebalance=False,
+    )
+
+    assert audit["ok"] is False
+    assert audit["reason"] == "fresh_audit_requires_conversion"
+    assert audit["requires_conversion"] is True
+    assert audit["classification"]["fragments"]
+    assert audit["external_assembly"]["pending_units"]
+    assert audit["resource_ledger"]["initial_ids_by_su"] == {"12": [13]}
+    assert audit["resource_ledger"]["remaining_ids_by_su"] == {"12": [13]}
+    assert audit["ownership_ledger"]["states"]["pending_topology"] == [10, 11, 12]
+    assert audit["ownership_ledger"]["states"]["remaining_aromatic_donor"] == [13]
+    assert audit["ownership_ledger"]["invariant_errors"] == []
+    pending = audit["pending_contracts"][0]
+    assert pending["real"] == "9-3-23-"
+    assert pending["real_gid"] == "11-10-12-"
+    assert pending["source_node_ids"] == [10, 11, 12]
+    assert pending["required_counts"] == {"22": 1}
+    assert pending["infeasibility_proof"]["missing_counts"] == {"22": 1}
+
+
 def test_residual_planner_prefers_two_23_side_chain() -> None:
     contracts = _residual_contracts(
         {11: [200], 22: [203], 23: [204, 205], 24: []},
@@ -33,68 +127,160 @@ def test_residual_planner_prefers_two_23_side_chain() -> None:
 
 
 def test_su25_cd_closes_with_real_f2_resources_when_available() -> None:
-    center = make_node(250, 25)
+    center = make_node(250, 25, target_hop1_degree=4)
     fixed22 = make_node(251, 22)
     pool23 = make_node(252, 23)
     pool22 = make_node(253, 22)
     pool22_b = make_node(254, 22)
     pool23_b = make_node(255, 23)
     pool22_c = make_node(256, 22)
+    pool11 = make_node(257, 11)
+    pool23_c = make_node(258, 23)
     connect(center, fixed22)
+    connect(center, pool23)
+    connect(center, pool23_b)
+    connect(center, pool23_c)
 
+    nodes = [
+        center, fixed22, pool23, pool22, pool22_b, pool23_b,
+        pool22_c, pool11, pool23_c,
+    ]
     assembly = assemble_topology_units(
-        [center, fixed22, pool23, pool22, pool22_b, pool23_b, pool22_c],
-        classify_topology_units([center, fixed22, pool23, pool22, pool22_b, pool23_b, pool22_c]),
+        nodes,
+        classify_topology_units(nodes),
     ).to_dict()
 
     assert not [item for item in assembly.get("pending_units", []) if int(item.get("unit_id", -1)) == 250]
     product = next(item for item in assembly.get("products", []) if 250 in list(item.get("source_fragment_ids", []) or []))
-    assert {250, 251, 252, 253, 254}.issubset(set(product.get("symbolic_node_ids", []) or []))
+    assert product["actual_topology_su"] == "11-23-25(-23-22)(-22)-23-22"
+    assert {250, 251, 252, 253, 254, 255, 257, 258}.issubset(
+        set(product.get("symbolic_node_ids", []) or [])
+    )
 
 
-def test_isolated_su24_requires_terminalization_and_cold_rebuild() -> None:
+def test_su25_requires_pool_fixed22_when_only_22_like_terminal_exists() -> None:
+    center = make_node(260, 25)
+    terminal1 = make_node(261, 1)
+    open23 = make_node(262, 23)
+    connect(center, terminal1)
+    connect(center, open23)
+
+    classification = classify_topology_units([center, terminal1, open23])
+    fragment = next(item for item in classification.fragments if int(item.fragment_id) == 260)
+
+    assert fragment.class_type == "25_CD"
+    assert fragment.branch_slots == ["FIXED22", "H"]
+    evidence = dict(fragment.evidence or {})
+    assert evidence["fixed22_neighbor_ids"] == []
+    assert evidence["fixed22_requires_pool"] is True
+    assert [slot.kind for slot in fragment.branch_contracts[:2]] == ["FIXED22", "H"]
+    assert fragment.branch_contracts[0].required_su_sequence == [22]
+
+
+def test_atomic_fallback_fragment_is_projected_and_cannot_disappear_at_completion() -> None:
+    left = make_node(1, 15)
+    right = make_node(2, 15)
+    connect(left, right)
+    nodes = [left, right]
+
+    classification = classify_topology_units(nodes)
+    assert [(item.fragment_id, item.family) for item in classification.fragments] == [
+        (1, "basic_unsaturated_pair")
+    ]
+    assert classification.fragments[0].class_type == "D"
+    assert classification.fragments[0].evidence["flex_range_candidate_kind"] == "d_like_open"
+
+    assembly = assemble_topology_units(nodes, classification).to_dict()
+    covered_fragment_ids = {
+        int(value)
+        for row in list(assembly.get("products", []) or []) + list(assembly.get("pending_units", []) or [])
+        for value in list(dict(row or {}).get("source_fragment_ids", []) or [])
+    }
+    assert covered_fragment_ids == {1}
+
+    plan = plan_stage3_resource_adjustments(H=_histogram(nodes), nodes=nodes)
+    assert plan.reason != "stage3_complete"
+
+
+def test_external_flex_shortfall_is_not_materialized_without_real_fragments() -> None:
+    nodes = [make_node(100 + index, 9) for index in range(10)]
+    nodes.extend(make_node(200 + index, 10) for index in range(4))
+    nodes.extend(make_node(300 + index, 11) for index in range(2))
+    nodes.extend(make_node(400 + index, 23) for index in range(2))
+
+    plan = plan_stage3_resource_adjustments(
+        H=_histogram(nodes),
+        nodes=nodes,
+        enable_post_external_spectrum=False,
+    )
+
+    assert plan.reason == "stage3_complete"
+    flex_transactions = [
+        transaction
+        for transaction in list(plan.phase_result.transactions or [])
+        if int(transaction.contract_id) == -200000
+    ]
+    assert flex_transactions == []
+
+
+def test_isolated_su24_is_left_untouched_within_residual_tolerance() -> None:
     nodes = [make_node(1, 24)]
     H = _histogram(nodes)
     phase_eval = build_stage3_phase_evaluation(nodes, classification=classify_topology_units(nodes))
     assert 1 in list(phase_eval.closure_pool_ids_by_su.get(24, []) or [])
 
     plan = plan_stage3_resource_adjustments(H=H, nodes=nodes)
-    assert str(plan.phase) == "residual_resource_self_closure"
-    assert plan.reason == "stage3_rebuild_required"
+    assert str(plan.phase) == "complete"
+    assert plan.reason == "stage3_complete"
     apply_result = apply_stage3_node_adjustments(nodes, H, plan)
 
-    assert apply_result.changed is True
-    assert int(apply_result.nodes[0].su_type) == 23
-    assert int(apply_result.H[24].item()) == 0
-    assert int(apply_result.H[23].item()) == 1
+    assert apply_result.changed is False
+    assert int(apply_result.nodes[0].su_type) == 24
+    assert int(apply_result.H[24].item()) == 1
+    assert int(apply_result.H[23].item()) == 0
     assert int(dict(apply_result.conservation_after or {}).get("su_count", 0)) == 1
 
 
-def test_isolated_su11_is_terminalized_then_reclassified() -> None:
+def test_isolated_su11_is_left_untouched_within_residual_tolerance() -> None:
     nodes = [make_node(1, 11)]
     H = _histogram(nodes)
 
     first_plan = plan_stage3_resource_adjustments(H=H, nodes=nodes)
     first = apply_stage3_node_adjustments(nodes, H, first_plan)
 
-    assert first_plan.reason == "stage3_rebuild_required"
-    assert first.changed is True
-    assert int(first.nodes[0].su_type) in {12, 13}
-    assert int(first.H[11].item()) == 0
+    assert first_plan.reason == "stage3_complete"
+    assert first.changed is False
+    assert int(first.nodes[0].su_type) == 11
+    assert int(first.H[11].item()) == 1
 
 
-def test_isolated_residual_requests_layer12_rebuild_after_conversion() -> None:
-    nodes = [make_node(1, 24)]
+def test_three_mixed_unassemblable_resources_are_left_untouched() -> None:
+    nodes = [make_node(1, 24), make_node(2, 22), make_node(3, 22)]
     H = _histogram(nodes)
     plan = plan_stage3_resource_adjustments(H=H, nodes=nodes)
     applied = apply_stage3_node_adjustments(nodes, H, plan)
 
+    assert plan.reason == "stage3_complete"
+    assert applied.changed is False
+    assert [int(node.su_type) for node in applied.nodes] == [24, 22, 22]
+    assert plan.diagnostics["tolerated_remaining_count"] == 3
+    assert plan.diagnostics["tolerated_remaining_ids_by_su"] == {
+        "22": [2, 3],
+        "24": [1],
+    }
+
+
+def test_four_unassemblable_resources_still_require_conversion() -> None:
+    nodes = [make_node(index, 22) for index in range(1, 5)]
+
+    plan = plan_stage3_resource_adjustments(H=_histogram(nodes), nodes=nodes)
+
     assert plan.reason == "stage3_rebuild_required"
-    assert applied.changed is True
-    assert int(applied.nodes[0].su_type) == 23
+    assert plan.phase == "residual_resource_self_closure"
+    assert plan.histogram_adjustment_plan.primary_adjustment_count > 0
 
 
-def test_direct_residual_side_product_then_terminal_conversion_requires_rebuild() -> None:
+def test_direct_residual_side_products_include_11_22_without_rebuild() -> None:
     nodes = [
         make_node(1, 11),
         make_node(2, 11),
@@ -108,12 +294,46 @@ def test_direct_residual_side_product_then_terminal_conversion_requires_rebuild(
 
     plan = plan_stage3_resource_adjustments(H=H, nodes=nodes)
     applied = apply_stage3_node_adjustments(nodes, H, plan)
-    assert plan.reason == "stage3_rebuild_required"
-    assert applied.changed is True
-    assert any(
-        str(transaction.target_role) == "residual_resource_conversion"
-        and bool(transaction.committed)
-        for transaction in plan.phase_result.transactions
+    assert plan.reason == "stage3_complete"
+    assert applied.changed is False
+    residual_fits = list(plan.diagnostics.get("direct_residual_template_fits", []) or [])
+    assert [item["chain_23_count"] for item in residual_fits] == [1, 0]
+    assert all(int(item["conversion_count"]) == 0 for item in residual_fits)
+
+
+def test_rebuilt_state_is_reassembled_without_prior_residual_products() -> None:
+    nodes = [
+        make_node(12, 12),
+        make_node(22, 22),
+        make_node(23, 23),
+        make_node(24, 23),
+        make_node(25, 23),
+    ]
+    H = _histogram(nodes)
+
+    first_plan = plan_stage3_resource_adjustments(
+        H=H,
+        nodes=nodes,
+        enable_post_external_spectrum=False,
+    )
+    first_applied = apply_stage3_node_adjustments(nodes, H, first_plan)
+    second_plan = plan_stage3_resource_adjustments(
+        H=first_applied.H,
+        nodes=first_applied.nodes,
+        enable_post_external_spectrum=False,
+    )
+
+    assert first_plan.reason == "stage3_rebuild_required"
+    assert second_plan.reason == "stage3_complete"
+    assert second_plan.phase_result.infeasibility_proof == {}
+    ledger = second_plan.runtime["iteration_topology_ledger"]
+    assert ledger.conflicts == []
+    assert ledger.conflict_node_ids == []
+    assert all(
+        int(node_id) in {int(node.global_id) for node in first_applied.nodes}
+        for product in ledger.completed_products
+        for values in dict(product.get("claimed_resource_ids_by_su", {}) or {}).values()
+        for node_id in values
     )
 
 
@@ -123,7 +343,7 @@ def test_su24_resource_is_visible_in_round_closure_pool() -> None:
     assert sorted(phase_eval.closure_pool_ids_by_su[24]) == [1, 2]
 
 
-def test_su24_and_aromatic_support_remain_resources_without_real_fragment() -> None:
+def test_connected_su24_remains_real_resource_with_other_resources() -> None:
     center = make_node(1, 24)
     aromatic = make_node(2, 11)
     support = make_node(3, 23)
@@ -135,6 +355,10 @@ def test_su24_and_aromatic_support_remain_resources_without_real_fragment() -> N
 
     assert 1 in list(dict(pool.get("remaining_ids_by_su", {}) or {}).get("24", []) or [])
     assert 2 in list(dict(pool.get("remaining_ids_by_su", {}) or {}).get("11", []) or [])
+    assert not any(
+        int(item.get("node_id", -1)) == 1
+        for item in list(classification.classification_rejects or [])
+    )
 
 
 def test_histogram_conversion_does_not_update_old_neighbor_histograms() -> None:

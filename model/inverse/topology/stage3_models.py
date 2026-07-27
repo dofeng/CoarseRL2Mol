@@ -692,6 +692,7 @@ class TopologyResourceTransaction(Stage3Serializable):
     h_after_primary: float = 0.0
     h_after: float = 0.0
     commit_scope: str = "iteration_ledger"
+    transaction_origin: str = ""
     committed: bool = False
     rollback_reason: str = ""
     infeasibility_proof: Dict[str, Any] = field(default_factory=dict)
@@ -713,17 +714,23 @@ class Stage3PhaseResult(Stage3Serializable):
 @dataclass
 class SU24ResourceRoleProfile(Stage3Serializable):
     node_id: int = -1
+    role: str = ""
     roles: List[str] = field(default_factory=list)
     available_roles: List[str] = field(default_factory=list)
     hop1_su: Dict[int, int] = field(default_factory=dict)
     hop1_node_ids: List[int] = field(default_factory=list)
     fixed_neighbor_ids: List[int] = field(default_factory=list)
+    cap_node_ids: List[int] = field(default_factory=list)
+    terminal_node_ids: List[int] = field(default_factory=list)
+    terminal_su_by_node_id: Dict[str, int] = field(default_factory=dict)
+    open_neighbor_ids: List[int] = field(default_factory=list)
     fixed_neighbor_count: int = 0
     remaining_degree: int = 0
     branch_h_count: int = 0
     requires_su11_cap: bool = False
     allowed_ring_slots: List[str] = field(default_factory=list)
     forbidden_ring_slots: List[str] = field(default_factory=list)
+    rejected_reason: str = ""
 
 
 @dataclass
@@ -746,6 +753,7 @@ class AtomicAdjustmentGroup(Stage3Serializable):
     h_before: float = 0.0
     h_after_primary: float = 0.0
     h_after_final: float = 0.0
+    scoring_diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -760,6 +768,11 @@ class HistogramAdjustmentPlan(Stage3Serializable):
     demand_after: Dict[int, int] = field(default_factory=dict)
     inventory_before: Dict[int, int] = field(default_factory=dict)
     inventory_after: Dict[int, int] = field(default_factory=dict)
+    aggregate_inventory_before: Dict[int, int] = field(default_factory=dict)
+    aggregate_inventory_after: Dict[int, int] = field(default_factory=dict)
+    aggregate_required_counts: Dict[int, int] = field(default_factory=dict)
+    protected_resource_counts: Dict[int, int] = field(default_factory=dict)
+    accounting_diagnostics: Dict[str, Any] = field(default_factory=dict)
     unresolved_counts: Dict[int, int] = field(default_factory=dict)
     blocked_reason: str = ""
     su11_rotation_index_before: int = 0
@@ -862,7 +875,7 @@ class Stage3WorkflowCycleRecord(Stage3Serializable):
     gap_before: Dict[str, int] = field(default_factory=dict)
     gap_after: Dict[str, int] = field(default_factory=dict)
     state_signature: str = ""
-    cold_rebuild: bool = False
+    fresh_rebuild: bool = False
     structural_blockers: List[Dict[str, Any]] = field(default_factory=list)
 
 

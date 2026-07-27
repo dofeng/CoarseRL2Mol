@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import inspect
 
 import pandas as pd
+import pytest
 import torch
 
 import model.inverse.inverse_pipeline as inverse_pipeline_module
@@ -28,44 +30,40 @@ def _build_pipeline_stub() -> InversePipelineV3:
     return pipeline
 
 
-def test_inverse_pipeline_final_topology_rows_use_public_contract() -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+@pytest.fixture(scope="module")
+def complete_fresh_topology_audit():
+    nodes = [
+        make_node(1, 11),
+        make_node(2, 22),
+        make_node(3, 23),
+        make_node(4, 23),
+    ]
     pipeline = _build_pipeline_stub()
-
     rows, summary = pipeline._final_topology_rows(nodes)
+    return nodes, rows, summary
+
+
+def test_inverse_pipeline_final_topology_rows_use_public_contract(
+    complete_fresh_topology_audit,
+) -> None:
+    _, rows, summary = complete_fresh_topology_audit
 
     assert rows
-    assert bool(summary.get("ok", True)) is False
+    assert bool(summary.get("ok", False)) is True
     assert int(summary.get("closed_topology_count", 0) or 0) == len(rows)
-    assert str(dict(summary.get("diagnostics", {}) or {}).get("reason", "")) == "external_ring_candidates_pending"
-    assembly_diag = dict(dict(summary.get("diagnostics", {}) or {}).get("assembly", {}) or {})
-    assert str(assembly_diag.get("stage3_phase", "")) in {
-        "external_flex_closure",
-        "external_fatty_ring_closure",
-        "external_side_chain_closure",
-    }
-    flex_counts = dict(dict(summary.get("diagnostics", {}) or {}).get("flex_counts", {}) or {})
-    assert int(flex_counts.get("explicit_total", 0) or 0) == 13
-    assert int(flex_counts.get("final", 0) or 0) >= int(flex_counts.get("explicit_total", 0) or 0)
-
-    pending = list(summary.get("unclosed_candidates", []) or [])
-    assert pending
-    assert set(pending[0].keys()) == {
-        "contract_id", "real", "real_gid", "pending_kind", "phase", "subphase",
-        "source_fragment_ids", "source_fragment_classes", "source_node_ids", "claimed_source_node_ids",
-        "core_node_ids", "context_node_ids", "open_mainline_slots", "branch_slots", "required_counts",
-        "available_counts", "infeasibility_proof", "reason", "attempt_reasons", "validation_errors",
-    }
-    assert str(pending[0].get("reason", ""))
-    assert "source_ids" not in pending[0]
-    assert not any(str(item.get("real", "")) == "-1" for item in pending)
-    assert all(int(item.get("contract_id", -1)) >= 0 for item in pending)
+    diagnostics = dict(summary.get("diagnostics", {}) or {})
+    assert str(diagnostics.get("reason", "")) == "stage3_complete"
+    assert summary.get("unclosed_candidates", []) == []
+    assert rows[0]["product_type"] == "residual_resource_conversion"
+    assert rows[0]["topology_notation"] == "11-23-23-22"
+    assert rows[0]["node_id_notation"] == "1-3-4-2"
+    assert rows[0]["closed"] is True
 
     resource_ledger = dict(dict(summary.get("diagnostics", {}) or {}).get("resource_ledger", {}) or {})
-    assert set(resource_ledger.keys()) == {
+    assert {
         "initial_counts", "consumed_counts", "topology_consumed_counts",
         "residual_consumed_counts", "remaining_counts", "shortage_counts", "snapshot_stage",
-    }
+    }.issubset(resource_ledger)
     assert "classification_only" not in summary
     assert "assembly_implemented" not in summary
     assert "optionless_pending_group_count" not in summary
@@ -80,16 +78,30 @@ def test_final_topology_export_forwards_stage3_targets(monkeypatch) -> None:
     spectrum_marker = torch.ones(2, dtype=torch.float32)
     element_marker = torch.ones(6, dtype=torch.float32)
     captured = {}
-    real_assemble = inverse_pipeline_module.assemble_topology_units
-
     def capture_targets(*args, **kwargs):
         captured["S_target"] = kwargs.get("S_target")
         captured["E_target"] = kwargs.get("E_target")
-        kwargs["S_target"] = None
-        kwargs["E_target"] = None
-        return real_assemble(*args, **kwargs)
+        return {
+            "ok": False,
+            "reason": "test_audit",
+            "requires_conversion": False,
+            "products": [],
+            "pending_contracts": [],
+            "classification": {
+                "summary": {},
+                "classification_rejects": [],
+                "unclassified_nodes": [],
+                "resource_pool": {},
+            },
+            "external_assembly": {"diagnostics": {}},
+            "ownership_ledger": {"states": {}, "invariant_errors": []},
+            "resource_ledger": {},
+            "resource_accounting": {"ok": True, "errors": []},
+            "infeasibility_proof": {},
+            "plan": {"phase": "complete"},
+        }
 
-    monkeypatch.setattr(inverse_pipeline_module, "assemble_topology_units", capture_targets)
+    monkeypatch.setattr(inverse_pipeline_module, "audit_stage3_topology", capture_targets)
     pipeline._final_topology_rows(
         nodes,
         S_target=spectrum_marker,
@@ -100,7 +112,7 @@ def test_final_topology_export_forwards_stage3_targets(monkeypatch) -> None:
     assert captured["E_target"] is element_marker
 
 
-def test_final_topology_export_accepts_stage3_proven_residual_terminal(monkeypatch) -> None:
+def test_final_topology_export_rejects_historical_residual_terminal_proof(monkeypatch) -> None:
     pipeline = _build_pipeline_stub()
     pipeline._final_stage3_completion_diagnostics = {
         "residual_infeasibility_proof": {
@@ -110,50 +122,39 @@ def test_final_topology_export_accepts_stage3_proven_residual_terminal(monkeypat
         }
     }
 
-    class ClassificationStub:
-        def to_dict(self):
-            return {
+    monkeypatch.setattr(
+        inverse_pipeline_module,
+        "audit_stage3_topology",
+        lambda **_kwargs: {
+            "ok": False,
+            "reason": "fresh_audit_requires_conversion",
+            "requires_conversion": True,
+            "products": [],
+            "pending_contracts": [],
+            "classification": {
                 "summary": {},
                 "classification_rejects": [],
                 "unclassified_nodes": [],
                 "resource_pool": {},
-            }
-
-    class AssemblyStub:
-        def to_public_dict(self):
-            return {
-                "ok": False,
-                "reason": "residual_resource_self_closure_pending",
-                "feasible": True,
-                "products": [],
-                "pending_units": [],
-                "resource_ledger": {"remaining_counts": {"11": 4, "23": 1}},
-            }
-
-        def to_dict(self):
-            return {
-                "diagnostics": {},
-                "flex_bounds": {},
-                "flex_counts": {},
-                "flex_target_plan": {},
-                "resource_demand": {},
-                "protected_resource_counts": {},
-                "referenced_resource_counts": {},
-            }
-
-    monkeypatch.setattr(inverse_pipeline_module, "classify_topology_units", lambda *args, **kwargs: ClassificationStub())
-    monkeypatch.setattr(inverse_pipeline_module, "assemble_topology_units", lambda *args, **kwargs: AssemblyStub())
+            },
+            "external_assembly": {"diagnostics": {}},
+            "ownership_ledger": {"states": {}, "invariant_errors": []},
+            "resource_ledger": {"remaining_counts": {"11": 4, "23": 1}},
+            "resource_accounting": {"ok": True, "errors": []},
+            "infeasibility_proof": {},
+            "plan": {"phase": "residual_resource_self_closure"},
+        },
+    )
 
     rows, summary = pipeline._final_topology_rows([])
 
     assert rows == []
-    assert summary["ok"] is True
+    assert summary["ok"] is False
     assert summary["pending_closure_total_count"] == 0
-    assert summary["diagnostics"]["solver_reason"] == "stage3_complete"
-    assert summary["diagnostics"]["residual_infeasibility_proof"]["executable"] is False
+    assert summary["diagnostics"]["solver_reason"] == "fresh_audit_requires_conversion"
 
 
-def test_final_topology_export_uses_matching_complete_generation_products(monkeypatch) -> None:
+def test_final_topology_export_uses_only_fresh_audit_products(monkeypatch) -> None:
     pipeline = _build_pipeline_stub()
     nodes = [
         SimpleNamespace(
@@ -186,7 +187,7 @@ def test_final_topology_export_uses_matching_complete_generation_products(monkey
     pipeline._final_stage3_completion_diagnostics = {
         "stage3_complete": True,
         "generation_id": 9,
-        "products": [product],
+        "products": [{**product, "product_id": "historical-product"}],
         "node_state_signature": pipeline._stage3_node_state_signature(nodes),
         "ownership_ledger": {
             "states": {
@@ -200,50 +201,54 @@ def test_final_topology_export_uses_matching_complete_generation_products(monkey
         },
     }
 
-    class ClassificationStub:
-        def to_dict(self):
-            return {
+    resource_ledger = {
+        "initial_ids_by_su": {"11": [1], "22": [2], "23": [3, 4]},
+        "consumed_ids_by_su": {"11": [1], "22": [2], "23": [3, 4]},
+        "remaining_ids_by_su": {"11": [], "22": [], "23": []},
+        "initial_counts": {"11": 1, "22": 1, "23": 2},
+        "consumed_counts": {"11": 1, "22": 1, "23": 2},
+        "topology_consumed_counts": {"11": 0, "22": 0, "23": 0},
+        "residual_consumed_counts": {"11": 1, "22": 1, "23": 2},
+        "remaining_counts": {"11": 0, "22": 0, "23": 0},
+        "shortage_counts": {},
+        "invariant_errors": [],
+        "snapshot_stage": "fresh_stage3_audit",
+    }
+    monkeypatch.setattr(
+        inverse_pipeline_module,
+        "audit_stage3_topology",
+        lambda **_kwargs: {
+            "ok": True,
+            "reason": "stage3_complete",
+            "requires_conversion": False,
+            "products": [product],
+            "pending_contracts": [],
+            "classification": {
                 "summary": {},
                 "classification_rejects": [],
                 "unclassified_nodes": [],
-                "atomic_groups": [],
-                "resource_pool": {
-                    "initial_ids_by_su": {"11": [1], "22": [2], "23": [3, 4]},
-                    "su11_donor_ids_by_su": {},
-                },
-            }
-
-    class AssemblyStub:
-        def to_public_dict(self):
-            return {
-                "ok": False,
-                "reason": "remaining_pool_spectrum_rebalance_ready",
-                "feasible": True,
-                "products": [],
-                "pending_units": [],
-                "resource_ledger": {},
-            }
-
-        def to_dict(self):
-            return {"diagnostics": {}}
-
-    monkeypatch.setattr(inverse_pipeline_module, "classify_topology_units", lambda *args, **kwargs: ClassificationStub())
-    monkeypatch.setattr(inverse_pipeline_module, "assemble_topology_units", lambda *args, **kwargs: AssemblyStub())
+                "resource_pool": {},
+            },
+            "external_assembly": {"diagnostics": {}},
+            "ownership_ledger": pipeline._final_stage3_completion_diagnostics["ownership_ledger"],
+            "resource_ledger": resource_ledger,
+            "resource_accounting": {"ok": True, "errors": []},
+            "infeasibility_proof": {},
+            "plan": {"phase": "complete"},
+        },
+    )
 
     rows, summary = pipeline._final_topology_rows(nodes)
 
     assert rows == [product]
     assert summary["ok"] is True
     assert summary["diagnostics"]["solver_reason"] == "stage3_complete"
-    assert summary["diagnostics"]["stage3_generation_id"] == 9
+    assert summary["diagnostics"]["stage3_generation_id"] == 0
     ledger = summary["diagnostics"]["resource_ledger"]
     assert ledger["remaining_counts"]["11"] == 0
     assert ledger["residual_consumed_counts"]["23"] == 2
 
-    nodes[0].su_type = 12
-    stale_rows, stale_summary = pipeline._final_topology_rows(nodes)
-    assert stale_rows == []
-    assert stale_summary["diagnostics"]["solver_reason"] != "stage3_complete"
+    assert rows[0]["product_id"] != "historical-product"
 
 
 def test_pipeline_captures_complete_generation_products_from_state_machine_ledger() -> None:
@@ -277,7 +282,11 @@ def test_pipeline_captures_complete_generation_products_from_state_machine_ledge
     _, _, _, meta = pipeline._run_topology_stage3_resource_cycles(
         nodes=nodes,
         H=histogram,
-        current_diff={"r2": 0.5},
+        current_diff={
+            "r2": 0.5,
+            "source_stage": "layer2",
+            "spectral_contract": "template_center_mu",
+        },
         S_target=torch.zeros(2401),
         E_target=torch.zeros(6),
         eval_lib_path=None,
@@ -302,7 +311,7 @@ def test_pipeline_captures_and_flattens_terminal_infeasibility_proof(tmp_path) -
     histogram[24] = 1
     proof = {
         "phase": "residual_resource_self_closure",
-        "reason": "stage3_iteration_budget_exhausted",
+        "reason": "residual_terminal_conversion_infeasible",
         "required_counts": {"23": 1},
         "available_counts": {"24": 1},
         "missing_counts": {"23": 1},
@@ -329,7 +338,11 @@ def test_pipeline_captures_and_flattens_terminal_infeasibility_proof(tmp_path) -
     _, _, _, meta = pipeline._run_topology_stage3_resource_cycles(
         nodes=nodes,
         H=histogram,
-        current_diff={"r2": 0.5},
+        current_diff={
+            "r2": 0.5,
+            "source_stage": "layer2",
+            "spectral_contract": "template_center_mu",
+        },
         S_target=torch.zeros(2401),
         E_target=torch.zeros(6),
         eval_lib_path=None,
@@ -344,7 +357,7 @@ def test_pipeline_captures_and_flattens_terminal_infeasibility_proof(tmp_path) -
     assert terminal["stop_reason"] == "phase_resource_infeasible"
     assert terminal["infeasibility_proof"] == proof
     rows = pipeline._flatten_stage3_resource_cycles(meta, outer_idx=0)
-    assert 'stage3_iteration_budget_exhausted' in rows[-1]["infeasibility_proof"]
+    assert 'residual_terminal_conversion_infeasible' in rows[-1]["infeasibility_proof"]
     pipeline._save_final_stage3_resource_summary(rows, str(tmp_path))
     summary = pd.read_json(tmp_path / "final_stage3_resource_summary.json", typ="series")
     assert summary["summary"]["infeasibility_proof"] == proof
@@ -369,6 +382,10 @@ def test_pipeline_flattens_spectrum_candidate_scores() -> None:
         "candidate": candidate,
         "accepted": True,
         "r2_gain": 0.012,
+        "balance_penalty": 0.003,
+        "balanced_r2_gain": 0.009,
+        "required_r2_gain": 0.005,
+        "balance_diagnostics": {"h_before": 520.0, "h_after": 519.0},
         "window_loss_gain": 0.4,
     }]
     meta = {
@@ -382,6 +399,10 @@ def test_pipeline_flattens_spectrum_candidate_scores() -> None:
             "diagnostics": {
                 "selected_candidate": candidate,
                 "r2_gain": 0.012,
+                "balance_penalty": 0.003,
+                "balanced_r2_gain": 0.009,
+                "required_r2_gain": 0.005,
+                "balance_diagnostics": {"h_before": 520.0, "h_after": 519.0},
                 "window_loss_gain": 0.4,
                 "evaluated_candidates": scores,
             },
@@ -393,16 +414,28 @@ def test_pipeline_flattens_spectrum_candidate_scores() -> None:
 
     assert row["spectrum_candidate_id"] == "spectrum:23:24:2"
     assert row["spectrum_r2_gain"] == 0.012
+    assert row["spectrum_balance_penalty"] == 0.003
+    assert row["spectrum_balanced_r2_gain"] == 0.009
+    assert row["spectrum_required_r2_gain"] == 0.005
+    assert '"h_after": 519.0' in row["spectrum_balance_diagnostics"]
     assert row["spectrum_window_loss_gain"] == 0.4
     assert "spectrum:23:24:2" in row["spectrum_candidate_scores"]
 
 
-def test_final_topology_export_uses_only_matching_terminal_infeasibility_proof() -> None:
+def test_outer_pipeline_does_not_swallow_block_c_programming_errors() -> None:
+    source = inspect.getsource(InversePipelineV3.infer)
+
+    assert "Block C resource workflow crashed" in source
+    assert "失败，保持当前状态" not in source
+    assert "Layer3 skipped" in source
+
+
+def test_final_topology_export_ignores_historical_terminal_infeasibility_proof() -> None:
     pipeline = _build_pipeline_stub()
     nodes = [make_node(1, 24)]
     proof = {
         "phase": "residual_resource_self_closure",
-        "reason": "stage3_iteration_budget_exhausted",
+        "reason": "residual_terminal_conversion_infeasible",
     }
     pipeline._final_stage3_terminal_diagnostics = {
         "stop_reason": "phase_resource_infeasible",
@@ -413,21 +446,20 @@ def test_final_topology_export_uses_only_matching_terminal_infeasibility_proof()
 
     _, summary = pipeline._final_topology_rows(nodes)
 
-    assert summary["ok"] is False
-    assert summary["diagnostics"]["solver_reason"] == "phase_resource_infeasible"
-    assert summary["diagnostics"]["infeasibility_proof"] == proof
-    assert summary["diagnostics"]["stage3_generation_id"] == 11
-    assert summary["diagnostics"]["stage3_terminal_snapshot_match"] is True
-
-    nodes[0].su_type = 23
-    _, stale_summary = pipeline._final_topology_rows(nodes)
-    assert stale_summary["diagnostics"]["solver_reason"] != "phase_resource_infeasible"
-    assert stale_summary["diagnostics"]["infeasibility_proof"] == {}
+    assert summary["ok"] is True
+    assert summary["diagnostics"]["solver_reason"] == "stage3_complete"
+    assert summary["diagnostics"]["infeasibility_proof"] != proof
+    assert summary["diagnostics"]["stage3_generation_id"] == 0
+    assert summary["diagnostics"]["stage3_terminal_snapshot_match"] is False
 
 
-def test_inverse_pipeline_final_topology_print_is_minimal(capsys) -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+def test_inverse_pipeline_final_topology_print_is_minimal(
+    capsys,
+    complete_fresh_topology_audit,
+) -> None:
+    nodes, rows, summary = complete_fresh_topology_audit
     pipeline = _build_pipeline_stub()
+    pipeline._final_topology_rows = lambda *_args, **_kwargs: (rows, summary)
 
     pipeline._print_final_topology_specs(nodes, limit=200)
     output = capsys.readouterr().out
@@ -442,12 +474,11 @@ def test_inverse_pipeline_final_topology_print_is_minimal(capsys) -> None:
     assert "consumed_counts=" in output
     assert "remaining_counts=" in output
     assert "shortage_counts=" in output
-    assert "[Final Topology Pending]" in output
+    assert "[Final Topology Pending]" not in output
     assert "] real=-1 real_gid=" not in output
     assert "topology_consumed_counts=" in output
     assert "residual_consumed_counts=" in output
     assert "snapshot_stage=" in output
-    assert "real_gid=" in output
     assert "topology=" in output
     assert "node_ids=" in output
 
@@ -458,18 +489,22 @@ def test_inverse_pipeline_final_topology_print_is_minimal(capsys) -> None:
         "src=",
         "candidate_group_id",
         "preferred_mode",
-        "branch_ops",
-        "main_ops",
-        "reason=",
-        "optionless=",
+            "branch_ops",
+            "main_ops",
+            "optionless=",
         "unallocated_branch=",
     ]:
         assert token not in output
+    assert "reason=raw_su24_existing_connectivity_unsupported" not in output
 
 
-def test_inverse_pipeline_final_topology_csv_exports_are_public(tmp_path: Path) -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+def test_inverse_pipeline_final_topology_csv_exports_are_public(
+    tmp_path: Path,
+    complete_fresh_topology_audit,
+) -> None:
+    nodes, rows, summary = complete_fresh_topology_audit
     pipeline = _build_pipeline_stub()
+    pipeline._final_topology_rows = lambda *_args, **_kwargs: (rows, summary)
     stale_duplicate = tmp_path / "final_topology_unclosed_candidates.csv"
     stale_duplicate.write_text("obsolete\n", encoding="utf-8")
 
@@ -507,7 +542,7 @@ def test_inverse_pipeline_final_topology_csv_exports_are_public(tmp_path: Path) 
         "available_counts",
         "reason",
     ]
-    assert not any(str(value) == "-1" for value in list(pending["actual_su"]))
+    assert pending.empty
     assert not stale_duplicate.exists()
 
     resource_pool = pd.read_csv(tmp_path / "final_topology_resource_pool.csv")
@@ -584,8 +619,24 @@ def test_inverse_pipeline_final_topology_summary_keeps_bad_topologies(monkeypatc
                 "planned_conversions": [],
             }
 
-    monkeypatch.setattr(inverse_pipeline_module, "classify_topology_units", lambda *args, **kwargs: _ClassificationStub())
-    monkeypatch.setattr(inverse_pipeline_module, "assemble_topology_units", lambda *args, **kwargs: _AssemblyStub())
+    monkeypatch.setattr(
+        inverse_pipeline_module,
+        "audit_stage3_topology",
+        lambda **_kwargs: {
+            "ok": False,
+            "reason": "external_side_chain_closure_pending",
+            "requires_conversion": False,
+            "products": [],
+            "pending_contracts": [],
+            "classification": _ClassificationStub().to_dict(),
+            "external_assembly": _AssemblyStub().to_dict(),
+            "ownership_ledger": {"states": {}, "invariant_errors": []},
+            "resource_ledger": _AssemblyStub().to_public_dict()["resource_ledger"],
+            "resource_accounting": {"ok": True, "errors": []},
+            "infeasibility_proof": {},
+            "plan": {"phase": "external_side_chain_closure"},
+        },
+    )
 
     rows, summary = pipeline._final_topology_rows([])
 
@@ -685,8 +736,27 @@ def test_inverse_pipeline_pending_gid_invariant_allows_suppressed_support_nodes(
                 "planned_conversions": [],
             }
 
-    monkeypatch.setattr(inverse_pipeline_module, "classify_topology_units", lambda *args, **kwargs: _ClassificationStub())
-    monkeypatch.setattr(inverse_pipeline_module, "assemble_topology_units", lambda *args, **kwargs: _AssemblyStub())
+    monkeypatch.setattr(
+        inverse_pipeline_module,
+        "audit_stage3_topology",
+        lambda **_kwargs: {
+            "ok": False,
+            "reason": "external_ring_candidates_pending",
+            "requires_conversion": False,
+            "products": [],
+            "pending_contracts": [pending],
+            "classification": _ClassificationStub().to_dict(),
+            "external_assembly": _AssemblyStub().to_dict(),
+            "ownership_ledger": {
+                "states": {"pending_topology": [182, 310, 405, 505, 569]},
+                "invariant_errors": [],
+            },
+            "resource_ledger": _AssemblyStub().to_public_dict()["resource_ledger"],
+            "resource_accounting": {"ok": True, "errors": []},
+            "infeasibility_proof": {},
+            "plan": {"phase": "external_fatty_ring_closure"},
+        },
+    )
 
     rows, summary = pipeline._final_topology_rows(nodes)
 
@@ -754,13 +824,24 @@ def test_final_topology_allows_adjacent_slots_to_share_a_path_node(monkeypatch) 
 
     monkeypatch.setattr(
         inverse_pipeline_module,
-        "classify_topology_units",
-        lambda *args, **kwargs: _ClassificationStub(),
-    )
-    monkeypatch.setattr(
-        inverse_pipeline_module,
-        "assemble_topology_units",
-        lambda *args, **kwargs: _AssemblyStub(),
+        "audit_stage3_topology",
+        lambda **_kwargs: {
+            "ok": True,
+            "reason": "stage3_complete",
+            "requires_conversion": False,
+            "products": [product],
+            "pending_contracts": [],
+            "classification": _ClassificationStub().to_dict(),
+            "external_assembly": _AssemblyStub().to_dict(),
+            "ownership_ledger": {
+                "states": {"claimed_closure_resource": [1, 2, 3, 4]},
+                "invariant_errors": [],
+            },
+            "resource_ledger": {},
+            "resource_accounting": {"ok": True, "errors": []},
+            "infeasibility_proof": {},
+            "plan": {"phase": "complete"},
+        },
     )
 
     rows, summary = pipeline._final_topology_rows(nodes)

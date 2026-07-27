@@ -16,6 +16,10 @@ warnings.filterwarnings(
 )
 
 from model.inverse.topology.classification.classifier import classify_topology_units
+from model.inverse.topology.classification.classification_models import (
+    TopologyClassificationResult,
+    TopologyFragment,
+)
 from model.inverse.topology.conversion_solver import apply_stage3_node_adjustments
 from model.inverse.topology.assembly_external import (
     AssemblyFragmentView,
@@ -23,6 +27,8 @@ from model.inverse.topology.assembly_external import (
     ExternalTopologyAssembler,
     _validate_ring_product_shape,
     assemble_external_topologies,
+    assemble_pool_su24_rings,
+    project_fragment_views,
 )
 from model.inverse.topology.phase_eval import assemble_topology_units, build_stage3_phase_evaluation
 from model.inverse.topology.round_context import (
@@ -32,6 +38,10 @@ from model.inverse.topology.round_context import (
 )
 from model.inverse.topology.stage3_models import merge_stage3_contracts_by_owner
 from model.inverse.topology.stage3_models import TopologyAssemblyProduct, TopologyPathRender, TopologyPoolLedger
+from model.inverse.topology.stage3_state_machine import (
+    build_su24_resource_role_profiles,
+    plan_stage3_state_machine,
+)
 from model.inverse.topology.workflow import plan_stage3_resource_adjustments
 from model.inverse.inverse_pipeline import InversePipelineV3
 
@@ -60,6 +70,68 @@ PRODUCT_KEYS = {
     "closed",
     "reason",
 }
+
+
+def test_external_allocator_starts_from_fresh_rebuilt_resource_pool() -> None:
+    nodes = [
+        make_node(1, 11),
+        make_node(2, 11),
+        make_node(3, 23),
+        make_node(4, 23),
+        make_node(5, 23),
+    ]
+    classification = classify_topology_units(nodes)
+    result = assemble_external_topologies(nodes, classification).to_dict()
+
+    ledger = dict(result["resource_ledger"])
+    remaining = {
+        str(key): list(values)
+        for key, values in dict(ledger["remaining_ids_by_su"]).items()
+    }
+    assert remaining["11"] == [1, 2]
+    assert remaining["23"] == [3, 4, 5]
+    assert sorted(ledger["initial_ids_by_su"]["11"]) == [1, 2]
+    assert sorted(ledger["initial_ids_by_su"]["23"]) == [3, 4, 5]
+    assert dict(result["diagnostics"])["product_ownership_conflicts"] == []
+    ownership = dict(result["ownership_ledger"])
+    claimed_ids = list(dict(ownership.get("states", {})).get("claimed_closure_resource", []) or [])
+    assert claimed_ids == []
+    assert result["flex_counts"]["final"] == 0
+    assert "prior_committed_flex_count" not in result["flex_target_plan"]
+
+
+def test_rebuilt_fragment_is_available_without_prior_claim_masking() -> None:
+    aromatic = make_node(1, 9)
+    claimed = make_node(2, 11)
+    classification = TopologyClassificationResult(
+        fragments=[TopologyFragment(
+            fragment_id=2,
+            family="basic",
+            class_type="B",
+            topology_template="9-11",
+            source_node_ids=[1, 2],
+            claimed_node_ids=[1, 2],
+            evidence={
+                "center_node_id": 2,
+                "matched_neighbors": [
+                    {"node_id": 1, "su_type": 9, "label": "9"},
+                ],
+            },
+        )],
+        resource_pool={
+            "remaining_ids_by_su": {
+                "11": [2], "22": [], "23": [], "24": [],
+            },
+            "su11_donor_ids_by_su": {"10": [], "12": [], "13": []},
+        },
+    )
+    assembler = ExternalTopologyAssembler(
+        [aromatic, claimed],
+        classification,
+    )
+
+    assert assembler.fragment_state_by_id[2] == "available"
+    assert assembler.allocator.remaining_ids_by_su["11"] == [2]
 
 
 def test_resource_ownership_reconciliation_does_not_inflate_convertible_pool() -> None:
@@ -92,6 +164,31 @@ def test_contract_merge_rejects_conflicting_fragment_owner_definitions() -> None
 
     with pytest.raises(ValueError, match="duplicate topology contract definitions"):
         merge_stage3_contracts_by_owner([base, {**base, "required_counts": {"11": 2, "23": 1}}])
+
+
+def test_fragment_projection_rejects_unknown_family() -> None:
+    classification = TopologyClassificationResult(fragments=[TopologyFragment(
+        fragment_id=7,
+        family="removed_legacy_family",
+        class_type="G",
+        topology_template="",
+    )])
+
+    with pytest.raises(ValueError, match=r"unsupported topology fragment families: 7:removed_legacy_family"):
+        project_fragment_views(classification, {})
+
+
+def test_atomic_pair_orientation_is_independent_of_global_id() -> None:
+    terminal = make_node(1, 16)
+    unsaturated = make_node(2, 15)
+    connect(terminal, unsaturated)
+
+    classification = classify_topology_units([terminal, unsaturated])
+    fragment = next(item for item in classification.fragments if set(item.claimed_node_ids) == {1, 2})
+
+    assert fragment.mainline_node_ids == [2, 1]
+    assert fragment.mainline_labels == ["15", "16"]
+    assert [slot.kind for slot in fragment.open_mainline_slots] == ["F1", "CLOSED_TERMINAL"]
 
 
 def test_pipeline_shares_layer2_template_cache_with_layer3() -> None:
@@ -314,7 +411,7 @@ def test_external_assembly_minimal_product_contract_for_explicit_a() -> None:
     assert product["actual_topology_su"] == "9-3-9"
     assert product["actual_topology_gid"] == "11-10-12"
     assert product["source_fragment_classes"] == ["A"]
-    assert product["fixed_source_node_ids"] == [10]
+    assert product["fixed_source_node_ids"] == [10, 11, 12]
     assert product["claimed_resource_ids_by_su"] == {}
     assert product["mainline_slots"]
     assert all(slot["connection_semantics"] == "open" for slot in product["mainline_slots"])
@@ -325,8 +422,8 @@ def test_external_assembly_minimal_product_contract_for_explicit_a() -> None:
         [center, left, right],
         classify_topology_units([center, left, right]),
     ).to_public_dict()["products"][0]
-    assert public_product["fixed_source_node_ids"] == [10]
-    assert public_product["node_id_notation"] == "OPEN-10-OPEN"
+    assert public_product["fixed_source_node_ids"] == [10, 11, 12]
+    assert public_product["node_id_notation"] == "11-10-12"
 
 
 def test_external_assembly_closes_b_plus_g_without_legacy_fields() -> None:
@@ -349,15 +446,54 @@ def test_external_assembly_closes_b_plus_g_without_legacy_fields() -> None:
     assert product["product_kind"] == "side_chain"
     assert product["actual_topology_su"] == "1-23-23-3-9"
     assert product["source_fragment_classes"] == ["G", "B"]
-    assert product["fixed_source_node_ids"] == [45, 55]
+    assert product["fixed_source_node_ids"] == [45, 46, 47, 55, 56]
     assert product["claimed_resource_ids_by_su"] == {}
-    assert sorted(classification_dict["resource_pool"]["remaining_ids_by_su"]["23"]) == [47, 56]
-    assert sorted(assembly["resource_ledger"]["remaining_ids_by_su"]["23"]) == [47, 56]
+    assert classification_dict["resource_pool"]["remaining_ids_by_su"]["23"] == []
+    assert assembly["resource_ledger"]["remaining_ids_by_su"]["23"] == []
+    metrics = dict(assembly.get("topology_metrics", {}) or {})
+    assert metrics["product_count"] == len(assembly["products"])
+    assert metrics["pending_count"] == len(assembly["pending_units"])
+    flex_counts = dict(assembly.get("flex_counts", {}) or {})
+    flex_bounds = dict(assembly.get("flex_bounds", {}) or {})
+    expected_flex_gap = (
+        max(
+            0,
+            int(flex_bounds.get("min", 0)) - int(flex_counts.get("final", 0)),
+            int(flex_counts.get("final", 0)) - int(flex_bounds.get("max", 0)),
+        )
+        if bool(flex_bounds.get("enforced", False))
+        else 0
+    )
+    assert metrics["flex_gap"] == expected_flex_gap
+    ledger = dict(assembly.get("resource_ledger", {}) or {})
+    assert sum(dict(ledger.get("initial_counts", {}) or {}).values()) == (
+        sum(dict(ledger.get("consumed_counts", {}) or {}).values())
+        + sum(dict(ledger.get("remaining_counts", {}) or {}).values())
+    )
     public_product = assemble_topology_units(
         nodes,
         classify_topology_units(nodes),
     ).to_public_dict()["products"][0]
-    assert "OPEN" in public_product["node_id_notation"]
+    assert "47" in public_product["node_id_notation"]
+    assert "56" in public_product["node_id_notation"]
+    plan = plan_stage3_resource_adjustments(
+        H=torch.bincount(
+            torch.tensor([int(node.su_type) for node in nodes]), minlength=40
+        ),
+        nodes=nodes,
+        enable_post_external_spectrum=False,
+    )
+    phase_snapshot = dict(
+        dict(plan.runtime or {}).get("phase_evaluation_dict", {}) or {}
+    )
+    snapshot_assembly = dict(phase_snapshot.get("assembly_view", {}) or {})
+    snapshot_metrics = dict(phase_snapshot.get("topology_metrics", {}) or {})
+    assert snapshot_metrics["product_count"] == len(
+        list(snapshot_assembly.get("products", []) or [])
+    )
+    assert snapshot_metrics["pending_count"] == len(
+        list(snapshot_assembly.get("pending_units", []) or [])
+    )
 
 
 def test_like24_b_plus_e_joins_real_open_end_terminal_to_aromatic() -> None:
@@ -399,16 +535,13 @@ def test_like24_b_plus_e_joins_real_open_end_terminal_to_aromatic() -> None:
     assert e_view.endpoint("right").role == "e_like_open_end"
 
     assembly = assembler.assemble().to_dict()
+    assert assembly["pending_units"] == []
     assert len(assembly["products"]) == 1
     product = assembly["products"][0]
-    assert product["actual_topology_su"] == "19d1-2-23-single20d3(-23-22)-0-9"
-    assert "-9-19d1-" not in product["actual_topology_su"]
+    assert product["product_kind"] == "side_chain"
+    assert product["actual_topology_su"] == "22-23-single20d3(-23-2-19d1)-0-9"
+    assert product["actual_topology_gid"] == "104-103-100(-202-200-201)-101-102"
     assert set(product["source_fragment_ids"]) == {100, 200}
-    assert assembly["pending_units"] == []
-    assert "topology_notation" not in product
-    assert "node_id_notation" not in product
-    assert "main_closure_mode" not in product
-    assert "resource_cost" not in product
 
 
 def test_double19d3_su28_su29_terminal_path_is_symbolic_without_pending() -> None:
@@ -575,6 +708,66 @@ def test_external_assembly_closes_d_with_two_end_f1_segments() -> None:
     assert product["source_fragment_classes"] == ["D"]
 
 
+def test_unselected_d_candidate_closes_as_side_after_flex_target_is_met() -> None:
+    center = make_node(60, 3)
+    open_left = make_node(61, 23)
+    open_right = make_node(62, 23)
+    cap_11 = make_node(63, 11)
+    cap_22 = make_node(64, 22)
+    connect(center, open_left)
+    connect(center, open_right)
+    nodes = [center, open_left, open_right, cap_11, cap_22]
+
+    assembly = ExternalTopologyAssembler(
+        nodes,
+        classify_topology_units(nodes),
+        flex_audit={
+            "enforced": True,
+            "scenario": "in_range",
+            "flex_lower": 0,
+            "flex_upper": 2,
+            "target_flex_count": 0,
+            "selected_candidate_fragment_ids": [],
+        },
+    ).assemble().to_dict()
+
+    assert assembly["pending_units"] == []
+    assert len(assembly["products"]) == 1
+    product = assembly["products"][0]
+    assert product["product_kind"] == "side_chain"
+    assert product["actual_topology_su"] == "11-23-3-23-22"
+    assert product["actual_topology_gid"] == "63-61-60-62-64"
+
+
+def test_unselected_d_side_shortage_reports_f1_f2_contract() -> None:
+    center = make_node(60, 3)
+    open_left = make_node(61, 23)
+    open_right = make_node(62, 23)
+    cap_11 = make_node(63, 11)
+    connect(center, open_left)
+    connect(center, open_right)
+    nodes = [center, open_left, open_right, cap_11]
+
+    assembly = ExternalTopologyAssembler(
+        nodes,
+        classify_topology_units(nodes),
+        flex_audit={
+            "enforced": True,
+            "scenario": "in_range",
+            "flex_lower": 0,
+            "flex_upper": 2,
+            "target_flex_count": 0,
+            "selected_candidate_fragment_ids": [],
+        },
+    ).assemble().to_dict()
+
+    pending = next(item for item in assembly["pending_units"] if item["source_fragment_ids"] == [60])
+    assert pending["target_role"] == "side_chain"
+    assert pending["required_counts"] == {"11": 1, "22": 1}
+    assert pending["infeasibility_proof"]["missing_counts"] == {"22": 1}
+    assert [slot["kind"] for slot in pending["open_mainline_slots"]] == ["F1", "F2"]
+
+
 def test_external_assembly_branch_pool_shortage_pending_uses_minimal_contract() -> None:
     center = make_node(60, 19, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
     connector = make_node(61, 29, target_hop1_degree=2)
@@ -617,16 +810,13 @@ def test_fixed_branch_secondary_connector_can_pending_as_h1_shortage_without_rol
     classification = classify_topology_units([center, connector_0, aromatic_9, connector_27, side_single20d2, pool_11, pool_23, pool_22])
     assembly = assemble_topology_units([center, connector_0, aromatic_9, connector_27, side_single20d2, pool_11, pool_23, pool_22], classification).to_dict()
 
-    pending = next(item for item in list(assembly.get("pending_units", []) or []) if int(item.get("unit_id", 0)) == 1)
-    assert str(pending.get("reason", "")) == "branch_pool_shortage"
-    diagnostics = dict(assembly.get("diagnostics", {}) or {})
-    pending_contracts = list(diagnostics.get("pending_contracts", []) or [])
-    assert any(
-        str(item.get("contract_kind", "")) == "branch_closure"
-        and str(item.get("reason", "")) == "branch_pool_shortage"
-        for item in pending_contracts
+    product = next(
+        item for item in list(assembly.get("products", []) or [])
+        if 1 in item["source_fragment_ids"]
     )
-    assert not any(str(item.get("reason", "")) == "fixed_branch_role_conflict" for item in pending_contracts)
+    assert product["actual_topology_su"] == "11-double20d3(-27-single20d2-23-22)-0-9"
+    assert product["actual_topology_gid"] == "6-1(-4-5-7-8)-2-3"
+    assert assembly["pending_units"] == []
 
 
 def test_fixed_branch_secondary_connector_with_paired_like24_becomes_partner_pending() -> None:
@@ -882,7 +1072,7 @@ def test_invalid_ring_attempts_are_reported_as_bad_topologies() -> None:
     assert "reason=side_ring_backbone_node_count:7" in report
 
 
-def test_external_assembly_report_includes_empty_unrecognized_section() -> None:
+def test_external_assembly_report_does_not_reject_connected_su24_resource() -> None:
     nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
     classification = classify_topology_units(nodes)
     assembly = assemble_topology_units(nodes, classification)
@@ -890,7 +1080,7 @@ def test_external_assembly_report_includes_empty_unrecognized_section() -> None:
     report = build_external_assembly_audit_report(classification.to_dict(), assembly.to_dict())
 
     assert "=== Unrecognized Topologies ===" in report
-    assert "=== Unrecognized Topologies ===\n(none)" in report
+    assert "reason=raw_su24_existing_connectivity_unsupported" not in report
 
 
 def test_external_assembly_report_lists_unrecognized_topologies() -> None:
@@ -1165,6 +1355,171 @@ def test_below_range_only_selects_b_like_candidates_for_supplemental_flex() -> N
         str(dict(item.get("diagnostics", {}) or {}).get("candidate_kind", "")) == "b_like_open"
         for item in candidate_contracts
     )
+    candidate_profile = next(
+        item
+        for item in list(flex_audit.get("supplemental_flex_candidate_profiles", []) or [])
+        if int(item.get("fragment_id", -1)) == 10
+    )
+    assert candidate_profile["resource_template"] == {"11": 1}
+
+
+def test_flex_audit_groups_two_b_fragments_as_one_product_candidate() -> None:
+    nodes = []
+    for center_id in (10, 20):
+        center = make_node(center_id, 3)
+        aromatic = make_node(center_id + 1, 9)
+        open_node = make_node(center_id + 2, 23)
+        connect(center, aromatic)
+        connect(center, open_node)
+        nodes.extend([center, aromatic, open_node])
+    nodes.extend(make_node(100 + index, 9) for index in range(8))
+    nodes.extend(make_node(200 + index, 10) for index in range(4))
+
+    phase = build_stage3_phase_evaluation(
+        nodes,
+        classification=classify_topology_units(nodes),
+    ).to_dict()
+    audit = dict(phase.get("flex_audit", {}) or {})
+
+    assert audit["scenario"] == "below_range"
+    assert audit["selected_candidate_fragment_ids"] == [10, 20]
+    assert audit["selected_candidate_groups"] == [{
+        "group_id": "b_pair:10:20",
+        "strategy": "b_plus_b",
+        "fragment_ids": [10, 20],
+        "contribution_count": 1,
+        "resource_template": {},
+    }]
+    assert audit["external_planned_addition"] == 1
+    selected_contract = next(
+        item
+        for item in list(phase.get("flex_reconciliation_contracts", []) or [])
+        if str(item.get("reason", "")) == "supplemental_flex_candidate"
+    )
+    assert selected_contract["source_fragment_ids"] == [10, 20]
+    assert selected_contract["contract_kind"] == "fragment_composition"
+    assert selected_contract["required_counts"] == {}
+
+
+def test_uncovered_external_flex_gap_is_deferred_without_synthetic_contract() -> None:
+    center = make_node(30, 3)
+    terminal = make_node(31, 22)
+    open_node = make_node(32, 23)
+    endcap = make_node(33, 11)
+    connect(center, terminal)
+    connect(center, open_node)
+    nodes = [center, terminal, open_node, endcap]
+    classification = classify_topology_units(nodes)
+
+    assembly = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={
+            "enforced": True,
+            "scenario": "below_range",
+            "flex_lower": 1,
+            "flex_upper": 2,
+            "target_flex_count": 1,
+            "selected_candidate_fragment_ids": [],
+            "external_candidate_capacity": 0,
+            "external_planned_addition": 0,
+        },
+    ).assemble().to_dict()
+
+    assert len(assembly["products"]) == 1
+    assert str(assembly["products"][0].get("product_kind", "")) == "side_chain"
+    flex_contracts = [
+        item
+        for item in list(dict(assembly.get("diagnostics", {}) or {}).get("pending_contracts", []) or [])
+        if str(item.get("target_role", "")) == "flex_chain"
+    ]
+    assert flex_contracts == []
+    assert bool(
+        dict(assembly.get("flex_target_plan", {}) or {}).get(
+            "external_shortfall_deferred_to_residual", False
+        )
+    )
+
+
+def test_unmaterializable_selected_flex_candidate_does_not_block_side_or_ring() -> None:
+    center = make_node(30, 3)
+    terminal = make_node(31, 22)
+    open_node = make_node(32, 23)
+    endcap = make_node(33, 11)
+    connect(center, terminal)
+    connect(center, open_node)
+    nodes = [center, terminal, open_node, endcap]
+    classification = classify_topology_units(nodes)
+    selected_id = int(classification.fragments[0].fragment_id)
+
+    assembly = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={
+            "enforced": True,
+            "scenario": "below_range",
+            "flex_lower": 1,
+            "flex_upper": 2,
+            "target_flex_count": 1,
+            "selected_candidate_fragment_ids": [selected_id],
+            "supplemental_flex_candidate_ids": [selected_id],
+            "external_candidate_capacity": 1,
+            "external_planned_addition": 1,
+        },
+    ).assemble().to_dict()
+
+    assert any(
+        str(item.get("product_kind", "")) == "side_chain"
+        for item in list(assembly.get("products", []) or [])
+    )
+    assert bool(
+        dict(assembly.get("flex_target_plan", {}) or {}).get(
+            "external_shortfall_deferred_to_residual", False
+        )
+    )
+    assert not any(
+        str(item.get("reason", "")) == "flex_range_below_minimum"
+        for item in list(assembly.get("pending_units", []) or [])
+    )
+
+
+def test_explicit_side_pending_uses_remaining_side_subphase() -> None:
+    assembler = ExternalTopologyAssembler([], TopologyClassificationResult())
+
+    assert assembler._pending_subphase("explicit_side", "") == (
+        "remaining_external_halfclosed_closure"
+    )
+
+
+def test_supplemental_flex_search_includes_unselected_backfill_candidates() -> None:
+    assembler = ExternalTopologyAssembler(
+        [],
+        TopologyClassificationResult(),
+        flex_audit={
+            "enforced": True,
+            "scenario": "below_range",
+            "selected_candidate_fragment_ids": [10],
+            "supplemental_flex_candidate_ids": [10, 20],
+        },
+    )
+    assembler.views = [
+        SimpleNamespace(
+            fragment_id=fragment_id,
+            flex_reconcile_roles=["b_like_open"],
+            flex_reconcile_priority=0,
+            can_ring=False,
+        )
+        for fragment_id in (10, 20)
+    ]
+    assembler.fragment_state_by_id = {10: "available", 20: "available"}
+
+    candidates = assembler._available_flex_reconcile_views(
+        require_roles=["b_like_open"],
+        allow_ring_capable=True,
+        require_materializable=False,
+    )
+
+    assert [int(item.fragment_id) for item in candidates] == [10, 20]
 
 
 def test_below_range_includes_d_like_open_in_supplemental_candidate_pool() -> None:
@@ -1323,11 +1678,11 @@ def test_like24_open_views_expose_structured_flex_reconcile_roles() -> None:
     assert int(cd_cd_view.ring_like24_units) == int(dict(cd_cd_view.evidence or {}).get("ring_like24_units", 0) or 0)
 
     assert cd_n_view.ring_backbone_labels == {
-        "fused": ["single20d3", "27", "single20d2"],
-        "side": ["single20d3", "27", "single20d2"],
-        "upper_lower": ["single20d3", "27", "single20d2"],
+        "fused": ["23", "single20d3", "27", "single20d2"],
+        "side": ["23", "single20d3", "27", "single20d2"],
+        "upper_lower": ["23", "single20d3", "27", "single20d2"],
     }
-    assert cd_n_view.ring_backbone_span == {"fused": 3, "side": 3, "upper_lower": 3}
+    assert cd_n_view.ring_backbone_span == {"fused": 4, "side": 4, "upper_lower": 4}
     assert cd_n_view.ring_backbone_kind == {
         "fused": "fused_path",
         "side": "side_path",
@@ -1357,11 +1712,11 @@ def test_like24_open_views_expose_structured_flex_reconcile_roles() -> None:
     assert dict(ab_cd_view.ring_anchor_profile or {}).get("touches_aromatic_anchor", False) is True
 
     assert cd_cd_view.ring_backbone_labels == {
-        "fused": ["14", "14"],
-        "side": ["14", "14"],
-        "upper_lower": ["14", "14"],
+        "fused": ["23", "14", "14"],
+        "side": ["23", "14", "14"],
+        "upper_lower": ["23", "14", "14"],
     }
-    assert cd_cd_view.ring_backbone_span == {"fused": 2, "side": 2, "upper_lower": 2}
+    assert cd_cd_view.ring_backbone_span == {"fused": 3, "side": 3, "upper_lower": 3}
     assert cd_cd_view.ring_backbone_kind == {
         "fused": "fused_path",
         "side": "side_path",
@@ -1373,6 +1728,7 @@ def test_like24_open_views_expose_structured_flex_reconcile_roles() -> None:
         "fused": ["inner_pair"],
     }
     assert dict(cd_cd_view.ring_anchor_profile or {}).get("bridgehead_role", "") == "fused_bridgehead_substitute_pair"
+    assert classification.resource_pool["remaining_ids_by_su"]["24"] == [424]
 
 
 def test_priority_ring_scheduler_dispatches_fused_side_upper_in_order() -> None:
@@ -1446,7 +1802,7 @@ def test_non_applicable_flex_window_does_not_force_flex_range_gate() -> None:
 
 
 
-def test_external_h_branch_does_not_consume_an_unrelated_fragment() -> None:
+def test_external_h_branch_prefers_e_g_donor_but_h1_does_not() -> None:
     b_center = make_node(10, 3)
     b_aro = make_node(11, 9)
     b_open = make_node(12, 23)
@@ -1459,9 +1815,18 @@ def test_external_h_branch_does_not_consume_an_unrelated_fragment() -> None:
 
     classification = classify_topology_units([b_center, b_aro, b_open, g_center, g_open])
     assembler = ExternalTopologyAssembler([b_center, b_aro, b_open, g_center, g_open], classification)
-    branch_donors = assembler._available_views(assembler._is_side_pending_view)
+    branch_donors = assembler._available_branch_donors()
     result = assembler._resolve_branch_closure("H", branch_donors, anchor_index=0)
 
+    assert result is not None
+    assert result.branch_kind == "H"
+    assert result.mode == "fragment:G_as_H"
+    assert result.branch_topology in {"-23-1", "-23-22"}
+    assert len(branch_donors) == 0
+
+    assembler = ExternalTopologyAssembler([b_center, b_aro, b_open, g_center, g_open], classification)
+    branch_donors = assembler._available_branch_donors()
+    result = assembler._resolve_branch_closure("H1", branch_donors, anchor_index=0)
     assert result is None
     assert len(branch_donors) == 1
 
@@ -1661,12 +2026,9 @@ def test_external_assembly_csv_regression_contract_and_topologies() -> None:
     }
     assert not (bad_actual_topologies & actual_topologies)
     assert actual_topologies
-    assert str(assembly.get("reason", "")) == "external_ring_candidates_pending"
-    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) in {
-        "external_flex_closure",
-        "external_fatty_ring_closure",
-        "external_side_chain_closure",
-    }
+    assert str(assembly.get("reason", "")) == "external_flex_range_below_minimum"
+    assert str(dict(assembly.get("diagnostics", {}) or {}).get("stage3_phase", "")) == "flex_range_reconciliation"
+    assert list(dict(assembly.get("diagnostics", {}) or {}).get("completed_phases", []) or []) == []
 
     assert any(
         str(fragment.class_type) in {"24_AB_N_24_CD", "24_CD_N_24_CD"}
@@ -1680,13 +2042,13 @@ def test_external_assembly_csv_regression_contract_and_topologies() -> None:
     assert all("[" not in str(item.get("actual_topology_su", "")) for item in side_products)
     assert all("]" not in str(item.get("actual_topology_su", "")) for item in side_products)
 
-    ring_pending = [
-        item for item in list(assembly.get("pending_units", []) or [])
-        if str(item.get("pending_kind", "")) == "pending_ring_candidate"
-    ]
-    assert ring_pending
-    assert all(str(item.get("phase", "")) == "external_fatty_ring_closure" for item in ring_pending)
-    assert all(item.get("source_node_ids") for item in ring_pending)
+    # Real flex resource contracts stop materialization before the ring pass;
+    # unrelated ring/side fragments must not receive the global flex reason.
+    assert not any(
+        str(item.get("reason", "")) == "flex_range_below_minimum"
+        and str(item.get("phase", "")) != "external_flex_closure"
+        for item in list(assembly.get("pending_units", []) or [])
+    )
     assert any(str(item.get("pending_kind", "")) == "e_like_open" for item in list(assembly.get("pending_units", []) or []))
     assert not any(str(item.get("real_topology_partial", "")) == "-1" for item in list(assembly.get("pending_units", []) or []))
     assert all(item.get("source_fragment_ids") for item in list(assembly.get("pending_units", []) or []))
@@ -1719,9 +2081,9 @@ def test_external_assembly_report_is_minimal() -> None:
     assert "=== Complete Fatty Rings ===" in report
     assert "=== Pending Topologies ===" in report
     assert "Products=0 | Pending=" not in report
-    assert "ok=False | reason=external_ring_candidates_pending" in report
+    assert "ok=False | reason=external_flex_range_below_minimum" in report
     assert "\n   real=-1\n" not in report
-    assert "real=-25(-22)-" not in report
+    assert "claimed_source_not_in_symbolic_product" not in report
     assert "real_gid=" in report
     assert "=== Bad Topologies ===" not in report
 
@@ -1768,7 +2130,7 @@ def test_external_assembly_public_contract_is_minimal() -> None:
         _assert_public_pending(item)
 
     assert list(public.get("products", []) or [])
-    assert str(public.get("reason", "")) == "external_ring_candidates_pending"
+    assert str(public.get("reason", "")) == "external_flex_range_below_minimum"
     assert not any(str(item.get("real", "")) == "-1" for item in list(public.get("pending_units", []) or []))
     assert all(int(item.get("contract_id", -1)) >= 0 for item in list(public.get("pending_units", []) or []))
 
@@ -1788,6 +2150,7 @@ def test_external_assembly_diagnostics_keep_only_live_keys() -> None:
             "pending_contracts",
             "composition_attempt_failures",
             "contract_definition_conflicts",
+            "ring_resource_blockers",
         "total_shortage",
         "stage3_phase",
         "completed_phases",
@@ -1873,13 +2236,16 @@ def test_pending_public_contract_exposes_resource_traceability() -> None:
     pending = list(result.to_public_dict().get("pending_units", []) or [])
 
     assert pending
-    assert pending[0]["phase"] == "external_flex_closure"
+    assert pending[0]["phase"] == "external_side_chain_closure"
+    assert pending[0]["required_counts"] == {"22": 1}
+    assert pending[0]["infeasibility_proof"]["missing_counts"] == {"22": 1}
+    assert [slot["kind"] for slot in pending[0]["open_mainline_slots"]] == ["F2"]
     assert pending[0]["source_node_ids"]
     assert isinstance(pending[0]["required_counts"], dict)
     assert pending[0]["reason"]
 
 
-def test_like24_single19d3_with_multiple_11_neighbors_selects_one_anchor() -> None:
+def test_like24_single19d3_with_multiple_11_neighbors_preserves_both_anchors() -> None:
     center = make_node(
         414,
         19,
@@ -1898,18 +2264,24 @@ def test_like24_single19d3_with_multiple_11_neighbors_selects_one_anchor() -> No
     assembler = ExternalTopologyAssembler([center, left_11, right_11, terminal_28], classification)
     view = next(item for item in assembler.views if int(item.fragment_id) == 414)
 
-    assert view.main_labels == ["28", "single19d3", "11"]
-    assert view.main_node_ids == [522, 414, 168]
+    assert view.main_labels == ["11", "single19d3", "11"]
+    assert view.main_node_ids == [168, 414, 184]
     assert view.main_closed is True
     assert view.actual_branch_stubs == []
-    assert all("-11" not in stub.topology_notation for stub in view.actual_branch_stubs)
+    branch_contracts = view.fixed_branch_contracts_by_anchor()
+    assert branch_contracts[1][0]["base_path_node_ids"] == [522]
+    assert branch_contracts[1][0]["role_candidates"] == ["branch_only"]
     fragment = next(item for item in classification.fragments if int(item.fragment_id) == 414)
-    assert 168 in set(fragment.source_node_ids)
-    assert 184 not in set(fragment.source_node_ids)
-    assert 184 in set(classification.resource_pool["remaining_ids_by_su"]["11"])
+    assert set(fragment.source_node_ids) == {168, 184, 414, 522}
+    assert classification.resource_pool["remaining_ids_by_su"]["11"] == []
+
+    assembly = assembler.assemble().to_dict()
+    product = next(item for item in assembly["products"] if 414 in item["source_fragment_ids"])
+    assert product["actual_topology_su"] == "11-single19d3(-28)-11"
+    assert product["actual_topology_gid"] == "168-414(-522)-184"
 
 
-def test_like24_extra_11_neighbors_remain_open_resources_not_side_branches() -> None:
+def test_like24_extra_11_neighbor_is_not_recycled_as_a_free_resource() -> None:
     for su_type, terminal_su in ((19, 28),):
         center = make_node(
             1000 + su_type,
@@ -1929,13 +2301,664 @@ def test_like24_extra_11_neighbors_remain_open_resources_not_side_branches() -> 
         assembler = ExternalTopologyAssembler([center, left_11, right_11, terminal], classification)
         view = next(item for item in assembler.views if int(item.fragment_id) == int(center.global_id))
 
-        assert view.main_labels[0] == "28"
-        assert view.main_labels == ["28", "single19d3", "11"]
+        assert view.main_labels == ["11", "single19d3", "11"]
         assert view.main_closed is True
-        assert all("11" not in stub.topology_notation for stub in view.actual_branch_stubs)
         fragment = next(item for item in classification.fragments if int(item.fragment_id) == int(center.global_id))
-        assert int(right_11.global_id) not in set(fragment.source_node_ids)
-        assert int(right_11.global_id) in set(classification.resource_pool["remaining_ids_by_su"]["11"])
+        assert int(right_11.global_id) in set(fragment.source_node_ids)
+        assert int(right_11.global_id) not in set(classification.resource_pool["remaining_ids_by_su"]["11"])
+
+
+def test_raw_su24_c_remains_unclaimed_pool_resource_until_ring_selection() -> None:
+    center = make_node(491, 24, target_hop1_degree=3)
+    left_open = make_node(26, 3)
+    right_open = make_node(457, 23)
+    branch_open = make_node(498, 23)
+    branch_terminal = make_node(500, 22)
+    connect(center, left_open)
+    connect(center, right_open)
+    connect(center, branch_open)
+    connect(branch_open, branch_terminal)
+
+    nodes = [center, left_open, right_open, branch_open, branch_terminal]
+    classification = classify_topology_units(nodes)
+    profiles = build_su24_resource_role_profiles(nodes, {24: [491]})
+
+    assert [(profile.node_id, profile.role) for profile in profiles] == [(491, "C")]
+    assert not any(int(item.fragment_id) == 491 for item in classification.fragments)
+    assert classification.resource_pool["remaining_ids_by_su"]["24"] == [491]
+    assert not any(
+        491 in set(item.source_node_ids or [])
+        for item in classification.fragments
+    )
+
+
+def test_raw_su24_does_not_capture_neighbor_atomic_pair_or_render_as_external_fragment() -> None:
+    far_15 = make_node(314, 15)
+    near_15 = make_node(315, 15)
+    center = make_node(484, 24)
+    right_23 = make_node(480, 23)
+    branch_23 = make_node(491, 23)
+    connect(far_15, near_15)
+    connect(near_15, center)
+    connect(center, right_23)
+    connect(center, branch_23)
+    nodes = [far_15, near_15, center, right_23, branch_23]
+
+    classification = classify_topology_units(nodes)
+    assert not any(int(item.fragment_id) == 484 for item in classification.fragments)
+    assert classification.resource_pool["remaining_ids_by_su"]["24"] == [484]
+    fragment = next(item for item in classification.fragments if int(item.fragment_id) == 315)
+    assert fragment.class_type == "D"
+    assert fragment.claimed_node_ids == [314, 315]
+    assert dict(fragment.evidence or {})["atomic_group_node_ids"] == [314, 315]
+
+    assembler = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={
+            "enforced": True,
+            "scenario": "in_range",
+            "flex_lower": 0,
+            "flex_upper": 1,
+            "target_flex_count": 0,
+            "selected_candidate_fragment_ids": [],
+        },
+    )
+    view = next(item for item in assembler.views if int(item.fragment_id) == 315)
+    assert view.main_node_ids == [315, 314]
+    assert 484 not in set(view.source_node_ids)
+    assert all("24" not in item.main_labels for item in assembler.views)
+
+
+def test_raw_su24_neighbor_does_not_satisfy_like24_branch_h_contract() -> None:
+    center = make_node(
+        300,
+        19,
+        target_hop1_degree=3,
+        special_anchor_mode="single",
+        target_fixed_anchor_count=1,
+    )
+    connector = make_node(329, 29)
+    aromatic = make_node(5, 5)
+    anchor = make_node(11, 11)
+    raw_24 = make_node(24, 24)
+    raw_open = [make_node(node_id, 23) for node_id in (40, 41, 42)]
+    terminal = make_node(50, 22)
+    connect(center, connector, fixed=True)
+    connect(connector, aromatic)
+    connect(center, anchor)
+    connect(center, raw_24)
+    for node in raw_open:
+        connect(raw_24, node)
+    nodes = [center, connector, aromatic, anchor, raw_24, terminal] + raw_open
+
+    classification = classify_topology_units(nodes)
+    assembler = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={
+            "enforced": False,
+            "scenario": "in_range",
+            "selected_candidate_fragment_ids": [],
+        },
+    )
+    view = assembler.view_by_id[300]
+    specs = list(view.evidence.get("required_branch_closure_specs", []) or [])
+    assert [item["closure_kind"] for item in specs] == ["H"]
+
+    assembly = assembler.assemble().to_dict()
+    product = next(
+        item for item in assembly["products"]
+        if 300 in item["source_fragment_ids"]
+    )
+    assert "24" not in product["actual_topology_su"].split("-")
+    assert 24 not in product["source_node_ids"]
+    assert assembly["resource_ledger"]["remaining_ids_by_su"]["24"] == [24]
+
+
+def test_raw_su24_terminates_real_prefix_at_pool_boundary_and_closes_with_h() -> None:
+    from model.inverse.topology.assembly_external import _trace_real_branch_path
+
+    center = make_node(10, 19)
+    left_fixed = make_node(11, 3)
+    prefix_23 = make_node(12, 23)
+    right_fixed = make_node(13, 3)
+    raw_24 = make_node(14, 24)
+    terminal_22 = make_node(15, 22)
+    connect(center, left_fixed)
+    connect(left_fixed, prefix_23)
+    connect(prefix_23, right_fixed)
+    connect(right_fixed, raw_24)
+    nodes = [center, left_fixed, prefix_23, right_fixed, raw_24, terminal_22]
+
+    trace = _trace_real_branch_path(
+        center_id=10,
+        first_node_id=11,
+        nodes_by_id={int(node.global_id): node for node in nodes},
+    )
+
+    assert trace["base_path_node_ids"] == [11, 12, 13]
+    assert trace["base_path_effective_sequence"] == [23]
+    assert trace["terminated_kind"] == "resource_pool_boundary"
+    assert trace["raw_su24_pool_boundary"] is True
+
+    classification = TopologyClassificationResult(
+        resource_pool={"remaining_ids_by_su": {"22": [15], "24": [14]}},
+    )
+    assembler = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    result, required, blocker = assembler._resolve_fixed_branch_contract(
+        {
+            "role_candidates": ["branch_only"],
+            "base_path_labels": trace["base_path_labels"],
+            "base_path_node_ids": trace["base_path_node_ids"],
+            "base_path_effective_sequence": trace["base_path_effective_sequence"],
+            "tail_closure_kind": "H_AFTER_PREFIX",
+            "structural_boundary": trace["structural_boundary"],
+        },
+        [],
+        anchor_index=0,
+    )
+
+    assert blocker == ""
+    assert required == {"22": 1}
+    assert result is not None
+    assert result.main_node_ids == [11, 12, 13, 15]
+    assert assembler.allocator.remaining_ids_by_su["24"] == [14]
+
+
+def test_non_ring_product_cannot_capture_raw_su24_pool_node() -> None:
+    nodes = [make_node(1, 11), make_node(2, 24), make_node(3, 22)]
+    classification = classify_topology_units(nodes)
+    assembler = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={
+            "enforced": False,
+            "scenario": "in_range",
+            "selected_candidate_fragment_ids": [],
+        },
+    )
+    snapshot = assembler.allocator.snapshot()
+    product = TopologyAssemblyProduct(
+        product_kind="side_chain",
+        actual_topology_su="11-24-22",
+        actual_topology_gid="1-2-3",
+        source_node_ids=[1, 2, 3],
+        symbolic_node_ids=[1, 2, 3],
+        closed=True,
+    )
+
+    committed = assembler._commit_product(
+        product,
+        allocator_snapshot=snapshot,
+    )
+
+    assert committed is False
+    assert assembler.allocator.snapshot() == snapshot
+    assert assembler.invalid_topologies[-1]["reason"] == (
+        "raw_su24_requires_ring_materialization:[2]"
+    )
+
+
+def _raw_su24_ring_fixture(
+    *,
+    a_count: int,
+    c_count: int,
+    terminal_22_count: int,
+) -> list:
+    nodes = []
+    next_center_id = 100
+    next_cap_id = 10
+    next_open_id = 200
+    for _ in range(int(a_count)):
+        center = make_node(next_center_id, 24)
+        cap = make_node(next_cap_id, 11)
+        opens = [make_node(next_open_id + offset, 23) for offset in range(2)]
+        for neighbor in [cap] + opens:
+            connect(center, neighbor)
+        nodes.extend([center, cap] + opens)
+        next_center_id += 1
+        next_cap_id += 1
+        next_open_id += 2
+    for _ in range(int(c_count)):
+        center = make_node(next_center_id, 24)
+        opens = [make_node(next_open_id + offset, 23) for offset in range(3)]
+        for neighbor in opens:
+            connect(center, neighbor)
+        nodes.extend([center] + opens)
+        next_center_id += 1
+        next_open_id += 3
+    nodes.extend(
+        make_node(300 + offset, 22)
+        for offset in range(int(terminal_22_count))
+    )
+    return nodes
+
+
+def test_pool_su24_side_ring_materializes_real_nodes_and_exact_support_claims() -> None:
+    nodes = _raw_su24_ring_fixture(a_count=2, c_count=1, terminal_22_count=3)
+    classification = classify_topology_units(nodes)
+    pool = {
+        int(key): list(values)
+        for key, values in classification.resource_pool["remaining_ids_by_su"].items()
+    }
+
+    result = assemble_pool_su24_rings(nodes, classification, pool)
+
+    assert result["remaining_su24_count"] == 0
+    assert result["stop_reason"] == "pool_su24_ring_remainder_accepted"
+    assert len(result["products"]) == 1
+    product = result["products"][0]
+    assert product["closed"] is True
+    assert product["phase"] == "resource_su24_ring_closure"
+    assert product["topology_notation"] == (
+        "11-24(-23-22)-24(-23-22)-23-24(-23-22)-11"
+    )
+    assert {
+        key: len(values)
+        for key, values in product["claimed_resource_ids_by_su"].items()
+    } == {"24": 3, "11": 2, "23": 4, "22": 3}
+    assert result["remaining_ids_by_su"][24] == []
+
+
+def test_pool_su24_ring_shortage_rolls_back_entire_attempt() -> None:
+    nodes = _raw_su24_ring_fixture(a_count=2, c_count=1, terminal_22_count=0)
+    classification = classify_topology_units(nodes)
+    pool = {
+        int(key): list(values)
+        for key, values in classification.resource_pool["remaining_ids_by_su"].items()
+    }
+
+    result = assemble_pool_su24_rings(nodes, classification, pool)
+
+    assert result["products"] == []
+    assert result["stop_reason"] == "pool_su24_ring_resource_shortage"
+    assert result["blocked_attempt"]["missing_counts"] == {22: 1}
+    assert result["remaining_ids_by_su"] == pool
+
+
+def test_pool_su24_upper_lower_ring_uses_selected_raw_anchor_node() -> None:
+    nodes = _raw_su24_ring_fixture(a_count=2, c_count=1, terminal_22_count=1)
+    classification = classify_topology_units(nodes)
+    pool = {
+        int(key): list(values)
+        for key, values in classification.resource_pool["remaining_ids_by_su"].items()
+    }
+
+    result = assemble_pool_su24_rings(nodes, classification, pool)
+
+    assert len(result["products"]) == 1
+    product = result["products"][0]
+    assert product["product_type"] == "aliphatic_ring"
+    assert product["reason"] == "ring:pool_upper_lower_template"
+    assert set(product["claimed_resource_ids_by_su"]["24"]) & {100, 101}
+    assert result["remaining_su24_count"] == 1
+
+
+def test_pool_su24_ring_uses_virtual_conversion_types_for_product_claims() -> None:
+    nodes = _raw_su24_ring_fixture(a_count=2, c_count=1, terminal_22_count=1)
+    classification = classify_topology_units(nodes)
+    pool = {
+        int(key): list(values)
+        for key, values in classification.resource_pool["remaining_ids_by_su"].items()
+    }
+    pool[23].remove(200)
+    pool[23].remove(201)
+    pool[22].extend([200, 201])
+
+    result = assemble_pool_su24_rings(nodes, classification, pool)
+
+    assert len(result["products"]) == 1
+    claims = result["products"][0]["claimed_resource_ids_by_su"]
+    assert {200, 201}.issubset(set(claims["22"]))
+    assert {200, 201}.isdisjoint(set(claims["23"]))
+    claimed_su_by_node = {
+        int(node_id): str(su_type)
+        for su_type, node_ids in claims.items()
+        for node_id in node_ids
+    }
+    assert sum(len(node_ids) for node_ids in claims.values()) == len(claimed_su_by_node)
+
+
+def test_pool_su24_ring_falls_back_from_blocked_fused_to_direct_side(
+    monkeypatch,
+) -> None:
+    nodes = _raw_su24_ring_fixture(a_count=2, c_count=4, terminal_22_count=3)
+    classification = classify_topology_units(nodes)
+    pool = {
+        int(key): list(values)
+        for key, values in classification.resource_pool["remaining_ids_by_su"].items()
+    }
+
+    assembler = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    assembler.pool_only_su24_ring_mode = True
+    candidates = assembler._pool_su24_ring_plan_candidates()
+    blocked_fused = next(
+        item for item in candidates
+        if item[0].get("product_kind") == "fatty_ring_fused"
+        and dict(item[0].get("missing_counts", {}) or {})
+    )
+    direct_side = next(
+        item for item in candidates
+        if item[0].get("product_kind") == "fatty_ring_side"
+        and not dict(item[0].get("missing_counts", {}) or {})
+    )
+    monkeypatch.setattr(
+        assembler,
+        "_pool_su24_ring_plan_candidates",
+        lambda: [blocked_fused, direct_side],
+    )
+
+    result = assembler.assemble_pool_su24_rings()
+
+    assert result["products"]
+    assert result["products"][0]["reason"] == "ring:pool_side_template"
+
+
+def test_pool_su24_ring_retains_all_candidate_rejection_proofs() -> None:
+    nodes = _raw_su24_ring_fixture(a_count=2, c_count=4, terminal_22_count=0)
+    classification = classify_topology_units(nodes)
+    pool = {
+        int(key): list(values)
+        for key, values in classification.resource_pool["remaining_ids_by_su"].items()
+    }
+
+    result = assemble_pool_su24_rings(nodes, classification, pool)
+
+    assert result["products"] == []
+    assert len(result["blocked_attempts"]) >= 2
+    assert all(
+        dict(attempt.get("missing_counts", {}) or {})
+        for attempt in result["blocked_attempts"]
+    )
+
+
+def test_external_ring_cannot_materialize_a_pure_pool_su24_plan() -> None:
+    nodes = _raw_su24_ring_fixture(a_count=2, c_count=1, terminal_22_count=3)
+    classification = classify_topology_units(nodes)
+    assembler = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    external_view = AssemblyFragmentView(
+        unit_id=999,
+        fragment_id=999,
+        family="like24",
+        class_type="24_AB_N",
+        topology_template="external-ring-source",
+        source_node_ids=[999],
+        main_labels=["external"],
+        main_node_ids=[999],
+        canonical_labels=["external"],
+        open_left=True,
+        open_right=True,
+        can_ring=True,
+        target_roles=["fatty_ring"],
+    )
+    assembler.fragment_state_by_id[999] = "available"
+    before = assembler.allocator.snapshot()
+
+    created = assembler._assemble_ring(
+        product_kind="fatty_ring_side",
+        preferred_views=[external_view],
+        branch_donors=[],
+    )
+
+    assert created is False
+    assert assembler.products == []
+    assert assembler.allocator.snapshot() == before
+
+
+def test_pool_su24_fused_ring_consumes_two_a_and_four_c_profiles() -> None:
+    nodes = _raw_su24_ring_fixture(a_count=2, c_count=4, terminal_22_count=4)
+    classification = classify_topology_units(nodes)
+    pool = {
+        int(key): list(values)
+        for key, values in classification.resource_pool["remaining_ids_by_su"].items()
+    }
+
+    result = assemble_pool_su24_rings(nodes, classification, pool)
+
+    assert len(result["products"]) == 1
+    product = result["products"][0]
+    assert product["reason"] == "ring:fused_template"
+    assert "[-" in product["topology_notation"]
+    assert {
+        key: len(values)
+        for key, values in product["claimed_resource_ids_by_su"].items()
+    } == {"24": 6, "11": 2, "23": 6, "22": 4}
+    assert result["remaining_su24_count"] == 0
+
+
+def test_pool_su24_b_d_ring_uses_real_fixed_terminals_without_h_substitution() -> None:
+    nodes = []
+    next_open_id = 200
+    for center_id, cap_id, terminal_id, terminal_su in (
+        (100, 10, 400, 1),
+        (101, 11, 401, 4),
+    ):
+        center = make_node(center_id, 24)
+        cap = make_node(cap_id, 11)
+        terminal = make_node(terminal_id, terminal_su)
+        open_node = make_node(next_open_id, 23)
+        next_open_id += 1
+        for neighbor in (cap, terminal, open_node):
+            connect(center, neighbor)
+        nodes.extend([center, cap, terminal, open_node])
+    middle = make_node(102, 24)
+    middle_terminal = make_node(402, 1)
+    middle_opens = [make_node(202, 23), make_node(203, 23)]
+    for neighbor in [middle_terminal] + middle_opens:
+        connect(middle, neighbor)
+    nodes.extend([middle, middle_terminal] + middle_opens)
+
+    classification = classify_topology_units(nodes)
+    pool = {
+        int(key): list(values)
+        for key, values in classification.resource_pool["remaining_ids_by_su"].items()
+    }
+    result = assemble_pool_su24_rings(nodes, classification, pool)
+
+    assert classification.fragments == []
+    assert {
+        item["node_id"] for item in classification.support_units_only
+    } == {400, 401, 402}
+    product = result["products"][0]
+    assert product["fixed_source_node_ids"] == [400, 401, 402]
+    assert product["topology_notation"] == "11-24(-1)-24(-1)-23-24(-4)-11"
+    assert {
+        key: len(values)
+        for key, values in product["claimed_resource_ids_by_su"].items()
+    } == {"24": 3, "11": 2, "23": 1}
+    assert "22" not in product["claimed_resource_ids_by_su"]
+
+
+def test_pool_su24_single_remainder_is_accepted_without_fake_product() -> None:
+    nodes = _raw_su24_ring_fixture(a_count=0, c_count=1, terminal_22_count=0)
+    classification = classify_topology_units(nodes)
+    pool = {
+        int(key): list(values)
+        for key, values in classification.resource_pool["remaining_ids_by_su"].items()
+    }
+
+    result = assemble_pool_su24_rings(nodes, classification, pool)
+
+    assert result["products"] == []
+    assert result["remaining_su24_count"] == 1
+    assert result["stop_reason"] == "pool_su24_ring_remainder_accepted"
+    assert result["remaining_ids_by_su"] == pool
+
+
+def test_state_machine_fresh_classifies_pool_su24_when_classification_is_omitted() -> None:
+    nodes = _raw_su24_ring_fixture(a_count=2, c_count=1, terminal_22_count=3)
+    classification = classify_topology_units(nodes)
+    phase_eval = build_stage3_phase_evaluation(nodes, classification=classification)
+    H = torch.zeros(40, dtype=torch.long)
+    for node in nodes:
+        H[int(node.su_type)] += 1
+
+    plan = plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=H,
+        nodes=nodes,
+        enable_post_external_spectrum=False,
+        post_external_resume_phase="resource_su24_ring_closure",
+    )
+
+    assert plan.ok is True
+    assert plan.reason == "stage3_complete"
+    products = plan.runtime["iteration_topology_ledger"].completed_products
+    assert len(products) == 1
+    assert products[0]["phase"] == "resource_su24_ring_closure"
+    assert products[0]["closed"] is True
+
+
+def test_state_machine_accounts_direct_su24_ring_before_next_ring_conversion() -> None:
+    nodes = _raw_su24_ring_fixture(a_count=3, c_count=5, terminal_22_count=4)
+    classification = classify_topology_units(nodes)
+    phase_eval = build_stage3_phase_evaluation(nodes, classification=classification)
+    H = torch.zeros(40, dtype=torch.long)
+    for node in nodes:
+        H[int(node.su_type)] += 1
+
+    plan = plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=H,
+        nodes=nodes,
+        classification=classification,
+        enable_post_external_spectrum=False,
+        post_external_resume_phase="resource_su24_ring_closure",
+    )
+
+    assert plan.ok is True
+    assert plan.reason == "stage3_rebuild_required"
+    conversions = [
+        group.primary_op for group in plan.histogram_adjustment_plan.groups
+    ]
+    assert [
+        (item.from_su, item.to_su, item.node_ids)
+        for item in conversions
+    ] == [(23, 22, [206])]
+    transactions = plan.phase_result.transactions
+    assert len(transactions) == 3
+    assert transactions[0].transaction_origin == "assembly_snapshot"
+    assert transactions[0].phase == "resource_su24_ring_closure"
+    assert transactions[0].committed is True
+    assert transactions[1].committed is True
+    assert transactions[1].converted_node_ids == [206]
+    assert transactions[2].transaction_origin == "assembly_snapshot"
+    assert transactions[2].claimed_resource_ids[22] == [206]
+    assert 206 not in transactions[2].claimed_resource_ids[23]
+    assert plan.phase_result.infeasibility_proof == {}
+
+
+def test_state_machine_accumulates_su24_conversions_and_rings_before_rebuild() -> None:
+    nodes = _raw_su24_ring_fixture(a_count=2, c_count=2, terminal_22_count=0)
+    classification = classify_topology_units(nodes)
+    phase_eval = build_stage3_phase_evaluation(nodes, classification=classification)
+    H = torch.zeros(40, dtype=torch.long)
+    for node in nodes:
+        H[int(node.su_type)] += 1
+
+    plan = plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=H,
+        nodes=nodes,
+        classification=classification,
+        enable_post_external_spectrum=False,
+        post_external_resume_phase="resource_su24_ring_closure",
+        max_primary_adjustments_per_stage=10,
+    )
+
+    assert plan.ok is True
+    assert plan.reason == "stage3_rebuild_required"
+    conversions = [
+        group.primary_op for group in plan.histogram_adjustment_plan.groups
+    ]
+    assert len(conversions) == 2
+    assert all(
+        (item.from_su, item.to_su, item.count) == (23, 22, 1)
+        for item in conversions
+    )
+    converted_node_ids = {
+        int(node_id)
+        for item in conversions
+        for node_id in item.node_ids
+    }
+    assert len(converted_node_ids) == 2
+    ring_transactions = [
+        transaction
+        for transaction in plan.phase_result.transactions
+        if transaction.transaction_origin == "assembly_snapshot"
+    ]
+    assert len(ring_transactions) == 2
+    aggregate_claims = {
+        int(su_type): {
+            int(node_id)
+            for transaction in ring_transactions
+            for node_id in transaction.claimed_resource_ids.get(int(su_type), [])
+        }
+        for su_type in (11, 22, 23, 24)
+    }
+    assert converted_node_ids.issubset(aggregate_claims[22])
+    assert converted_node_ids.isdisjoint(aggregate_claims[23])
+    claims = {
+        int(su_type): sorted(node_ids)
+        for su_type, node_ids in aggregate_claims.items()
+    }
+    claimed_su_by_node = {
+        int(node_id): str(su_type)
+        for su_type, node_ids in claims.items()
+        for node_id in node_ids
+    }
+    assert sum(len(node_ids) for node_ids in claims.values()) == len(claimed_su_by_node)
+    assert len(plan.phase_result.transactions) == 4
+
+
+def test_su25_cd_flex_closes_both_ends_and_keeps_branches_on_center() -> None:
+    center = make_node(499, 25, target_hop1_degree=4)
+    left_open = make_node(501, 23)
+    right_open = make_node(502, 23)
+    branch_open = make_node(503, 23)
+    fixed_22 = make_node(504, 22)
+    left_11 = make_node(510, 11)
+    right_11 = make_node(511, 11)
+    branch_22 = make_node(512, 22)
+    connect(center, left_open)
+    connect(center, right_open)
+    connect(center, branch_open)
+    connect(center, fixed_22)
+
+    nodes = [
+        center, left_open, right_open, branch_open, fixed_22,
+        left_11, right_11, branch_22,
+    ]
+    classification = classify_topology_units(nodes)
+    assembler = ExternalTopologyAssembler(nodes, classification)
+    view = next(item for item in assembler.views if int(item.fragment_id) == 499)
+
+    assert view.class_type == "25_CD"
+    assert view.open_left is True and view.open_right is True
+    assert assembler._finalize_with_two_end_closures(
+        view,
+        product_kind="flex_chain",
+        left_mode="F1",
+        right_mode="F1",
+        branch_donors=[],
+    )
+    product = assembler.products[0]
+    assert product.actual_topology_su == "11-23-25(-23-22)(-22)-23-11"
+    assert product.actual_topology_gid == "510-502-499(-501-512)(-504)-503-511"
+    assert product.actual_topology_gid.startswith("510-502-499(")
 
 
 def test_flex_candidate_keeps_nonfixed_su28_branch_on_single19d3() -> None:
@@ -2100,6 +3123,19 @@ def test_raw_su24_only_fills_ring_until_like24_minimum() -> None:
     assert selected is not None
     assert selected[0]["pool_su"] == 23
 
+    assembler.pool_only_su24_ring_mode = True
+    selected_pool_only = assembler._search_ring_middle_segments(
+        candidates,
+        remaining_span=1,
+        claimed_fragment_ids=set(),
+        used_candidate_ids=set(),
+        current_like24=2,
+        min_like24=2,
+        max_like24=4,
+    )
+    assert selected_pool_only is not None
+    assert selected_pool_only[0]["pool_su"] == 24
+
 
 def test_double20d3_closed_secondary_fixed_branch_does_not_add_h() -> None:
     center = make_node(430, 20, target_hop1_degree=3, special_anchor_mode="double", target_fixed_anchor_count=2)
@@ -2126,7 +3162,90 @@ def test_double20d3_closed_secondary_fixed_branch_does_not_add_h() -> None:
     assert "-23-22" not in product["actual_topology_su"]
 
 
-def test_double20d3_full_mainline_does_not_materialize_untyped_third_branch() -> None:
+def test_fixed_n_branch_claims_generic_open_from_pool_without_blocking_next_explicit_flex() -> None:
+    open_center = make_node(
+        432,
+        20,
+        target_hop1_degree=3,
+        special_anchor_mode="single",
+        target_fixed_anchor_count=1,
+    )
+    left_11 = make_node(264, 11)
+    right_11 = make_node(266, 11)
+    open_connector = make_node(0, 0)
+    existing_open_23 = make_node(471, 23)
+    neighboring_center = make_node(3, 1)
+    pool_22 = make_node(440, 22)
+    connect(open_center, left_11)
+    connect(open_center, right_11)
+    connect(open_center, open_connector, fixed=True)
+    connect(open_connector, existing_open_23)
+    connect(existing_open_23, neighboring_center)
+
+    closed_center = make_node(
+        433,
+        20,
+        target_hop1_degree=3,
+        special_anchor_mode="double",
+        target_fixed_anchor_count=2,
+    )
+    closed_11 = make_node(265, 11)
+    left_connector = make_node(503, 27)
+    left_terminal = make_node(100, 6)
+    right_connector = make_node(504, 27)
+    right_terminal = make_node(101, 6)
+    connect(closed_center, closed_11)
+    connect(closed_center, left_connector, fixed=True)
+    connect(left_connector, left_terminal)
+    connect(closed_center, right_connector, fixed=True)
+    connect(right_connector, right_terminal)
+
+    nodes = [
+        open_center,
+        left_11,
+        right_11,
+        open_connector,
+        existing_open_23,
+        neighboring_center,
+        pool_22,
+        closed_center,
+        closed_11,
+        left_connector,
+        left_terminal,
+        right_connector,
+        right_terminal,
+    ]
+    classification = classify_topology_units(nodes)
+    open_fragment = next(
+        item for item in classification.fragments if int(item.fragment_id) == 432
+    )
+
+    assert str(open_fragment.class_type) == "24_A"
+    assert 471 not in set(open_fragment.claimed_node_ids)
+    assert 471 in classification.resource_pool["remaining_ids_by_su"]["23"]
+
+    assembly = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    ).assemble().to_dict()
+    open_product = next(
+        item for item in assembly["products"] if 432 in item["source_fragment_ids"]
+    )
+    closed_product = next(
+        item for item in assembly["products"] if 433 in item["source_fragment_ids"]
+    )
+
+    assert open_product["actual_topology_su"] == "11-single20d3(-0-23-22)-11"
+    assert open_product["actual_topology_gid"] == "264-432(-0-471-440)-266"
+    assert closed_product["actual_topology_su"] == "11-double20d3(-27-6)-27-6"
+    assert not any(
+        int(item.get("unit_id", -1)) in {432, 433}
+        for item in list(assembly.get("pending_units", []) or [])
+    )
+
+
+def test_double20d3_full_mainline_materializes_real_closed_third_branch() -> None:
     center = make_node(438, 20, target_hop1_degree=3, special_anchor_mode="double", target_fixed_anchor_count=2)
     left_connector = make_node(503, 27)
     left_terminal = make_node(128, 6)
@@ -2153,10 +3272,10 @@ def test_double20d3_full_mainline_does_not_materialize_untyped_third_branch() ->
 
     assembly = assemble_topology_units(nodes, classification).to_dict()
     product = next(item for item in assembly["products"] if 438 in item["source_fragment_ids"])
-    assert product["actual_topology_su"] == "6-27-double20d3-27-6"
-    assert product["actual_topology_gid"] == "128-503-438-504-129"
+    assert product["actual_topology_su"] == "6-27-double20d3(-3-23-11)-27-6"
+    assert product["actual_topology_gid"] == "128-503-438(-33-455-217)-504-129"
     assert set(product["source_fragment_ids"]) == {438}
-    assert {33, 455, 217}.isdisjoint(set(product["source_node_ids"]))
+    assert {33, 455, 217}.issubset(set(product["source_node_ids"]))
 
 
 
@@ -2185,6 +3304,48 @@ def test_assembler_rejects_duplicate_global_id_across_products() -> None:
     assert len(assembler.products) == 1
     assert assembler.product_ownership_conflicts[0]["reason"] == "duplicate_topology_ownership"
     assert assembler.product_ownership_conflicts[0]["node_ids"] == [2]
+
+
+def test_materialized_product_excludes_declared_suppressed_support_nodes() -> None:
+    nodes = [
+        make_node(1, 19),
+        make_node(2, 19),
+        make_node(3, 24),
+        make_node(4, 19),
+    ]
+    classification = classify_topology_units(nodes)
+    assembler = ExternalTopologyAssembler(nodes, classification)
+    view = AssemblyFragmentView(
+        unit_id=1,
+        fragment_id=1,
+        family="basic",
+        class_type="A",
+        topology_template="11-23-11",
+        source_node_ids=[1, 2, 3, 4],
+        main_labels=["11", "23", "11"],
+        main_node_ids=[1, 2, 4],
+        canonical_labels=["11", "23", "11"],
+        open_left=False,
+        open_right=False,
+        suppressed_support_node_ids=[3],
+    )
+    product = assembler._make_product(
+        product_kind="flex_chain",
+        reason="test_suppressed_support",
+        source_views=[view],
+        labels=view.main_labels,
+        node_ids=view.main_node_ids,
+        branch_map={},
+        branch_id_map={},
+        suppressed_support_node_ids=[3],
+    )
+
+    assert product is not None
+    assert assembler._commit_product(product) is True
+    assert product.source_node_ids == [1, 2, 4]
+    assert product.fixed_source_node_ids == [1, 2, 4]
+    assert product.symbolic_node_ids == [1, 2, 4]
+    assert assembler.product_owner_by_node_id == {1: 0, 2: 0, 4: 0}
 
 
 def test_committed_product_resources_are_removed_from_allocator_pool() -> None:
@@ -2393,7 +3554,7 @@ def test_half_closed_pending_keeps_nonfixed_neighbor_in_resource_pool() -> None:
         family="basic",
         class_type="D",
         topology_template="-23-15-15-",
-        source_node_ids=[298, 299, 454],
+        source_node_ids=[298, 299],
         main_labels=["23", "15", "15"],
         main_node_ids=[454, 298, 299],
         canonical_labels=["23", "15", "15"],
@@ -2681,3 +3842,583 @@ def test_chain_validator_rejects_duplicate_mainline_global_ids() -> None:
     )
 
     assert reason == "duplicate_mainline_node_ids:[336]"
+
+
+def test_pending_explicit_branch_does_not_skip_supplemental_flex(monkeypatch) -> None:
+    assembler = ExternalTopologyAssembler(
+        [],
+        TopologyClassificationResult(resource_pool={"remaining_ids_by_su": {}}),
+        flex_audit={
+            "enforced": True,
+            "scenario": "below_range",
+            "flex_lower": 1,
+            "flex_upper": 2,
+            "target_flex_count": 1,
+            "selected_candidate_fragment_ids": [10],
+        },
+    )
+    events = []
+
+    def close_explicit(_donors):
+        events.append("explicit")
+        assembler.pending_contracts.append({
+            "contract_id": 1,
+            "contract_kind": "branch_closure",
+            "target_role": "flex_chain",
+            "phase": "external_flex_closure",
+            "subphase": "explicit_branch_closure",
+            "claimed_source_node_ids": [],
+            "required_counts": {"22": 1, "23": 1},
+        })
+        return False
+
+    def supplemental(_donors):
+        events.append("supplemental")
+        return True
+
+    monkeypatch.setattr(
+        assembler,
+        "_close_explicit_flex_branches_if_needed",
+        close_explicit,
+    )
+    monkeypatch.setattr(
+        assembler,
+        "_assemble_selected_supplemental_flex",
+        supplemental,
+    )
+
+    assembler.assemble()
+
+    assert events == ["explicit", "supplemental"]
+
+
+def test_explicit_h_branch_shortage_materializes_resource_contract() -> None:
+    assembler = ExternalTopologyAssembler(
+        [],
+        TopologyClassificationResult(resource_pool={"remaining_ids_by_su": {}}),
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    view = AssemblyFragmentView(
+        unit_id=10,
+        fragment_id=10,
+        family="basic",
+        class_type="A",
+        topology_template="11-23-11",
+        source_node_ids=[],
+        main_labels=["11", "23", "11"],
+        main_node_ids=[1, 2, 3],
+        canonical_labels=["11", "23", "11"],
+        open_left=False,
+        open_right=False,
+        preferred_product_type="flex_chain",
+        target_roles=["flex_chain"],
+        evidence={
+            "required_branch_closure_specs": [
+                {
+                    "slot_id": "center:0",
+                    "anchor": "center",
+                    "closure_kind": "H",
+                    "attach_role": "center_branch",
+                    "target_path": "center_side_branch",
+                }
+            ],
+            "external_pending_profile": {
+                "external_pending_kind": "explicit_flex",
+                "external_pending_reason": "explicit_branch_closure",
+            },
+        },
+    )
+    assembler.views = [view]
+    assembler.view_by_id = {10: view}
+    assembler.fragment_state_by_id = {10: "available"}
+
+    assert not assembler._finalize_single_view_product(
+        view,
+        product_kind="flex_chain",
+        reason="explicit_branch_closure",
+        branch_donors=[],
+    )
+
+    contract = assembler.pending_contracts[0]
+    assert contract["contract_kind"] == "branch_closure"
+    assert contract["required_counts"] == {"22": 1, "23": 1}
+
+
+def test_ring_capable_b_like_fragment_can_fall_back_to_side(monkeypatch) -> None:
+    assembler = ExternalTopologyAssembler(
+        [],
+        TopologyClassificationResult(resource_pool={"remaining_ids_by_su": {}}),
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    view = AssemblyFragmentView(
+        unit_id=20,
+        fragment_id=20,
+        family="like24",
+        class_type="24_B",
+        topology_template="11-24-",
+        source_node_ids=[],
+        main_labels=["11", "24"],
+        main_node_ids=[1, 2],
+        canonical_labels=["11", "24"],
+        open_left=False,
+        open_right=True,
+        preferred_product_type="flex_chain",
+        flex_reconcile_roles=["b_like_open", "like24_open"],
+        can_ring=True,
+        target_roles=["flex_chain", "fatty_ring"],
+    )
+    assembler.views = [view]
+    assembler.view_by_id = {20: view}
+    assembler.fragment_state_by_id = {20: "available"}
+    finalized = []
+
+    def finalize(candidate, **kwargs):
+        finalized.append((int(candidate.fragment_id), str(kwargs.get("product_kind"))))
+        return True
+
+    monkeypatch.setattr(assembler, "_finalize_with_closure", finalize)
+
+    assert assembler._assemble_remaining_b_d_as_side([])
+    assert finalized == [(20, "side_chain")]
+
+
+def test_ring_stage_blocker_requires_real_resource_deficit() -> None:
+    assembler = ExternalTopologyAssembler(
+        [],
+        TopologyClassificationResult(
+            resource_pool={"remaining_ids_by_su": {"22": [1], "23": [2]}}
+        ),
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    assembler.ring_pending_required_counts = {10: {"22": 1, "23": 1}}
+    assert assembler._ring_resource_blockers() == {}
+
+    assembler.ring_pending_required_counts = {10: {"22": 2, "23": 1}}
+    blockers = assembler._ring_resource_blockers()
+    assert blockers[10]["missing_counts"] == {"22": 1}
+
+
+def test_like24_projection_keeps_open_context_out_of_fixed_ownership() -> None:
+    center = make_node(1514, 14)
+    partner = make_node(1515, 15)
+    left_context = make_node(1523, 23)
+    right_context = make_node(1524, 23)
+    connect(center, partner)
+    connect(center, left_context)
+    connect(partner, right_context)
+    nodes = [center, partner, left_context, right_context]
+
+    classification = classify_topology_units(nodes)
+    assembler = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    view = next(item for item in assembler.views if int(item.fragment_id) == 1514)
+
+    assert view.main_node_ids == [1523, 1514, 1515, 1524]
+    assert set(view.source_node_ids) == {1514, 1515}
+
+
+def test_su25_projection_does_not_capture_unowned_nonresource_context() -> None:
+    center = make_node(2500, 25)
+    open_context = make_node(2523, 23)
+    structural_context = make_node(2529, 29)
+    connect(center, open_context)
+    connect(center, structural_context)
+    nodes = [center, open_context, structural_context]
+
+    classification = classify_topology_units(nodes)
+    assembler = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    view = next(item for item in assembler.views if int(item.fragment_id) == 2500)
+
+    assert 2523 not in view.main_node_ids
+    assert 2529 not in view.main_node_ids
+    assert view.source_node_ids == [2500]
+    assert view.unresolved_branch_kinds == ["FIXED22", "H"]
+    assert 2529 not in {
+        int(value)
+        for contracts in view.branch_closure_contracts_by_anchor.values()
+        for item in contracts
+        for value in list(dict(item or {}).get("base_path_node_ids", []) or [])
+    }
+
+
+def test_su25_projection_keeps_long_random_su23_neighbors_in_resource_pool() -> None:
+    center = make_node(499, 25, target_hop1_degree=4)
+    carbonyl = make_node(23, 3)
+    left_23 = make_node(493, 23)
+    right_23 = make_node(495, 23)
+    branch_23 = make_node(497, 23)
+    branch_23_b = make_node(498, 23)
+    branch_23_c = make_node(491, 23)
+    branch_23_d = make_node(492, 23)
+    terminal_22 = make_node(442, 22)
+    pool_11 = make_node(510, 11)
+    pool_22_b = make_node(511, 22)
+    pool_22_c = make_node(512, 22)
+    connect(center, carbonyl)
+    connect(center, left_23)
+    connect(center, right_23)
+    connect(center, branch_23)
+    connect(branch_23, branch_23_b)
+    connect(branch_23_b, branch_23_c)
+    connect(branch_23_c, branch_23_d)
+    connect(branch_23_d, terminal_22)
+    nodes = [
+        center,
+        carbonyl,
+        left_23,
+        right_23,
+        branch_23,
+        branch_23_b,
+        branch_23_c,
+        branch_23_d,
+        terminal_22,
+        pool_11,
+        pool_22_b,
+        pool_22_c,
+    ]
+
+    classification = classify_topology_units(nodes)
+    assembler = ExternalTopologyAssembler(
+        nodes,
+        classification,
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    view = next(item for item in assembler.views if int(item.fragment_id) == 499)
+
+    assert view.main_node_ids == [499]
+    assert view.fixed_branch_contracts_by_anchor() == {}
+    assert view.unresolved_branch_kinds == ["FIXED22", "H"]
+    assert {493, 495, 497}.issubset(
+        set(assembler.allocator.remaining_ids_by_su["23"])
+    )
+    assert assembler._assemble_remaining_su25([])
+    product = assembler.products[-1]
+    assert product.actual_topology_su == "11-23-25(-22)(-23-22)-23-22"
+    assert "23-23-23-23-22" not in product.actual_topology_su
+
+
+def test_su25_foreign_context_does_not_block_resource_closure(monkeypatch) -> None:
+    assembler = ExternalTopologyAssembler(
+        [],
+        TopologyClassificationResult(resource_pool={"remaining_ids_by_su": {}}),
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    view = AssemblyFragmentView(
+        unit_id=25,
+        fragment_id=25,
+        family="su25",
+        class_type="25_CD",
+        topology_template="-25-",
+        source_node_ids=[25],
+        main_labels=["25"],
+        main_node_ids=[25],
+        canonical_labels=["25"],
+        open_left=True,
+        open_right=True,
+        diagnostics={"foreign_context_fragment_owners": {"29": 29}},
+    )
+    assembler.views = [view]
+    assembler.view_by_id = {25: view}
+    assembler.fragment_state_by_id = {25: "available"}
+    finalized = []
+
+    def finalize(candidate, **kwargs):
+        finalized.append((int(candidate.fragment_id), kwargs["left_mode"], kwargs["right_mode"]))
+        return True
+
+    monkeypatch.setattr(assembler, "_finalize_with_two_end_closures", finalize)
+
+    assert assembler._assemble_remaining_su25([])
+    assert finalized == [(25, "F1", "F2")]
+
+
+def test_product_commit_rejects_rendered_context_without_transaction_claim() -> None:
+    owned = make_node(1, 15)
+    context = make_node(2, 3)
+    assembler = ExternalTopologyAssembler(
+        [owned, context],
+        TopologyClassificationResult(resource_pool={"remaining_ids_by_su": {}}),
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    snapshot = assembler.allocator.snapshot()
+    product = TopologyAssemblyProduct(
+        product_kind="side_chain",
+        product_type="side_chain",
+        actual_topology_su="15-3",
+        actual_topology_gid="1-2",
+        source_node_ids=[1, 2],
+        fixed_source_node_ids=[1],
+        closed=True,
+    )
+
+    assert not assembler._commit_product(product, allocator_snapshot=snapshot)
+    assert assembler.invalid_topologies[-1]["reason"] == (
+        "rendered_node_without_transaction_ownership:[2]"
+    )
+
+
+def test_non_h_structure_unit_is_not_translated_to_su23_prefix() -> None:
+    from model.inverse.topology.assembly_external import _trace_real_branch_path
+
+    center = make_node(10, 24)
+    prefix = make_node(11, 23)
+    structural = make_node(12, 3)
+    connect(center, prefix)
+    connect(prefix, structural)
+
+    trace = _trace_real_branch_path(
+        center_id=10,
+        first_node_id=11,
+        nodes_by_id={10: center, 11: prefix, 12: structural},
+    )
+
+    assert trace["semantic_sequence"] == [23]
+    assert trace["base_path_effective_sequence"] == [23]
+    assert trace["h_prefix_compatible"] is False
+    assert trace["terminated_kind"] == "structural_boundary"
+    assert trace["structural_boundary"]["su_type"] == 3
+
+
+def test_unresolved_branch_profile_is_not_counted_as_strict_explicit_flex() -> None:
+    from model.inverse.topology.phase_eval import _profile_counts_as_strict_explicit_flex
+
+    base = {
+        "counts_as_explicit": True,
+        "supports_explicit_mainline": True,
+        "mainline_closed": True,
+        "preferred_product_type": "flex_chain",
+        "candidate_kind": "explicit_flex",
+    }
+
+    assert _profile_counts_as_strict_explicit_flex(base)
+    assert not _profile_counts_as_strict_explicit_flex({
+        **base,
+        "open_fixed_branch_contract_count": 1,
+    })
+    assert not _profile_counts_as_strict_explicit_flex({
+        **base,
+        "branch_resource_template": {"22": 1, "23": 1},
+    })
+
+
+def test_like24_fixed_component_stops_at_first_aromatic_anchor() -> None:
+    center = make_node(
+        404,
+        19,
+        target_hop1_degree=3,
+        special_anchor_mode="single",
+        target_fixed_anchor_count=1,
+    )
+    fixed_28 = make_node(528, 28)
+    direct_aromatic = make_node(243, 11)
+    path_3a = make_node(30, 3)
+    path_23 = make_node(280, 23)
+    path_3b = make_node(25, 3)
+    path_aromatic = make_node(120, 9)
+    aromatic_cluster_neighbor = make_node(252, 11)
+    connect(center, fixed_28, fixed=True)
+    connect(center, direct_aromatic)
+    connect(center, path_3a)
+    connect(path_3a, path_23)
+    connect(path_23, path_3b)
+    connect(path_3b, path_aromatic)
+    connect(path_aromatic, aromatic_cluster_neighbor)
+    nodes = [
+        center,
+        fixed_28,
+        direct_aromatic,
+        path_3a,
+        path_23,
+        path_3b,
+        path_aromatic,
+        aromatic_cluster_neighbor,
+    ]
+
+    classification = classify_topology_units(nodes)
+    fragment = next(item for item in classification.fragments if int(item.fragment_id) == 404)
+
+    assert str(fragment.class_type) == "24_AB_P"
+    assert set(fragment.source_node_ids) == {25, 30, 120, 243, 280, 404, 528}
+    assert 252 not in fragment.source_node_ids
+
+    assembly = assemble_external_topologies(
+        nodes,
+        classification,
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    product = next(item for item in assembly.products if 404 in item.source_fragment_ids)
+    assert product.actual_topology_su == "28-single19d3(-3-23-3-9)-11"
+    assert product.actual_topology_gid == "528-404(-30-280-25-120)-243"
+    assert 252 not in product.source_node_ids
+    assert not [item for item in assembly.pending_units if 404 in item.source_fragment_ids]
+
+
+def test_like24_real_mainline_path_materializes_through_aromatic_anchor() -> None:
+    center = make_node(
+        424,
+        19,
+        target_hop1_degree=3,
+        special_anchor_mode="double",
+        target_fixed_anchor_count=2,
+    )
+    fixed_28 = make_node(506, 28)
+    fixed_29 = make_node(576, 29)
+    terminal_19 = make_node(
+        339,
+        19,
+        target_hop1_degree=1,
+        special_anchor_mode="single",
+        target_fixed_anchor_count=1,
+    )
+    path_3 = make_node(32, 3)
+    path_23 = make_node(469, 23)
+    aromatic_11 = make_node(217, 11)
+    connect(center, fixed_28, fixed=True)
+    connect(center, fixed_29, fixed=True)
+    connect(fixed_29, terminal_19, fixed=True)
+    connect(center, path_3)
+    connect(path_3, path_23)
+    connect(path_23, aromatic_11)
+    nodes = [center, fixed_28, fixed_29, terminal_19, path_3, path_23, aromatic_11]
+
+    classification = classify_topology_units(nodes)
+    view = next(
+        item
+        for item in project_fragment_views(
+            classification,
+            {int(node.global_id): node for node in nodes},
+        )
+        if int(item.fragment_id) == 424
+    )
+
+    assert str(view.class_type) == "24_CD_P"
+    assert view.main_node_ids == [217, 469, 32, 424, 576, 339]
+    assert not view.open_left
+    assert not view.open_right
+    assert dict(view.evidence.get("external_pending_profile", {}))["external_pending_kind"] == "explicit_side"
+
+    assembly = assemble_external_topologies(
+        nodes,
+        classification,
+        flex_audit={"enforced": False, "scenario": "in_range"},
+    )
+    product = next(item for item in assembly.products if 424 in item.source_fragment_ids)
+    assert product.actual_topology_su == "11-23-3-double19d3(-28)-29-19d1"
+    assert product.actual_topology_gid == "217-469-32-424(-506)-576-339"
+    assert not [item for item in assembly.pending_units if 424 in item.source_fragment_ids]
+
+
+def test_su14_real_h_branch_consumes_the_single_h_placeholder() -> None:
+    center = make_node(310, 14)
+    partner = make_node(318, 15)
+    main_open = make_node(460, 23)
+    branch_open = make_node(462, 23)
+    aromatic_end = make_node(216, 11)
+    connect(center, partner)
+    connect(center, main_open)
+    connect(center, branch_open)
+    connect(branch_open, aromatic_end)
+    nodes = [center, partner, main_open, branch_open, aromatic_end]
+
+    classification = classify_topology_units(nodes)
+    fragment = next(
+        item
+        for item in classification.fragments
+        if int(item.fragment_id) == 310
+    )
+    assert [
+        str(item.get("closure_kind", ""))
+        for item in list(fragment.evidence.get("required_branch_closure_specs", []) or [])
+    ] == ["H"]
+
+    view = next(
+        item
+        for item in project_fragment_views(
+            classification,
+            {int(node.global_id): node for node in nodes},
+        )
+        if int(item.fragment_id) == 310
+    )
+
+    contracts = [
+        dict(contract)
+        for values in view.fixed_branch_contracts_by_anchor().values()
+        for contract in values
+    ]
+    assert len(contracts) == 1
+    assert contracts[0]["side_class"] == "REAL_H"
+    assert contracts[0]["base_path_node_ids"] == [462, 216]
+    assert view.branch_closure_specs() == []
+    assert not [
+        kind
+        for values in view.real_branch_kinds_by_anchor().values()
+        for kind in values
+        if str(kind) == "H"
+    ]
+
+
+def test_su14_visible_terminal_branch_consumes_the_single_h_placeholder() -> None:
+    center = make_node(314, 14)
+    partner = make_node(317, 15)
+    left_open = make_node(467, 23)
+    right_open = make_node(464, 23)
+    terminal = make_node(413, 22)
+    connect(center, partner)
+    connect(center, left_open)
+    connect(partner, right_open)
+    connect(center, terminal)
+    nodes = [center, partner, left_open, right_open, terminal]
+
+    classification = classify_topology_units(nodes)
+    view = next(
+        item
+        for item in project_fragment_views(
+            classification,
+            {int(node.global_id): node for node in nodes},
+        )
+        if int(item.fragment_id) == 314
+    )
+
+    real_stubs = [
+        stub
+        for values in view.real_branch_stubs_map().values()
+        for stub in values
+    ]
+    assert [stub.topology_notation for stub in real_stubs] == ["-22"]
+    assert view.branch_closure_specs() == []
+    assert not [
+        kind
+        for values in view.real_branch_kinds_by_anchor().values()
+        for kind in values
+        if str(kind) == "H"
+    ]
+
+
+def test_product_guard_rejects_more_than_one_branch_on_su14() -> None:
+    center = make_node(14, 14)
+    assembler = ExternalTopologyAssembler(
+        [center],
+        TopologyClassificationResult(),
+    )
+
+    product = assembler._make_product(
+        product_kind="side_chain",
+        reason="test",
+        source_views=[],
+        labels=["11", "23", "14", "23", "22"],
+        node_ids=[1, 2, 14, 3, 4],
+        branch_map={2: ["-23-11", "-23-22"]},
+        branch_id_map={2: ["-5-6", "-7-8"]},
+    )
+
+    assert product is None
+    assert assembler.invalid_topologies[-1]["reason"].startswith(
+        "su14_branch_capacity_exceeded"
+    )

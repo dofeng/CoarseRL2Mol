@@ -9,7 +9,7 @@ from ...shared.inverse_common import TERMINAL_PORT_BASE_SU, terminal_neighbor_co
 from ..special_anchor_evidence import (
     SU19_DOUBLE_EVIDENCE_WINDOWS,
     SU19_DOUBLE_SUPPORT_WEIGHT,
-    weighted_su19_double_area,
+    split_su19_double_area,
 )
 
 
@@ -636,39 +636,38 @@ def _special_anchor_mode_scores(adjuster: Any,
     stats_by_mode = dict(stats_source.get(int(su_type), {}) or {})
     manual_by_mode = dict(MANUAL_SPECIAL_ANCHOR_MODE_WINDOWS.get(int(su_type), {}) or {})
     out: Dict[str, Dict[str, float]] = {}
+    su19_double_components: Dict[str, Dict[str, float]] = {}
+    su19_window_cache: Dict[Tuple[float, float], Dict[str, float]] = {}
+    if int(su_type) == 19:
+        def _su19_stats(lo: float, hi: float) -> Dict[str, float]:
+            key = (float(lo), float(hi))
+            if key not in su19_window_cache:
+                su19_window_cache[key] = _window_score(
+                    adjuster,
+                    ppm_arr,
+                    diff_arr,
+                    float(lo),
+                    float(hi),
+                    0.5 * (float(lo) + float(hi)),
+                )
+            return su19_window_cache[key]
+
+        for component in ("pos", "neg_abs", "abs"):
+            su19_double_components[component] = split_su19_double_area(
+                lambda lo, hi, component=component: float(
+                    _su19_stats(lo, hi)[component]
+                )
+            )
     for mode_name in ('single_d1', 'single_d2', 'single_d3', 'double_d2', 'double_d3'):
         if int(su_type) == 19 and str(mode_name) in SU19_DOUBLE_EVIDENCE_WINDOWS:
             spec = dict(SU19_DOUBLE_EVIDENCE_WINDOWS[str(mode_name)])
             core_lo, core_hi = spec['core']
             support_lo, support_hi = spec['support']
             mu = float(spec['mu'])
-            stats_cache: Dict[Tuple[float, float], Dict[str, float]] = {}
-
-            def _stats(lo: float, hi: float) -> Dict[str, float]:
-                key = (float(lo), float(hi))
-                if key not in stats_cache:
-                    stats_cache[key] = _window_score(
-                        adjuster,
-                        ppm_arr,
-                        diff_arr,
-                        float(lo),
-                        float(hi),
-                        mu,
-                    )
-                return stats_cache[key]
-
-            pos = weighted_su19_double_area(
-                lambda lo, hi: float(_stats(lo, hi)['pos']),
-                str(mode_name),
-            )
-            neg_abs = weighted_su19_double_area(
-                lambda lo, hi: float(_stats(lo, hi)['neg_abs']),
-                str(mode_name),
-            )
-            abs_area = weighted_su19_double_area(
-                lambda lo, hi: float(_stats(lo, hi)['abs']),
-                str(mode_name),
-            )
+            core_stats = _su19_stats(float(core_lo), float(core_hi))
+            pos = float(su19_double_components['pos'].get(str(mode_name), 0.0))
+            neg_abs = float(su19_double_components['neg_abs'].get(str(mode_name), 0.0))
+            abs_area = float(su19_double_components['abs'].get(str(mode_name), 0.0))
             out[str(mode_name)] = {
                 'lo': float(support_lo),
                 'hi': float(support_hi),
@@ -678,9 +677,14 @@ def _special_anchor_mode_scores(adjuster: Any,
                 'neg_abs': float(neg_abs),
                 'score': float(pos - neg_abs),
                 'abs': float(abs_area),
-                'source': 'canonical_core_support',
+                'source': str(spec.get('source', 'stats_exclusive_core')),
                 'core_lo': float(core_lo),
                 'core_hi': float(core_hi),
+                'core_pos': float(core_stats.get('pos', 0.0)),
+                'core_neg_abs': float(core_stats.get('neg_abs', 0.0)),
+                'core_score': float(
+                    core_stats.get('pos', 0.0) - core_stats.get('neg_abs', 0.0)
+                ),
                 'support_weight': float(SU19_DOUBLE_SUPPORT_WEIGHT),
             }
             continue
@@ -1657,7 +1661,12 @@ def adjust_special_anchor_count_impl(
             tail_raw = float(tail_net.get(int(tail_su), 0.0))
 
             avail_fwd = int(cnt_a // 2) if str(mode_a) == str(mode_b) else int(min(cnt_a, cnt_b))
-            if int(avail_fwd) > 0:
+            target_mode_stats = dict(mode_scores.get(str(mode_t), {}) or {})
+            core_supports_forward = bool(
+                int(su_type) != 19
+                or float(target_mode_stats.get('core_score', 0.0)) > float(thr)
+            )
+            if int(avail_fwd) > 0 and core_supports_forward:
                 desirability = (
                     max(0.0, -float(raw_a)) +
                     max(0.0, -float(raw_b)) +
@@ -1767,6 +1776,10 @@ def adjust_special_anchor_count_impl(
         mode_scores[str(mode_a)]['score'] = float(mode_scores[str(mode_a)]['score']) * 0.85
         mode_scores[str(mode_b)]['score'] = float(mode_scores[str(mode_b)]['score']) * 0.85
         mode_scores[str(mode_t)]['score'] = float(mode_scores[str(mode_t)]['score']) * 0.85
+        if int(su_type) == 19 and str(direction) == 'forward':
+            # A new double-anchor assignment changes the next Layer1 fixed
+            # topology. Rebuild before considering another single->double move.
+            break
 
     return H_new, moves, {
         'scores': {str(k): dict(v) for k, v in mode_scores.items()},

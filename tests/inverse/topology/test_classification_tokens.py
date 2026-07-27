@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from model.inverse.topology.classification import build_node_token, normalize_subtype
 
 from .helpers import connect, make_node
@@ -49,3 +51,11 @@ def test_build_node_token_captures_structured_neighbors() -> None:
     connector_neighbor = next(neighbor for neighbor in list(token.neighbor_tokens or []) if int(neighbor.node_id) == 29)
     assert connector_neighbor.is_fixed is True
     assert connector_neighbor.subtype == "29"
+
+
+def test_build_node_token_rejects_dangling_neighbor_identity() -> None:
+    center = make_node(7, 3)
+    center.hop1_ids.append(999)
+
+    with pytest.raises(ValueError, match=r"node 7 references missing hop1 node 999"):
+        build_node_token(center, nodes_by_id={7: center})

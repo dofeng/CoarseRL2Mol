@@ -180,3 +180,45 @@ def test_atomic_group_members_share_fixed_fragment_ownership() -> None:
     assert claimed is not None
     assert claimed.ownership_by_node_id[289].state == Stage3OwnershipState.COMPLETED_TOPOLOGY.value
     assert claimed.ownership_by_node_id[290].state == Stage3OwnershipState.COMPLETED_TOPOLOGY.value
+
+
+def test_released_evidence_neighbor_is_owned_only_by_its_explicit_fragment() -> None:
+    nodes = [_node(1, 20), _node(2, 19)]
+    classification = SimpleNamespace(
+        to_dict=lambda: {
+            "fragments": [
+                {
+                    "fragment_id": 1,
+                    "source_node_ids": [1],
+                    "claimed_node_ids": [1],
+                    "context_node_ids": [2],
+                    "evidence": {
+                        "center_node_ids": [1],
+                        "fixed_hop1_ids": [2],
+                    },
+                },
+                {
+                    "fragment_id": 2,
+                    "source_node_ids": [2],
+                    "claimed_node_ids": [2],
+                    "context_node_ids": [],
+                    "evidence": {"center_node_ids": [2]},
+                },
+            ],
+            "resource_pool": {},
+            "unclassified_nodes": [],
+            "classification_rejects": [],
+            "claim_conflicts": [],
+            "support_units_only": [],
+        },
+    )
+
+    context = build_stage3_round_context(
+        nodes=nodes,
+        classification=classification,
+    )
+
+    assert context.conflicts == []
+    assert context.ownership_by_node_id[1].owner_fragment_id == 1
+    assert context.ownership_by_node_id[2].owner_fragment_id == 2
+    assert round_context_invariants(context) == []

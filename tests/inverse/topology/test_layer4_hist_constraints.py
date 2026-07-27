@@ -25,14 +25,18 @@ def test_required_hist_constraints_reject_hydrogen_error_above_tolerance() -> No
     assert "元素H误差过大" in result["reason"]
 
 
-def test_aromatic_balance_does_not_enforce_su13_minimum() -> None:
+def test_required_hist_constraints_do_not_enforce_su12_su13_ratio() -> None:
     adjuster = Layer4Adjuster(device=torch.device("cpu"))
     H = torch.zeros(33, dtype=torch.long)
-    H[12] = 2
+    H[12] = 20
+    E_target = torch.zeros(6, dtype=torch.float)
 
-    result = adjuster._evaluate_aromatic_balance_constraints(H)
+    result = adjuster._evaluate_required_hist_constraints(
+        H,
+        E_target,
+        enforce_h_rel=False,
+    )
 
-    assert result["su13"] == 0
-    assert result["su13_min"] == 0
-    assert result["su13_ok"] is True
     assert result["ok"] is True
+    assert "aromatic_balance" not in result
+    assert "su12_exceeds_ratio" not in result["reason"]

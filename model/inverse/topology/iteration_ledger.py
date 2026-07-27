@@ -11,21 +11,20 @@ from .stage3_models import (
     TopologyClosureSlot,
     TopologySlotKind,
 )
+from .resource_profiles import closure_sequences
+from .round_context import normalize_stage3_product
 
 DIRECT_RESOURCE_TYPES = (11, 22, 23, 24)
 RESOURCE_TYPES = (10, 11, 12, 13, 22, 23, 24)
-SLOT_RESOURCE_SEQUENCES = {
-    TopologySlotKind.F1.value: (23, 11),
-    TopologySlotKind.F2.value: (23, 22),
-    TopologySlotKind.H.value: (23, 22),
-    TopologySlotKind.H1.value: (23, 22),
-    TopologySlotKind.FIXED22.value: (22,),
-    TopologySlotKind.CLOSED_TERMINAL.value: (),
-}
 
 
 def slot_sequence(kind: str) -> List[int]:
-    return [int(value) for value in SLOT_RESOURCE_SEQUENCES.get(str(kind), ())]
+    if str(kind) == TopologySlotKind.CLOSED_TERMINAL.value:
+        return []
+    options = closure_sequences(str(kind))
+    if not options:
+        return []
+    return [int(value) for value in list(options[0] or [])]
 
 
 def normalize_slot(slot: Any) -> TopologyClosureSlot:
@@ -151,6 +150,18 @@ def seed_ledger_topology_state(
             for values in dict(product.get("claimed_resource_ids_by_su", product.get("claimed_resource_ids", {})) or {}).values()
             for value in list(values or [])
         ]
+        claimed_su_by_node_id = {
+            int(node_id): int(su_type)
+            for su_type, values in dict(
+                product.get(
+                    "claimed_resource_ids_by_su",
+                    product.get("claimed_resource_ids", {}),
+                )
+                or {}
+            ).items()
+            if str(su_type).lstrip("-").isdigit()
+            for node_id in list(values or [])
+        }
         resource_id_set = set(resource_node_ids)
         for node_id in sorted(set(fixed_node_ids + resource_node_ids)):
             owner = working.ownership_by_node_id.get(int(node_id))
@@ -167,9 +178,21 @@ def seed_ledger_topology_state(
                     "owners": [str(owner.owner_product_id), product_id],
                 })
                 continue
+            claimed_su = claimed_su_by_node_id.get(int(node_id))
+            if claimed_su is not None and int(owner.su_type) != int(claimed_su):
+                working.conflicts.append({
+                    "node_id": int(node_id),
+                    "reason": "completed_product_su_type_mismatch",
+                    "product_id": product_id,
+                    "claimed_su_type": int(claimed_su),
+                    "actual_su_type": int(owner.su_type),
+                })
+                continue
             for values in working.available_ids_by_su.values():
                 if int(node_id) in values:
                     values.remove(int(node_id))
+            if int(node_id) in working.conflict_node_ids:
+                working.conflict_node_ids.remove(int(node_id))
             owner.state = (
                 Stage3OwnershipState.CLAIMED_CLOSURE_RESOURCE.value
                 if int(node_id) in resource_id_set
@@ -210,6 +233,8 @@ def seed_ledger_topology_state(
             for values in working.available_ids_by_su.values():
                 if int(node_id) in values:
                     values.remove(int(node_id))
+            if int(node_id) in working.conflict_node_ids:
+                working.conflict_node_ids.remove(int(node_id))
             owner.state = Stage3OwnershipState.PENDING_TOPOLOGY.value
             owner.owner_fragment_id = min(fragment_ids) if fragment_ids else None
             owner.owner_contract_id = contract_id
@@ -323,7 +348,11 @@ def assign_contract_slots(
             owner.role = str(slot.kind)
         slot.assigned_resource_ids = list(assigned)
         slot.state = "FILLED"
-    product_id = str(contract.expected_topology or contract.contract_id)
+    product_id = (
+        f"residual:{int(contract.contract_id)}"
+        if str(contract.contract_kind) == "residual_conversion"
+        else str(contract.expected_topology or contract.contract_id)
+    )
     product_nodes = sorted({
         int(value)
         for value in list(contract.claimed_source_node_ids or contract.source_node_ids or [])
@@ -347,10 +376,21 @@ def assign_contract_slots(
             if owner.state == Stage3OwnershipState.CLAIMED_CLOSURE_RESOURCE.value
             else "fixed_source"
         )
+    provisional = bool(
+        dict(contract.diagnostics or {}).get("provisional_requires_rebuild", False)
+    )
     product = {
         "product_id": product_id,
         "contract_id": int(contract.contract_id),
+        "contract_kind": str(contract.contract_kind),
+        "phase": str(contract.phase),
         "target_role": str(contract.target_role),
+        "product_role": str(
+            dict(contract.diagnostics or {}).get("product_role", "") or ""
+        ),
+        "chain_23_count": int(
+            dict(contract.diagnostics or {}).get("chain_23_count", 0) or 0
+        ),
         "source_fragment_ids": list(contract.source_fragment_ids),
         "source_fragment_classes": list(contract.source_fragment_classes),
         "fixed_source_node_ids": list(contract.claimed_source_node_ids or contract.source_node_ids or []),
@@ -362,8 +402,26 @@ def assign_contract_slots(
             slot.to_dict() for slot in slots[len(list(contract.mainline_slots or [])):]
         ],
         "topology_notation": str(contract.expected_topology),
-        "closed": True,
+        "closed": not provisional,
+        "reason": "provisional_requires_rebuild" if provisional else "",
+        "provisional": bool(provisional),
     }
+    normalized_product = normalize_stage3_product(
+        product,
+        generation_id=int(getattr(working, "generation_id", 0) or 0),
+        index=len(list(working.completed_products or [])),
+    ).to_dict()
+    normalized_product.update({
+        "contract_id": int(contract.contract_id),
+        "contract_kind": str(contract.contract_kind),
+        "phase": str(contract.phase),
+        "target_role": str(contract.target_role),
+        "product_role": str(product.get("product_role", "") or contract.target_role),
+        "chain_23_count": int(product.get("chain_23_count", 0) or 0),
+        "source_fragment_classes": list(contract.source_fragment_classes),
+        "provisional": bool(provisional),
+    })
+    product = normalized_product
     working.completed_products.append(product)
     working.pending_contracts = [
         item for item in list(working.pending_contracts or [])

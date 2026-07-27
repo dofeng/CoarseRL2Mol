@@ -9,6 +9,7 @@ else:
     _NodeV3 = Any
 from .classification_models import TopologyClassificationResult, TopologyFragment, TopologyRef
 from ..iteration_ledger import normalize_slot
+from ..resource_profiles import classify_raw_su24_semantics
 from ..stage3_models import TopologyClosureSlot, TopologySlotKind
 from .classification_rules_basic import (
     BASIC_A_AROMATIC_BY_CENTER,
@@ -42,7 +43,6 @@ from .classification_tokens import (
     build_node_tokens,
     is_abstract_open_nonfixed_semantic,
     is_visible_fixed_connector_semantic,
-    is_visible_mainline_nonfixed_semantic,
     is_visible_terminal_semantic,
 )
 
@@ -144,12 +144,10 @@ def _build_resource_pool(
     consumed: Set[int],
     *,
     excluded_ids: Optional[Iterable[int]] = None,
-    deferred_ids: Optional[Iterable[int]] = None,
 ) -> Dict[str, Any]:
     remaining_ids_by_su: Dict[str, List[int]] = {str(su): [] for su in sorted(RESOURCE_POOL_SU_TYPES)}
     su11_donor_ids_by_su: Dict[str, List[int]] = {str(su): [] for su in sorted(SU11_DONOR_SU_TYPES)}
     excluded = {int(node_id) for node_id in list(excluded_ids or [])}
-    deferred = {int(node_id) for node_id in list(deferred_ids or [])}
     for token in list(tokens or []):
         if int(token.node_id) in consumed:
             continue
@@ -160,7 +158,7 @@ def _build_resource_pool(
         elif int(token.su_type) in SU11_DONOR_SU_TYPES:
             su11_donor_ids_by_su.setdefault(str(token.su_type), []).append(int(token.node_id))
     for values in list(remaining_ids_by_su.values()) + list(su11_donor_ids_by_su.values()):
-        values.sort(key=lambda node_id: (int(node_id) in deferred, int(node_id)))
+        values.sort()
     remaining_counts = {str(k): int(len(v or [])) for k, v in remaining_ids_by_su.items()}
     return {
         "remaining_ids_by_su": remaining_ids_by_su,
@@ -210,6 +208,22 @@ def _union_source_ids(*chunks: Iterable[int]) -> List[int]:
     for chunk in chunks:
         merged.extend(int(value) for value in list(chunk or []))
     return sorted(_dedupe_ints(merged))
+
+
+def _ordered_atomic_pair_ids(
+    node_ids: Iterable[int],
+    tokens_by_id: Dict[int, ClassificationToken],
+) -> List[int]:
+    """Order an unsaturated pair by chemical role, not by global ID."""
+    return sorted(
+        {int(value) for value in list(node_ids or [])},
+        key=lambda node_id: (
+            2 if int(getattr(tokens_by_id.get(int(node_id)), "su_type", -1)) in {16, 18} else 0,
+            0 if int(getattr(tokens_by_id.get(int(node_id)), "su_type", -1)) == 14 else 1,
+            int(getattr(tokens_by_id.get(int(node_id)), "su_type", -1)),
+            int(node_id),
+        ),
+    )
 
 
 def _build_unsaturated_atomic_groups(
@@ -303,7 +317,6 @@ def _collect_direct_claimed_ids(
     include_aromatic: bool = False,
     include_terminals: bool = False,
     include_fixed: bool = False,
-    include_visible_mainline: bool = False,
     include_explicit_nonabstract: bool = False,
 ) -> List[int]:
     include_set = {int(x) for x in list(include_neighbor_ids or [])}
@@ -321,8 +334,6 @@ def _collect_direct_claimed_ids(
         elif include_aromatic and int(neighbor.su_type) in set(AROMATIC_SU_TYPES):
             include = True
         elif include_terminals and is_visible_terminal_semantic(neighbor):
-            include = True
-        elif include_visible_mainline and is_visible_mainline_nonfixed_semantic(neighbor):
             include = True
         elif include_explicit_nonabstract and not is_abstract_open_nonfixed_semantic(neighbor):
             include = True
@@ -346,11 +357,13 @@ def _attach_center_atomic_group(
         int(value)
         for value in list(dict(fragment.evidence or {}).get("center_node_ids", []) or [])
     ] or [int(fragment.fragment_id)]
+    claimed_ids = set(_fragment_claimed_node_ids(fragment))
+    candidate_ids = sorted(set(center_ids) | claimed_ids)
     atomic_ids: Set[int] = set()
     atomic_group_ids: Set[int] = set()
     atomic_groups: List[Dict[str, Any]] = []
-    for center_id in center_ids:
-        token = tokens_by_id.get(int(center_id))
+    for candidate_id in candidate_ids:
+        token = tokens_by_id.get(int(candidate_id))
         group_node_ids = [
             int(value)
             for value in list(dict(getattr(token, "meta", {}) or {}).get("atomic_group_node_ids", []) or [])
@@ -375,9 +388,17 @@ def _attach_center_atomic_group(
     fragment.evidence["atomic_group_ids"] = sorted(atomic_group_ids)
     fragment.evidence["atomic_groups"] = atomic_groups
     fragment.evidence["atomic_group_node_ids"] = sorted(atomic_ids)
+    fragment.evidence["center_atomic_group_node_ids"] = (
+        sorted(atomic_ids) if atomic_ids.intersection(set(center_ids)) else []
+    )
     fragment_token = tokens_by_id.get(int(fragment.fragment_id))
-    if fragment_token is not None and int(fragment_token.su_type) == 14:
-        fragment.evidence["center_node_ids"] = sorted(atomic_ids)
+    center_owns_atomic_group = bool(atomic_ids.intersection(set(center_ids)))
+    if (
+        center_owns_atomic_group
+        and fragment_token is not None
+        and int(fragment_token.su_type) == 14
+    ):
+        fragment.evidence["center_node_ids"] = _ordered_atomic_pair_ids(atomic_ids, tokens_by_id)
         anchor_14_ids = sorted(
             int(node_id)
             for node_id in atomic_ids
@@ -398,8 +419,8 @@ def _attach_center_atomic_group(
             )
             for node_id in anchor_14_ids
         ]
-    elif fragment_token is not None:
-        ordered_atomic_ids = sorted(atomic_ids)
+    elif center_owns_atomic_group and fragment_token is not None:
+        ordered_atomic_ids = _ordered_atomic_pair_ids(atomic_ids, tokens_by_id)
         fragment.mainline_node_ids = list(ordered_atomic_ids)
         fragment.mainline_labels = [
             str(int(getattr(tokens_by_id.get(int(node_id)), "su_type", -1)))
@@ -649,7 +670,6 @@ def _flex_range_evidence(
     counts_as_explicit = False
     can_supplement = False
     can_demote = False
-    resource_template: Dict[str, int] = {}
     mainline_evidence = _flex_range_mainline_evidence(
         family=str(family),
         class_type=str(class_type),
@@ -672,12 +692,10 @@ def _flex_range_evidence(
         count_role = "supplemental_candidate"
         candidate_kind = "b_like_open"
         can_supplement = True
-        resource_template = {"11": 1, "23": 1}
     elif supports_supplemental and mainline_open and class_name in FLEX_RECONCILE_D_LIKE_OPEN_CLASSES:
         count_role = "supplemental_candidate"
         candidate_kind = "d_like_open"
         can_supplement = True
-        resource_template = {"11": 2, "23": 1}
     elif class_name in FLEX_RECONCILE_EXPLICIT_SIDE_CLASSES or class_name in FLEX_RECONCILE_E_LIKE_OPEN_CLASSES:
         count_role = "side_explicit"
         candidate_kind = "explicit_side"
@@ -691,11 +709,6 @@ def _flex_range_evidence(
         "flex_range_counts_as_explicit": bool(counts_as_explicit),
         "flex_range_can_supplement": bool(can_supplement),
         "flex_range_can_demote": bool(can_demote),
-        "flex_range_resource_template": {
-            str(key): int(value)
-            for key, value in dict(resource_template or {}).items()
-            if int(value) > 0
-        },
         **dict(mainline_evidence or {}),
     }
 
@@ -854,11 +867,23 @@ def _append_if_unclaimed(
         int(value)
         for value in list(dict(getattr(fragment, "evidence", {}) or {}).get("atomic_group_node_ids", []) or [])
     }
+    center_atomic_ids = {
+        int(value)
+        for value in list(
+            dict(getattr(fragment, "evidence", {}) or {}).get(
+                "center_atomic_group_node_ids", []
+            )
+            or []
+        )
+    }
     resource_blocking = [
         int(node_id)
         for node_id in blocking
         if int(node_id) not in center_ids
-        and int(node_id) not in atomic_ids
+        and (
+            int(node_id) not in atomic_ids
+            or int(node_id) not in center_atomic_ids
+        )
     ]
     if blocking and len(resource_blocking) == len(blocking):
         fragment.claimed_node_ids = [int(value) for value in node_ids if int(value) not in set(blocking)]
@@ -867,6 +892,35 @@ def _append_if_unclaimed(
             int(value)
             for value in list(getattr(fragment, "context_node_ids", []) or []) + list(blocking)
         })
+        released_atomic_ids = set(blocking) & atomic_ids
+        if released_atomic_ids:
+            retained_groups = [
+                dict(group or {})
+                for group in list(
+                    dict(getattr(fragment, "evidence", {}) or {}).get(
+                        "atomic_groups", []
+                    )
+                    or []
+                )
+                if not released_atomic_ids.intersection({
+                    int(value)
+                    for value in list(dict(group or {}).get("node_ids", []) or [])
+                })
+            ]
+            fragment.evidence["atomic_groups"] = retained_groups
+            fragment.evidence["atomic_group_ids"] = sorted(
+                int(group.get("group_id"))
+                for group in retained_groups
+                if group.get("group_id") is not None
+            )
+            fragment.evidence["atomic_group_node_ids"] = sorted({
+                int(value)
+                for group in retained_groups
+                for value in list(group.get("node_ids", []) or [])
+            })
+            fragment.evidence["center_atomic_group_node_ids"] = sorted(
+                center_atomic_ids - released_atomic_ids
+            )
         node_ids = _fragment_claimed_node_ids(fragment)
         required_anchor_ids = {
             int(getattr(slot, "anchor_node_id", -1))
@@ -957,7 +1011,7 @@ def _is_nonterminal_branch_neighbor(neighbor: NeighborToken) -> bool:
         return False
     if _is_terminal_branch_neighbor(neighbor):
         return False
-    if is_abstract_open_nonfixed_semantic(neighbor) or is_visible_mainline_nonfixed_semantic(neighbor):
+    if is_abstract_open_nonfixed_semantic(neighbor):
         return False
     return True
 
@@ -1021,7 +1075,31 @@ def resolve_fixed_connectors(
 ) -> Tuple[List[NeighborToken], Optional[str]]:
     if bool(dict(token.meta or {}).get("fixed_connector_forbidden", False)):
         return [], "fixed_connector_forbidden_by_partition_meta"
+    partition = ""
+    if int(token.su_type) == 19:
+        partition = str(token.anchor_partition or "").strip().lower()
+        if not partition:
+            return [], "su19_anchor_partition_missing"
+        if partition not in {"ether", "thio"}:
+            return [], f"su19_anchor_partition_invalid:{partition}"
+        partition_allowed = (
+            {31}
+            if partition == "thio"
+            else ({2, 29} if int(token.target_degree) == 1 else {2, 28, 29})
+        )
+        allowed_su = set(allowed_su) & set(partition_allowed)
     fixed_neighbors = [neighbor for neighbor in list(token.neighbor_tokens or []) if bool(neighbor.is_fixed)]
+    partition_incompatible = [
+        neighbor
+        for neighbor in fixed_neighbors
+        if int(token.su_type) == 19
+        and int(neighbor.su_type) in set(CONNECTOR_SU_TYPES)
+        and int(neighbor.su_type) not in set(allowed_su)
+    ]
+    if partition_incompatible:
+        return [], f"su19_partition_connector_mismatch:{partition}:" + ",".join(
+            str(int(neighbor.su_type)) for neighbor in partition_incompatible
+        )
     connectors = [neighbor for neighbor in fixed_neighbors if int(neighbor.su_type) in set(allowed_su)]
     connectors.sort(key=lambda item: int(item.node_id))
     if int(len(connectors)) != int(expected_count):
@@ -1212,20 +1290,15 @@ def select_primary_fixed_side(connector_profiles: Sequence[Dict[str, Any]]) -> O
 
 
 def _like24_base_claimed_node_ids(token: ClassificationToken) -> List[int]:
-    if str(token.subtype) == "24":
-        return [int(token.node_id)]
-    eleven_ids = sorted(
-        int(neighbor.node_id)
-        for neighbor in list(token.neighbor_tokens or [])
-        if int(neighbor.su_type) == 11
-    )
-    unselected_eleven_ids = set(eleven_ids[1:])
+    # Open, non-fixed aliphatic neighbours are classification evidence, not
+    # fragment-owned topology.  They stay in the closure pool until an
+    # assembly transaction explicitly claims them.
     return _collect_direct_claimed_ids(
         token,
         include_aromatic=True,
         include_terminals=True,
         include_fixed=True,
-        exclude_neighbor_ids=unselected_eleven_ids,
+        include_explicit_nonabstract=True,
     )
 
 
@@ -1234,6 +1307,10 @@ def _like24_fixed_component_node_ids(
     tokens_by_id: Dict[int, ClassificationToken],
 ) -> List[int]:
     node_ids: Set[int] = set(_like24_base_claimed_node_ids(token))
+    atomic_group_node_ids = {
+        int(value)
+        for value in list(dict(token.meta or {}).get("atomic_group_node_ids", []) or [])
+    }
     for neighbor in list(token.neighbor_tokens or []):
         if not bool(neighbor.is_fixed):
             continue
@@ -1245,22 +1322,75 @@ def _like24_fixed_component_node_ids(
             int(other.node_id)
             for other in list(connector.neighbor_tokens or [])
             if int(other.node_id) != int(token.node_id)
+            and not is_abstract_open_nonfixed_semantic(other)
         )
+    for neighbor in list(token.neighbor_tokens or []):
+        if bool(neighbor.is_fixed) or int(neighbor.su_type) in RESOURCE_POOL_SU_TYPES:
+            continue
+        if int(neighbor.node_id) in atomic_group_node_ids:
+            continue
+        previous_id = int(token.node_id)
+        current_id = int(neighbor.node_id)
+        visited = {int(token.node_id)}
+        while current_id not in visited:
+            current = tokens_by_id.get(int(current_id))
+            if current is None or int(current.su_type) == 24:
+                break
+            node_ids.add(int(current_id))
+            visited.add(int(current_id))
+            # A real side path belongs to this fragment only up to its first
+            # aromatic or terminal anchor.  Nodes beyond that anchor are part
+            # of the aromatic cluster (or another topology unit), not the
+            # like24 fixed component.
+            if (
+                int(current.su_type) in set(AROMATIC_SU_TYPES)
+                or is_visible_terminal_semantic(current)
+            ):
+                break
+            forward_ids = sorted({
+                int(other.node_id)
+                for other in list(current.neighbor_tokens or [])
+                if int(other.node_id) != int(previous_id)
+                and int(other.node_id) not in visited
+            })
+            if len(forward_ids) != 1:
+                break
+            previous_id, current_id = int(current_id), int(forward_ids[0])
     return sorted(node_ids)
 
 
 def _like24_secondary_claimed_node_ids(
     token: ClassificationToken,
     connector_profiles: Sequence[Dict[str, Any]],
+    tokens_by_id: Dict[int, ClassificationToken],
+    *,
+    fixed_connection_contracts: Sequence[Dict[str, Any]],
+    primary_connector_id: int = -1,
 ) -> List[int]:
+    # A generic open neighbor behind a secondary fixed connector belongs to
+    # the closure pool.  It is claimed later by that branch transaction.  The
+    # same kind of neighbor behind the selected primary connector is part of
+    # the materialized mainline and therefore remains fragment-owned.
+    primary_open_ids = [
+        int(node_id)
+        for profile in list(connector_profiles or [])
+        if _safe_int(dict(profile or {}).get("connector_node_id"), -1)
+        == int(primary_connector_id)
+        for item, node_id in zip(
+            list(dict(profile or {}).get("remaining_neighbors", []) or []),
+            list(dict(profile or {}).get("remaining_node_ids", []) or []),
+        )
+        if is_abstract_open_nonfixed_semantic(dict(item or {}))
+    ]
     return _union_source_ids(
-        _like24_base_claimed_node_ids(token),
+        _like24_fixed_component_node_ids(token, tokens_by_id),
         [int(profile.get("connector_node_id", -1)) for profile in list(connector_profiles or [])],
         [
             int(node_id)
-            for profile in list(connector_profiles or [])
-            for node_id in list(profile.get("remaining_node_ids", []) or [])
+            for contract in list(fixed_connection_contracts or [])
+            for node_id in list(dict(contract or {}).get("base_path_node_ids", []) or [])
         ],
+        primary_open_ids,
     )
 
 
@@ -1371,6 +1501,7 @@ def _build_fixed_connection_contract(
         "tail_open_reason": "",
         "externally_closed": False,
         "partner_spec": {},
+        "generic_open_evidence_node_ids": [],
     }
     connector_label = str(contract["connector_token_subtype"] or contract["connector_su_type"] or "")
     connector_node_id = int(contract["connector_node_id"])
@@ -1380,6 +1511,12 @@ def _build_fixed_connection_contract(
     ]
     remaining_labels = [_profile_neighbor_label(item) for item in remaining_neighbors]
     remaining_node_ids = [_safe_int(item.get("node_id"), -1) for item in remaining_neighbors]
+    contract["generic_open_evidence_node_ids"] = [
+        int(node_id)
+        for item, node_id in zip(remaining_neighbors, remaining_node_ids)
+        if int(node_id) >= 0
+        and is_abstract_open_nonfixed_semantic(dict(item or {}))
+    ]
     side_class = str(contract["side_class"])
     connector_su = int(contract["connector_su_type"])
 
@@ -1644,7 +1781,6 @@ def _like24_direct_generic_count(token: ClassificationToken) -> int:
         for neighbor in list(token.neighbor_tokens or [])
         if (
             _is_generic_open_neighbor(neighbor)
-            and not is_visible_mainline_nonfixed_semantic(neighbor)
             and not is_visible_terminal_semantic(neighbor)
             and not is_visible_fixed_connector_semantic(neighbor)
         )
@@ -1682,6 +1818,9 @@ def _like24_required_branch_kinds(
     if class_name in {"24_D", "24_CD_P"} and subtype not in {"14"}:
         return {}
     if class_name in {"24_AB_M", "24_CD_M", "24_CD_M_FULL"}:
+        generic_count = _like24_direct_generic_count(token)
+        if generic_count > 0:
+            return {"center": ["H" for _ in range(int(generic_count))]}
         has_closed_fixed_branch = any(
             str(dict(profile or {}).get("side_class", "")) in {"M", "P"}
             for profile in list(connector_profiles or [])[1:]
@@ -1697,6 +1836,8 @@ def _like24_required_branch_kinds(
         return {}
     generic_count = _like24_direct_generic_count(token)
     expected_mainline_generic = _like24_expected_mainline_generic_count(class_name, connector_profiles)
+    if str(getattr(token, "subtype", "")) == "24":
+        expected_mainline_generic = 1 if class_name in {"24_A", "24_B"} else 2
     unresolved_count = max(0, int(generic_count - expected_mainline_generic))
     if unresolved_count <= 0:
         return {}
@@ -2294,7 +2435,7 @@ def _like24_suppressed_support_node_ids(token: ClassificationToken) -> List[int]
             continue
         if int(neighbor.su_type) == 11:
             continue
-        if is_abstract_open_nonfixed_semantic(neighbor) or is_visible_mainline_nonfixed_semantic(neighbor):
+        if is_abstract_open_nonfixed_semantic(neighbor):
             out.append(int(neighbor.node_id))
     return sorted({int(node_id) for node_id in out})
 
@@ -3034,6 +3175,17 @@ def _make_like24_base_fragment(
         "reject_reason": "",
         "secondary_skipped_reason": "",
     }
+    if str(token.subtype) == "24":
+        raw_role, raw_details = classify_raw_su24_semantics(
+            su_type=int(token.su_type),
+            neighbors=[neighbor.to_dict() for neighbor in list(token.neighbor_tokens or [])],
+        )
+        if raw_role:
+            evidence.update({
+                "raw_su24_role": str(raw_role),
+                "raw_su24_profile": dict(raw_details or {}),
+                "raw_su24_real_neighbors": True,
+            })
     evidence.update(_like24_ring_evidence(
         token,
         class_type=str(base_rule.get("class_type")),
@@ -3105,11 +3257,10 @@ def _match_like24_fragment(
     tokens_by_id: Dict[int, ClassificationToken],
     rejects: List[Dict[str, Any]],
 ) -> Optional[TopologyFragment]:
-    # A physical/raw SU24 is a free resource until the dedicated raw-SU24
-    # ring phase explicitly selects it.  It is not an external half-closed
-    # topology fragment.  Genuine like24 branch structures are represented by
-    # non-raw centers and continue through the secondary 24_AB_*/24_CD_* rules.
     if int(token.su_type) == 24:
+        # Raw SU24 nodes remain ordinary closure resources for the whole fresh
+        # classification pass. Their A/B/C/D profile is evaluated from real
+        # 1-hop data only when a ring template selects the node.
         return None
     base_rule = _match_like24_base_rule(token)
     if base_rule is None:
@@ -3153,6 +3304,42 @@ def _match_like24_fragment(
     if primary_connector is None:
         _record_reject(rejects, token, family="like24", reason="missing_primary_connector")
         return None
+    real_su11_ids = sorted(
+        int(neighbor.node_id)
+        for neighbor in list(token.neighbor_tokens or [])
+        if int(neighbor.su_type) == 11
+    )
+    if str(token.subtype).startswith("single") and len(real_su11_ids) >= 2:
+        contracts = _build_fixed_connection_contracts(
+            class_type=str(base_rule.get("class_type")),
+            connector_profiles=connector_profiles,
+            primary_connector=None,
+        )
+        for contract in contracts:
+            contract["role_candidates"] = ["branch_only"]
+        base_fragment.evidence.update({
+            "connector_profiles": connector_profiles,
+            "selected_primary_connector": {},
+            "secondary_connector_profiles": connector_profiles,
+            "fixed_connection_contracts": contracts,
+            "real_su11_pair_mainline": True,
+            "selected_su11_anchor_ids": list(real_su11_ids[:2]),
+            "released_extra_su11_ids": [],
+            "secondary_skipped_reason": "real_su11_pair_keeps_fixed_connection_as_branch",
+        })
+        base_fragment.topology_template = "11-24(?)-11"
+        base_fragment.open_slots = []
+        base_fragment.open_mainline_slots = []
+        base_fragment.source_node_ids = _union_source_ids(
+            _like24_fixed_component_node_ids(token, tokens_by_id),
+            [
+                int(node_id)
+                for contract in contracts
+                for node_id in list(dict(contract or {}).get("base_path_node_ids", []) or [])
+            ],
+        )
+        base_fragment.claimed_node_ids = list(base_fragment.source_node_ids)
+        return _normalize_fragment_contract(base_fragment)
     secondary_rule = _resolve_like24_secondary_rule(
         str(base_rule.get("class_type")),
         str(primary_connector.get("side_class")),
@@ -3220,7 +3407,13 @@ def _match_like24_fragment(
             node_id=int(primary_connector.get("connector_node_id", -1)),
         ),
     ]
-    claimed_node_ids = _like24_secondary_claimed_node_ids(token, connector_profiles)
+    claimed_node_ids = _like24_secondary_claimed_node_ids(
+        token,
+        connector_profiles,
+        tokens_by_id,
+        fixed_connection_contracts=list(evidence.get("fixed_connection_contracts", []) or []),
+        primary_connector_id=_safe_int(primary_connector.get("connector_node_id"), -1),
+    )
     return _make_fragment(
         token,
         family=str(secondary_rule.get("family")),
@@ -3421,21 +3614,6 @@ def _basic_fragment(
 ) -> TopologyFragment:
     rule = dict(BASIC_RULE_BY_ID[str(rule_id)])
     topology_template = str(rule.get("topology_template"))
-    matched_neighbors = [
-        dict(item or {})
-        for item in list(dict(evidence or {}).get("matched_neighbors", []) or [])
-    ]
-    claim_neighbor_ids = [
-        _dict.get("node_id")
-        for _dict in matched_neighbors
-        if (
-            int(_dict.get("su_type", -1)) in set(AROMATIC_SU_TYPES)
-            or is_visible_terminal_semantic(_dict)
-            or is_visible_fixed_connector_semantic(_dict)
-            or is_visible_mainline_nonfixed_semantic(_dict)
-            or not is_abstract_open_nonfixed_semantic(_dict)
-        )
-    ]
     direct_source_ids = _collect_direct_source_ids(token)
     return _make_fragment(
         token,
@@ -3549,21 +3727,34 @@ def classify_basic_center(token: ClassificationToken) -> Optional[TopologyFragme
 def _match_su25_fragment(token: ClassificationToken) -> Optional[TopologyFragment]:
     if str(token.subtype) != "25":
         return None
-    has_11 = any(int(neighbor.su_type) == 11 for neighbor in list(token.neighbor_tokens or []))
-    has_22_like = any(
-        int(neighbor.su_type) in ({22} | TERMINAL_NEIGHBORS | {0, 1, 2, 3, 14, 15, 17, 24, 25})
+    eleven_neighbor_ids = [
+        int(neighbor.node_id)
+        for neighbor in list(token.neighbor_tokens or [])
+        if int(neighbor.su_type) == 11
+    ]
+    has_11 = bool(eleven_neighbor_ids)
+    fixed_22_neighbor_ids = [
+        int(neighbor.node_id)
+        for neighbor in list(token.neighbor_tokens or [])
+        if int(neighbor.su_type) == 22
+    ]
+    has_branch_capacity = any(
+        int(neighbor.su_type) in ({22, 23, 24, 25, 0, 1, 2, 3, 14, 15, 17} | TERMINAL_NEIGHBORS)
         for neighbor in list(token.neighbor_tokens or [])
     )
-    if not has_22_like:
+    if not has_branch_capacity:
         return None
     rule = SU25_RULES[0] if has_11 else SU25_RULES[1]
+    branch_slot_kinds = [TopologySlotKind.H.value]
+    if not fixed_22_neighbor_ids:
+        branch_slot_kinds = [TopologySlotKind.FIXED22.value, TopologySlotKind.H.value]
     return _make_fragment(
         token,
         family=str(rule.get("family")),
         class_type=str(rule.get("class_type")),
         topology_template=str(rule.get("topology_template")),
         open_slots=["OPEN"],
-        branch_slots=["H"],
+        branch_slots=branch_slot_kinds,
         evidence={
             "rule_id": str(rule.get("rule_id")),
             "center_node_ids": [int(token.node_id)],
@@ -3572,15 +3763,16 @@ def _match_su25_fragment(token: ClassificationToken) -> Optional[TopologyFragmen
             "secondary_connector_profiles": [],
             "fixed_connection_contracts": [],
             "realization_modes": [],
+            "requires_fixed22_branch": True,
+            "fixed22_neighbor_ids": list(fixed_22_neighbor_ids[:1]),
+            "fixed22_requires_pool": not bool(fixed_22_neighbor_ids),
             "reject_reason": "",
         },
         source_node_ids=_collect_direct_source_ids(token),
-        claimed_node_ids=_collect_direct_claimed_ids(
-            token,
-            include_aromatic=True,
-            include_terminals=True,
-            include_fixed=True,
-            include_visible_mainline=True,
+        claimed_node_ids=_union_source_ids(
+            [int(token.node_id)],
+            list(eleven_neighbor_ids[:1]),
+            list(fixed_22_neighbor_ids[:1]),
         ),
     )
 
@@ -3619,13 +3811,13 @@ def _atomic_pair_fallback_fragment(
     group: Dict[str, Any],
     tokens_by_id: Dict[int, ClassificationToken],
 ) -> TopologyFragment:
-    node_ids = sorted(int(value) for value in list(group.get("node_ids", []) or []))
+    node_ids = _ordered_atomic_pair_ids(group.get("node_ids", []), tokens_by_id)
     tokens = [tokens_by_id[node_id] for node_id in node_ids]
     su_pair = tuple(int(token.su_type) for token in tokens)
     branch_slots: List[TopologyClosureSlot] = []
     mainline_slots: List[TopologyClosureSlot] = []
     if 14 in su_pair:
-        class_type = "24_CD_M_FULL" if su_pair == (14, 14) else "24_C"
+        class_type = "24_CD_P" if int(tokens[-1].su_type) in {16, 18} else "24_C"
         family = "like24_unsaturated_pair"
         for token in tokens:
             if int(token.su_type) == 14:
@@ -3636,12 +3828,36 @@ def _atomic_pair_fallback_fragment(
                     anchor_role="unsaturated_branch_anchor",
                     required_su_sequence=[23, 22],
                 ))
+        mainline_slots.append(TopologyClosureSlot(
+            slot_id=f"atomic:{node_ids[0]}:left:F1",
+            kind=TopologySlotKind.F1.value,
+            anchor_node_id=int(node_ids[0]),
+            anchor_role="left_mainline",
+            required_su_sequence=[23, 11],
+        ))
+        if int(tokens[-1].su_type) in {16, 18}:
+            mainline_slots.append(TopologyClosureSlot(
+                slot_id=f"atomic:{node_ids[0]}:right:terminal",
+                kind=TopologySlotKind.CLOSED_TERMINAL.value,
+                anchor_node_id=int(node_ids[-1]),
+                anchor_role="right_terminal",
+                existing_node_ids=[int(node_ids[-1])],
+                state=TopologySlotKind.CLOSED_TERMINAL.value,
+            ))
+        else:
+            mainline_slots.append(TopologyClosureSlot(
+                slot_id=f"atomic:{node_ids[0]}:right:F1",
+                kind=TopologySlotKind.F1.value,
+                anchor_node_id=int(node_ids[-1]),
+                anchor_role="right_mainline",
+                required_su_sequence=[23, 11],
+            ))
         topology_template = "-" + "-".join(
             f"14(-H)" if int(token.su_type) == 14 else str(int(token.su_type))
             for token in tokens
         ) + ("-" if int(tokens[-1].su_type) != 16 else "")
     else:
-        class_type = "G"
+        class_type = "G" if int(tokens[-1].su_type) in {16, 18} else "D"
         family = "basic_unsaturated_pair"
         mainline_slots.append(TopologyClosureSlot(
             slot_id=f"atomic:{node_ids[0]}:left:F1",
@@ -3668,6 +3884,21 @@ def _atomic_pair_fallback_fragment(
                 required_su_sequence=[23, 11],
             ))
         topology_template = "-".join(str(value) for value in su_pair)
+    evidence = _augment_fragment_evidence(
+        family=family,
+        class_type=class_type,
+        topology_template=topology_template,
+        open_slots=[slot.kind for slot in mainline_slots if not slot.is_complete()],
+        branch_slots=[slot.kind for slot in branch_slots if not slot.is_complete()],
+        fixed_connector_inferred=False,
+        evidence={
+            "rule_id": "unsaturated_atomic_pair_fallback",
+            "center_node_ids": list(node_ids),
+            "atomic_group_id": int(group.get("group_id", node_ids[0])),
+            "atomic_group_node_ids": list(node_ids),
+            "atomic_group_su_pair": list(su_pair),
+        },
+    )
     return TopologyFragment(
         fragment_id=int(group.get("group_id", node_ids[0])),
         family=family,
@@ -3687,20 +3918,20 @@ def _atomic_pair_fallback_fragment(
         branch_contracts=branch_slots,
         context_node_ids=[],
         atomic_group_ids=[int(group.get("group_id", node_ids[0]))],
-        evidence={
-            "rule_id": "unsaturated_atomic_pair_fallback",
-            "center_node_ids": list(node_ids),
-            "atomic_group_id": int(group.get("group_id", node_ids[0])),
-            "atomic_group_node_ids": list(node_ids),
-            "atomic_group_su_pair": list(su_pair),
-        },
+        evidence=evidence,
     )
 
 
 def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment:
     original_source = sorted({int(value) for value in list(fragment.source_node_ids or [])})
     claimed = sorted({int(value) for value in list(fragment.claimed_node_ids or original_source)})
-    fragment.context_node_ids = sorted(set(original_source) - set(claimed))
+    fragment.context_node_ids = sorted(
+        {
+            int(value)
+            for value in list(fragment.context_node_ids or [])
+        }
+        | (set(original_source) - set(claimed))
+    )
     fragment.claimed_node_ids = list(claimed)
     fragment.source_node_ids = list(claimed)
     if not fragment.mainline_node_ids:
@@ -3730,6 +3961,16 @@ def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment
             and int(item.get("su_type", -1)) == 22
             and int(item.get("node_id")) in set(claimed)
         })
+        fixed_22_ids = sorted(
+            set(fixed_22_ids)
+            | {
+                int(node_id)
+                for node_id in list(
+                    dict(fragment.evidence or {}).get("fixed22_neighbor_ids", []) or []
+                )
+                if int(node_id) in set(claimed)
+            }
+        )
         main_kind = TopologySlotKind.F2.value if str(fragment.class_type) == "25_CD" else TopologySlotKind.F1.value
         main_required = [23, 22] if main_kind == TopologySlotKind.F2.value else [23, 11]
         fragment.open_mainline_slots = [TopologyClosureSlot(
@@ -3739,7 +3980,16 @@ def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment
             anchor_role="left_mainline",
             required_su_sequence=main_required,
         )]
-        fragment.branch_contracts = [TopologyClosureSlot(
+        branch_contracts: List[TopologyClosureSlot] = []
+        if not fixed_22_ids:
+            branch_contracts.append(TopologyClosureSlot(
+                slot_id=f"fragment:{fragment.fragment_id}:branch:FIXED22",
+                kind=TopologySlotKind.FIXED22.value,
+                anchor_node_id=int(fragment.fragment_id),
+                anchor_role="fixed22_branch",
+                required_su_sequence=[22],
+            ))
+        fragment.branch_contracts = branch_contracts + [TopologyClosureSlot(
             slot_id=f"fragment:{fragment.fragment_id}:branch:H",
             kind=TopologySlotKind.H.value,
             anchor_node_id=int(fragment.fragment_id),
@@ -3758,7 +4008,11 @@ def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment
             for node_id in fixed_22_ids
         )
         fragment.open_slots = [main_kind]
-        fragment.branch_slots = [TopologySlotKind.H.value]
+        fragment.branch_slots = (
+            [TopologySlotKind.H.value]
+            if fixed_22_ids
+            else [TopologySlotKind.FIXED22.value, TopologySlotKind.H.value]
+        )
     fixed_terminal_bridge_subtype = {
         28: "single19d2",
         32: "21d2",
@@ -3862,15 +4116,55 @@ def classify_topology_units(
     if partition_by_node or forbidden_fixed_connector_node_ids:
         for token in tokens:
             if int(token.node_id) in partition_by_node:
-                token.anchor_partition = str(partition_by_node[int(token.node_id)])
+                token.anchor_partition = str(partition_by_node[int(token.node_id)]).strip().lower()
                 token.meta["fixed_partition_meta_applied"] = True
             if int(token.node_id) in forbidden_fixed_connector_node_ids:
                 token.meta["fixed_connector_forbidden"] = True
     tokens_by_id = _token_by_id(tokens)
+    raw_su24_fixed_support_ids: Set[int] = set()
+    for token in tokens:
+        if int(token.su_type) != 24:
+            continue
+        raw_role, raw_details = classify_raw_su24_semantics(
+            su_type=int(token.su_type),
+            neighbors=[neighbor.to_dict() for neighbor in list(token.neighbor_tokens or [])],
+        )
+        if not raw_role:
+            continue
+        terminal_su_by_node_id = {
+            int(key): int(value)
+            for key, value in dict(raw_details.get("terminal_su_by_node_id", {}) or {}).items()
+            if str(key).lstrip("-").isdigit()
+        }
+        raw_su24_fixed_support_ids.update(
+            int(node_id)
+            for node_id, su_type in terminal_su_by_node_id.items()
+            if int(su_type) not in RESOURCE_POOL_SU_TYPES
+        )
     consumed: Set[int] = set()
     fragments: List[TopologyFragment] = []
     classification_rejects: List[Dict[str, Any]] = []
     claim_conflicts: List[Dict[str, Any]] = []
+    invalid_partition_node_ids: Set[int] = set()
+    invalid_resource_node_ids: Set[int] = set()
+    for token in tokens:
+        if int(token.su_type) != 19:
+            continue
+        partition = str(token.anchor_partition or "").strip().lower()
+        if partition in {"ether", "thio"}:
+            continue
+        reason = (
+            "su19_anchor_partition_missing"
+            if not partition
+            else f"su19_anchor_partition_invalid:{partition}"
+        )
+        _record_reject(
+            classification_rejects,
+            token,
+            family="su19_partition",
+            reason=reason,
+        )
+        invalid_partition_node_ids.add(int(token.node_id))
     atomic_groups = _build_unsaturated_atomic_groups(tokens, classification_rejects)
     rejected_atomic_node_ids = {
         int(item.get("node_id", -1))
@@ -3879,7 +4173,7 @@ def classify_topology_units(
     }
 
     for token in tokens:
-        if int(token.node_id) in consumed or int(token.node_id) in rejected_atomic_node_ids:
+        if int(token.node_id) in consumed or int(token.node_id) in rejected_atomic_node_ids | invalid_partition_node_ids | invalid_resource_node_ids:
             continue
         fragment = _find_double_d2_fragment(token, tokens_by_id, classification_rejects)
         if fragment is not None:
@@ -3888,7 +4182,7 @@ def classify_topology_units(
 
     per_token_like24: Dict[int, TopologyFragment] = {}
     for token in tokens:
-        if int(token.node_id) in consumed or int(token.node_id) in rejected_atomic_node_ids:
+        if int(token.node_id) in consumed or int(token.node_id) in rejected_atomic_node_ids | invalid_partition_node_ids | invalid_resource_node_ids:
             continue
         fragment = _match_like24_fragment(token, tokens_by_id, classification_rejects)
         if fragment is not None:
@@ -3900,7 +4194,7 @@ def classify_topology_units(
         _append_if_unclaimed(fragments, consumed, fragment)
 
     for token in tokens:
-        if int(token.node_id) in consumed or int(token.node_id) in rejected_atomic_node_ids:
+        if int(token.node_id) in consumed or int(token.node_id) in rejected_atomic_node_ids | invalid_partition_node_ids | invalid_resource_node_ids:
             continue
         like24_fragment = per_token_like24.get(int(token.node_id))
         if like24_fragment is not None:
@@ -3908,21 +4202,7 @@ def classify_topology_units(
             _append_if_unclaimed(fragments, consumed, like24_fragment)
 
     for token in tokens:
-        if int(token.node_id) in consumed or int(token.node_id) in rejected_atomic_node_ids:
-            continue
-        basic_fragment = classify_basic_center(token)
-        if basic_fragment is not None:
-            basic_fragment = _attach_center_atomic_group(basic_fragment, tokens_by_id)
-            _append_if_unclaimed(
-                fragments,
-                consumed,
-                basic_fragment,
-                claim_conflicts=claim_conflicts,
-                record_conflict=True,
-            )
-
-    for token in tokens:
-        if int(token.node_id) in consumed:
+        if int(token.node_id) in consumed or int(token.node_id) in invalid_partition_node_ids | invalid_resource_node_ids:
             continue
         su25_fragment = _match_su25_fragment(token)
         if su25_fragment is not None:
@@ -3931,6 +4211,24 @@ def classify_topology_units(
                 fragments,
                 consumed,
                 su25_fragment,
+                claim_conflicts=claim_conflicts,
+                record_conflict=True,
+            )
+
+    for token in tokens:
+        if (
+            int(token.node_id) in consumed
+            or int(token.node_id) in raw_su24_fixed_support_ids
+            or int(token.node_id) in rejected_atomic_node_ids | invalid_partition_node_ids | invalid_resource_node_ids
+        ):
+            continue
+        basic_fragment = classify_basic_center(token)
+        if basic_fragment is not None:
+            basic_fragment = _attach_center_atomic_group(basic_fragment, tokens_by_id)
+            _append_if_unclaimed(
+                fragments,
+                consumed,
+                basic_fragment,
                 claim_conflicts=claim_conflicts,
                 record_conflict=True,
             )
@@ -3947,6 +4245,50 @@ def classify_topology_units(
             claim_conflicts=claim_conflicts,
             record_conflict=True,
         )
+
+    raw_su24_ids = {
+        int(token.node_id)
+        for token in tokens
+        if int(token.su_type) == 24
+    }
+    reserved_fixed_branch_pool_ids = {
+        int(node_id)
+        for fragment in fragments
+        for contract in list(
+            dict(getattr(fragment, "evidence", {}) or {}).get(
+                "fixed_connection_contracts", []
+            )
+            or []
+        )
+        if "branch_only" in {
+            str(value)
+            for value in list(dict(contract or {}).get("role_candidates", []) or [])
+        }
+        for node_id in list(
+            dict(contract or {}).get("generic_open_evidence_node_ids", []) or []
+        )
+        if int(getattr(tokens_by_id.get(_safe_int(node_id, -1)), "su_type", -1))
+        in RESOURCE_POOL_SU_TYPES
+    }
+    released_pool_context_ids = set(raw_su24_ids) | set(
+        reserved_fixed_branch_pool_ids
+    )
+    if released_pool_context_ids:
+        for fragment in fragments:
+            claimed = {
+                int(value)
+                for value in list(fragment.claimed_node_ids or fragment.source_node_ids or [])
+            }
+            released = claimed & released_pool_context_ids
+            if not released:
+                continue
+            fragment.claimed_node_ids = sorted(claimed - released)
+            fragment.source_node_ids = list(fragment.claimed_node_ids)
+            fragment.context_node_ids = sorted({
+                int(value)
+                for value in list(fragment.context_node_ids or [])
+            } | released)
+        consumed.difference_update(released_pool_context_ids)
 
     fragments = [_normalize_fragment_contract(fragment) for fragment in fragments]
 
@@ -3975,26 +4317,25 @@ def classify_topology_units(
     token_lookup = _token_by_id(tokens)
     referenced_source_ids: Set[int] = set()
     for fragment in list(fragments or []):
-        center_ids = [
-            int(node_id)
-            for node_id in list(dict(getattr(fragment, "evidence", {}) or {}).get("center_node_ids", []) or [])
-        ]
         referenced_source_ids.update(
             int(node_id)
             for node_id in list(getattr(fragment, "source_node_ids", []) or [])
         )
-    reusable_abstract_resource_ids = {
-        int(node_id)
-        for node_id in referenced_source_ids
-        if int(getattr(token_lookup.get(int(node_id)), "su_type", -1))
-        in set(RESOURCE_POOL_SU_TYPES) | set(SU11_DONOR_SU_TYPES)
-        and is_abstract_open_nonfixed_semantic(token_lookup.get(int(node_id)))
+    referenced_fixed_support_ids = {
+        int(neighbor_id)
+        for source_id in referenced_source_ids
+        for neighbor_id in list(
+            getattr(token_lookup.get(int(source_id)), "fixed_neighbor_ids", []) or []
+        )
+        if int(neighbor_id) not in referenced_source_ids
+        and token_lookup.get(int(neighbor_id)) is not None
+        and int(getattr(token_lookup[int(neighbor_id)], "su_type", -1))
+        not in set(RESOURCE_POOL_SU_TYPES)
     }
     resource_pool = _build_resource_pool(
         tokens,
-        consumed - reusable_abstract_resource_ids,
-        excluded_ids=referenced_source_ids - reusable_abstract_resource_ids,
-        deferred_ids=reusable_abstract_resource_ids,
+        consumed,
+        excluded_ids=referenced_source_ids | invalid_resource_node_ids,
     )
     rejected_node_ids = {int(item.get("node_id", -1)) for item in list(classification_rejects or [])}
     conflict_node_ids = {int(item.get("node_id", -1)) for item in list(claim_conflicts or [])}
@@ -4010,6 +4351,8 @@ def classify_topology_units(
         like24_fixed_partner_support = _is_like24_fixed_partner_support(token, token_lookup)
         if (
             int(token.node_id) in referenced_source_ids
+            or int(token.node_id) in referenced_fixed_support_ids
+            or int(token.node_id) in raw_su24_fixed_support_ids
             or bool(like24_fixed_partner_support)
             or bool(str(dict(token.meta or {}).get("semantic_bucket", "")))
             or int(token.su_type) in set(SUPPORT_ONLY_SU_TYPES)
@@ -4024,12 +4367,20 @@ def classify_topology_units(
                     "referenced_as_support_unit"
                     if int(token.node_id) in referenced_source_ids
                     else (
-                        "like24_fixed_partner_support"
-                        if bool(like24_fixed_partner_support)
+                        "referenced_fixed_neighbor_support"
+                        if int(token.node_id) in referenced_fixed_support_ids
                         else (
-                        "semantic_open_support"
-                        if str(dict(token.meta or {}).get("semantic_bucket", ""))
-                        else "support_unit_only"
+                            "raw_su24_fixed_support"
+                            if int(token.node_id) in raw_su24_fixed_support_ids
+                            else (
+                                "like24_fixed_partner_support"
+                                if bool(like24_fixed_partner_support)
+                                else (
+                                    "semantic_open_support"
+                                    if str(dict(token.meta or {}).get("semantic_bucket", ""))
+                                    else "support_unit_only"
+                                )
+                            )
                         )
                     )
                 ),
@@ -4045,10 +4396,18 @@ def classify_topology_units(
             reason="no_classification_rule_matched",
         ))
 
+    unresolved_fragment_ids = {
+        int(fragment.fragment_id)
+        for fragment in fragments
+        if any(
+            not normalize_slot(slot).is_complete()
+            for slot in list(fragment.open_mainline_slots or []) + list(fragment.branch_contracts or [])
+        )
+    }
     summary = {
         "fragment_count": int(len(fragments)),
-        "closed_fragment_count": int(sum(1 for fragment in fragments if not list(fragment.open_slots or []))),
-        "open_fragment_count": int(sum(1 for fragment in fragments if bool(list(fragment.open_slots or [])))),
+        "closed_fragment_count": int(len(fragments) - len(unresolved_fragment_ids)),
+        "open_fragment_count": int(len(unresolved_fragment_ids)),
         "unclassified_non_resource_count": int(len(unclassified_nodes)),
         "support_units_only_count": int(len(support_units_only)),
         "class_counts": dict(class_counts),

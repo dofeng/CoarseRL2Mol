@@ -868,65 +868,6 @@ class Layer4Adjuster:
                 'total_max': 10**9,
             }
 
-    def _estimate_aromatic_ch_target(self,
-                                     S_target: Optional[torch.Tensor],
-                                     E_target: Optional[torch.Tensor],
-                                     H: Optional[torch.Tensor] = None) -> int:
-        if S_target is not None and E_target is not None:
-            try:
-                spec = S_target.detach().cpu().float().flatten()
-                target_c = float(E_target.detach().cpu().flatten()[0].item())
-                total_area = float(spec.sum().item()) * 0.1
-                if int(spec.numel()) > 0 and float(total_area) > 1e-8 and float(target_c) > 0.0:
-                    lo_i = max(0, int(math.floor(115.0 / 0.1)))
-                    hi_i = min(int(spec.numel()), int(math.ceil(135.0 / 0.1)))
-                    if hi_i > lo_i:
-                        area = float(spec[lo_i:hi_i].sum().item()) * 0.1
-                        return max(0, int(round(float(area / total_area) * float(target_c))))
-            except Exception:
-                pass
-
-        if H is not None:
-            try:
-                H_cpu = torch.clamp(H.detach().cpu(), min=0).long()
-                aromatic_pool = int(sum(
-                    int(H_cpu[int(su)].item())
-                    for su in [10, 11, 12, 13]
-                    if int(su) < int(H_cpu.numel())
-                ))
-                return max(0, int(round(0.35 * float(aromatic_pool))))
-            except Exception:
-                pass
-        return 0
-
-    def _evaluate_aromatic_balance_constraints(self,
-                                               H: torch.Tensor,
-                                               S_target: Optional[torch.Tensor] = None,
-                                               E_target: Optional[torch.Tensor] = None) -> Dict[str, Any]:
-        H_cpu = torch.clamp(H.detach().cpu(), min=0).long()
-        n12 = int(H_cpu[12].item()) if int(H_cpu.numel()) > 12 else 0
-        n13 = int(H_cpu[13].item()) if int(H_cpu.numel()) > 13 else 0
-        aromatic_ch_target = int(self._estimate_aromatic_ch_target(S_target, E_target, H_cpu))
-        min13 = 0
-        max12 = int(math.floor(2.5 * float(max(1, int(n13)))))
-        su13_ok = True
-        su12_ok = bool(int(n12) <= int(max12))
-        reasons: List[str] = []
-        if not bool(su12_ok):
-            reasons.append(f"su12_exceeds_ratio(count={int(n12)},max={int(max12)},su13={int(n13)})")
-        return {
-            'ok': bool(su13_ok and su12_ok),
-            'su13_ok': bool(su13_ok),
-            'su12_ok': bool(su12_ok),
-            'su12': int(n12),
-            'su13': int(n13),
-            'su13_min': int(min13),
-            'su12_max': int(max12),
-            'aromatic_ch_target': int(aromatic_ch_target),
-            'reasons': list(reasons),
-            'reason': 'ok' if not reasons else '; '.join(str(x) for x in reasons),
-        }
-
     @staticmethod
     def _count_map_entry(src: Dict[str, Any], key: int) -> int:
         return int(src.get(int(key), src.get(str(int(key)), 0)) or 0)
@@ -1100,7 +1041,6 @@ class Layer4Adjuster:
                 'even10_ok': True,
                 'unsat_even_ok': True,
                 'unsat_total': 0,
-                'aromatic_balance_ok': True,
                 'reason': 'ok',
                 'reasons': [],
             }
@@ -1145,12 +1085,6 @@ class Layer4Adjuster:
         n27 = int(H_cpu[27].item()) if int(H_cpu.numel()) > 27 else 0
         n28 = int(H_cpu[28].item()) if int(H_cpu.numel()) > 28 else 0
         mode_meta = self._get_special_anchor_mode_meta(H_cpu)
-        aromatic_balance = self._evaluate_aromatic_balance_constraints(
-            H_cpu,
-            S_target=S_target,
-            E_target=E_target_cpu,
-        )
-
         w_amine = int(n0 + 2 * n27)
         amine_mode = dict(mode_meta.get(20, {}) or {})
         amine_20_edges = int(sum(
@@ -1300,8 +1234,6 @@ class Layer4Adjuster:
             )
         if not bool(halogen_double_ok):
             reasons.append(f"halogen_double_mode_not_allowed(count={int(halogen_double_total)})")
-        if not bool(aromatic_balance.get('ok', True)):
-            reasons.extend(str(x) for x in list(aromatic_balance.get('reasons', []) or []))
         if not bool(su11_external_ok):
             reasons.append(
                 f"su11_external_capacity_short(required={int(layer1_hist_proxy.get('su11_required', 0))},"
@@ -1319,7 +1251,7 @@ class Layer4Adjuster:
         return {
             'ok': bool(
                 even10_ok and unsat_even_ok and fixed_connection_ok and
-                su11_external_ok and special_generic_ok and bool(aromatic_balance.get('ok', True))
+                su11_external_ok and special_generic_ok
                 and (bool(h_ok) or not bool(h_rel_enforced))
             ),
             'h_ok': bool(h_ok),
@@ -1374,8 +1306,6 @@ class Layer4Adjuster:
             'amine_double_d3_cap': int(amine_double_d3_cap),
             'halogen_double_ok': bool(halogen_double_ok),
             'halogen_double_total': int(halogen_double_total),
-            'aromatic_balance_ok': bool(aromatic_balance.get('ok', True)),
-            'aromatic_balance': dict(aromatic_balance),
             'layer1_hist_proxy_ok': bool(su11_external_ok and special_generic_ok),
             'su11_external_ok': bool(su11_external_ok),
             'su11_required': int(layer1_hist_proxy.get('su11_required', 0)),
@@ -1497,11 +1427,12 @@ class Layer4Adjuster:
                                            generation_id: int = 0,
                                            difference_spectrum: Optional[Dict[str, Any]] = None,
                                            enable_post_external_spectrum: bool = True,
-                                           skip_post_external_spectrum: bool = False,
-                                           spectrum_candidate_limit: int = 10,
-                                           spectrum_max_primary_adjustments: int = 8,
+                                           post_external_resume_phase: str = "remaining_pool_spectrum_rebalance",
+                                           spectrum_candidate_limit: int = 2,
+                                           spectrum_max_primary_adjustments: int = 10,
                                            rejected_spectrum_histogram_signatures: Optional[Any] = None,
-                                           forbidden_spectrum_inverse_signatures: Optional[Any] = None) -> Any:
+                                           forbidden_spectrum_inverse_signatures: Optional[Any] = None,
+                                           forbidden_resource_conversion_signatures: Optional[Any] = None) -> Any:
         nodes_local = list(nodes or [])
         plan = plan_stage3_resource_adjustments(
             H=H,
@@ -1521,11 +1452,12 @@ class Layer4Adjuster:
             generation_id=int(generation_id),
             difference_spectrum=difference_spectrum,
             enable_post_external_spectrum=bool(enable_post_external_spectrum),
-            skip_post_external_spectrum=bool(skip_post_external_spectrum),
+            post_external_resume_phase=str(post_external_resume_phase),
             spectrum_candidate_limit=int(spectrum_candidate_limit),
             spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
             rejected_spectrum_histogram_signatures=rejected_spectrum_histogram_signatures,
             forbidden_spectrum_inverse_signatures=forbidden_spectrum_inverse_signatures,
+            forbidden_resource_conversion_signatures=forbidden_resource_conversion_signatures,
         )
         return plan
 
@@ -1677,7 +1609,6 @@ class Layer4Adjuster:
                 rebuild_fn=kwargs.get('rebuild_fn'),
                 validate_fn=kwargs.get('validate_fn'),
                 output_dir=kwargs.get('output_dir'),
-                max_stage3_iterations=kwargs.get('max_stage3_iterations', 20),
                 max_primary_adjustments_per_stage=kwargs.get('max_primary_adjustments_per_stage', 10),
                 max_h_compensation_ops_per_adjustment=kwargs.get(
                     'max_h_compensation_ops_per_adjustment', 8
@@ -1693,11 +1624,9 @@ class Layer4Adjuster:
                 context_restore_fn=kwargs.get('context_restore_fn'),
                 difference_spectrum=kwargs.get('difference_spectrum'),
                 enable_post_external_spectrum=kwargs.get('enable_post_external_spectrum', True),
-                spectrum_candidate_limit=kwargs.get('spectrum_candidate_limit', 10),
-                spectrum_max_primary_adjustments=kwargs.get('spectrum_max_primary_adjustments', 8),
+                spectrum_candidate_limit=kwargs.get('spectrum_candidate_limit', 2),
+                spectrum_max_primary_adjustments=kwargs.get('spectrum_max_primary_adjustments', 10),
                 spectrum_min_r2_gain=kwargs.get('spectrum_min_r2_gain', 0.002),
-                spectrum_min_window_loss_gain=kwargs.get('spectrum_min_window_loss_gain', 0.1),
-                spectrum_max_accepted_rounds=kwargs.get('spectrum_max_accepted_rounds', 2),
             )
             H_work = torch.clamp(getattr(workflow_result, 'H', H_work).detach().clone(), min=0).long()
             meta = workflow_result.to_dict()
@@ -1734,7 +1663,6 @@ class Layer4Adjuster:
         rebuild_fn: Any = None,
         validate_fn: Any = None,
         output_dir: Optional[str] = None,
-        max_stage3_iterations: int = 20,
         max_primary_adjustments_per_stage: int = 10,
         max_h_compensation_ops_per_adjustment: int = 8,
         residual_flex_preferred_23: int = 3,
@@ -1748,11 +1676,9 @@ class Layer4Adjuster:
         context_restore_fn: Any = None,
         difference_spectrum: Optional[Dict[str, Any]] = None,
         enable_post_external_spectrum: bool = True,
-        spectrum_candidate_limit: int = 10,
-        spectrum_max_primary_adjustments: int = 8,
+        spectrum_candidate_limit: int = 2,
+        spectrum_max_primary_adjustments: int = 10,
         spectrum_min_r2_gain: float = 0.002,
-        spectrum_min_window_loss_gain: float = 0.1,
-        spectrum_max_accepted_rounds: int = 2,
     ) -> Any:
         return run_block_c_resource_adjustment_loop_impl(
             self,
@@ -1763,7 +1689,6 @@ class Layer4Adjuster:
             rebuild_fn=rebuild_fn,
             validate_fn=validate_fn,
             output_dir=output_dir,
-            max_stage3_iterations=max_stage3_iterations,
             max_primary_adjustments_per_stage=int(max_primary_adjustments_per_stage),
             max_h_compensation_ops_per_adjustment=int(max_h_compensation_ops_per_adjustment),
             residual_flex_preferred_23=int(residual_flex_preferred_23),
@@ -1780,7 +1705,5 @@ class Layer4Adjuster:
             spectrum_candidate_limit=int(spectrum_candidate_limit),
             spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
             spectrum_min_r2_gain=float(spectrum_min_r2_gain),
-            spectrum_min_window_loss_gain=float(spectrum_min_window_loss_gain),
-            spectrum_max_accepted_rounds=int(spectrum_max_accepted_rounds),
         )
     
