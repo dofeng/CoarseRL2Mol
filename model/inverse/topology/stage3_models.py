@@ -705,6 +705,7 @@ class Stage3PhaseResult(Stage3Serializable):
     rebuild_required: bool = False
     primary_adjustment_count: int = 0
     h_compensation_count: int = 0
+    parity_balance_count: int = 0
     symbolic_topology_count: int = 0
     transactions: List[TopologyResourceTransaction] = field(default_factory=list)
     stop_reason: str = ""
@@ -762,6 +763,7 @@ class HistogramAdjustmentPlan(Stage3Serializable):
     groups: List[AtomicAdjustmentGroup] = field(default_factory=list)
     primary_adjustment_count: int = 0
     physical_conversion_count: int = 0
+    parity_balance_op: Optional[HistogramConversion] = None
     H_before: Optional[torch.Tensor] = None
     H_after: Optional[torch.Tensor] = None
     demand_before: Dict[int, int] = field(default_factory=dict)
@@ -868,6 +870,7 @@ class Stage3WorkflowCycleRecord(Stage3Serializable):
     primary_adjustment_count: int = 0
     physical_conversion_count: int = 0
     h_compensation_count: int = 0
+    parity_balance_count: int = 0
     histogram_before: Dict[str, int] = field(default_factory=dict)
     histogram_after: Dict[str, int] = field(default_factory=dict)
     phase_inventory: Dict[str, int] = field(default_factory=dict)

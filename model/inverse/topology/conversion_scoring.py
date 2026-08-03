@@ -7,11 +7,10 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import torch
 from .aromatic_clusters import generate_aromatic_clusters
 from .resource_profiles import (
-    H_SOFT_LOWER_RATIO,
-    H_SOFT_UPPER_RATIO,
+    DEFAULT_STAGE3_H_HARD_TOLERANCE,
     SU11_AROMATIC_ROTATION,
-    h_soft_bounds,
-    h_within_soft_bounds,
+    h_hard_bounds,
+    h_within_hard_bounds,
 )
 from .resource_accounting import positive_resource_gap
 from .stage3_models import HistogramConversion
@@ -19,7 +18,7 @@ from .stage3_models import HistogramConversion
 
 RESOURCE_TYPES = (11, 22, 23, 24)
 AROMATIC_TYPES = (12, 13)
-CONVERSION_SCORING_VERSION = "soft_h_flex_balance_v5"
+CONVERSION_SCORING_VERSION = "hard_h_flex_balance_v6"
 INFEASIBLE_SCORE = 1.0e12
 
 
@@ -38,6 +37,7 @@ class ConversionContext:
     demand: Dict[int, int]
     current_H: torch.Tensor
     target_h: Optional[float] = None
+    h_tolerance: float = DEFAULT_STAGE3_H_HARD_TOLERANCE
     preferred_demand: Dict[int, int] = field(default_factory=dict)
     flex_audit: Dict[str, Any] = field(default_factory=dict)
     protected_resource_counts: Dict[int, int] = field(default_factory=dict)
@@ -55,7 +55,7 @@ class ConversionImpact:
     h_before: Optional[float]
     h_after: Optional[float]
     h_delta: float
-    h_soft_penalty: float
+    h_bound_penalty: float
     h_drift_penalty: float
     flex_before: Dict[str, Any]
     flex_after: Dict[str, Any]
@@ -74,7 +74,7 @@ class ConversionImpact:
         return (
             0 if self.feasible else 1,
             round(float(self.total_score), 9),
-            round(float(self.h_soft_penalty), 9),
+            round(float(self.h_bound_penalty), 9),
             round(float(self.flex_penalty), 9),
             round(float(self.h_drift_penalty), 9),
             round(float(self.donor_criticality_penalty), 9),
@@ -95,7 +95,7 @@ class ConversionBundleScore:
     h_before: Optional[float]
     h_after: Optional[float]
     h_delta: float
-    h_soft_penalty: float
+    h_bound_penalty: float
     h_drift_penalty: float
     flex_impact: FlexImpact
     aromatic_penalty: float
@@ -112,7 +112,7 @@ class ConversionBundleScore:
         return (
             0 if self.feasible else 1,
             round(float(self.total_score), 9),
-            round(float(self.h_soft_penalty), 9),
+            round(float(self.h_bound_penalty), 9),
             round(float(self.flex_impact.penalty), 9),
             round(float(self.h_drift_penalty), 9),
             round(float(self.donor_criticality_penalty), 9),
@@ -200,13 +200,18 @@ def _ratio(current_h: Optional[float], target_h: Optional[float]) -> Optional[fl
     return (float(current_h) - float(target_h)) / float(target_h)
 
 
-def _outside_distance(ratio: Optional[float]) -> float:
+def _outside_distance(
+    ratio: Optional[float],
+    tolerance: float = DEFAULT_STAGE3_H_HARD_TOLERANCE,
+) -> float:
     if ratio is None:
         return 0.0
-    if float(ratio) < float(H_SOFT_LOWER_RATIO):
-        return float(H_SOFT_LOWER_RATIO) - float(ratio)
-    if float(ratio) > float(H_SOFT_UPPER_RATIO):
-        return float(ratio) - float(H_SOFT_UPPER_RATIO)
+    lower_ratio = -min(1.0, max(0.0, float(tolerance)))
+    upper_ratio = min(1.0, max(0.0, float(tolerance)))
+    if float(ratio) < float(lower_ratio):
+        return float(lower_ratio) - float(ratio)
+    if float(ratio) > float(upper_ratio):
+        return float(ratio) - float(upper_ratio)
     return 0.0
 
 
@@ -215,6 +220,7 @@ def _h_penalty(
     h_before: Optional[float],
     h_after: Optional[float],
     target_h: Optional[float],
+    tolerance: float = DEFAULT_STAGE3_H_HARD_TOLERANCE,
 ) -> Tuple[float, float, Dict[str, Any]]:
     if h_before is None or h_after is None:
         return 0.0, 0.0, {"mode": "unconstrained"}
@@ -227,69 +233,58 @@ def _h_penalty(
 
     ratio_before = _ratio(h_before, target_h)
     ratio_after = _ratio(h_after, target_h)
-    outside_before = _outside_distance(ratio_before)
-    outside_after = _outside_distance(ratio_after)
-    current_inside = h_within_soft_bounds(float(h_before), float(target_h))
-    after_inside = h_within_soft_bounds(float(h_after), float(target_h))
-    lower, upper = h_soft_bounds(float(target_h))
-    window_width = max(1e-9, float(H_SOFT_UPPER_RATIO) - float(H_SOFT_LOWER_RATIO))
-    soft_penalty = 0.0
+    effective_tolerance = min(1.0, max(0.0, float(tolerance)))
+    outside_before = _outside_distance(ratio_before, effective_tolerance)
+    outside_after = _outside_distance(ratio_after, effective_tolerance)
+    current_inside = h_within_hard_bounds(
+        float(h_before), float(target_h), effective_tolerance
+    )
+    after_inside = h_within_hard_bounds(
+        float(h_after), float(target_h), effective_tolerance
+    )
+    lower, upper = h_hard_bounds(float(target_h), effective_tolerance)
+    bound_penalty = 0.0
     drift_penalty = 0.0
 
-    if current_inside:
-        # Inside the soft window, preserving H margin is more important than
-        # chasing the nominal target exactly.
-        drift_penalty += abs(float(h_delta)) * 1.8
-        if ratio_after is not None:
-            lower_margin = float(ratio_after) - float(H_SOFT_LOWER_RATIO)
-            upper_margin = float(H_SOFT_UPPER_RATIO) - float(ratio_after)
-            near_margin = min(float(lower_margin), float(upper_margin))
-            critical = 0.35 * float(window_width)
-            if near_margin < critical:
-                margin_scale = (critical - near_margin) / float(window_width)
-                soft_penalty += max(0.0, margin_scale) * (1.0 + abs(float(h_delta))) * 5.0
-            if float(h_delta) < 0.0:
-                lower_scale = max(0.0, (critical - lower_margin) / float(window_width))
-                soft_penalty += lower_scale * abs(float(h_delta)) * 6.0
-            if float(h_delta) > 0.0:
-                upper_scale = max(0.0, (critical - upper_margin) / float(window_width))
-                soft_penalty += upper_scale * abs(float(h_delta)) * 4.0
-    else:
-        before_error = abs(float(h_before) - float(target_h))
-        after_error = abs(float(h_after) - float(target_h))
-        if ratio_before is not None and ratio_before < float(H_SOFT_LOWER_RATIO):
-            soft_penalty += max(0.0, -float(h_delta)) * 9.0
-        elif ratio_before is not None and ratio_before > float(H_SOFT_UPPER_RATIO):
-            soft_penalty += max(0.0, float(h_delta)) * 9.0
-        if after_error > before_error + 1e-9:
-            soft_penalty += (after_error - before_error) * 2.5
-        else:
-            soft_penalty += max(0.0, after_error - before_error) * 0.5
-        drift_penalty += abs(float(h_delta)) * 0.35
-
-    # Leaving the soft window is not impossible, but it is expensive. Worsening
-    # an existing violation is more expensive than reducing one.
+    # Stage3 resource planning has only a hard H boundary. Values inside that
+    # boundary are equivalent for H scoring; temporary violations remain
+    # rankable so compensation search can restore the complete bundle.
     target_scale = max(1.0, float(target_h))
-    soft_penalty += outside_after * target_scale * 35.0
+    bound_penalty += outside_after * target_scale * 35.0
     if outside_after > outside_before:
-        soft_penalty += (outside_after - outside_before) * target_scale * 80.0
+        bound_penalty += (outside_after - outside_before) * target_scale * 80.0
     if not after_inside and current_inside:
-        soft_penalty += 20.0
+        bound_penalty += 20.0
 
     diagnostics = {
-        "mode": "soft_h_score",
+        "mode": "stage3_hard_bound_score",
         "h_before": float(h_before),
         "h_after": float(h_after),
         "h_delta": float(h_delta),
         "target_h": float(target_h),
+        "hard_tolerance": float(effective_tolerance),
         "ratio_before": float(ratio_before) if ratio_before is not None else None,
         "ratio_after": float(ratio_after) if ratio_after is not None else None,
-        "soft_lower": float(lower) if lower is not None else None,
-        "soft_upper": float(upper) if upper is not None else None,
+        "hard_lower": float(lower) if lower is not None else None,
+        "hard_upper": float(upper) if upper is not None else None,
+        "hard_valid_after": bool(after_inside),
         "outside_before": float(outside_before),
         "outside_after": float(outside_after),
     }
-    return float(soft_penalty), float(drift_penalty), diagnostics
+    return float(bound_penalty), float(drift_penalty), diagnostics
+
+
+def h_within_context_hard_bounds(
+    context: ConversionContext,
+    current_h: Optional[float],
+) -> bool:
+    if current_h is None:
+        return False
+    return h_within_hard_bounds(
+        float(current_h),
+        _target_h_from_context(context),
+        float(context.h_tolerance),
+    )
 
 
 def _adjust_bridgehead_info(
@@ -507,7 +502,7 @@ def score_conversion_bundle(
             h_before=None,
             h_after=None,
             h_delta=0.0,
-            h_soft_penalty=INFEASIBLE_SCORE,
+            h_bound_penalty=INFEASIBLE_SCORE,
             h_drift_penalty=INFEASIBLE_SCORE,
             flex_impact=FlexImpact(penalty=INFEASIBLE_SCORE),
             aromatic_penalty=INFEASIBLE_SCORE,
@@ -524,10 +519,11 @@ def score_conversion_bundle(
     h_before = h_total_fn(context.current_H, special_degree_meta)
     h_after = h_total_fn(H_after, special_degree_meta)
     h_delta = float(h_after) - float(h_before)
-    h_soft_penalty, h_drift_penalty, h_diag = _h_penalty(
+    h_bound_penalty, h_drift_penalty, h_diag = _h_penalty(
         h_before=float(h_before),
         h_after=float(h_after),
         target_h=target_h,
+        tolerance=float(context.h_tolerance),
     )
     flex_impact = evaluate_flex_impact(context.current_H, H_after, context.flex_audit)
     aromatic_penalty = _aromatic_penalty(context, ops, flex_impact)
@@ -540,7 +536,7 @@ def score_conversion_bundle(
     total_score = (
         resource_penalty
         - topology_gain
-        + float(h_soft_penalty)
+        + float(h_bound_penalty)
         + float(h_drift_penalty)
         + float(flex_impact.penalty)
         + float(aromatic_penalty)
@@ -551,7 +547,7 @@ def score_conversion_bundle(
         "scoring_version": CONVERSION_SCORING_VERSION,
         "h": {
             **dict(h_diag or {}),
-            "soft_penalty": float(h_soft_penalty),
+            "hard_bound_penalty": float(h_bound_penalty),
             "drift_penalty": float(h_drift_penalty),
         },
         "flex": {
@@ -578,7 +574,7 @@ def score_conversion_bundle(
         h_before=float(h_before),
         h_after=float(h_after),
         h_delta=float(h_delta),
-        h_soft_penalty=float(h_soft_penalty),
+        h_bound_penalty=float(h_bound_penalty),
         h_drift_penalty=float(h_drift_penalty),
         flex_impact=flex_impact,
         aromatic_penalty=float(aromatic_penalty),
@@ -612,7 +608,7 @@ def score_conversion(
         h_before=bundle.h_before,
         h_after=bundle.h_after,
         h_delta=float(bundle.h_delta),
-        h_soft_penalty=float(bundle.h_soft_penalty),
+        h_bound_penalty=float(bundle.h_bound_penalty),
         h_drift_penalty=float(bundle.h_drift_penalty),
         flex_before=dict(bundle.flex_impact.before or {}),
         flex_after=dict(bundle.flex_impact.after or {}),
@@ -662,7 +658,11 @@ def best_conversion_bundle(
         for bundle in list(bundles or [])
         if list(bundle or [])
     ]
-    feasible = [item for item in scored if item.feasible]
+    feasible = [
+        item
+        for item in scored
+        if item.feasible and h_within_context_hard_bounds(context, item.h_after)
+    ]
     if not feasible:
         return None
     return min(feasible, key=lambda item: item.sort_key)

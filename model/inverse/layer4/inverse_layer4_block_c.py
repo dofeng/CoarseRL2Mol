@@ -10,11 +10,34 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
+from ...shared.inverse_common import (
+    SPECIAL_DEGREE_PRIORS,
+    SU_CONNECTION_DEGREE,
+    normalize_special_degree_meta,
+)
 from ..topology import Stage3WorkflowCycleRecord, Stage3WorkflowResult
-from ..topology.histogram_adjustment import _h_total
-from ..topology.resource_profiles import h_soft_bounds
+from ..topology.histogram_adjustment import (
+    _h_total,
+    _stateful_conversion_bundle_signature,
+)
+from ..topology.resource_accounting import (
+    apply_count_delta,
+    build_resource_accounting_snapshot,
+    combined_group_delta,
+)
+from ..topology.resource_profiles import (
+    DEFAULT_STAGE3_H_HARD_TOLERANCE,
+    h_hard_bounds,
+)
+from ..topology.stage3_models import (
+    AtomicAdjustmentGroup,
+    HistogramAdjustmentPlan,
+    HistogramConversion,
+)
 from ..topology.spectrum_rebalance import (
     apply_spectrum_candidate,
+    histogram_signature_after_operations,
+    inverse_bundle_signature,
     spectrum_candidate_balance_penalty,
     spectrum_window_loss,
 )
@@ -61,8 +84,8 @@ def _resource_gap(inventory: Dict[int, int], demand: Dict[int, int]) -> Dict[str
     }
 
 
-def _mapping_payload(value: Any, *, value_key: str = "value") -> Dict[str, Any]:
-    if value is None or (isinstance(value, str) and not value):
+def _mapping_payload(value: Any, *, field_name: str) -> Dict[str, Any]:
+    if value is None:
         return {}
     if isinstance(value, dict):
         return dict(value)
@@ -70,7 +93,7 @@ def _mapping_payload(value: Any, *, value_key: str = "value") -> Dict[str, Any]:
         converted = value.to_dict()
         if isinstance(converted, dict):
             return dict(converted)
-    return {str(value_key): value}
+    raise TypeError(f"{field_name} must be a mapping, got {type(value).__name__}")
 
 
 def _target_h(E_target: Optional[torch.Tensor]) -> Optional[float]:
@@ -141,13 +164,17 @@ def _print_stage3_plan_summary(
         if groups
         else float(_h_total(H_current, special_degree_meta))
     )
-    h_after = (
-        float(getattr(groups[-1], "h_after_final", h_before))
-        if groups
-        else float(_h_total(H_after, special_degree_meta))
-    )
+    h_after = float(_h_total(H_after, special_degree_meta))
     target_h = _target_h(E_target)
-    lower, upper = h_soft_bounds(target_h)
+    plan_diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
+    h_constraint = dict(plan_diagnostics.get("h_constraint", {}) or {})
+    h_tolerance = float(
+        h_constraint.get(
+            "effective_h_tolerance",
+            DEFAULT_STAGE3_H_HARD_TOLERANCE,
+        )
+    )
+    lower, upper = h_hard_bounds(target_h, h_tolerance)
     compensation_count = sum(
         len(list(getattr(group, "h_compensation_ops", []) or []))
         for group in groups
@@ -167,7 +194,7 @@ def _print_stage3_plan_summary(
     print(
         "  [Stage3 H] "
         f"current={h_before:.1f} target={target_h if target_h is not None else 'none'} "
-        f"soft=[{lower if lower is not None else 'none'},"
+        f"hard=[{lower if lower is not None else 'none'},"
         f"{upper if upper is not None else 'none'}] planned={h_after:.1f}",
         flush=True,
     )
@@ -183,13 +210,15 @@ def _print_stage3_plan_summary(
 
 def _print_stage3_histogram_adjustments(cycle_number: int, histogram_plan: Any) -> None:
     groups = list(getattr(histogram_plan, "groups", []) or [])
-    if not groups:
+    parity_op = getattr(histogram_plan, "parity_balance_op", None)
+    if not groups and parity_op is None:
         print(f"[Block C:resource #{cycle_number}] no physical histogram adjustment", flush=True)
         return
-    print(
-        f"[Block C:resource #{cycle_number}] structure-unit adjustments: {len(groups)} primary bundle(s)",
-        flush=True,
-    )
+    if groups:
+        print(
+            f"[Block C:resource #{cycle_number}] structure-unit adjustments: {len(groups)} primary bundle(s)",
+            flush=True,
+        )
     for group_index, group in enumerate(groups, start=1):
         primary = getattr(group, "primary_op", None)
         compensation = list(getattr(group, "h_compensation_ops", []) or [])
@@ -215,7 +244,7 @@ def _print_stage3_histogram_adjustments(cycle_number: int, histogram_plan: Any) 
             "    [Adjustment Score] "
             f"resource_gap={dict(scoring.get('resource_gap_before', getattr(group, 'demand_before', {})) or {})}"
             f"->{dict(scoring.get('resource_gap_after', getattr(group, 'demand_after', {})) or {})} "
-            f"H_soft_penalty={float(h_scoring.get('soft_penalty', 0.0) or 0.0):.4f} "
+            f"H_hard_bound_penalty={float(h_scoring.get('hard_bound_penalty', 0.0) or 0.0):.4f} "
             f"H_drift_penalty={float(h_scoring.get('drift_penalty', 0.0) or 0.0):.4f} "
             f"flex_penalty={float(flex_scoring.get('penalty', 0.0) or 0.0):.4f} "
             f"total={float(scoring.get('total_score', 0.0) or 0.0):.4f}",
@@ -234,6 +263,11 @@ def _print_stage3_histogram_adjustments(cycle_number: int, histogram_plan: Any) 
                 f"->{flex_after.get('minimum_flex_gap', 0)}",
                 flush=True,
             )
+    if parity_op is not None:
+        print(
+            f"  [Port Parity Balance] {_format_conversion(parity_op)}",
+            flush=True,
+        )
 
 
 def _histogram_h_compensation_count(histogram_plan: Any) -> int:
@@ -243,25 +277,32 @@ def _histogram_h_compensation_count(histogram_plan: Any) -> int:
     )
 
 
-def _primary_conversion_signature(histogram_plan: Any) -> str:
+def _histogram_parity_balance_count(histogram_plan: Any) -> int:
+    return 1 if getattr(histogram_plan, "parity_balance_op", None) is not None else 0
+
+
+def _last_resource_step_signature(histogram_plan: Any) -> str:
     groups = list(getattr(histogram_plan, "groups", []) or [])
     if not groups:
         return ""
-    primary = getattr(groups[0], "primary_op", None)
-    if primary is None:
+    H_state = getattr(histogram_plan, "H_before", None)
+    if not isinstance(H_state, torch.Tensor):
         return ""
-    via = (
-        f"@{int(getattr(primary, 'via_su'))}"
-        if getattr(primary, "via_su", None) is not None
-        else ""
+    H_state = torch.clamp(H_state.detach().clone(), min=0).long()
+    for group in groups[:-1]:
+        for su_type, delta in dict(getattr(group, "combined_delta", {}) or {}).items():
+            H_state[int(su_type)] += int(delta)
+    final_group = groups[-1]
+    operations = [getattr(final_group, "primary_op", None)] + list(
+        getattr(final_group, "h_compensation_ops", []) or []
     )
-    return (
-        f"{int(getattr(primary, 'from_su', -1))}>"
-        f"{int(getattr(primary, 'to_su', -1))}{via}"
+    return _stateful_conversion_bundle_signature(
+        H_state,
+        [op for op in operations if op is not None],
     )
 
 
-def _register_rejected_resource_variant(
+def _register_rejected_resource_candidate(
     plan: Any,
     histogram_plan: Any,
     rejected_signatures: set[str],
@@ -269,7 +310,7 @@ def _register_rejected_resource_variant(
     diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
     if not bool(diagnostics.get("candidate_alternatives_enabled", False)):
         return ""
-    signature = _primary_conversion_signature(histogram_plan)
+    signature = _last_resource_step_signature(histogram_plan)
     if not signature or signature in rejected_signatures:
         return ""
     rejected_signatures.add(signature)
@@ -327,6 +368,581 @@ def _restore_stage3_rotation_cursor(adjuster: Any, cursor_before: Optional[int])
         adjuster._stage3_su11_rotation_index = int(cursor_before)
 
 
+def _restore_stage3_parity_cursor(adjuster: Any, cursor_before: int) -> None:
+    if hasattr(adjuster, "_stage3_parity_balance_cursor"):
+        adjuster._stage3_parity_balance_cursor = int(cursor_before)
+
+
+def _stage3_total_port_degree(
+    H: torch.Tensor,
+    special_degree_meta: Optional[Dict[str, Any]] = None,
+) -> int:
+    histogram = torch.clamp(H.detach().cpu(), min=0).long()
+    special_counts = {
+        int(su_type): int(histogram[int(su_type)].item())
+        for su_type in SPECIAL_DEGREE_PRIORS
+        if int(su_type) < int(histogram.numel())
+    }
+    normalized_special = normalize_special_degree_meta(
+        special_counts,
+        special_degree_meta=special_degree_meta,
+    )
+    total = 0
+    for su_type, count in enumerate(histogram.tolist()):
+        if int(su_type) in normalized_special:
+            total += sum(
+                int(degree) * int(degree_count)
+                for degree, degree_count in normalized_special[int(su_type)].items()
+            )
+        else:
+            total += int(count) * int(SU_CONNECTION_DEGREE.get(int(su_type), 0))
+    return int(total)
+
+
+def _stage3_port_capacity_diagnostics(
+    H: torch.Tensor,
+    special_degree_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    histogram = torch.clamp(H.detach().cpu(), min=0).long()
+    special_counts = {
+        int(su_type): int(histogram[int(su_type)].item())
+        for su_type in SPECIAL_DEGREE_PRIORS
+        if int(su_type) < int(histogram.numel())
+    }
+    normalized_special = normalize_special_degree_meta(
+        special_counts,
+        special_degree_meta=special_degree_meta,
+    )
+
+    def count(su_type: int) -> int:
+        return (
+            int(histogram[int(su_type)].item())
+            if int(su_type) < int(histogram.numel())
+            else 0
+        )
+
+    direct_external = {
+        int(su_type): count(int(su_type))
+        for su_type in (15, 17, 22, 23, 24, 25)
+    }
+    special_external = {
+        int(su_type): sum(
+            int(value)
+            for degree, value in dict(normalized_special.get(int(su_type), {}) or {}).items()
+            if int(degree) in (2, 3)
+        )
+        for su_type in (19, 20, 21)
+    }
+    su11_count = count(11)
+    aromatic_unit_count = sum(count(su_type) for su_type in range(5, 14))
+    total_degree = _stage3_total_port_degree(histogram, special_degree_meta)
+    return {
+        "total_port_degree": int(total_degree),
+        "degree_is_even": bool(int(total_degree) % 2 == 0),
+        "su11_external_ports_required": int(su11_count),
+        "eligible_external_counts": {
+            **{str(key): int(value) for key, value in direct_external.items()},
+            **{str(key): int(value) for key, value in special_external.items()},
+        },
+        "eligible_external_node_capacity": int(
+            sum(direct_external.values()) + sum(special_external.values())
+        ),
+        "su11_aromatic_ports_required": int(2 * su11_count),
+        "coarse_aromatic_unit_count": int(aromatic_unit_count),
+        "scope": "necessary_coarse_preflight_not_exact_template_proof",
+    }
+
+
+def _ids_by_su(values: Any) -> Dict[int, List[int]]:
+    return {
+        int(key): sorted({int(node_id) for node_id in list(node_ids or [])})
+        for key, node_ids in dict(values or {}).items()
+        if str(key).lstrip("-").isdigit()
+    }
+
+
+def _ledger_value(ledger: Any, name: str) -> Any:
+    if isinstance(ledger, dict):
+        return dict(ledger).get(str(name))
+    return getattr(ledger, str(name), None)
+
+
+def _stage3_balance_resource_view(
+    plan: Any,
+    histogram_plan: Any,
+) -> Tuple[Dict[int, List[int]], Dict[int, str], str]:
+    accounting = dict(getattr(histogram_plan, "accounting_diagnostics", {}) or {})
+    final_remaining = _ids_by_su(accounting.get("final_remaining_ids_by_su", {}))
+    if "final_remaining_ids_by_su" in accounting:
+        return final_remaining, {}, "resource_accounting_final_remaining"
+
+    runtime = dict(getattr(plan, "runtime", {}) or {})
+    ledger = runtime.get("iteration_topology_ledger")
+    remaining = _ids_by_su(_ledger_value(ledger, "available_ids_by_su") or {})
+    ownership: Dict[int, str] = {}
+    for node_id, raw_owner in dict(
+        _ledger_value(ledger, "ownership_by_node_id") or {}
+    ).items():
+        owner = dict(raw_owner or {}) if isinstance(raw_owner, dict) else raw_owner
+        state = (
+            str(dict(owner).get("state", "") or "")
+            if isinstance(owner, dict)
+            else str(getattr(owner, "state", "") or "")
+        )
+        ownership[int(node_id)] = state
+    if remaining:
+        return remaining, ownership, "iteration_topology_ledger"
+
+    assembly = dict(runtime.get("assembly_before_adjustment", {}) or {})
+    resource_ledger = dict(assembly.get("resource_ledger", {}) or {})
+    for field in ("remaining_ids_by_su", "su11_donor_ids_by_su"):
+        for su_type, node_ids in _ids_by_su(resource_ledger.get(field, {})).items():
+            remaining.setdefault(int(su_type), []).extend(int(value) for value in node_ids)
+    remaining = {
+        int(key): sorted(set(values)) for key, values in remaining.items()
+    }
+    return remaining, {}, "assembly_resource_ledger" if remaining else "unavailable"
+
+
+def _stage3_used_conversion_ids(histogram_plan: Any) -> set[int]:
+    used = {
+        int(node_id)
+        for group in list(getattr(histogram_plan, "groups", []) or [])
+        for op in [getattr(group, "primary_op", None)]
+        + list(getattr(group, "h_compensation_ops", []) or [])
+        if op is not None
+        for node_id in list(getattr(op, "node_ids", []) or [])
+    }
+    parity_op = getattr(histogram_plan, "parity_balance_op", None)
+    if parity_op is not None:
+        used.update(
+            int(node_id)
+            for node_id in list(getattr(parity_op, "node_ids", []) or [])
+        )
+    return used
+
+
+def _append_stage3_parity_balance(
+    *,
+    plan: Any,
+    histogram_plan: Any,
+    nodes: List[Any],
+    special_degree_meta: Optional[Dict[str, Any]],
+    balance_cursor: int,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Balance odd total port degree with one unused SU12/SU13 conversion."""
+    H_after = getattr(histogram_plan, "H_after", None)
+    groups = list(getattr(histogram_plan, "groups", []) or [])
+    if not isinstance(H_after, torch.Tensor) or not groups:
+        return True, {
+            "enforced": False,
+            "reason": "no_physical_histogram_batch",
+        }
+
+    audit_before = _stage3_port_capacity_diagnostics(H_after, special_degree_meta)
+    degree_even = bool(audit_before["degree_is_even"])
+    if bool(degree_even):
+        return True, {
+            "enforced": True,
+            "reason": "port_degree_even",
+            "balance_applied": False,
+            "before": audit_before,
+            "after": audit_before,
+        }
+
+    remaining, ownership, pool_source = _stage3_balance_resource_view(
+        plan,
+        histogram_plan,
+    )
+    if not remaining:
+        accounting = dict(
+            getattr(histogram_plan, "accounting_diagnostics", {}) or {}
+        )
+        runtime = dict(getattr(plan, "runtime", {}) or {})
+        ledger = runtime.get("iteration_topology_ledger")
+        snapshot_declared = bool(
+            "final_remaining_ids_by_su" in accounting
+            or _ledger_value(ledger, "available_ids_by_su") is not None
+            or dict(runtime.get("assembly_before_adjustment", {}) or {}).get(
+                "resource_ledger"
+            )
+        )
+        return (False if snapshot_declared else True), {
+            "enforced": bool(snapshot_declared),
+            "reason": (
+                "odd_port_degree_no_unused_safe_balance_donor"
+                if snapshot_declared
+                else "port_audit_not_enforced_without_resource_identity_snapshot"
+            ),
+            "balance_applied": False,
+            "before": audit_before,
+            "pool_source": pool_source,
+        }
+
+    accounting_before = dict(
+        getattr(histogram_plan, "accounting_diagnostics", {}) or {}
+    )
+    authorized_before = _ids_by_su(
+        accounting_before.get("authorized_ids_before_by_su", {})
+    )
+    aggregate_before = _ids_by_su(
+        accounting_before.get("aggregate_ids_before_by_su", {})
+    )
+    node_types = {
+        int(getattr(node, "global_id", -1)): int(getattr(node, "su_type", -1))
+        for node in list(nodes or [])
+    }
+    used_ids = _stage3_used_conversion_ids(histogram_plan)
+    allowed_states = {
+        "remaining_closure_resource",
+        "remaining_aromatic_donor",
+    }
+    preferred = (13, 12) if int(balance_cursor) % 2 == 0 else (12, 13)
+    selected: Optional[Tuple[int, int, int]] = None
+    attempted_directions: List[Dict[str, Any]] = []
+    for source, target in (preferred,):
+        candidates = []
+        for node_id in list(remaining.get(int(source), []) or []):
+            if int(node_id) in used_ids:
+                continue
+            if int(node_types.get(int(node_id), -1)) != int(source):
+                continue
+            owner_state = str(ownership.get(int(node_id), "") or "")
+            if owner_state and owner_state not in allowed_states:
+                continue
+            if authorized_before and int(node_id) not in set(
+                authorized_before.get(int(source), [])
+            ):
+                continue
+            if aggregate_before and int(node_id) not in set(
+                aggregate_before.get(int(source), [])
+            ):
+                continue
+            candidates.append(int(node_id))
+        attempted_directions.append({
+            "from_su": int(source),
+            "to_su": int(target),
+            "candidate_node_ids": sorted(candidates),
+        })
+        if candidates:
+            selected = (int(source), int(target), min(candidates))
+            break
+    if selected is None:
+        return False, {
+            "enforced": True,
+            "reason": "odd_port_degree_no_unused_safe_balance_donor",
+            "balance_applied": False,
+            "before": audit_before,
+            "pool_source": pool_source,
+            "required_direction": [int(preferred[0]), int(preferred[1])],
+            "attempted_directions": attempted_directions,
+        }
+
+    source, target, node_id = selected
+    working_histogram = deepcopy(histogram_plan)
+    working_groups = list(getattr(working_histogram, "groups", []) or [])
+    balance_op = HistogramConversion(
+        from_su=int(source),
+        to_su=int(target),
+        count=1,
+        reason="pre_rebuild_port_parity_balance",
+        node_ids=[int(node_id)],
+    )
+    working_histogram.parity_balance_op = balance_op
+    H_balanced = H_after.detach().clone()
+    if (
+        int(source) >= int(H_balanced.numel())
+        or int(target) >= int(H_balanced.numel())
+        or int(H_balanced[int(source)].item()) <= 0
+    ):
+        return False, {
+            "enforced": True,
+            "reason": "odd_port_degree_balance_histogram_source_unavailable",
+            "balance_applied": False,
+            "before": audit_before,
+            "selected_node_id": int(node_id),
+        }
+    H_balanced[int(source)] -= 1
+    H_balanced[int(target)] += 1
+    working_histogram.H_after = H_balanced
+    working_histogram.physical_conversion_count = int(
+        getattr(working_histogram, "physical_conversion_count", 0) or 0
+    ) + 1
+
+    updated_accounting: Dict[str, Any] = {}
+    if aggregate_before and authorized_before:
+        final_remaining = _ids_by_su(
+            accounting_before.get("final_remaining_ids_by_su", {})
+        )
+        final_remaining[int(source)] = [
+            int(value)
+            for value in final_remaining.get(int(source), [])
+            if int(value) != int(node_id)
+        ]
+        final_remaining.setdefault(int(target), []).append(int(node_id))
+        final_remaining[int(target)] = sorted(set(final_remaining[int(target)]))
+        updated_accounting = build_resource_accounting_snapshot(
+            aggregate_ids_before_by_su=aggregate_before,
+            authorized_ids_before_by_su=authorized_before,
+            final_remaining_ids_by_su=final_remaining,
+            committed_claimed_ids_by_su=_ids_by_su(
+                accounting_before.get("committed_claimed_ids_by_su", {})
+            ),
+            groups=working_groups,
+            extra_ops=[balance_op],
+        )
+        if not bool(updated_accounting.get("ok", False)):
+            return False, {
+                "enforced": True,
+                "reason": "parity_balance_resource_accounting_failed",
+                "balance_applied": False,
+                "before": audit_before,
+                "selected_node_id": int(node_id),
+                "resource_accounting": updated_accounting,
+            }
+        working_histogram.inventory_before = {
+            int(key): int(value)
+            for key, value in dict(
+                updated_accounting.get("authorized_inventory_before", {}) or {}
+            ).items()
+        }
+        working_histogram.inventory_after = {
+            int(key): int(value)
+            for key, value in dict(
+                updated_accounting.get("authorized_inventory_after", {}) or {}
+            ).items()
+        }
+        working_histogram.aggregate_inventory_before = {
+            int(key): int(value)
+            for key, value in dict(
+                updated_accounting.get("aggregate_inventory_before", {}) or {}
+            ).items()
+        }
+        working_histogram.aggregate_inventory_after = {
+            int(key): int(value)
+            for key, value in dict(
+                updated_accounting.get("aggregate_inventory_after", {}) or {}
+            ).items()
+        }
+        working_histogram.aggregate_required_counts = {
+            int(key): int(value)
+            for key, value in dict(
+                updated_accounting.get("aggregate_required_counts", {}) or {}
+            ).items()
+        }
+        working_histogram.accounting_diagnostics = dict(updated_accounting)
+    else:
+        inventory_after, inventory_errors = apply_count_delta(
+            getattr(working_histogram, "inventory_before", {}) or {},
+            combined_group_delta(working_groups, extra_ops=[balance_op]),
+        )
+        if inventory_errors:
+            return False, {
+                "enforced": True,
+                "reason": "parity_balance_inventory_update_failed",
+                "balance_applied": False,
+                "before": audit_before,
+                "inventory_errors": inventory_errors,
+            }
+        working_histogram.inventory_after = inventory_after
+
+    histogram_plan.__dict__.clear()
+    histogram_plan.__dict__.update(deepcopy(working_histogram.__dict__))
+
+    phase_result = getattr(plan, "phase_result", None)
+    if phase_result is not None:
+        phase_result.parity_balance_count = int(
+            getattr(phase_result, "parity_balance_count", 0) or 0
+        ) + 1
+
+    audit_after = _stage3_port_capacity_diagnostics(H_balanced, special_degree_meta)
+    diagnostics = {
+        "enforced": True,
+        "reason": "port_degree_balanced_before_rebuild",
+        "balance_applied": True,
+        "before": audit_before,
+        "after": audit_after,
+        "pool_source": pool_source,
+        "required_direction": [int(preferred[0]), int(preferred[1])],
+        "applied_direction": [int(source), int(target)],
+        "node_id": int(node_id),
+        "attempted_directions": attempted_directions,
+        "next_cursor": int(balance_cursor) + 1,
+    }
+    plan_diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
+    plan_diagnostics["pre_rebuild_port_feasibility"] = diagnostics
+    plan_diagnostics["histogram_adjustment_plan"] = histogram_plan.to_dict()
+    if phase_result is not None:
+        plan_diagnostics["phase_result"] = phase_result.to_dict()
+    if updated_accounting:
+        plan_diagnostics["resource_accounting"] = dict(updated_accounting)
+    plan.diagnostics = plan_diagnostics
+    return bool(audit_after["degree_is_even"]), diagnostics
+
+
+def _prepare_spectrum_candidate_for_rebuild(
+    *,
+    plan: Any,
+    candidate: Any,
+    nodes: List[Any],
+    H: torch.Tensor,
+    special_degree_meta: Optional[Dict[str, Any]],
+    balance_cursor: int,
+) -> Tuple[Any, Optional[List[Any]], Optional[torch.Tensor], Dict[str, Any]]:
+    """Apply one spectrum bundle and make its fixed-port parity rebuild-safe."""
+    effective_candidate = deepcopy(candidate)
+    candidate_nodes, candidate_H, apply_proof = apply_spectrum_candidate(
+        nodes=nodes,
+        H=H,
+        candidate=effective_candidate,
+    )
+    if candidate_nodes is None or candidate_H is None:
+        return effective_candidate, None, None, {
+            "ok": False,
+            "reason": str(dict(apply_proof or {}).get(
+                "reason", "spectrum_candidate_apply_failed"
+            )),
+            "apply_proof": dict(apply_proof or {}),
+        }
+
+    audit_before = _stage3_port_capacity_diagnostics(
+        candidate_H,
+        special_degree_meta,
+    )
+    if bool(audit_before["degree_is_even"]):
+        return effective_candidate, candidate_nodes, candidate_H, {
+            "ok": True,
+            "reason": "spectrum_candidate_port_parity_valid",
+            "balance_applied": False,
+            "before": audit_before,
+            "after": audit_before,
+        }
+
+    groups: List[AtomicAdjustmentGroup] = []
+    for raw in list(getattr(effective_candidate, "operations", []) or []):
+        op = dict(raw or {})
+        source = int(op.get("from_su", -1))
+        target = int(op.get("to_su", -1))
+        node_id = int(op.get("node_id", -1))
+        groups.append(AtomicAdjustmentGroup(
+            primary_op=HistogramConversion(
+                from_su=int(source),
+                to_su=int(target),
+                count=1,
+                reason=str(op.get("reason", "remaining_pool_difference_spectrum_rebalance")),
+                node_ids=[int(node_id)],
+            ),
+            combined_delta={int(source): -1, int(target): 1},
+        ))
+    trial_histogram_plan = HistogramAdjustmentPlan(
+        phase="remaining_pool_spectrum_rebalance",
+        groups=groups,
+        primary_adjustment_count=int(
+            getattr(effective_candidate, "primary_adjustment_count", 0) or 0
+        ),
+        physical_conversion_count=len(groups),
+        H_before=H.detach().clone(),
+        H_after=candidate_H.detach().clone(),
+        inventory_before={
+            int(index): int(value)
+            for index, value in enumerate(
+                torch.clamp(H.detach().cpu(), min=0).long().tolist()
+            )
+            if int(value) != 0
+        },
+    )
+    trial_plan = deepcopy(plan)
+    parity_ok, parity_diagnostics = _append_stage3_parity_balance(
+        plan=trial_plan,
+        histogram_plan=trial_histogram_plan,
+        nodes=nodes,
+        special_degree_meta=special_degree_meta,
+        balance_cursor=int(balance_cursor),
+    )
+    balance_op = getattr(trial_histogram_plan, "parity_balance_op", None)
+    if not bool(parity_ok) or balance_op is None:
+        return effective_candidate, None, None, {
+            **dict(parity_diagnostics or {}),
+            "ok": False,
+            "reason": str(dict(parity_diagnostics or {}).get(
+                "reason", "spectrum_candidate_pre_rebuild_port_infeasible"
+            )),
+        }
+
+    balance_node_ids = [
+        int(node_id)
+        for node_id in list(getattr(balance_op, "node_ids", []) or [])
+    ]
+    if len(balance_node_ids) != 1:
+        return effective_candidate, None, None, {
+            **dict(parity_diagnostics or {}),
+            "ok": False,
+            "reason": "spectrum_candidate_parity_balance_id_invalid",
+            "balance_node_ids": balance_node_ids,
+        }
+    parity_operation = {
+        "op": "convert",
+        "node_id": int(balance_node_ids[0]),
+        "from_su": int(getattr(balance_op, "from_su")),
+        "to_su": int(getattr(balance_op, "to_su")),
+        "reason": "pre_rebuild_port_parity_balance",
+        "operation_kind": "parity_balance",
+    }
+    effective_candidate.operations = list(
+        getattr(effective_candidate, "operations", []) or []
+    ) + [parity_operation]
+    effective_candidate.histogram_signature = histogram_signature_after_operations(
+        H,
+        effective_candidate.operations,
+    )
+    effective_candidate.inverse_signature = inverse_bundle_signature(
+        effective_candidate.operations
+    )
+    effective_candidate.candidate_id = (
+        f"{str(getattr(effective_candidate, 'candidate_id', '') or '')}:"
+        f"parity:{int(parity_operation['from_su'])}-{int(parity_operation['to_su'])}"
+    )
+    candidate_diagnostics = dict(
+        getattr(effective_candidate, "diagnostics", {}) or {}
+    )
+    candidate_diagnostics["parity_balance"] = dict(parity_diagnostics or {})
+    candidate_diagnostics["total_operation_count"] = len(
+        effective_candidate.operations
+    )
+    effective_candidate.diagnostics = candidate_diagnostics
+
+    candidate_nodes, candidate_H, apply_proof = apply_spectrum_candidate(
+        nodes=nodes,
+        H=H,
+        candidate=effective_candidate,
+    )
+    if candidate_nodes is None or candidate_H is None:
+        return effective_candidate, None, None, {
+            **dict(parity_diagnostics or {}),
+            "ok": False,
+            "reason": str(dict(apply_proof or {}).get(
+                "reason", "spectrum_candidate_parity_apply_failed"
+            )),
+            "apply_proof": dict(apply_proof or {}),
+        }
+    audit_after = _stage3_port_capacity_diagnostics(
+        candidate_H,
+        special_degree_meta,
+    )
+    final_ok = bool(audit_after["degree_is_even"])
+    return effective_candidate, candidate_nodes, candidate_H, {
+        **dict(parity_diagnostics or {}),
+        "ok": bool(final_ok),
+        "reason": (
+            "spectrum_candidate_port_parity_balanced"
+            if final_ok
+            else "spectrum_candidate_pre_rebuild_port_infeasible"
+        ),
+        "after": audit_after,
+        "parity_operation": parity_operation,
+    }
+
+
 def _stage3_terminal_infeasibility_proof(
     plan: Any,
     *,
@@ -336,15 +952,15 @@ def _stage3_terminal_infeasibility_proof(
     phase_result = getattr(plan, "phase_result", None)
     prior_proof = _mapping_payload(
         getattr(phase_result, "infeasibility_proof", {}) or {},
-        value_key="reason",
+        field_name="infeasibility_proof",
     )
     slot_proof = _mapping_payload(
         prior_proof.get("slot_assignment_proof", {}) or {},
-        value_key="reason",
+        field_name="slot_assignment_proof",
     )
     failed_contract = _mapping_payload(
         prior_proof.get("failed_contract", {}) or {},
-        value_key="target_role",
+        field_name="failed_contract",
     )
     has_explicit_pending_requirement = bool(
         "required_counts" in prior_proof
@@ -413,7 +1029,7 @@ def _stage3_terminal_infeasibility_proof(
     )
     current_contract = _mapping_payload(
         diagnostics.get("current_contract", {}) or {},
-        value_key="target_role",
+        field_name="current_contract",
     )
     if not failed_contract and current_contract:
         failed_contract = current_contract
@@ -421,7 +1037,7 @@ def _stage3_terminal_infeasibility_proof(
         if candidates:
             failed_contract = _mapping_payload(
                 candidates[0],
-                value_key="target_role",
+                field_name="failed_contract_candidate",
             )
             break
     if not failed_contract:
@@ -466,7 +1082,7 @@ def _stage3_terminal_infeasibility_proof(
         "template_checks": {
             **_mapping_payload(
                 prior_proof.get("template_checks", {}) or {},
-                value_key="reason",
+                field_name="template_checks",
             ),
             "next_plan_reason": str(getattr(plan, "reason", "") or ""),
             "next_plan_kind": str(getattr(plan, "plan_kind", "") or ""),
@@ -522,13 +1138,16 @@ def run_block_c_resource_adjustment_loop_impl(
     difference_spectrum: Optional[Dict[str, Any]] = None,
     **kwargs: Any,
 ) -> Stage3WorkflowResult:
-    primary_limit = max(0, min(10, int(max_primary_adjustments_per_stage)))
+    primary_limit = min(10, max(0, int(max_primary_adjustments_per_stage)))
     compensation_limit = int(kwargs.pop("max_h_compensation_ops_per_adjustment", 8))
     residual_flex_preferred_23 = int(kwargs.pop("residual_flex_preferred_23", 3))
     residual_flex_min_23 = int(kwargs.pop("residual_flex_min_23", 2))
     residual_side_preferred_23 = int(kwargs.pop("residual_side_preferred_23", 2))
     residual_side_min_23 = int(kwargs.pop("residual_side_min_23", 1))
-    h_tolerance = float(kwargs.pop("h_tolerance", 0.06))
+    h_tolerance = float(
+        kwargs.pop("h_tolerance", DEFAULT_STAGE3_H_HARD_TOLERANCE)
+    )
+    adjuster._h_tolerance = h_tolerance
     outer_cycle = int(kwargs.pop("outer_cycle", 0))
     iteration_offset = max(0, int(kwargs.pop("iteration_offset", 0)))
     enable_post_external_spectrum = bool(kwargs.pop("enable_post_external_spectrum", True))
@@ -565,6 +1184,9 @@ def run_block_c_resource_adjustment_loop_impl(
             int(getattr(adjuster, "_stage3_su11_rotation_index", 0) or 0)
             if hasattr(adjuster, "_stage3_su11_rotation_index")
             else None
+        )
+        parity_cursor_before = int(
+            getattr(adjuster, "_stage3_parity_balance_cursor", 0) or 0
         )
         special_degree_meta = (
             adjuster._get_special_degree_meta(H_current)
@@ -614,8 +1236,6 @@ def run_block_c_resource_adjustment_loop_impl(
             baseline_diff = dict(diff_current or {})
             baseline_source = str(baseline_diff.get("source_stage", "") or "")
             baseline_contract = str(baseline_diff.get("spectral_contract", "") or "")
-            baseline_hwhm = baseline_diff.get("evaluation_hwhm")
-            baseline_build_variant = baseline_diff.get("effective_build_variant")
             spectrum_context_before = (
                 deepcopy(cycle_context_before)
             )
@@ -667,10 +1287,22 @@ def run_block_c_resource_adjustment_loop_impl(
                         "significant": False,
                     })
                     continue
-                candidate_nodes, candidate_H, apply_proof = apply_spectrum_candidate(
+                (
+                    candidate,
+                    candidate_nodes,
+                    candidate_H,
+                    parity_diagnostics,
+                ) = _prepare_spectrum_candidate_for_rebuild(
+                    plan=plan,
+                    candidate=candidate,
                     nodes=spectrum_nodes_before,
                     H=spectrum_H_before,
-                    candidate=candidate,
+                    special_degree_meta=special_degree_meta,
+                    balance_cursor=int(parity_cursor_before),
+                )
+                apply_proof = dict(parity_diagnostics.get("apply_proof", {}) or {})
+                candidate_diagnostics = dict(
+                    getattr(candidate, "diagnostics", {}) or {}
                 )
                 trial_operations, trial_delta = _spectrum_trial_operations(candidate)
                 candidate_h_value = (
@@ -686,6 +1318,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     f"batch={int(candidate_diagnostics.get('batch_size', len(list(getattr(candidate, 'operations', []) or []))) or 0)} "
                     f"conversions={dict(candidate_diagnostics.get('conversion_counts', {}) or {})} "
                     f"h_compensation={dict(candidate_diagnostics.get('h_compensation_conversion_counts', {}) or {})} "
+                    f"parity_balance={bool(parity_diagnostics.get('balance_applied', False))} "
                     f"operations=[{trial_operations}] delta={trial_delta} "
                     f"H={float(_h_total(H_current, special_degree_meta)):.1f}->{candidate_h_value:.1f}",
                     flush=True,
@@ -694,14 +1327,29 @@ def run_block_c_resource_adjustment_loop_impl(
                     "candidate": candidate.to_dict() if hasattr(candidate, "to_dict") else dict(candidate or {}),
                     "accepted": False,
                     "apply_proof": dict(apply_proof or {}),
+                    "pre_rebuild_port_feasibility": dict(parity_diagnostics or {}),
                 }
                 if candidate_nodes is None or candidate_H is None or rebuild_fn is None or validate_fn is None:
-                    record["reason"] = str(dict(apply_proof or {}).get("reason", "candidate_apply_or_rebuild_unavailable"))
+                    record["reason"] = str(
+                        dict(parity_diagnostics or {}).get(
+                            "reason",
+                            dict(apply_proof or {}).get(
+                                "reason", "candidate_apply_or_rebuild_unavailable"
+                            ),
+                        )
+                    )
                     rejected_spectrum_histogram_signatures.add(str(getattr(candidate, "histogram_signature", "") or ""))
+                    record.update({
+                        "valid": False,
+                        "valid_reason": str(record["reason"]),
+                        "significant": False,
+                        "reason": str(record["reason"]),
+                    })
                     evaluated_candidates.append(record)
                     print(
                         f"[Spectrum Trial Result] candidate_id={getattr(candidate, 'candidate_id', '')} "
                         f"graph_valid=False valid_reason={record['reason']} "
+                        "rebuild_started=False "
                         "accepted=False state_retained=False",
                         flush=True,
                     )
@@ -711,11 +1359,6 @@ def run_block_c_resource_adjustment_loop_impl(
                         H_seed=candidate_H,
                         phase="remaining_pool_spectrum_rebalance",
                         cycle_idx=cycle_number - 1,
-                        build_variant=(
-                            int(baseline_build_variant)
-                            if baseline_build_variant is not None
-                            else None
-                        ),
                     )
                     valid, valid_reason = validate_fn(
                         nodes=cand_nodes,
@@ -726,20 +1369,12 @@ def run_block_c_resource_adjustment_loop_impl(
                     candidate_contract = str(
                         dict(cand_diff or {}).get("spectral_contract", "") or ""
                     )
-                    candidate_hwhm = dict(cand_diff or {}).get("evaluation_hwhm")
                     if candidate_source != "layer2":
                         valid = False
                         valid_reason = "spectrum_candidate_is_not_layer2"
                     elif candidate_contract != "template_center_mu":
                         valid = False
                         valid_reason = "spectrum_candidate_contract_mismatch"
-                    elif (
-                        baseline_hwhm is not None
-                        and candidate_hwhm is not None
-                        and not np.isclose(float(candidate_hwhm), float(baseline_hwhm))
-                    ):
-                        valid = False
-                        valid_reason = "spectrum_candidate_evaluation_hwhm_mismatch"
                 except Exception as exc:
                     valid = False
                     valid_reason = f"spectrum_candidate_rebuild_failed:{exc}"
@@ -856,6 +1491,18 @@ def run_block_c_resource_adjustment_loop_impl(
                 balanced_r2_gain = float(r2_gain) - float(selected_balance_penalty)
                 if callable(context_restore_fn):
                     context_restore_fn(deepcopy(candidate_context))
+                selected_parity = dict(
+                    dict(getattr(candidate, "diagnostics", {}) or {}).get(
+                        "parity_balance", {}
+                    ) or {}
+                )
+                if bool(selected_parity.get("balance_applied", False)):
+                    adjuster._stage3_parity_balance_cursor = int(
+                        selected_parity.get(
+                            "next_cursor",
+                            int(parity_cursor_before) + 1,
+                        )
+                    )
                 nodes_current = list(cand_nodes or [])
                 H_current = torch.clamp(cand_H.detach().clone(), min=0).long()
                 diff_current = dict(cand_diff or {})
@@ -884,6 +1531,9 @@ def run_block_c_resource_adjustment_loop_impl(
                     accepted=True,
                     acceptance_reason="layer2_r2_gain_threshold_met",
                     primary_adjustment_count=int(getattr(candidate, "primary_adjustment_count", 0) or 0),
+                    parity_balance_count=(
+                        1 if bool(selected_parity.get("balance_applied", False)) else 0
+                    ),
                     histogram_before=_histogram_dict(spectrum_H_before),
                     histogram_after=_histogram_dict(H_current),
                     fresh_rebuild=True,
@@ -893,8 +1543,6 @@ def run_block_c_resource_adjustment_loop_impl(
                         "baseline_spectral_contract": str(baseline_contract),
                         "baseline_layer2_r2": float(baseline_r2),
                         "baseline_reason": str(baseline_reason),
-                        "baseline_evaluation_hwhm": baseline_hwhm,
-                        "baseline_build_variant": baseline_build_variant,
                         "r2_gain": float(r2_gain),
                         "balanced_r2_gain": float(balanced_r2_gain),
                         "balance_penalty": float(selected_balance_penalty),
@@ -949,8 +1597,6 @@ def run_block_c_resource_adjustment_loop_impl(
                 "source_stage": str(baseline_source),
                 "spectral_contract": str(baseline_contract),
                 "r2": float(baseline_r2),
-                "evaluation_hwhm": baseline_hwhm,
-                "effective_build_variant": baseline_build_variant,
             }
             _print_stage3_plan_summary(
                 cycle_number,
@@ -968,11 +1614,114 @@ def run_block_c_resource_adjustment_loop_impl(
             f"({time.perf_counter() - plan_started:.2f}s)",
             flush=True,
         )
-        phase = str(getattr(plan, "phase", "") or dict(getattr(plan, "diagnostics", {}) or {}).get("stage3_phase", ""))
-        plan_dict = plan.to_dict() if hasattr(plan, "to_dict") else dict(plan or {})
+        phase = str(
+            getattr(plan, "phase", "")
+            or dict(getattr(plan, "diagnostics", {}) or {}).get(
+                "stage3_phase", ""
+            )
+        )
         before_metrics = _stage3_metrics_from_plan(plan)
         before_signature = _stage3_signature_from_plan(plan)
         histogram_plan = getattr(plan, "histogram_adjustment_plan", None)
+        if histogram_plan is not None:
+            parity_ok, parity_diagnostics = _append_stage3_parity_balance(
+                plan=plan,
+                histogram_plan=histogram_plan,
+                nodes=nodes_current,
+                special_degree_meta=special_degree_meta,
+                balance_cursor=int(parity_cursor_before),
+            )
+        else:
+            parity_ok, parity_diagnostics = True, {
+                "enforced": False,
+                "reason": "no_histogram_adjustment_plan",
+            }
+        plan_diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
+        plan_diagnostics["pre_rebuild_port_feasibility"] = dict(parity_diagnostics)
+        plan.diagnostics = plan_diagnostics
+        if bool(parity_diagnostics.get("enforced", False)):
+            before_degree = int(
+                dict(parity_diagnostics.get("before", {}) or {}).get(
+                    "total_port_degree",
+                    0,
+                )
+                or 0
+            )
+            after_degree = int(
+                dict(parity_diagnostics.get("after", {}) or {}).get(
+                    "total_port_degree",
+                    before_degree,
+                )
+                or before_degree
+            )
+            print(
+                f"[Block C:resource #{cycle_number}] pre-rebuild port audit "
+                f"degree={before_degree}->{after_degree} "
+                f"balance={bool(parity_diagnostics.get('balance_applied', False))} "
+                f"reason={str(parity_diagnostics.get('reason', ''))}",
+                flush=True,
+            )
+        if not parity_ok:
+            rejection_reason = str(
+                parity_diagnostics.get("reason", "pre_rebuild_port_feasibility_failed")
+            )
+            setattr(plan, "blocked_reason", rejection_reason)
+            retry_signature = _register_rejected_resource_candidate(
+                plan,
+                histogram_plan,
+                rejected_resource_conversion_signatures,
+            )
+            plan_dict, rolled_back_contract_ids = _rollback_stage3_plan_transactions(
+                plan,
+                rejection_reason,
+            )
+            _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
+            _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
+            if callable(context_restore_fn):
+                context_restore_fn(deepcopy(cycle_context_before))
+            cycles.append(Stage3WorkflowCycleRecord(
+                cycle=cycle_number,
+                phase=phase,
+                applied=False,
+                stop_reason="pre_rebuild_port_feasibility_failed",
+                accepted_state_retained=True,
+                rebuild_valid=False,
+                plan=plan_dict,
+                before_metrics=before_metrics,
+                topology_signature=before_signature,
+                blocked_reason=rejection_reason,
+                accepted=False,
+                acceptance_reason="pre_rebuild_port_feasibility_failed",
+                primary_adjustment_count=int(
+                    getattr(histogram_plan, "primary_adjustment_count", 0) or 0
+                ),
+                physical_conversion_count=int(
+                    getattr(histogram_plan, "physical_conversion_count", 0) or 0
+                ),
+                h_compensation_count=_histogram_h_compensation_count(histogram_plan),
+                parity_balance_count=_histogram_parity_balance_count(histogram_plan),
+                histogram_before=_histogram_dict(H_current),
+                histogram_after=_histogram_dict(
+                    getattr(histogram_plan, "H_after", H_current)
+                ),
+                diagnostics={
+                    "pre_rebuild_port_feasibility": dict(parity_diagnostics),
+                    "rolled_back_contract_ids": list(rolled_back_contract_ids),
+                    "rejected_resource_conversion_signature": str(retry_signature),
+                    "primary_adjustment_limit": int(primary_limit),
+                },
+            ))
+            if retry_signature:
+                print(
+                    f"[Block C:resource #{cycle_number}] retry next conversion variant "
+                    f"after port preflight failure: rejected={retry_signature}",
+                    flush=True,
+                )
+                continue
+            stop_reason = "pre_rebuild_port_feasibility_failed"
+            break
+
+        plan_dict = plan.to_dict() if hasattr(plan, "to_dict") else dict(plan or {})
         phase_inventory = dict(getattr(histogram_plan, "inventory_before", {}) or {})
         phase_demand = dict(getattr(histogram_plan, "demand_before", {}) or {})
         aggregate_inventory_before = dict(
@@ -1040,7 +1789,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 f"blocked={int(external_diagnostics.get('external_blocked', 0) or 0)} "
                 f"remaining={int(external_diagnostics.get('external_remaining_pending', 0) or 0)} "
                 f"primary={int(external_diagnostics.get('external_primary_count', 0) or 0)}/"
-                f"{int(primary_limit)} "
+                    f"{int(primary_limit)} "
                 f"complete={bool(external_diagnostics.get('external_stage_completed', False))}"
             )
             for contract in selected_contracts:
@@ -1149,6 +1898,7 @@ def run_block_c_resource_adjustment_loop_impl(
             elif rejection_reason or stop_reason == "histogram_apply_no_effect":
                 plan_dict, _ = _rollback_stage3_plan_transactions(plan, stop_reason)
             _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
+            _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
             cycles.append(Stage3WorkflowCycleRecord(
@@ -1177,6 +1927,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     getattr(histogram_plan, "physical_conversion_count", 0) or 0
                 ),
                 h_compensation_count=_histogram_h_compensation_count(histogram_plan),
+                parity_balance_count=_histogram_parity_balance_count(histogram_plan),
                 histogram_before=histogram_before,
                 histogram_after=_histogram_dict(getattr(apply_result, "H")),
                 phase_inventory={str(key): int(value) for key, value in phase_inventory.items()},
@@ -1221,6 +1972,7 @@ def run_block_c_resource_adjustment_loop_impl(
             plan_dict = _stage3_infeasible_plan_dict(plan, proof, plan_dict=plan_dict)
             stop_reason = "phase_resource_infeasible"
             _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
+            _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
             cycles.append(Stage3WorkflowCycleRecord(
@@ -1249,6 +2001,7 @@ def run_block_c_resource_adjustment_loop_impl(
             stop_reason = "layer12_rebuild_invalid"
             plan_dict, rolled_back_contract_ids = _rollback_stage3_plan_transactions(plan, stop_reason)
             _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
+            _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             cycles.append(Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
@@ -1283,13 +2036,19 @@ def run_block_c_resource_adjustment_loop_impl(
         except Exception as exc:
             stop_reason = "layer12_rebuild_invalid"
             rollback_reason = f"{stop_reason}:{exc}"
-            retry_signature = _register_rejected_resource_variant(
+            print(
+                f"[Block C:resource #{cycle_number}] fresh Layer1/2 rebuild failed: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            retry_signature = _register_rejected_resource_candidate(
                 plan,
                 histogram_plan,
                 rejected_resource_conversion_signatures,
             )
             plan_dict, rolled_back_contract_ids = _rollback_stage3_plan_transactions(plan, rollback_reason)
             _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
+            _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
             cycles.append(Stage3WorkflowCycleRecord(
@@ -1309,6 +2068,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 primary_adjustment_count=int(getattr(histogram_plan, "primary_adjustment_count", 0) or 0),
                 physical_conversion_count=int(getattr(histogram_plan, "physical_conversion_count", 0) or 0),
                 h_compensation_count=_histogram_h_compensation_count(histogram_plan),
+                parity_balance_count=_histogram_parity_balance_count(histogram_plan),
                 phase_inventory={str(key): int(value) for key, value in phase_inventory.items()},
                 phase_demand={str(key): int(value) for key, value in phase_demand.items()},
                 histogram_before=histogram_before,
@@ -1325,6 +2085,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     "adjustment_bundles": adjustment_bundles,
                     "rolled_back_contract_ids": list(rolled_back_contract_ids),
                     "rejected_resource_conversion_signature": str(retry_signature),
+                    "primary_adjustment_limit": int(primary_limit),
                 },
             ))
             if retry_signature:
@@ -1338,13 +2099,14 @@ def run_block_c_resource_adjustment_loop_impl(
         candidate_histogram = torch.clamp(cand_H.detach().cpu(), min=0).long()
         if not torch.equal(candidate_histogram, H_seed):
             valid_reason = "fresh_rebuild_histogram_mismatch"
-            retry_signature = _register_rejected_resource_variant(
+            retry_signature = _register_rejected_resource_candidate(
                 plan,
                 histogram_plan,
                 rejected_resource_conversion_signatures,
             )
             plan_dict, rolled_back_contract_ids = _rollback_stage3_plan_transactions(plan, valid_reason)
             _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
+            _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
             cycles.append(Stage3WorkflowCycleRecord(
@@ -1368,6 +2130,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     "rebuilt_histogram": _histogram_dict(candidate_histogram),
                     "rolled_back_contract_ids": list(rolled_back_contract_ids),
                     "rejected_resource_conversion_signature": str(retry_signature),
+                    "primary_adjustment_limit": int(primary_limit),
                 },
             ))
             if retry_signature:
@@ -1388,13 +2151,14 @@ def run_block_c_resource_adjustment_loop_impl(
             flush=True,
         )
         if not valid:
-            retry_signature = _register_rejected_resource_variant(
+            retry_signature = _register_rejected_resource_candidate(
                 plan,
                 histogram_plan,
                 rejected_resource_conversion_signatures,
             )
             plan_dict, rolled_back_contract_ids = _rollback_stage3_plan_transactions(plan, str(valid_reason))
             _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
+            _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
             cycles.append(Stage3WorkflowCycleRecord(
@@ -1421,6 +2185,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     "adjustment_bundles": adjustment_bundles,
                     "rolled_back_contract_ids": list(rolled_back_contract_ids),
                     "rejected_resource_conversion_signature": str(retry_signature),
+                    "primary_adjustment_limit": int(primary_limit),
                 },
             ))
             if retry_signature:
@@ -1441,6 +2206,17 @@ def run_block_c_resource_adjustment_loop_impl(
         H_current = torch.clamp(cand_H.detach().clone(), min=0).long()
         diff_current = dict(cand_diff or {})
         visited_histograms.add(next_histogram_signature)
+        cleared_resource_rejections = sorted(
+            rejected_resource_conversion_signatures
+        )
+        rejected_resource_conversion_signatures.clear()
+        if bool(parity_diagnostics.get("balance_applied", False)):
+            adjuster._stage3_parity_balance_cursor = int(
+                parity_diagnostics.get(
+                    "next_cursor",
+                    int(parity_cursor_before) + 1,
+                )
+            )
         accepted_cycles += 1
         cycles.append(Stage3WorkflowCycleRecord(
             cycle=cycle_number,
@@ -1461,6 +2237,7 @@ def run_block_c_resource_adjustment_loop_impl(
             primary_adjustment_count=int(getattr(histogram_plan, "primary_adjustment_count", 0) or 0),
             physical_conversion_count=int(getattr(histogram_plan, "physical_conversion_count", 0) or 0),
             h_compensation_count=_histogram_h_compensation_count(histogram_plan),
+            parity_balance_count=_histogram_parity_balance_count(histogram_plan),
             phase_inventory={str(key): int(value) for key, value in phase_inventory.items()},
             phase_demand={str(key): int(value) for key, value in phase_demand.items()},
             histogram_before=histogram_before,
@@ -1480,6 +2257,9 @@ def run_block_c_resource_adjustment_loop_impl(
                 "flex_target_plan": dict(flex_target_plan),
                 "protected_resource_counts": dict(protected_counts),
                 "fresh_replan_deferred_to_next_cycle": True,
+                "cleared_resource_conversion_rejections": (
+                    cleared_resource_rejections
+                ),
             },
         ))
 

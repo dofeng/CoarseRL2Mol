@@ -32,10 +32,15 @@ def normalize_slot(slot: Any) -> TopologyClosureSlot:
         result = deepcopy(slot)
     else:
         data = dict(slot or {})
+        raw_anchor_node_id = data.get("anchor_node_id", -1)
         result = TopologyClosureSlot(
             slot_id=str(data.get("slot_id", "")),
             kind=str(data.get("kind", "")),
-            anchor_node_id=int(data.get("anchor_node_id", -1) or -1),
+            anchor_node_id=(
+                -1
+                if raw_anchor_node_id is None or raw_anchor_node_id == ""
+                else int(raw_anchor_node_id)
+            ),
             anchor_role=str(data.get("anchor_role", "")),
             required_su_sequence=[int(value) for value in list(data.get("required_su_sequence", []) or [])],
             existing_node_ids=[int(value) for value in list(data.get("existing_node_ids", []) or [])],

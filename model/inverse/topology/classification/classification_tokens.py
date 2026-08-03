@@ -298,10 +298,17 @@ def is_abstract_open_nonfixed_semantic(value: Any) -> bool:
     )
 
 
+def is_open_boundary_semantic(value: Any) -> bool:
+    """Every non-fixed neighbor is an unresolved topology boundary."""
+    _, _, is_fixed = _semantic_fields(value)
+    return not bool(is_fixed)
+
+
 def _build_neighbor_tokens(
     node: _NodeV3,
     nodes_by_id: Dict[int, _NodeV3],
 ) -> List[NeighborToken]:
+    node_id = int(getattr(node, "global_id", -1))
     fixed_ids = set(int(x) for x in list(getattr(node, "fixed_hop1_ids", set()) or set()))
     out: List[NeighborToken] = []
     for neighbor_id in list(getattr(node, "hop1_ids", []) or []):
@@ -314,11 +321,16 @@ def _build_neighbor_tokens(
             raise ValueError(
                 f"node {int(getattr(node, 'global_id', -1))} references missing hop1 node {nid}"
             )
+        neighbor_fixed_ids = {
+            int(value)
+            for value in list(getattr(neighbor, "fixed_hop1_ids", set()) or set())
+        }
+        is_fixed = bool(int(nid) in fixed_ids and int(node_id) in neighbor_fixed_ids)
         out.append(NeighborToken(
             node_id=int(nid),
             su_type=int(getattr(neighbor, "su_type", -1)),
             subtype=normalize_subtype(neighbor),
-            is_fixed=bool(int(nid) in fixed_ids),
+            is_fixed=is_fixed,
             target_degree=_target_degree(neighbor),
             anchor_mode=_normalized_anchor_mode(neighbor),
             anchor_partition=_normalized_partition(neighbor),
@@ -338,6 +350,28 @@ def build_node_token(node: _NodeV3, nodes_by_id: Optional[Dict[int, _NodeV3]] = 
     hop1_ids = tuple(int(x) for x in list(getattr(node, "hop1_ids", []) or []))
     nodes_lookup = dict(nodes_by_id or {})
     neighbor_tokens = _build_neighbor_tokens(node, nodes_lookup)
+    fixed_edge_violations: List[Dict[str, Any]] = []
+    local_fixed_ids = {
+        int(value)
+        for value in list(getattr(node, "fixed_hop1_ids", set()) or set())
+    }
+    for neighbor in list(neighbor_tokens or []):
+        neighbor_node = nodes_lookup.get(int(neighbor.node_id))
+        reverse_fixed = bool(
+            neighbor_node is not None
+            and int(node_id) in {
+                int(value)
+                for value in list(getattr(neighbor_node, "fixed_hop1_ids", set()) or set())
+            }
+        )
+        local_fixed = int(neighbor.node_id) in local_fixed_ids
+        if bool(local_fixed) != bool(reverse_fixed):
+            fixed_edge_violations.append({
+                "edge_key": sorted([int(node_id), int(neighbor.node_id)]),
+                "local_fixed": bool(local_fixed),
+                "reverse_fixed": bool(reverse_fixed),
+                "reason": "asymmetric_fixed_edge",
+            })
     fixed_neighbor_ids = tuple(sorted(int(neighbor.node_id) for neighbor in neighbor_tokens if bool(neighbor.is_fixed)))
     connector_neighbor_ids = tuple(sorted(
         int(neighbor.node_id) for neighbor in neighbor_tokens if int(neighbor.su_type) in CONNECTOR_SU_TYPES
@@ -363,6 +397,7 @@ def build_node_token(node: _NodeV3, nodes_by_id: Optional[Dict[int, _NodeV3]] = 
             dict(getattr(node, "score_components", {}) or {}).get("fixture_inferred_fixed_connectors", False)
         ),
         "semantic_bucket": semantic_bucket_for_node(node),
+        "fixed_edge_violations": fixed_edge_violations,
     }
     return ClassificationToken(
         node_id=node_id,

@@ -379,18 +379,6 @@ def _print_anchor_mode_snapshot(H: torch.Tensor,
         print(f"{indent}{row}")
 
 
-def _parse_multiset_text(text: Any) -> Tuple[int, ...]:
-    raw = str(text or '').strip().strip('"').strip("'")
-    raw = raw.strip('[]')
-    if not raw:
-        return tuple()
-    parts = [p.strip() for p in raw.split(',') if p.strip()]
-    try:
-        return tuple(sorted(int(x) for x in parts))
-    except Exception:
-        return tuple()
-
-
 def _fixed_anchor_types_for_special_su(su_type: int,
                                        partition: Optional[str] = None) -> Tuple[int, ...]:
     if int(su_type) == 19:
@@ -406,42 +394,20 @@ def _fixed_anchor_types_for_special_su(su_type: int,
     return tuple()
 
 
-def _classify_anchor_mode_from_hop1(su_type: int, hop1_multiset: Tuple[int, ...]) -> Optional[str]:
-    su_i = int(su_type)
-    degree_i = int(len(tuple(hop1_multiset)))
-    if int(su_i) in {19, 20} and int(degree_i) not in {1, 2, 3}:
-        return None
-    if int(su_i) == 21 and int(degree_i) not in {2, 3}:
-        return None
-    if int(terminal_neighbor_count(tuple(hop1_multiset))) > 1:
-        return None
-    partition = 'thio' if 31 in set(int(x) for x in tuple(hop1_multiset)) else 'ether'
-    fixed_types = set(int(x) for x in _fixed_anchor_types_for_special_su(int(su_i), partition=partition))
-    if not fixed_types:
-        return None
-    fixed_count = int(sum(1 for x in tuple(hop1_multiset) if int(x) in fixed_types))
-    if int(su_i) == 21:
-        return f"single_d{int(degree_i)}" if int(fixed_count) == 1 else None
-    if int(fixed_count) == 1:
-        return f"single_d{int(degree_i)}"
-    if int(fixed_count) == 2:
-        return f"double_d{int(degree_i)}"
-    return None
-
-
 def _get_special_anchor_mode_stats(adjuster: Any) -> Dict[int, Dict[str, Dict[str, float]]]:
     cache = getattr(adjuster, '_su_special_anchor_mode_stats_cache', None)
     if isinstance(cache, dict):
         return cache
 
     out: Dict[int, Dict[str, Dict[str, float]]] = {}
-    try:
-        hop1_path = Path(getattr(adjuster, 'su_hop1_ranges_path', ''))
-    except Exception:
-        hop1_path = Path()
-    mode_csv = hop1_path.parent / 'su_special_anchor_mode_nmr_range_filtered.csv'
+    common_path = getattr(adjuster, 'su_common_ranges_path', None)
+    mode_csv = (
+        Path(str(common_path)).parent / 'su_special_anchor_mode_nmr_range_filtered.csv'
+        if common_path
+        else None
+    )
 
-    if mode_csv.exists():
+    if mode_csv is not None and mode_csv.exists():
         try:
             df_mode = pd.read_csv(mode_csv)
             for _, row in df_mode.iterrows():
@@ -462,53 +428,6 @@ def _get_special_anchor_mode_stats(adjuster: Any) -> Dict[int, Dict[str, Dict[st
                 }
             setattr(adjuster, '_su_special_anchor_mode_stats_cache', out)
             return out
-        except Exception:
-            out = {}
-
-    if hop1_path.exists():
-        try:
-            df_hop1 = pd.read_csv(hop1_path)
-            grouped: Dict[Tuple[int, str], List[Dict[str, float]]] = {}
-            for _, row in df_hop1.iterrows():
-                su_i = int(row.get('center_su_idx', row.get('center_su', -1)))
-                if int(su_i) not in {19, 20, 21}:
-                    continue
-                hop1_tuple = _parse_multiset_text(row.get('hop1_multiset', ''))
-                mode = _classify_anchor_mode_from_hop1(int(su_i), hop1_tuple)
-                if not mode:
-                    continue
-                grouped.setdefault((int(su_i), str(mode)), []).append({
-                    'mu': float(row.get('mu_median', 0.0)),
-                    'mu_min': float(row.get('mu_common_min', row.get('mu_median', 0.0))),
-                    'mu_max': float(row.get('mu_common_max', row.get('mu_median', 0.0))),
-                    'sample_count': int(row.get('sample_count_total', row.get('sample_count', 1))),
-                })
-            for (su_i, mode), items in grouped.items():
-                if not items:
-                    continue
-                mu_values = [float(it['mu']) for it in items]
-                weights = [max(1, int(it['sample_count'])) for it in items]
-                if sum(weights) <= 0:
-                    continue
-                order = np.argsort(mu_values)
-                mu_sorted = [mu_values[int(i)] for i in order]
-                w_sorted = [weights[int(i)] for i in order]
-                total_w = float(sum(w_sorted))
-                cumsum = np.cumsum(np.asarray(w_sorted, dtype=np.float64))
-                q05_idx = int(np.searchsorted(cumsum, 0.05 * total_w, side='left'))
-                q95_idx = int(np.searchsorted(cumsum, 0.95 * total_w, side='left'))
-                weighted_mean = float(np.average(np.asarray(mu_values, dtype=np.float64), weights=np.asarray(weights, dtype=np.float64)))
-                out.setdefault(int(su_i), {})[str(mode)] = {
-                    'mu_median': float(weighted_mean),
-                    'mu_common_min': float(min(it['mu_min'] for it in items)),
-                    'mu_common_max': float(max(it['mu_max'] for it in items)),
-                    'mu_q05': float(mu_sorted[min(max(q05_idx, 0), len(mu_sorted) - 1)]),
-                    'mu_q95': float(mu_sorted[min(max(q95_idx, 0), len(mu_sorted) - 1)]),
-                    'mu_global_min': float(min(it['mu_min'] for it in items)),
-                    'mu_global_max': float(max(it['mu_max'] for it in items)),
-                    'n_templates': int(len(items)),
-                    'sample_count_total': int(sum(weights)),
-                }
         except Exception:
             out = {}
 

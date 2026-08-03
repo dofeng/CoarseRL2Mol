@@ -39,9 +39,9 @@ except ImportError:
         terminal_neighbor_count,
     )
 try:
-    from ..hop1_adjuster import can_match_ports_exact
+    from ..layer1.hop1_adjuster import can_match_ports_exact
 except ImportError:
-    from model.inverse.hop1_adjuster import can_match_ports_exact
+    from model.inverse.layer1.hop1_adjuster import can_match_ports_exact
 
 # ============================================================================
 # 端口匹配辅助函数

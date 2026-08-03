@@ -49,8 +49,6 @@ class Layer2Estimator:
         base_dir = Z_LIBRARY_DIR
         self.lib_path = lib_path or str(base_dir / 'subgraph_library.pt')
         
-        self.intensity_scale = 1.0
-        self.unit_peak_intensity = True
         
         # 缓存
         self._template_cache = None
@@ -181,8 +179,7 @@ class Layer2Estimator:
     def layer2_assign(self, nodes: List[_NodeV3],
                       S_target: torch.Tensor,
                       E_target: torch.Tensor,
-                      output_dir: Optional[str] = None,
-                      hwhm: float = 1.0) -> List[_NodeV3]:
+                      output_dir: Optional[str] = None) -> List[_NodeV3]:
         """
         Layer2: 为每个节点分配2-hop邻居和z向量
         
@@ -191,7 +188,6 @@ class Layer2Estimator:
             S_target: 目标谱图
             E_target: 目标元素组成
             output_dir: 输出目录
-            hwhm: 谱峰半高宽
         
         Returns:
             nodes: 更新后的节点列表
@@ -326,24 +322,18 @@ class Layer2Estimator:
         print(f"  匹配: 精确={self.stats['exact_match']}, 近似={self.stats['approx_match']}, 未匹配={self.stats['missing']}")
         
         # NMR评估
-        S_recon = self.reconstruct_spectrum(nodes, hwhm=hwhm)
-        
-        # 计算最优缩放因子
+        S_recon = self.reconstruct_spectrum(nodes)
         eval_info = evaluate_spectrum_reconstruction(
             S_target,
             S_recon,
             ppm_axis=PPM_AXIS.to(device),
-            fit_scale=True,
-            nonnegative_alpha=True,
         )
-        S_fit = eval_info['S_fit']
-        alpha = float(eval_info.get('alpha', 1.0))
         r2 = float(eval_info.get('r2', 0.0))
-        print(f"  R²={r2:.4f}, α={alpha:.4f}")
+        print(f"  R²={r2:.4f}")
         
         # 保存结果
         if output_dir:
-            self._save_results(nodes, S_target, S_fit, r2, alpha, output_dir, S_recon_raw=S_recon)
+            self._save_results(nodes, S_target, S_recon, r2, output_dir)
             try:
                 Path(output_dir).mkdir(parents=True, exist_ok=True)
                 match_detail_rows = self._build_match_detail_rows(nodes)
@@ -544,8 +534,7 @@ class Layer2Estimator:
     # 谱图重建
     # ========================================================================
     
-    def reconstruct_spectrum(self, nodes: List[_NodeV3],
-                             hwhm: float = 1.0) -> torch.Tensor:
+    def reconstruct_spectrum(self, nodes: List[_NodeV3]) -> torch.Tensor:
         """从节点重建NMR谱图"""
         device = self.device
         ppm_axis = PPM_AXIS.to(device)
@@ -559,32 +548,19 @@ class Layer2Estimator:
                 continue
             
             mu = float(getattr(n, 'mu', 0.0))
-            pi = float(getattr(n, 'pi', 0.0))
-            
-            if pi <= 0.0 or mu == 0.0:
+            if mu == 0.0:
                 continue
-            
             mus.append(mu)
-            if bool(getattr(self, 'unit_peak_intensity', False)):
-                pis.append(1.0)
-            else:
-                pis.append(pi)
-        
-        try:
-            s = float(getattr(self, 'intensity_scale', 1.0))
-        except Exception as e:
-            import logging
-            logging.debug(f"Failed to get intensity_scale: {e}")
-            s = 1.0
+            pis.append(1.0)
         
         return reconstruct_from_mu_pi(
             mus=mus,
             pis=pis,
             ppm_axis=ppm_axis,
-            hwhm=float(hwhm),
-            intensity_scale=float(s),
+            hwhm=1.0,
+            intensity_scale=1.0,
             device=device,
-            unit_peak_intensity=bool(getattr(self, 'unit_peak_intensity', False)),
+            unit_peak_intensity=True,
         )
 
     def _build_match_detail_rows(self, nodes: List[_NodeV3]) -> List[Dict[str, object]]:
@@ -636,11 +612,9 @@ class Layer2Estimator:
     
     def _save_results(self, nodes: List[_NodeV3],
                       S_target: torch.Tensor,
-                      S_fit: torch.Tensor,
+                      S_recon: torch.Tensor,
                       r2: float,
-                      alpha: float,
-                      output_dir: str,
-                      S_recon_raw: Optional[torch.Tensor] = None):
+                      output_dir: str):
         """保存Layer2结果"""
         try:
             out_dir = Path(output_dir)
@@ -652,23 +626,22 @@ class Layer2Estimator:
             df = pd.DataFrame({
                 'ppm': ppm_axis,
                 'target': S_target.cpu().numpy(),
-                'reconstructed_raw': S_recon_raw.cpu().numpy() if S_recon_raw is not None else S_fit.cpu().numpy(),
-                'reconstructed': S_fit.cpu().numpy(),
-                'difference': (S_target - S_fit).cpu().numpy(),
+                'reconstructed': S_recon.cpu().numpy(),
+                'difference': (S_target - S_recon).cpu().numpy(),
             })
             df.to_csv(str(out_dir / 'layer2_spectrum_comparison.csv'), index=False)
 
             try:
                 visualize_spectrum_comparison(
                     S_target=S_target.detach().cpu(),
-                    S_recon=S_fit.detach().cpu(),
+                    S_recon=S_recon.detach().cpu(),
                     ppm_axis=PPM_AXIS.detach().cpu(),
                     layer_name='Layer2',
                     save_dir=str(out_dir),
                 )
                 visualize_spectrum_comparison(
                     S_target=S_target.detach().cpu(),
-                    S_recon=S_fit.detach().cpu(),
+                    S_recon=S_recon.detach().cpu(),
                     ppm_axis=PPM_AXIS.detach().cpu(),
                     layer_name='Layer2-Library',
                     save_dir=str(out_dir),
@@ -683,10 +656,9 @@ class Layer2Estimator:
                 )
                 metrics = {
                     'r2': float(r2),
-                    'r2_carbonyl': float(compute_segment_r2(S_target, S_fit, ppm_axis_t, 'carbonyl')),
-                    'r2_aromatic': float(compute_segment_r2(S_target, S_fit, ppm_axis_t, 'aromatic')),
-                    'r2_aliphatic': float(compute_segment_r2(S_target, S_fit, ppm_axis_t, 'aliphatic')),
-                    'alpha': float(alpha),
+                    'r2_carbonyl': float(compute_segment_r2(S_target, S_recon, ppm_axis_t, 'carbonyl')),
+                    'r2_aromatic': float(compute_segment_r2(S_target, S_recon, ppm_axis_t, 'aromatic')),
+                    'r2_aliphatic': float(compute_segment_r2(S_target, S_recon, ppm_axis_t, 'aliphatic')),
                     'exact_match': int(self.stats.get('exact_match', 0)),
                     'approx_match': int(self.stats.get('approx_match', 0)),
                     'missing': int(self.stats.get('missing', 0)),

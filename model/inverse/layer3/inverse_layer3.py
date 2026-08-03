@@ -1,4 +1,5 @@
 from pathlib import Path
+from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -22,8 +23,7 @@ class Layer3Estimator:
         self.vae = vae_model
         self.lib_path = lib_path
         self._template_cache: Optional[Dict] = None
-        self.intensity_scale = 1.0
-        self.unit_peak_intensity = True
+        self.last_diagnostics: Dict[str, object] = {}
 
     def _get_template_library(self) -> Optional[Dict]:
         if self._template_cache is not None:
@@ -192,18 +192,17 @@ class Layer3Estimator:
         return [int(idx) for idx in np.argsort(distances)[:max(1, int(top_k))]]
 
     @staticmethod
-    def _peak(mu: float, ppm_axis: torch.Tensor, hwhm: float) -> torch.Tensor:
+    def _peak(mu: float, ppm_axis: torch.Tensor) -> torch.Tensor:
         return lorentzian_spectrum(
             torch.tensor([float(mu)], dtype=torch.float, device=ppm_axis.device),
             torch.ones(1, dtype=torch.float, device=ppm_axis.device),
             ppm_axis,
-            hwhm=float(hwhm),
+            hwhm=1.0,
         )
 
     def _build_recon(self,
                      nodes: List[_NodeV3],
-                     ppm_axis: torch.Tensor,
-                     hwhm: float) -> Tuple[torch.Tensor, Dict[int, torch.Tensor]]:
+                     ppm_axis: torch.Tensor) -> Tuple[torch.Tensor, Dict[int, torch.Tensor]]:
         peak_cache: Dict[int, torch.Tensor] = {}
         recon = torch.zeros_like(ppm_axis)
         for node in nodes:
@@ -213,7 +212,7 @@ class Layer3Estimator:
             mu = float(getattr(node, 'mu', 0.0))
             if not np.isfinite(mu) or mu <= 0.0:
                 continue
-            peak = self._peak(mu, ppm_axis, hwhm=float(hwhm))
+            peak = self._peak(mu, ppm_axis)
             peak_cache[int(node.global_id)] = peak
             recon = recon + peak
         return recon, peak_cache
@@ -224,7 +223,6 @@ class Layer3Estimator:
         S_target: torch.Tensor,
         E_target: torch.Tensor,
         max_iters: int = 150,
-        hwhm: float = 1.0,
         output_dir: Optional[str] = None,
         pos_search_window: float = 15.0,
         neg_assign_window: float = 2.0,
@@ -244,6 +242,20 @@ class Layer3Estimator:
 
         ppm_axis = PPM_AXIS.to(self.device)
         target = S_target.to(self.device).view(-1)
+        baseline_nodes = deepcopy(nodes)
+        baseline_has_complete_peaks = all(
+            np.isfinite(float(getattr(node, 'mu', 0.0)))
+            and float(getattr(node, 'mu', 0.0)) > 0.0
+            for node in baseline_nodes
+            if float(E_SU[int(node.su_type), 0].detach().cpu().item()) > 0.0
+        )
+        baseline_recon, _ = self._build_recon(baseline_nodes, ppm_axis)
+        baseline_eval = evaluate_spectrum_reconstruction(
+            target,
+            baseline_recon,
+            ppm_axis=ppm_axis,
+        )
+        baseline_r2 = float(baseline_eval.get('r2', float('-inf')))
         g_embed = self._global_embed_from_elements(E_target)
         carbon_nodes: List[_NodeV3] = []
         fixed_template_keys: Dict[int, Tuple] = {}
@@ -306,13 +318,11 @@ class Layer3Estimator:
                 score_components['spectral_source'] = 'g2s_layer3'
                 score_components['layer3_decoder_mu'] = mu_value
 
-        recon, peak_cache = self._build_recon(nodes, ppm_axis, hwhm=float(hwhm))
+        recon, peak_cache = self._build_recon(nodes, ppm_axis)
         eval_current = evaluate_spectrum_reconstruction(
             target,
             recon,
             ppm_axis=ppm_axis,
-            fit_scale=True,
-            nonnegative_alpha=True,
         )
         current_r2 = float(eval_current.get('r2', 0.0))
         full_mask = torch.ones_like(ppm_axis, dtype=torch.bool)
@@ -329,7 +339,7 @@ class Layer3Estimator:
             )
 
         for _ in range(max(0, int(max_iters))):
-            diff = eval_current['S_target'] - eval_current['S_fit']
+            diff = eval_current['S_target'] - eval_current['S_recon']
             negative_ppms = self._top_negative_ppms(
                 diff,
                 ppm_axis,
@@ -392,20 +402,18 @@ class Layer3Estimator:
                         if not (float(coarse_lo) <= float(mu_candidate) <= float(coarse_hi)):
                             continue
 
-                        peak_candidate = self._peak(mu_candidate, ppm_axis, hwhm=float(hwhm))
+                        peak_candidate = self._peak(mu_candidate, ppm_axis)
                         recon_candidate = recon - old_peak + peak_candidate
                         eval_candidate = evaluate_spectrum_reconstruction(
                             target,
                             recon_candidate,
                             ppm_axis=ppm_axis,
-                            fit_scale=True,
-                            nonnegative_alpha=True,
                         )
                         r2_candidate = float(eval_candidate.get('r2', 0.0))
                         if r2_candidate <= current_r2 + 1e-9:
                             continue
                         residual_candidate = self._segment_abs(
-                            eval_candidate['S_target'] - eval_candidate['S_fit'],
+                            eval_candidate['S_target'] - eval_candidate['S_recon'],
                             full_mask,
                         )
                         rank = (r2_candidate, -residual_candidate)
@@ -492,18 +500,47 @@ class Layer3Estimator:
                 score_components['layer3_decoder_mu'] = decoded_mu
                 score_components['layer3_final_decode_error'] = float(error)
 
-        recon, peak_cache = self._build_recon(nodes, ppm_axis, hwhm=float(hwhm))
+        recon, peak_cache = self._build_recon(nodes, ppm_axis)
         eval_current = evaluate_spectrum_reconstruction(
             target,
             recon,
             ppm_axis=ppm_axis,
-            fit_scale=True,
-            nonnegative_alpha=True,
         )
-        spectrum_fit = eval_current['S_fit']
-        spectrum_diff = eval_current['S_target'] - spectrum_fit
+        spectrum_recon = eval_current['S_recon']
+        spectrum_diff = eval_current['S_target'] - spectrum_recon
         r2 = float(eval_current.get('r2', 0.0))
-        alpha = float(eval_current.get('alpha', 1.0))
+        accepted = bool(
+            np.isfinite(r2)
+            and (
+                not baseline_has_complete_peaks
+                or r2 + 1e-9 >= baseline_r2
+            )
+        )
+        self.last_diagnostics = {
+            'accepted': bool(accepted),
+            'reason': (
+                'g2s_layer3_required_complete_decode'
+                if accepted and not baseline_has_complete_peaks
+                else 'g2s_layer3_not_worse_than_input'
+                if accepted
+                else 'g2s_layer3_below_input_baseline'
+            ),
+            'baseline_r2': float(baseline_r2),
+            'decoded_initial_r2': float(current_r2 if not moves else moves[0]['r2_before']),
+            'candidate_r2': float(r2),
+            'r2_gain': float(r2 - baseline_r2),
+            'z_moves': int(len(moves)),
+            'stop_reason': str(stop_reason),
+            'max_decode_error': float(max_decode_error),
+        }
+
+        if not accepted:
+            print(
+                f"  [Layer3 rollback] candidate_r2={r2:.4f} < "
+                f"input_r2={baseline_r2:.4f}; retained incoming Layer2 state"
+            )
+            print("Layer3 完成（候选未提交）\n")
+            return baseline_nodes, float(baseline_r2)
 
         if output_dir:
             out = Path(output_dir)
@@ -511,17 +548,15 @@ class Layer3Estimator:
             pd.DataFrame({
                 'ppm': ppm_axis.detach().cpu().numpy(),
                 'target': target.detach().cpu().numpy(),
-                'reconstructed_raw': recon.detach().cpu().numpy(),
-                'reconstructed': spectrum_fit.detach().cpu().numpy(),
+                'reconstructed': spectrum_recon.detach().cpu().numpy(),
                 'difference': spectrum_diff.detach().cpu().numpy(),
-                'alpha': np.full(int(ppm_axis.numel()), alpha, dtype=np.float64),
             }).to_csv(str(out / 'layer3_spectrum.csv'), index=False)
             pd.DataFrame(moves).to_csv(str(out / 'layer3_z_moves.csv'), index=False)
 
         print(
             f"  最终调整结果: z_moves={len(moves)}, template_moves=0, "
             f"stop={stop_reason}, max_decode_error={max_decode_error:.2e}, "
-            f"R²={r2:.4f}, α={alpha:.4f}"
+            f"R²={r2:.4f}"
         )
         print("Layer3 完成\n")
         return nodes, r2

@@ -16,7 +16,12 @@ from model.inverse.topology.spectrum_rebalance import (
     generate_spectrum_candidates,
     spectrum_candidate_balance_penalty,
 )
-from model.inverse.topology.stage3_state_machine import _residual_contracts, plan_stage3_state_machine
+from model.inverse.topology.stage3_state_machine import (
+    _filter_spectrum_candidates_by_stage3_hard_constraint,
+    _partition_active_external_contracts,
+    _residual_contracts,
+    plan_stage3_state_machine,
+)
 from model.inverse.topology.stage3_models import (
     Stage3AdjustmentPlan,
     Stage3PhaseResult,
@@ -74,6 +79,25 @@ def test_phase_sequence_places_spectrum_before_su24_and_residual() -> None:
         "residual_resource_self_closure",
         "complete",
     )
+
+
+def test_later_side_contract_is_dormant_while_ring_phase_is_active() -> None:
+    phase = Stage3PhaseResult(active_phase="external_fatty_ring_closure")
+    phase.active_phase = "external_fatty_ring_closure"
+    contracts = [
+        {"contract_id": 300, "target_role": "fatty_ring"},
+        {"contract_id": 401, "target_role": "side_chain"},
+    ]
+
+    active, dormant, active_phase, active_role = _partition_active_external_contracts(
+        phase,
+        contracts,
+    )
+
+    assert [item["contract_id"] for item in active] == [300]
+    assert [item["contract_id"] for item in dormant] == [401]
+    assert active_phase == "external_fatty_ring_closure"
+    assert active_role == "fatty_ring"
 
 
 def test_flex_upper_uses_exact_point_eight_formula_without_lower_bound_raise(monkeypatch) -> None:
@@ -414,7 +438,9 @@ def _external_budget_fixture():
     return nodes, phase
 
 
-def test_external_resource_conversion_forces_fresh_physical_assembly(monkeypatch) -> None:
+def test_external_resource_conversions_are_batched_before_fresh_physical_assembly(
+    monkeypatch,
+) -> None:
     nodes, phase = _external_budget_fixture()
     monkeypatch.setattr(
         "model.inverse.topology.stage3_state_machine._evaluate_external_phases",
@@ -425,30 +451,38 @@ def test_external_resource_conversion_forces_fresh_physical_assembly(monkeypatch
         phase_eval=phase,
         H=_histogram(nodes),
         nodes=nodes,
-        E_target=torch.tensor([0.0, 2.0]),
         enable_post_external_spectrum=False,
         max_primary_adjustments_per_stage=10,
     )
 
     assert plan.reason == "stage3_rebuild_required"
     assert plan.phase == "external_topology_assembly"
-    assert plan.histogram_adjustment_plan.primary_adjustment_count == 1
+    assert plan.histogram_adjustment_plan.primary_adjustment_count == 3
     assert plan.phase_result.phase_completed is False
     assert plan.diagnostics["external_stage_completed"] is False
     assert plan.diagnostics["physical_materialization_required_after_rebuild"] is True
+    assert plan.diagnostics["external_reserved_after_conversion"] == 3
+    assert plan.diagnostics["external_completed_after_conversion"] == 0
     assert plan.diagnostics["external_rebuild_reason"] == (
         "resource_conversion_requires_fresh_assembly"
     )
-    assert all(
-        transaction.claimed_resource_ids == {}
-        and transaction.product_node_ids == []
-        and transaction.slot_assignments == []
+    candidate_transactions = [
+        transaction
         for transaction in plan.phase_result.transactions
-        if transaction.transaction_origin != "assembly_snapshot"
-    )
+        if transaction.transaction_origin == "current_plan_candidate"
+    ]
+    assert len(candidate_transactions) == 3
+    claimed_ids = [
+        int(node_id)
+        for transaction in candidate_transactions
+        for node_ids in transaction.claimed_resource_ids.values()
+        for node_id in node_ids
+    ]
+    assert len(claimed_ids) == 3
+    assert len(set(claimed_ids)) == len(claimed_ids)
 
 
-def test_available_resources_do_not_upgrade_pending_contract_to_product(monkeypatch) -> None:
+def test_available_resources_report_topology_materialization_failure(monkeypatch) -> None:
     nodes = [make_node(1, 11)]
     phase = build_stage3_phase_evaluation(
         nodes,
@@ -491,7 +525,10 @@ def test_available_resources_do_not_upgrade_pending_contract_to_product(monkeypa
 
     assert plan.reason == "phase_resource_infeasible"
     failed = plan.phase_result.infeasibility_proof["failed_contract"]
-    assert failed["proof"]["reason"] == "external_physical_materialization_failed"
+    assert failed["proof"]["reason"] == "external_topology_materialization_invalid"
+    assert failed["proof"]["failure_domain"] == "topology_materialization"
+    assert plan.blocked_reason == "stage3_topology_materialization_invalid"
+    assert plan.plan_kind == "sequential_phase_topology_materialization_invalid"
     assert failed["proof"]["missing_counts"] == {}
     assert plan.diagnostics["external_stage_completed"] is False
 
@@ -551,17 +588,19 @@ def test_external_conversion_budget_does_not_mark_pending_roles_complete(monkeyp
         phase_eval=phase,
         H=_histogram(nodes),
         nodes=nodes,
-        E_target=torch.tensor([0.0, 2.0]),
         enable_post_external_spectrum=False,
         max_primary_adjustments_per_stage=2,
     )
 
     assert plan.reason == "stage3_rebuild_required"
     assert plan.phase == "external_topology_assembly"
-    assert plan.histogram_adjustment_plan.primary_adjustment_count == 1
+    assert plan.histogram_adjustment_plan.primary_adjustment_count == 2
     assert plan.phase_result.phase_completed is False
     assert plan.diagnostics["external_stage_completed"] is False
-    assert plan.diagnostics["external_remaining_pending"] == 3
+    assert plan.diagnostics["external_remaining_pending"] == 1
+    assert plan.diagnostics["external_reserved_after_conversion"] == 2
+    assert plan.diagnostics["external_completed_after_conversion"] == 0
+    assert plan.diagnostics["external_conversion_budget_exhausted"] is True
     assert plan.diagnostics["external_rebuild_reason"] == (
         "resource_conversion_requires_fresh_assembly"
     )
@@ -638,15 +677,18 @@ class _SpectrumAdjuster:
 
 def test_block_c_accepts_only_significant_spectrum_candidate() -> None:
     ppm, diff, improved = _spectrum_fixture()
-    node = make_node(101, 23)
-    H = _histogram([node])
+    nodes = [make_node(101, 23), make_node(102, 23)]
+    H = _histogram(nodes)
     candidate = Stage3SpectrumCandidate(
         candidate_id="strong",
         histogram_signature="hist-strong",
         inverse_signature="inverse-strong",
-        operations=[{"node_id": 101, "from_su": 23, "to_su": 24}],
+        operations=[
+            {"node_id": 101, "from_su": 23, "to_su": 24},
+            {"node_id": 102, "from_su": 23, "to_su": 24},
+        ],
         target_su_types=[23, 24],
-        primary_adjustment_count=1,
+        primary_adjustment_count=2,
     )
 
     def rebuild(**kwargs):
@@ -667,6 +709,46 @@ def test_block_c_accepts_only_significant_spectrum_candidate() -> None:
     result = run_block_c_resource_adjustment_loop_impl(
         _SpectrumAdjuster(candidate),
         H,
+        nodes,
+        E_target=None,
+        difference_spectrum={
+            "ppm": ppm,
+            "diff": diff,
+            "r2": 0.50,
+            "source_stage": "layer2",
+            "spectral_contract": "template_center_mu",
+            "evaluation_hwhm": 1.0,
+        },
+        rebuild_fn=rebuild,
+        validate_fn=lambda **_kwargs: (True, "ok"),
+        spectrum_min_r2_gain=0.02,
+    )
+
+    assert result.accepted_cycles == 1
+    assert int(result.H[23].item()) == 0
+    assert int(result.H[24].item()) == 2
+    assert result.cycles[0].acceptance_reason == "layer2_r2_gain_threshold_met"
+    assert result.cycles[0].diagnostics["baseline_layer2_r2"] == 0.50
+    assert "baseline_build_variant" not in result.cycles[0].diagnostics
+
+
+def test_block_c_does_not_rebuild_odd_port_spectrum_candidate() -> None:
+    ppm, diff, _ = _spectrum_fixture()
+    node = make_node(101, 23)
+    H = _histogram([node])
+    candidate = Stage3SpectrumCandidate(
+        candidate_id="odd-port",
+        histogram_signature="odd-port-histogram",
+        inverse_signature="odd-port-inverse",
+        operations=[{"node_id": 101, "from_su": 23, "to_su": 24}],
+        target_su_types=[23, 24],
+        primary_adjustment_count=1,
+    )
+    rebuild_calls = []
+
+    result = run_block_c_resource_adjustment_loop_impl(
+        _SpectrumAdjuster(candidate),
+        H,
         [node],
         E_target=None,
         difference_spectrum={
@@ -676,19 +758,105 @@ def test_block_c_accepts_only_significant_spectrum_candidate() -> None:
             "source_stage": "layer2",
             "spectral_contract": "template_center_mu",
             "evaluation_hwhm": 1.0,
-            "effective_build_variant": 7,
+        },
+        rebuild_fn=lambda **kwargs: rebuild_calls.append(kwargs),
+        validate_fn=lambda **_kwargs: (True, "ok"),
+    )
+
+    assert result.accepted_cycles == 0
+    assert rebuild_calls == []
+    rejected = result.cycles[0].plan["diagnostics"]["rejected_spectrum_candidates"]
+    assert rejected[0]["valid"] is False
+    assert rejected[0]["significant"] is False
+    assert rejected[0]["pre_rebuild_port_feasibility"]["ok"] is False
+
+
+def test_block_c_balances_odd_spectrum_candidate_from_remaining_pool() -> None:
+    ppm, diff, improved = _spectrum_fixture()
+    nodes = [
+        make_node(101, 23),
+        make_node(102, 23),
+        make_node(103, 23),
+        make_node(104, 13),
+    ]
+    H = _histogram(nodes)
+    candidate = Stage3SpectrumCandidate(
+        candidate_id="odd-but-balanceable",
+        histogram_signature="odd-but-balanceable-histogram",
+        inverse_signature="odd-but-balanceable-inverse",
+        operations=[{"node_id": 101, "from_su": 23, "to_su": 24}],
+        target_su_types=[23, 24],
+        primary_adjustment_count=1,
+    )
+
+    class BalanceableSpectrumAdjuster(_SpectrumAdjuster):
+        def __init__(self, value):
+            super().__init__(value)
+            self._stage3_parity_balance_cursor = 0
+
+        def plan_topology_resource_adjustments(self, **kwargs):
+            plan = super().plan_topology_resource_adjustments(**kwargs)
+            if plan.reason == "stage3_spectrum_candidates_ready":
+                plan.runtime = {
+                    "iteration_topology_ledger": {
+                        "available_ids_by_su": {
+                            23: [101, 102, 103],
+                            13: [104],
+                        },
+                        "ownership_by_node_id": {
+                            node_id: {"state": "remaining_closure_resource"}
+                            for node_id in (101, 102, 103, 104)
+                        },
+                    }
+                }
+            return plan
+
+    rebuild_histograms = []
+
+    def rebuild(**kwargs):
+        H_seed = kwargs["H_seed"]
+        rebuild_histograms.append(H_seed.detach().clone())
+        return (
+            _nodes_from_histogram(H_seed),
+            H_seed,
+            {
+                "ppm": ppm,
+                "diff": improved,
+                "r2": 0.60,
+                "source_stage": "layer2",
+                "spectral_contract": "template_center_mu",
+                "evaluation_hwhm": 1.0,
+            },
+            0.60,
+        )
+
+    adjuster = BalanceableSpectrumAdjuster(candidate)
+    result = run_block_c_resource_adjustment_loop_impl(
+        adjuster,
+        H,
+        nodes,
+        E_target=None,
+        difference_spectrum={
+            "ppm": ppm,
+            "diff": diff,
+            "r2": 0.50,
+            "source_stage": "layer2",
+            "spectral_contract": "template_center_mu",
+            "evaluation_hwhm": 1.0,
         },
         rebuild_fn=rebuild,
         validate_fn=lambda **_kwargs: (True, "ok"),
         spectrum_min_r2_gain=0.02,
     )
 
+    assert len(rebuild_histograms) == 1
+    assert int(rebuild_histograms[0][23].item()) == 2
+    assert int(rebuild_histograms[0][24].item()) == 1
+    assert int(rebuild_histograms[0][12].item()) == 1
+    assert int(rebuild_histograms[0][13].item()) == 0
     assert result.accepted_cycles == 1
-    assert result.nodes[0].su_type == 24
-    assert result.nodes[0].global_id == 0
-    assert result.cycles[0].acceptance_reason == "layer2_r2_gain_threshold_met"
-    assert result.cycles[0].diagnostics["baseline_layer2_r2"] == 0.50
-    assert result.cycles[0].diagnostics["baseline_build_variant"] == 7
+    assert result.cycles[0].parity_balance_count == 1
+    assert adjuster._stage3_parity_balance_cursor == 1
 
 
 def test_block_c_rejects_post_layer3_spectrum_as_layer2_baseline() -> None:
@@ -766,28 +934,34 @@ def test_block_c_rejects_mixed_layer2_spectral_contract() -> None:
 
 def test_block_c_restores_context_for_selected_best_spectrum_candidate() -> None:
     ppm, diff, improved = _spectrum_fixture()
-    node = make_node(101, 23)
-    H = _histogram([node])
+    nodes = [make_node(101, 23), make_node(102, 23)]
+    H = _histogram(nodes)
     best = Stage3SpectrumCandidate(
         candidate_id="best",
         histogram_signature="hist-best",
         inverse_signature="inverse-best",
-        operations=[{"node_id": 101, "from_su": 23, "to_su": 24}],
+        operations=[
+            {"node_id": 101, "from_su": 23, "to_su": 24},
+            {"node_id": 102, "from_su": 23, "to_su": 24},
+        ],
         target_su_types=[23, 24],
-        primary_adjustment_count=1,
+        primary_adjustment_count=2,
     )
     last = Stage3SpectrumCandidate(
         candidate_id="last",
         histogram_signature="hist-last",
         inverse_signature="inverse-last",
-        operations=[{"node_id": 101, "from_su": 23, "to_su": 22}],
+        operations=[
+            {"node_id": 101, "from_su": 23, "to_su": 22},
+            {"node_id": 102, "from_su": 23, "to_su": 22},
+        ],
         target_su_types=[22, 23],
-        primary_adjustment_count=1,
+        primary_adjustment_count=2,
     )
     context = {"candidate": "baseline"}
 
     def rebuild(**kwargs):
-        if int(kwargs["H_seed"][24].item()) == 1:
+        if int(kwargs["H_seed"][24].item()) == 2:
             context["candidate"] = "best"
             r2 = 0.60
         else:
@@ -810,7 +984,7 @@ def test_block_c_restores_context_for_selected_best_spectrum_candidate() -> None
     result = run_block_c_resource_adjustment_loop_impl(
         _SpectrumAdjuster([best, last]),
         H,
-        [node],
+        nodes,
         E_target=None,
         difference_spectrum={
             "ppm": ppm,
@@ -834,15 +1008,18 @@ def test_block_c_restores_context_for_selected_best_spectrum_candidate() -> None
 
 def test_block_c_rolls_back_weak_spectrum_candidate_and_continues() -> None:
     ppm, diff, improved = _spectrum_fixture()
-    node = make_node(101, 23)
-    H = _histogram([node])
+    nodes = [make_node(101, 23), make_node(102, 23)]
+    H = _histogram(nodes)
     candidate = Stage3SpectrumCandidate(
         candidate_id="weak",
         histogram_signature="hist-weak",
         inverse_signature="inverse-weak",
-        operations=[{"node_id": 101, "from_su": 23, "to_su": 24}],
+        operations=[
+            {"node_id": 101, "from_su": 23, "to_su": 24},
+            {"node_id": 102, "from_su": 23, "to_su": 24},
+        ],
         target_su_types=[23, 24],
-        primary_adjustment_count=1,
+        primary_adjustment_count=2,
     )
 
     context = {"candidate": "baseline"}
@@ -866,7 +1043,7 @@ def test_block_c_rolls_back_weak_spectrum_candidate_and_continues() -> None:
     result = run_block_c_resource_adjustment_loop_impl(
         _SpectrumAdjuster(candidate),
         H,
-        [node],
+        nodes,
         E_target=None,
         difference_spectrum={
             "ppm": ppm,
@@ -893,22 +1070,25 @@ def test_block_c_rolls_back_weak_spectrum_candidate_and_continues() -> None:
 
 def test_block_c_uses_saved_layer2_baseline_without_noop_rebuild() -> None:
     ppm, diff, improved = _spectrum_fixture()
-    node = make_node(101, 23)
-    H = _histogram([node])
+    nodes = [make_node(101, 23), make_node(102, 23)]
+    H = _histogram(nodes)
     candidate = Stage3SpectrumCandidate(
         candidate_id="variant-only",
         histogram_signature="variant-only-histogram",
         inverse_signature="variant-only-inverse",
-        operations=[{"node_id": 101, "from_su": 23, "to_su": 24}],
+        operations=[
+            {"node_id": 101, "from_su": 23, "to_su": 24},
+            {"node_id": 102, "from_su": 23, "to_su": 24},
+        ],
         target_su_types=[23, 24],
-        primary_adjustment_count=1,
+        primary_adjustment_count=2,
     )
 
     rebuild_phases = []
 
     def rebuild(**kwargs):
         rebuild_phases.append(kwargs["phase"])
-        assert kwargs["build_variant"] == 7
+        assert "build_variant" not in kwargs
         return (
             _nodes_from_histogram(kwargs["H_seed"]),
             kwargs["H_seed"],
@@ -926,7 +1106,7 @@ def test_block_c_uses_saved_layer2_baseline_without_noop_rebuild() -> None:
     result = run_block_c_resource_adjustment_loop_impl(
         _SpectrumAdjuster(candidate),
         H,
-        [node],
+        nodes,
         E_target=None,
         difference_spectrum={
             "ppm": ppm,
@@ -935,7 +1115,6 @@ def test_block_c_uses_saved_layer2_baseline_without_noop_rebuild() -> None:
             "source_stage": "layer2",
             "spectral_contract": "template_center_mu",
             "evaluation_hwhm": 1.0,
-            "effective_build_variant": 7,
         },
         rebuild_fn=rebuild,
         validate_fn=lambda **_kwargs: (True, "ok"),
@@ -1043,3 +1222,49 @@ def test_spectrum_h_balance_is_unpenalized_inside_three_percent_window() -> None
     assert outside["h_after"] == 502.0
     assert outside["h_penalty"] > 0.0
     assert outside["h_compensation_required"] is True
+
+
+def test_spectrum_plus_five_percent_keeps_soft_compensation_diagnostic() -> None:
+    H_before = torch.zeros(600, dtype=torch.long)
+    H_before[13] = 100
+    H_after = H_before.detach().clone()
+    H_after[13] = 105
+
+    balance = spectrum_candidate_balance_penalty(
+        H_before=H_before,
+        H_after=H_after,
+        E_target=torch.tensor([0.0, 100.0]),
+    )
+
+    assert balance["h_after"] == 105.0
+    assert balance["h_compensation_required"] is True
+    assert balance["spectrum_h_soft_lower_ratio"] == -0.03
+    assert balance["spectrum_h_soft_upper_ratio"] == 0.03
+
+
+def test_stage3_hard_filter_accepts_plus_five_and_rejects_plus_nine_percent() -> None:
+    candidates = [
+        Stage3SpectrumCandidate(
+            candidate_id="plus-five",
+            diagnostics={"preflight_balance": {"h_after": 105.0}},
+        ),
+        Stage3SpectrumCandidate(
+            candidate_id="plus-nine",
+            diagnostics={"preflight_balance": {"h_after": 109.0}},
+        ),
+    ]
+
+    valid, rejected = _filter_spectrum_candidates_by_stage3_hard_constraint(
+        candidates,
+        target_h=100.0,
+        h_tolerance=0.08,
+    )
+
+    assert [candidate.candidate_id for candidate in valid] == ["plus-five"]
+    assert rejected == [
+        {
+            "candidate_id": "plus-nine",
+            "h_after": 109.0,
+            "reason": "stage3_hard_constraint_violation",
+        }
+    ]

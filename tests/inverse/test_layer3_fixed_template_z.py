@@ -89,6 +89,45 @@ def test_layer3_zero_move_still_decodes_every_carbon_node() -> None:
     assert all(node.score_components["layer3_final_decode_error"] <= 1e-5 for node in result)
 
 
+def test_layer3_rolls_back_full_decode_when_it_is_worse_than_input() -> None:
+    template_key = (22, (), ())
+    estimator = Layer3Estimator(device=torch.device("cpu"), vae_model=_FakeG2S())
+    estimator._template_cache = {
+        "templates": {
+            template_key: {
+                "samples": {"z": torch.tensor([[0.0], [0.5]])},
+            }
+        }
+    }
+    node = _NodeV3(global_id=0, su_type=22)
+    node.template_key = template_key
+    node.z_vec = torch.tensor([0.0])
+    node.mu = 110.0
+    node.pi = 1.0
+    node.score_components["spectral_source"] = "layer2_template_center_mu"
+    target = lorentzian_spectrum(
+        torch.tensor([110.0]),
+        torch.ones(1),
+        PPM_AXIS,
+        hwhm=1.0,
+    )
+
+    result, r2 = estimator.layer3_adjust_templates(
+        [node],
+        S_target=target,
+        E_target=torch.zeros(6),
+        max_iters=0,
+        verbose=False,
+    )
+
+    assert result[0].mu == 110.0
+    assert torch.equal(result[0].z_vec, torch.tensor([0.0]))
+    assert result[0].score_components["spectral_source"] == "layer2_template_center_mu"
+    assert r2 > 0.99
+    assert estimator.last_diagnostics["accepted"] is False
+    assert estimator.last_diagnostics["candidate_r2"] < estimator.last_diagnostics["baseline_r2"]
+
+
 class _FailingG2S(_FakeG2S):
     def decoder(self, su_feat: torch.Tensor, z: torch.Tensor, global_embed: torch.Tensor) -> torch.Tensor:
         raise RuntimeError("decoder failure")

@@ -1,6 +1,7 @@
 import torch
 
 from model.inverse.topology.histogram_adjustment import (
+    _conversion_bundle_signature,
     apply_histogram_adjustment_plan,
     build_histogram_adjustment_plan,
 )
@@ -11,7 +12,7 @@ from model.inverse.topology.conversion_scoring import (
     evaluate_flex_impact,
     score_conversion_bundle,
 )
-from model.inverse.topology.resource_profiles import h_soft_bounds
+from model.inverse.topology.resource_profiles import h_hard_bounds
 from model.inverse.topology.stage3_models import Stage3AdjustmentPlan
 from model.inverse.topology.stage3_models import (
     AtomicAdjustmentGroup,
@@ -69,7 +70,7 @@ def test_histogram_application_does_not_mutate_nodes() -> None:
     assert node.global_id == 7
 
 
-def test_high_h_state_accepts_explicit_conversion_with_soft_compensation() -> None:
+def test_hard_valid_resource_conversion_does_not_add_h_compensation() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[11], H[22], H[23], H[24] = 1, 10, 1, 3
     plan = Stage3AdjustmentPlan(
@@ -84,7 +85,7 @@ def test_high_h_state_accepts_explicit_conversion_with_soft_compensation() -> No
             },
         },
     )
-    target_elements = torch.tensor([0.0, 30.0])
+    target_elements = torch.tensor([0.0, 34.0])
 
     histogram_plan = build_histogram_adjustment_plan(
         plan,
@@ -98,11 +99,128 @@ def test_high_h_state_accepts_explicit_conversion_with_soft_compensation() -> No
     assert histogram_plan.primary_adjustment_count == 1
     assert histogram_plan.groups[0].primary_op.from_su == 24
     assert histogram_plan.groups[0].primary_op.to_su == 23
-    assert histogram_plan.groups[0].h_after_final <= histogram_plan.groups[0].h_after_primary
+    assert histogram_plan.groups[0].h_after_final == histogram_plan.groups[0].h_after_primary
+    assert histogram_plan.groups[0].h_compensation_ops == []
 
 
-def test_h_soft_bounds_are_asymmetric_minus_two_plus_three_percent() -> None:
-    assert h_soft_bounds(100.0) == (98.0, 103.0)
+def test_stage3_hard_bounds_are_symmetric_eight_percent() -> None:
+    assert h_hard_bounds(100.0) == (92.0, 108.0)
+
+
+def test_stage3_resource_candidate_at_plus_five_percent_is_hard_valid() -> None:
+    H = torch.zeros(33, dtype=torch.long)
+    H[13] = 106
+    plan = Stage3AdjustmentPlan(
+        phase="external_side_chain_closure",
+        planned_conversions=[{"from_su": 13, "to_su": 11, "reason": "primary"}],
+        runtime={
+            "assembly_before_adjustment": {
+                "resource_ledger": {"convertible_counts": {11: 0, 13: 106}}
+            }
+        },
+    )
+
+    result = build_histogram_adjustment_plan(
+        plan,
+        H,
+        E_target=torch.tensor([0.0, 100.0]),
+        max_primary_adjustments=1,
+        max_h_compensation_ops=0,
+        h_tolerance=0.08,
+    )
+
+    assert result.primary_adjustment_count == 1
+    assert result.groups[0].h_after_final == 105.0
+
+
+def test_stage3_resource_candidate_at_plus_nine_percent_is_hard_invalid() -> None:
+    H = torch.zeros(33, dtype=torch.long)
+    H[13] = 110
+    plan = Stage3AdjustmentPlan(
+        phase="external_side_chain_closure",
+        planned_conversions=[{"from_su": 13, "to_su": 11, "reason": "primary"}],
+        runtime={
+            "assembly_before_adjustment": {
+                "resource_ledger": {"convertible_counts": {11: 0, 13: 110}}
+            }
+        },
+    )
+
+    result = build_histogram_adjustment_plan(
+        plan,
+        H,
+        E_target=torch.tensor([0.0, 100.0]),
+        max_primary_adjustments=1,
+        max_h_compensation_ops=0,
+        h_tolerance=0.08,
+    )
+
+    assert result.primary_adjustment_count == 0
+    assert torch.equal(result.H_after, H)
+
+
+def test_stage3_resource_h_compensation_is_suppressed_inside_hard_window() -> None:
+    H = torch.zeros(33, dtype=torch.long)
+    H[13], H[24] = 516, 1
+    plan = Stage3AdjustmentPlan(
+        phase="external_side_chain_closure",
+        minimum_resource_request={11: 0, 22: 0, 23: 0, 24: 0},
+        planned_conversions=[{"from_su": 13, "to_su": 11, "reason": "primary"}],
+        runtime={
+            "assembly_before_adjustment": {
+                "resource_ledger": {
+                    "convertible_counts": {11: 0, 13: 516, 22: 0, 23: 0, 24: 1},
+                },
+            },
+        },
+    )
+
+    histogram_plan = build_histogram_adjustment_plan(
+        plan,
+        H,
+        E_target=torch.tensor([0.0, 520.0]),
+        max_primary_adjustments=1,
+        max_h_compensation_ops=1,
+        h_tolerance=0.08,
+    )
+
+    assert histogram_plan.primary_adjustment_count == 1
+    assert histogram_plan.groups[0].h_after_primary == 516.0
+    assert histogram_plan.groups[0].h_compensation_ops == []
+    assert histogram_plan.accounting_diagnostics["effective_h_tolerance"] == 0.08
+    assert histogram_plan.accounting_diagnostics["stage3_hard_lower_ratio"] == -0.08
+
+
+def test_stage3_resource_does_not_compensate_inside_eight_percent_hard_window() -> None:
+    H = torch.zeros(33, dtype=torch.long)
+    # Effective H includes both SU13 (H=1) and SU24 (H=1): 494 + 10 = 504.
+    H[13], H[24] = 494, 10
+    plan = Stage3AdjustmentPlan(
+        phase="external_side_chain_closure",
+        minimum_resource_request={11: 0, 22: 0, 23: 0, 24: 0},
+        planned_conversions=[{"from_su": 13, "to_su": 11, "reason": "primary"}],
+        runtime={
+            "assembly_before_adjustment": {
+                "resource_ledger": {
+                    "convertible_counts": {11: 0, 13: 494, 22: 0, 23: 0, 24: 10},
+                },
+            },
+        },
+    )
+
+    histogram_plan = build_histogram_adjustment_plan(
+        plan,
+        H,
+        E_target=torch.tensor([0.0, 520.0]),
+        max_primary_adjustments=1,
+        max_h_compensation_ops=8,
+        h_tolerance=0.08,
+    )
+
+    group = histogram_plan.groups[0]
+    assert group.h_after_primary == 503.0
+    assert group.h_after_final == 503.0
+    assert group.h_compensation_ops == []
 
 
 def test_flex_scoring_accounts_for_product_created_by_current_transaction() -> None:
@@ -355,7 +473,7 @@ def test_executor_atomically_rejects_bundle_that_worsens_phase_deficit() -> None
     assert result.rejected_ops[0]["reason"] == "bundle_would_worsen_phase_resource_deficit"
 
 
-def test_missing_surplus_h_compensation_keeps_topology_progress() -> None:
+def test_resource_conversion_without_hard_valid_bundle_is_rejected() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[23], H[24] = 1, 1
     plan = Stage3AdjustmentPlan(
@@ -377,12 +495,11 @@ def test_missing_surplus_h_compensation_keeps_topology_progress() -> None:
         h_tolerance=0.0,
     )
 
-    assert histogram_plan.primary_adjustment_count == 1
-    assert histogram_plan.groups[0].primary_op.from_su == 24
-    assert histogram_plan.groups[0].primary_op.to_su == 23
+    assert histogram_plan.primary_adjustment_count == 0
+    assert torch.equal(histogram_plan.H_after, H)
 
 
-def test_primary_conversion_below_h_window_is_soft_penalized_not_blocked() -> None:
+def test_primary_conversion_below_hard_window_is_blocked() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[22], H[23] = 1, 1
     plan = Stage3AdjustmentPlan(
@@ -405,10 +522,8 @@ def test_primary_conversion_below_h_window_is_soft_penalized_not_blocked() -> No
         h_tolerance=0.0,
     )
 
-    assert histogram_plan.primary_adjustment_count == 1
-    assert histogram_plan.groups[0].primary_op.from_su == 23
-    assert histogram_plan.groups[0].primary_op.to_su == 11
-    assert histogram_plan.groups[0].h_after_final < histogram_plan.groups[0].h_before
+    assert histogram_plan.primary_adjustment_count == 0
+    assert torch.equal(histogram_plan.H_after, H)
 
 
 def test_hard_demand_precedes_preferred_demand() -> None:
@@ -542,7 +657,7 @@ def test_explicit_operation_is_not_replayed_after_gap_is_filled() -> None:
     assert int(result.H_after[22].item()) == 1
 
 
-def test_low_hydrogen_state_allows_only_available_topology_conversion() -> None:
+def test_topology_conversion_without_element_target_uses_available_donor() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[22] = 1
     plan = Stage3AdjustmentPlan(
@@ -558,9 +673,7 @@ def test_low_hydrogen_state_allows_only_available_topology_conversion() -> None:
     result = build_histogram_adjustment_plan(
         plan,
         H,
-        E_target=torch.tensor([0.0, 100.0]),
         max_primary_adjustments=1,
-        h_tolerance=0.06,
     )
 
     assert result.primary_adjustment_count == 1
@@ -569,7 +682,7 @@ def test_low_hydrogen_state_allows_only_available_topology_conversion() -> None:
     assert result.groups[0].h_after_final < result.groups[0].h_before
 
 
-def test_histogram_su11_gap_scores_h_drift_before_resource_surplus() -> None:
+def test_histogram_su11_gap_selection_is_stable_without_element_target() -> None:
     from model.inverse.topology import histogram_adjustment as module
 
     inventory = {11: 0, 12: 2, 13: 1, 22: 9, 23: 12, 24: 9}
@@ -577,14 +690,14 @@ def test_histogram_su11_gap_scores_h_drift_before_resource_surplus() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[12], H[13], H[22], H[23], H[24] = 2, 1, 9, 12, 9
 
-    lower_op, _ = module._choose_from_gap(H, inventory, demand, 0, current_h=90.0, target_h=100.0)
-    balanced_op, _ = module._choose_from_gap(H, inventory, demand, 0, current_h=100.0, target_h=100.0)
+    lower_op, _ = module._choose_from_gap(H, inventory, demand, 0)
+    balanced_op, _ = module._choose_from_gap(H, inventory, demand, 0)
 
     assert (lower_op.from_su, lower_op.to_su) == (12, 11)
     assert (balanced_op.from_su, balanced_op.to_su) == (12, 11)
 
 
-def test_histogram_su11_balanced_window_preserves_h_when_flex_context_is_absent() -> None:
+def test_histogram_su11_selection_uses_rotation_without_element_target() -> None:
     from model.inverse.topology import histogram_adjustment as module
 
     inventory = {11: 0, 12: 10, 13: 10, 22: 1, 23: 3, 24: 2}
@@ -597,8 +710,6 @@ def test_histogram_su11_balanced_window_preserves_h_when_flex_context_is_absent(
         inventory,
         demand,
         0,
-        current_h=100.0,
-        target_h=100.0,
     )
 
     assert (op.from_su, op.to_su) == (12, 11)
@@ -650,7 +761,7 @@ def test_histogram_su11_rotation_does_not_override_lower_h_drift() -> None:
     assert cursor == 8
 
 
-def test_su11_aromatic_donor_selection_uses_h_direction_before_rotation() -> None:
+def test_su11_aromatic_donor_h_scores_are_equal_inside_hard_window() -> None:
     from model.inverse.topology.histogram_adjustment import _h_total
 
     high_h = torch.zeros(140, dtype=torch.long)
@@ -695,8 +806,10 @@ def test_su11_aromatic_donor_selection_uses_h_direction_before_rotation() -> Non
         h_total_fn=_h_total,
     )
 
-    assert high_13.total_score < high_12.total_score
-    assert low_12.total_score < low_13.total_score
+    assert high_12.diagnostics["h"]["hard_bound_penalty"] == 0.0
+    assert high_13.diagnostics["h"]["hard_bound_penalty"] == 0.0
+    assert low_12.diagnostics["h"]["hard_bound_penalty"] == 0.0
+    assert low_13.diagnostics["h"]["hard_bound_penalty"] == 0.0
 
 
 def test_residual_su11_to_aromatic_uses_same_three_step_cycle() -> None:
@@ -712,7 +825,7 @@ def test_residual_su11_to_aromatic_uses_same_three_step_cycle() -> None:
     assert cursor == 5
 
 
-def test_histogram_non_su11_target_scores_h_when_h_is_low() -> None:
+def test_histogram_non_su11_target_selects_topology_candidate_without_element_target() -> None:
     from model.inverse.topology import histogram_adjustment as module
 
     inventory = {11: 0, 12: 3, 13: 3, 22: 5, 23: 0, 24: 1}
@@ -720,11 +833,11 @@ def test_histogram_non_su11_target_scores_h_when_h_is_low() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[12], H[13], H[22], H[24] = 3, 3, 5, 1
 
-    op, _ = module._choose_from_gap(H, inventory, demand, 0, current_h=95.0, target_h=100.0)
+    op, _ = module._choose_from_gap(H, inventory, demand, 0)
 
     assert op.to_su == 23
-    assert op.from_su == 12
-    assert op.via_su == 11
+    assert op.from_su == 22
+    assert op.via_su is None
 
 
 def test_su11_rotation_advances_only_after_successful_real_adjustment() -> None:
@@ -963,7 +1076,7 @@ def test_ym10_su11_gap_does_not_spend_protected_su23_on_h_compensation() -> None
     )
 
 
-def test_low_h_compensation_can_create_nondeficit_su22_from_surplus_su23() -> None:
+def test_resource_conversion_inside_hard_window_does_not_create_nondeficit_su22() -> None:
     H = torch.zeros(600, dtype=torch.long)
     H[13], H[23], H[22] = 483, 11, 0
     plan = Stage3AdjustmentPlan(
@@ -996,11 +1109,11 @@ def test_low_h_compensation_can_create_nondeficit_su22_from_surplus_su23() -> No
     assert result.primary_adjustment_count == 1
     group = result.groups[0]
     assert (group.primary_op.from_su, group.primary_op.to_su) == (13, 11)
-    assert [(op.from_su, op.to_su) for op in group.h_compensation_ops] == [(23, 22)]
+    assert group.h_compensation_ops == []
     assert group.h_before == 505.0
     assert group.h_after_primary == 504.0
-    assert group.h_after_final == 505.0
-    assert result.inventory_after[22] == 6
+    assert group.h_after_final == 504.0
+    assert result.inventory_after[22] == 5
 
 
 def test_low_h_compensation_cannot_spend_protected_su23() -> None:
@@ -1041,7 +1154,7 @@ def test_low_h_compensation_cannot_spend_protected_su23() -> None:
     assert group.h_after_final == 504.0
 
 
-def test_high_h_primary_24_to_22_uses_surplus_23_to_11_compensation() -> None:
+def test_high_h_primary_inside_hard_window_does_not_add_compensation() -> None:
     H = torch.zeros(600, dtype=torch.long)
     H[13], H[23], H[24] = 514, 10, 1
     plan = Stage3AdjustmentPlan(
@@ -1075,15 +1188,60 @@ def test_high_h_primary_24_to_22_uses_surplus_23_to_11_compensation() -> None:
     assert result.primary_adjustment_count == 1
     group = result.groups[0]
     assert (group.primary_op.from_su, group.primary_op.to_su) == (24, 22)
-    assert [(op.from_su, op.to_su) for op in group.h_compensation_ops] == [
-        (23, 11)
-    ]
+    assert group.h_compensation_ops == []
     assert group.h_before == 535.0
     assert group.h_after_primary == 537.0
-    assert group.h_after_final == 535.0
+    assert group.h_after_final == 537.0
 
 
-def test_high_h_compensation_does_not_create_surplus_su11_or_su24() -> None:
+def test_forbidden_hard_valid_primary_bundle_is_not_replayed() -> None:
+    H = torch.zeros(600, dtype=torch.long)
+    H[13], H[23], H[24] = 514, 10, 1
+    runtime = {
+        "assembly_before_adjustment": {
+            "resource_ledger": {
+                "remaining_counts": {
+                    "11": 0,
+                    "13": 514,
+                    "22": 0,
+                    "23": 10,
+                    "24": 1,
+                },
+            },
+        },
+    }
+    plan = Stage3AdjustmentPlan(
+        phase="resource_su24_ring_closure",
+        planned_conversions=[
+            {"from_su": 24, "to_su": 22, "reason": "ring_support_shortage"},
+        ],
+        runtime=runtime,
+    )
+    first = build_histogram_adjustment_plan(
+        plan,
+        H,
+        E_target=torch.tensor([500.0, 520.0]),
+        max_primary_adjustments=1,
+        max_h_compensation_ops=1,
+    )
+    first_ops = [first.groups[0].primary_op] + first.groups[0].h_compensation_ops
+    first_signature = _conversion_bundle_signature(first_ops)
+
+    plan.diagnostics = {
+        "forbidden_primary_conversion_signatures": [first_signature],
+    }
+    second = build_histogram_adjustment_plan(
+        plan,
+        H,
+        E_target=torch.tensor([500.0, 520.0]),
+        max_primary_adjustments=1,
+        max_h_compensation_ops=1,
+    )
+    assert first_signature == "bundle:24>22"
+    assert second.primary_adjustment_count == 0
+
+
+def test_hard_valid_resource_choice_does_not_add_compensation() -> None:
     H = torch.zeros(600, dtype=torch.long)
     H[13], H[22] = 500, 20
     plan = Stage3AdjustmentPlan(
@@ -1115,12 +1273,8 @@ def test_high_h_compensation_does_not_create_surplus_su11_or_su24() -> None:
 
     assert result.primary_adjustment_count == 1
     group = result.groups[0]
-    assert (group.primary_op.from_su, group.primary_op.to_su) == (22, 11)
-    assert group.h_compensation_ops
-    assert all(
-        (op.from_su, op.to_su) == (22, 23)
-        for op in group.h_compensation_ops
-    )
+    assert (group.primary_op.from_su, group.primary_op.to_su) == (13, 11)
+    assert group.h_compensation_ops == []
     assert result.inventory_after[11] == 1
     assert result.inventory_after[24] == 0
 
@@ -1281,3 +1435,33 @@ def test_atomic_via_su11_conversion_updates_node_history_as_one_bundle() -> None
         {"from_su": 13, "to_su": 11, "reason": "atomic_aromatic_via_su11_to_su23"},
         {"from_su": 11, "to_su": 23, "reason": "atomic_aromatic_via_su11_to_su23"},
     ]
+
+
+def test_parity_balance_rejects_non_12_13_conversion_contract() -> None:
+    from model.shared.inverse_common import _NodeV3
+
+    H = torch.zeros(33, dtype=torch.long)
+    H[11] = 1
+    node = _NodeV3(global_id=9, su_type=11)
+    histogram_plan = HistogramAdjustmentPlan(
+        phase="external_side_chain_closure",
+        inventory_before={11: 1},
+        H_before=H.detach().clone(),
+        H_after=H.detach().clone(),
+        parity_balance_op=HistogramConversion(
+            11,
+            12,
+            1,
+            "invalid_test_parity_conversion",
+            node_ids=[9],
+        ),
+    )
+
+    result = apply_histogram_adjustment_plan(H, histogram_plan, nodes=[node])
+
+    assert result.changed is False
+    assert result.nodes[0].su_type == 11
+    assert result.rejected_ops[0]["reason"] == "aggregate_resource_preflight_failed"
+    assert result.rejected_ops[0]["accounting"]["errors"][0]["reason"] == (
+        "invalid_parity_balance_contract"
+    )

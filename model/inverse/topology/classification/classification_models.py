@@ -42,6 +42,7 @@ class TopologyFragment(Stage3Serializable):
     open_mainline_slots: List[TopologyClosureSlot] = field(default_factory=list)
     branch_contracts: List[TopologyClosureSlot] = field(default_factory=list)
     context_node_ids: List[int] = field(default_factory=list)
+    open_boundaries: List[Dict[str, Any]] = field(default_factory=list)
     atomic_group_ids: List[int] = field(default_factory=list)
     evidence: Dict[str, Any] = field(default_factory=dict)
 

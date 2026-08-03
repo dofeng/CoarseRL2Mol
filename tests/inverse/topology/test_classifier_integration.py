@@ -22,8 +22,8 @@ def test_double19d2_supports_all_major_component_combinations() -> None:
     a5 = make_node(505, 5)
     connect(center_a, c2_a, fixed=True)
     connect(center_a, c29_a, fixed=True)
-    connect(c2_a, a9)
-    connect(c29_a, a5)
+    connect(c2_a, a9, fixed=True)
+    connect(c29_a, a5, fixed=True)
 
     # M + P -> C+
     center_c = make_node(510, 19, target_hop1_degree=2, special_anchor_mode="double", target_fixed_anchor_count=2)
@@ -32,7 +32,7 @@ def test_double19d2_supports_all_major_component_combinations() -> None:
     c9 = make_node(519, 9)
     connect(center_c, c2_c, fixed=True)
     connect(center_c, c28_c, fixed=True)
-    connect(c2_c, c9)
+    connect(c2_c, c9, fixed=True)
 
     # M + N -> B+
     center_b = make_node(520, 19, target_hop1_degree=2, special_anchor_mode="double", target_fixed_anchor_count=2)
@@ -42,7 +42,7 @@ def test_double19d2_supports_all_major_component_combinations() -> None:
     b_side = make_node(540, 19, target_hop1_degree=2, special_anchor_mode="single")
     connect(center_b, c2_b, fixed=True)
     connect(center_b, c31_b, fixed=True)
-    connect(c2_b, b9)
+    connect(c2_b, b9, fixed=True)
     connect(c31_b, b_side)
 
     result = classify_topology_units([
@@ -75,7 +75,7 @@ def test_double20d2_supports_n_n_and_n_p() -> None:
     connect(center_e, c0_e, fixed=True)
     connect(center_e, c27_e, fixed=True)
     connect(c0_e, open_24)
-    connect(c27_e, side_20d1)
+    connect(c27_e, side_20d1, fixed=True)
 
     result = classify_topology_units([
         center_d, c0_d, c27_d, open_23, side_single20d2,
@@ -103,7 +103,7 @@ def test_classifier_reports_rejects_and_keeps_consumed_ids_unique() -> None:
     side_20d1 = make_node(741, 20, target_hop1_degree=1, special_anchor_mode="single")
     connect(reject_center, reject_c0, fixed=True)
     connect(reject_center, reject_c27, fixed=True)
-    connect(reject_c0, wrong_side)
+    connect(reject_c0, wrong_side, fixed=True)
     connect(reject_c27, side_20d1)
 
     result = classify_topology_units([
@@ -177,6 +177,6 @@ def test_classifier_csv_regression_key_nodes_print() -> None:
     print("csv-claim-conflicts", list(getattr(result, "claim_conflicts", []) or []))
 
     assert "B" in node_21_classes
-    assert "24_CD_P" in node_392_classes
+    assert "24_D" in node_392_classes
     assert reject_392 == []
     assert no_rule_21 == []

@@ -126,7 +126,12 @@ def build_stage3_round_context(
     conflicts: List[Dict[str, Any]] = []
     for raw_fragment in list(classification_dict.get("fragments", []) or []):
         fragment = dict(raw_fragment or {})
-        fragment_id = int(fragment.get("fragment_id", -1) or -1)
+        raw_fragment_id = fragment.get("fragment_id", -1)
+        fragment_id = (
+            -1
+            if raw_fragment_id is None or raw_fragment_id == ""
+            else int(raw_fragment_id)
+        )
         fragment_fixed, fragment_context = _fixed_fragment_ids(fragment)
         context_ids.update(fragment_context)
         for node_id in sorted(fragment_fixed):
@@ -368,7 +373,12 @@ def mark_round_pending_contracts(
         contract = dict(raw or {})
         if not contract:
             continue
-        contract_id = int(contract.get("contract_id", contract.get("unit_id", -1)) or -1)
+        raw_contract_id = contract.get("contract_id", contract.get("unit_id", -1))
+        contract_id = (
+            -1
+            if raw_contract_id is None or raw_contract_id == ""
+            else int(raw_contract_id)
+        )
         fragment_ids = [
             int(value) for value in list(contract.get("source_fragment_ids", []) or [])
         ]

@@ -12,6 +12,7 @@ from model.inverse.topology.iteration_ledger import (
     assign_contract_slots,
     build_iteration_ledger,
     contract_source_status,
+    normalize_slot,
     seed_ledger_topology_state,
     slot_sequence,
 )
@@ -36,6 +37,10 @@ from model.inverse.topology.stage3_state_machine import (
     plan_stage3_state_machine,
 )
 from model.inverse.topology.phase_eval import _canonical_stage3_contracts, build_stage3_phase_evaluation
+from model.inverse.topology.round_context import (
+    build_stage3_round_context,
+    mark_round_pending_contracts,
+)
 from tests.inverse.topology.helpers import connect, make_node
 
 
@@ -48,6 +53,40 @@ def test_closure_profiles_define_short_defaults_and_long_alternatives() -> None:
     assert slot_sequence("F1") == [23, 11]
     assert minimum_closure_required_counts("H") == {23: 1, 22: 1}
     assert alternative_closure_required_counts("H") == [{23: 2, 22: 1}]
+
+
+def test_zero_ids_survive_slot_and_round_context_normalization() -> None:
+    slot = normalize_slot({
+        "slot_id": "fragment:436:main:0:open_boundary:F1",
+        "kind": "F1",
+        "anchor_node_id": 0,
+        "anchor_role": "fixed_path_open_boundary",
+        "required_su_sequence": [23, 11],
+    })
+    assert slot.anchor_node_id == 0
+
+    node = make_node(0, 15)
+    classification = {
+        "fragments": [{
+            "fragment_id": 0,
+            "source_node_ids": [0],
+            "claimed_node_ids": [0],
+            "context_node_ids": [],
+        }],
+        "resource_pool": {},
+    }
+    context = build_stage3_round_context(
+        nodes=[node],
+        classification=classification,
+    )
+    assert context.ownership_by_node_id[0].owner_fragment_id == 0
+
+    marked = mark_round_pending_contracts(context, [{
+        "contract_id": 0,
+        "source_fragment_ids": [0],
+        "claimed_source_node_ids": [0],
+    }])
+    assert marked.ownership_by_node_id[0].owner_contract_id == 0
 
 
 def test_canonical_contract_flow_uses_actual_assembly_slots_for_selected_flex_owner() -> None:

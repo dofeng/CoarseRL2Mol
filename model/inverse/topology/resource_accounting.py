@@ -74,13 +74,30 @@ def apply_count_delta(
     return result, errors
 
 
-def combined_group_delta(groups: Sequence[Any]) -> Dict[int, int]:
+def conversion_delta(op: Any) -> Dict[int, int]:
+    if op is None:
+        return {}
+    source = int(getattr(op, "from_su", -1))
+    target = int(getattr(op, "to_su", -1))
+    count = max(1, int(getattr(op, "count", 1) or 1))
+    if source < 0 or target < 0 or source == target:
+        return {}
+    return {source: -count, target: count}
+
+
+def combined_group_delta(
+    groups: Sequence[Any],
+    *,
+    extra_ops: Sequence[Any] = (),
+) -> Dict[int, int]:
     delta: Counter = Counter()
     for group in list(groups or []):
         delta.update({
             int(key): int(value)
             for key, value in dict(getattr(group, "combined_delta", {}) or {}).items()
         })
+    for op in list(extra_ops or []):
+        delta.update(conversion_delta(op))
     return {int(key): int(value) for key, value in delta.items() if int(value) != 0}
 
 
@@ -148,6 +165,7 @@ def build_resource_accounting_snapshot(
     final_remaining_ids_by_su: Mapping[Any, Any],
     committed_claimed_ids_by_su: Mapping[Any, Any],
     groups: Sequence[Any],
+    extra_ops: Sequence[Any] = (),
 ) -> Dict[str, Any]:
     aggregate_types, errors = _node_types_from_ids(aggregate_ids_before_by_su)
     authorized_types, authorized_errors = _node_types_from_ids(authorized_ids_before_by_su)
@@ -174,10 +192,13 @@ def build_resource_accounting_snapshot(
     authorized_ids_before = _ids_by_type(authorized_types)
 
     seen_conversion_ids: set[int] = set()
-    for group in list(groups or []):
-        operations = [getattr(group, "primary_op", None)] + list(
-            getattr(group, "h_compensation_ops", []) or []
-        )
+    operations_by_group = [
+        [getattr(group, "primary_op", None)]
+        + list(getattr(group, "h_compensation_ops", []) or [])
+        for group in list(groups or [])
+    ]
+    operations_by_group.append(list(extra_ops or []))
+    for operations in operations_by_group:
         for op in operations:
             if op is None:
                 continue
@@ -307,11 +328,34 @@ def build_resource_accounting_snapshot(
         "authorized_inventory_before": authorized_before_counts,
         "authorized_inventory_after": authorized_after_counts,
         "aggregate_required_counts": aggregate_required_counts,
-        "combined_delta": combined_group_delta(groups),
+        "combined_delta": combined_group_delta(groups, extra_ops=extra_ops),
     }
 
 
 def preflight_histogram_accounting(plan: Any) -> Tuple[bool, Dict[str, Any]]:
+    parity_op = getattr(plan, "parity_balance_op", None)
+    parity_errors: List[Dict[str, Any]] = []
+    if parity_op is not None:
+        source = int(getattr(parity_op, "from_su", -1))
+        target = int(getattr(parity_op, "to_su", -1))
+        count = int(getattr(parity_op, "count", 0) or 0)
+        if (
+            (source, target) not in {
+                (13, 12),
+                (12, 13),
+                (23, 24),
+                (24, 23),
+            }
+            or count != 1
+            or getattr(parity_op, "via_su", None) is not None
+        ):
+            parity_errors.append({
+                "reason": "invalid_parity_balance_contract",
+                "from_su": source,
+                "to_su": target,
+                "count": count,
+                "via_su": getattr(parity_op, "via_su", None),
+            })
     authorized_before = normalize_counts(
         getattr(plan, "inventory_before", {}) or {}
     )
@@ -327,27 +371,39 @@ def preflight_histogram_accounting(plan: Any) -> Tuple[bool, Dict[str, Any]]:
     aggregate_required = normalize_counts(
         getattr(plan, "aggregate_required_counts", {}) or {}
     )
-    if not aggregate_before and not aggregate_after_expected and not aggregate_required:
+    if (
+        not aggregate_before
+        and not aggregate_after_expected
+        and not aggregate_required
+        and not parity_errors
+    ):
         return True, {"mode": "authorized_inventory_only"}
 
     planning_accounting = dict(
         getattr(plan, "accounting_diagnostics", {}) or {}
     )
-    errors: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = list(parity_errors)
     if planning_accounting and not bool(planning_accounting.get("ok", True)):
         errors.append({
             "reason": "planning_resource_accounting_failed",
             "errors": list(planning_accounting.get("errors", []) or []),
         })
 
+    extra_ops = [parity_op] if parity_op is not None else []
     aggregate_after, delta_errors = apply_count_delta(
         aggregate_before,
-        combined_group_delta(list(getattr(plan, "groups", []) or [])),
+        combined_group_delta(
+            list(getattr(plan, "groups", []) or []),
+            extra_ops=extra_ops,
+        ),
     )
     errors.extend(delta_errors)
     authorized_after, authorized_errors = apply_count_delta(
         authorized_before,
-        combined_group_delta(list(getattr(plan, "groups", []) or [])),
+        combined_group_delta(
+            list(getattr(plan, "groups", []) or []),
+            extra_ops=extra_ops,
+        ),
     )
     errors.extend(authorized_errors)
     if authorized_after_expected and not _counts_equal(

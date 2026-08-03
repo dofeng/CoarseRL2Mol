@@ -288,12 +288,10 @@ def test_pipeline_captures_complete_generation_products_from_state_machine_ledge
             "spectral_contract": "template_center_mu",
         },
         S_target=torch.zeros(2401),
-        E_target=torch.zeros(6),
-        eval_lib_path=None,
-        layer1_runtime_cfg={},
-        layer2_runtime_cfg={},
-        layer2_eval_hwhm=1.0,
-        outer_idx=0,
+            E_target=torch.zeros(6),
+            eval_lib_path=None,
+            layer1_runtime_cfg={},
+            outer_idx=0,
         enable_post_external_spectrum=False,
     )
 
@@ -303,6 +301,60 @@ def test_pipeline_captures_complete_generation_products_from_state_machine_ledge
     assert completion["products"][0]["product_type"] == "residual_resource_conversion"
     assert completion["products"][0]["topology_notation"] == "11-23-23-22"
     assert completion["products"][0]["node_id_notation"] == "1-3-4-2"
+
+
+def test_stage3_fresh_rebuild_preserves_single_build_runtime_config() -> None:
+    pipeline = _build_pipeline_stub()
+    H = torch.zeros(40, dtype=torch.long)
+    H[12] = 2
+    nodes = [make_node(1, 12), make_node(2, 12)]
+    captured = {}
+
+    def run_layer12_cycle(**kwargs):
+        captured.update(kwargs["layer1_runtime_cfg"])
+        return nodes, kwargs["H_seed"], {"r2": 0.4}, 0.4
+
+    def run_resource_loop(**kwargs):
+        rebuilt_nodes, rebuilt_H, rebuilt_diff, _ = kwargs["rebuild_fn"](
+            H_seed=kwargs["H"],
+            phase="test_stage3_rebuild",
+            cycle_idx=99,
+        )
+        return Stage3WorkflowResult(
+            nodes=rebuilt_nodes,
+            H=rebuilt_H,
+            diff=rebuilt_diff,
+            ok=True,
+            stop_reason="stage3_complete",
+            cycles=[],
+        )
+
+    pipeline._run_layer12_cycle = run_layer12_cycle
+    pipeline.layer4_adjuster.run_block_c_resource_adjustment_loop = run_resource_loop
+
+    pipeline._run_topology_stage3_resource_cycles(
+        nodes=nodes,
+        H=H,
+        current_diff={
+            "r2": 0.4,
+            "source_stage": "layer2",
+            "spectral_contract": "template_center_mu",
+        },
+        S_target=torch.zeros(2401),
+        E_target=torch.zeros(6),
+        eval_lib_path="unused-test-library.pt",
+        layer1_runtime_cfg={
+            "neg_peak_threshold": -0.8,
+            "max_moves_per_region": 4,
+        },
+        outer_idx=7,
+    )
+
+    assert captured["max_moves_per_region"] == 4
+    assert "build_variant" not in captured
+    assert "hop1_completion_max_backtracks" not in captured
+    assert "hop1_completion_max_decisions" not in captured
+    assert "hop1_completion_time_limit_s" not in captured
 
 
 def test_pipeline_captures_and_flattens_terminal_infeasibility_proof(tmp_path) -> None:
@@ -344,12 +396,10 @@ def test_pipeline_captures_and_flattens_terminal_infeasibility_proof(tmp_path) -
             "spectral_contract": "template_center_mu",
         },
         S_target=torch.zeros(2401),
-        E_target=torch.zeros(6),
-        eval_lib_path=None,
-        layer1_runtime_cfg={},
-        layer2_runtime_cfg={},
-        layer2_eval_hwhm=1.0,
-        outer_idx=0,
+            E_target=torch.zeros(6),
+            eval_lib_path=None,
+            layer1_runtime_cfg={},
+            outer_idx=0,
         enable_post_external_spectrum=False,
     )
 
@@ -364,6 +414,7 @@ def test_pipeline_captures_and_flattens_terminal_infeasibility_proof(tmp_path) -
     cycles = pd.read_csv(tmp_path / "final_stage3_resource_cycles.csv")
     assert "transactions" not in cycles.columns
     assert "infeasibility_reason" in cycles.columns
+    assert "parity_balance_count" in cycles.columns
     assert (
         tmp_path / "debug" / "final_stage3_resource_cycle_details.jsonl"
     ).exists()

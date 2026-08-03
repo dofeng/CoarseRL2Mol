@@ -4,14 +4,17 @@ from collections import Counter
 import inspect
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from model.inverse.layer4.inverse_layer4 import Layer4Adjuster
 import model.inverse.layer4.inverse_layer4 as inverse_layer4_module
 from model.inverse.layer4.inverse_layer4_block_c import (
+    _last_resource_step_signature,
     _print_stage3_histogram_adjustments,
     _print_stage3_plan_summary,
     _rollback_stage3_plan_transactions,
+    _register_rejected_resource_candidate,
     _stage3_terminal_infeasibility_proof,
     run_block_c_resource_adjustment_loop_impl,
 )
@@ -53,6 +56,9 @@ from model.inverse.topology.resource_profiles import (
     raw_su24_segment_support,
     raw_su24_support_counts,
 )
+from model.inverse.topology.resource_accounting import (
+    build_resource_accounting_snapshot,
+)
 
 from .helpers import connect, make_node
 
@@ -72,6 +78,92 @@ def _nodes_from_histogram(H):
             nodes.append(make_node(global_id, su_type))
             global_id += 1
     return nodes
+
+
+def _parity_rebuild_plan(
+    nodes,
+    *,
+    primary_node_id,
+    primary_source=23,
+    primary_target=11,
+):
+    H_before = _histogram(nodes)
+    H_after = H_before.detach().clone()
+    H_after[int(primary_source)] -= 1
+    H_after[int(primary_target)] += 1
+    group = AtomicAdjustmentGroup(
+        primary_op=HistogramConversion(
+            int(primary_source),
+            int(primary_target),
+            1,
+            "test_primary_resource_adjustment",
+            node_ids=[int(primary_node_id)],
+        ),
+        combined_delta={int(primary_source): -1, int(primary_target): 1},
+    )
+    aggregate_before = {}
+    for node in nodes:
+        aggregate_before.setdefault(int(node.su_type), []).append(int(node.global_id))
+    claimed = {int(primary_target): [int(primary_node_id)]}
+    final_remaining = {
+        int(su_type): [
+            int(node_id)
+            for node_id in node_ids
+            if int(node_id) != int(primary_node_id)
+        ]
+        for su_type, node_ids in aggregate_before.items()
+    }
+    final_remaining = {
+        int(key): list(values)
+        for key, values in final_remaining.items()
+        if values
+    }
+    accounting = build_resource_accounting_snapshot(
+        aggregate_ids_before_by_su=aggregate_before,
+        authorized_ids_before_by_su=aggregate_before,
+        final_remaining_ids_by_su=final_remaining,
+        committed_claimed_ids_by_su=claimed,
+        groups=[group],
+    )
+    assert accounting["ok"] is True
+    histogram = HistogramAdjustmentPlan(
+        phase="external_side_chain_closure",
+        groups=[group],
+        primary_adjustment_count=1,
+        physical_conversion_count=1,
+        H_before=H_before,
+        H_after=H_after,
+        inventory_before=accounting["authorized_inventory_before"],
+        inventory_after=accounting["authorized_inventory_after"],
+        aggregate_inventory_before=accounting["aggregate_inventory_before"],
+        aggregate_inventory_after=accounting["aggregate_inventory_after"],
+        aggregate_required_counts=accounting["aggregate_required_counts"],
+        accounting_diagnostics=accounting,
+    )
+    transaction = TopologyResourceTransaction(
+        phase="external_side_chain_closure",
+        contract_id=700,
+        target_role="test_parity_rebuild",
+        converted_node_ids=[int(primary_node_id)],
+        conversion_path=[group.primary_op.to_dict()],
+        claimed_resource_ids=claimed,
+        committed=True,
+        transaction_origin="current_plan_candidate",
+    )
+    return Stage3AdjustmentPlan(
+        ok=True,
+        reason="stage3_rebuild_required",
+        phase="external_side_chain_closure",
+        plan_kind="test_parity_rebuild",
+        histogram_adjustment_plan=histogram,
+        diagnostics={"candidate_alternatives_enabled": False},
+        phase_result=Stage3PhaseResult(
+            active_phase="external_side_chain_closure",
+            rebuild_required=True,
+            primary_adjustment_count=1,
+            transactions=[transaction],
+        ),
+    )
 
 
 def _next_residual_product(
@@ -109,7 +201,7 @@ def _next_residual_product(
         iteration_ledger=ledger,
         H=H,
         E_target=E_target,
-        h_tolerance=0.06,
+        h_tolerance=0.08,
         special_degree_meta=None,
         su11_rotation_index=0,
         remaining_flex_chains=remaining_flex_chains,
@@ -169,6 +261,30 @@ def test_layer4_wrapper_forwards_block_c_resource_configuration(monkeypatch) -> 
     assert captured["residual_side_min_23"] == 1
     assert captured["h_tolerance"] == 0.06
     assert captured["iteration_offset"] == 10
+
+
+def test_block_c_resource_bundle_limit_is_hard_capped_at_ten() -> None:
+    captured = {}
+
+    class Adjuster:
+        def plan_topology_resource_adjustments(self, **kwargs):
+            captured.update(kwargs)
+            return Stage3AdjustmentPlan(
+                ok=True,
+                reason="stage3_complete",
+                phase="complete",
+            )
+
+    result = run_block_c_resource_adjustment_loop_impl(
+        Adjuster(),
+        torch.zeros(40, dtype=torch.long),
+        [],
+        E_target=None,
+        max_primary_adjustments_per_stage=25,
+    )
+
+    assert result.ok is True
+    assert captured["max_primary_adjustments_per_stage"] == 10
 
 
 def test_layer4_stage_router_forwards_complete_block_c_configuration(monkeypatch) -> None:
@@ -292,7 +408,7 @@ def test_su24_resources_only_convert_the_count_above_residual_tolerance() -> Non
     assert plan.phase_result.primary_adjustment_count <= 10
 
 
-def test_optional_residual_conversion_does_not_push_h_outside_soft_window() -> None:
+def test_optional_residual_conversion_is_allowed_inside_hard_window() -> None:
     pool = {11: [1, 2], 12: [], 13: [], 22: [], 23: [3, 4, 5], 24: [6]}
     H = torch.zeros(40, dtype=torch.long)
     for su_type, node_ids in pool.items():
@@ -308,11 +424,9 @@ def test_optional_residual_conversion_does_not_push_h_outside_soft_window() -> N
         max_h_compensation_ops=4,
     )
 
-    assert result["mode"] == "none"
-    assert any(
-        item.get("reason") == "optional_conversion_worsens_h_soft_balance"
-        for item in result["attempts"]
-    )
+    assert result["mode"] == "conversion"
+    histogram = result["plan"].histogram_adjustment_plan
+    assert abs(_h_total(histogram.H_after, None) - 7.0) / 7.0 <= 0.08
 
 
 def test_residual_next_product_balances_h_when_filling_su11_gap() -> None:
@@ -440,7 +554,7 @@ def test_residual_orphan_terminalization_never_creates_closure_compensation() ->
         phase_eval=phase_eval,
         pool=pool,
         H=H,
-        E_target=torch.tensor([0.0, 20.0]),
+        E_target=None,
         h_tolerance=0.06,
         special_degree_meta=None,
         su11_rotation_index=0,
@@ -475,7 +589,7 @@ def test_residual_uses_existing_resources_before_terminalizing_single_orphan() -
     assert len(pool[22]) - int(consumed[22]) == 1
 
 
-def test_optional_side_fit_does_not_worsen_existing_high_h_state() -> None:
+def test_optional_side_fit_is_allowed_inside_stage3_hard_window() -> None:
     H = torch.zeros(40, dtype=torch.long)
     for su_type, count in {
         0: 1, 1: 10, 2: 11, 3: 12, 5: 64, 6: 2, 9: 23, 10: 30,
@@ -502,11 +616,9 @@ def test_optional_side_fit_does_not_worsen_existing_high_h_state() -> None:
         max_h_compensation_ops=8,
     )
 
-    assert result["mode"] == "none"
-    assert any(
-        item.get("reason") == "optional_conversion_worsens_h_soft_balance"
-        for item in result["attempts"]
-    )
+    assert result["mode"] == "conversion"
+    histogram = result["plan"].histogram_adjustment_plan
+    assert abs(_h_total(histogram.H_after, None) - 520.0) / 520.0 <= 0.08
 
 
 def test_stage3_transaction_records_effective_h_not_histogram_node_count() -> None:
@@ -613,7 +725,7 @@ def test_block_c_stops_with_specific_phase_resource_infeasible() -> None:
     assert "template_checks" in proof
 
 
-def test_terminal_infeasibility_proof_accepts_legacy_string_failed_contract() -> None:
+def test_terminal_infeasibility_proof_rejects_noncanonical_failed_contract() -> None:
     plan = Stage3AdjustmentPlan(
         ok=False,
         reason="phase_resource_infeasible",
@@ -631,54 +743,8 @@ def test_terminal_infeasibility_proof_accepts_legacy_string_failed_contract() ->
         ),
     )
 
-    proof = _stage3_terminal_infeasibility_proof(plan)
-
-    assert proof["reason"] == "residual_terminal_conversion_infeasible"
-    assert proof["failed_contract"] == {
-        "target_role": "orphan_22_23_via_11_then_aromatic_rotation"
-    }
-
-
-def test_block_c_exports_legacy_residual_failure_without_diagnostic_crash() -> None:
-    plan = Stage3AdjustmentPlan(
-        ok=False,
-        reason="phase_resource_infeasible",
-        blocked_reason="residual_terminal_conversion_infeasible",
-        phase="residual_resource_self_closure",
-        plan_kind="residual_terminal_conversion_infeasible",
-        phase_result=Stage3PhaseResult(
-            active_phase="residual_resource_self_closure",
-            stop_reason="phase_resource_infeasible",
-            infeasibility_proof={
-                "phase": "residual_resource_self_closure",
-                "reason": "residual_terminal_conversion_infeasible",
-                "failed_contract": "orphan_22_23_via_11_then_aromatic_rotation",
-                "available_counts": {"22": 1},
-            },
-        ),
-    )
-
-    class Adjuster:
-        def plan_topology_resource_adjustments(self, **_kwargs):
-            return plan
-
-        def apply_topology_resource_adjustments(self, **kwargs):
-            return apply_stage3_node_adjustments(
-                kwargs["nodes"], kwargs["H"], kwargs["plan"]
-            )
-
-    result = run_block_c_resource_adjustment_loop_impl(
-        Adjuster(),
-        torch.zeros(40, dtype=torch.long),
-        [],
-        E_target=None,
-    )
-
-    assert result.stop_reason == "phase_resource_infeasible"
-    proof = result.cycles[-1].plan["phase_result"]["infeasibility_proof"]
-    assert proof["failed_contract"]["target_role"] == (
-        "orphan_22_23_via_11_then_aromatic_rotation"
-    )
+    with pytest.raises(TypeError, match="failed_contract must be a mapping"):
+        _stage3_terminal_infeasibility_proof(plan)
 
 
 def test_zero_conversion_fallback_cannot_commit_without_iteration_ledger() -> None:
@@ -908,6 +974,245 @@ def test_block_c_generation_id_is_unique_across_outer_cycles() -> None:
     )
 
     assert captured == [4_000_011]
+
+
+def _run_one_parity_rebuild_plan(
+    plan,
+    nodes,
+    *,
+    parity_cursor=0,
+    rebuild_fn=None,
+    validate_fn=None,
+):
+    class Adjuster:
+        def __init__(self):
+            self.calls = 0
+            self._stage3_su11_rotation_index = 0
+            self._stage3_parity_balance_cursor = int(parity_cursor)
+
+        def plan_topology_resource_adjustments(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return plan
+            return Stage3AdjustmentPlan(
+                ok=True,
+                reason="stage3_complete",
+                phase="complete",
+                phase_result=Stage3PhaseResult(
+                    active_phase="complete",
+                    phase_completed=True,
+                    stop_reason="stage3_complete",
+                ),
+            )
+
+        def apply_topology_resource_adjustments(self, **kwargs):
+            return apply_stage3_node_adjustments(
+                kwargs["nodes"], kwargs["H"], kwargs["plan"]
+            )
+
+    adjuster = Adjuster()
+    result = run_block_c_resource_adjustment_loop_impl(
+        adjuster,
+        _histogram(nodes),
+        nodes,
+        E_target=None,
+        rebuild_fn=(
+            rebuild_fn
+            if rebuild_fn is not None
+            else lambda **kwargs: (
+                _nodes_from_histogram(kwargs["H_seed"]),
+                kwargs["H_seed"],
+                {},
+                0.0,
+            )
+        ),
+        validate_fn=(
+            validate_fn
+            if validate_fn is not None
+            else lambda **_kwargs: (True, "ok")
+        ),
+    )
+    return adjuster, result
+
+
+def test_block_c_balances_odd_degree_with_first_su13_to_su12_rotation() -> None:
+    nodes = [make_node(1, 23), make_node(2, 13), make_node(3, 23)]
+    plan = _parity_rebuild_plan(nodes, primary_node_id=1)
+    rebuild_calls = []
+
+    def rebuild(**kwargs):
+        rebuild_calls.append(kwargs["H_seed"].detach().clone())
+        return (
+            _nodes_from_histogram(kwargs["H_seed"]),
+            kwargs["H_seed"],
+            {},
+            0.0,
+        )
+
+    adjuster, result = _run_one_parity_rebuild_plan(
+        plan,
+        nodes,
+        rebuild_fn=rebuild,
+    )
+
+    assert result.ok is True
+    assert len(rebuild_calls) == 1
+    assert int(rebuild_calls[0][11].item()) == 1
+    assert int(rebuild_calls[0][12].item()) == 1
+    assert int(rebuild_calls[0][13].item()) == 0
+    assert int(rebuild_calls[0][23].item()) == 1
+    assert int(rebuild_calls[0][24].item()) == 0
+    assert adjuster._stage3_parity_balance_cursor == 1
+    first_cycle = result.cycles[0]
+    audit = first_cycle.plan["diagnostics"]["pre_rebuild_port_feasibility"]
+    assert audit["before"]["total_port_degree"] == 7
+    assert audit["after"]["total_port_degree"] == 8
+    assert "su12_self_pair_is_even" not in audit["before"]
+    assert "su12_self_pair_is_even" not in audit["after"]
+    assert audit["applied_direction"] == [13, 12]
+    assert audit["node_id"] == 2
+    histogram = first_cycle.plan["histogram_adjustment_plan"]
+    assert histogram["physical_conversion_count"] == 2
+    assert histogram["parity_balance_op"]["from_su"] == 13
+    assert histogram["parity_balance_op"]["to_su"] == 12
+    assert histogram["groups"][0]["h_compensation_ops"] == []
+    assert histogram["accounting_diagnostics"]["ok"] is True
+    assert first_cycle.h_compensation_count == 0
+    assert first_cycle.parity_balance_count == 1
+    transaction = first_cycle.plan["phase_result"]["transactions"][0]
+    assert transaction["compensation_node_ids"] == []
+    assert "parity_balance_node_ids" not in transaction
+    assert [item["reason"] for item in transaction["conversion_path"]] == [
+        "test_primary_resource_adjustment"
+    ]
+
+
+def test_block_c_port_balance_uses_second_rotation_direction() -> None:
+    nodes = [make_node(1, 23), make_node(2, 12), make_node(3, 22)]
+    plan = _parity_rebuild_plan(nodes, primary_node_id=1)
+
+    adjuster, result = _run_one_parity_rebuild_plan(
+        plan,
+        nodes,
+        parity_cursor=1,
+    )
+
+    assert result.ok is True
+    audit = result.cycles[0].plan["diagnostics"][
+        "pre_rebuild_port_feasibility"
+    ]
+    assert audit["required_direction"] == [12, 13]
+    assert audit["applied_direction"] == [12, 13]
+    assert adjuster._stage3_parity_balance_cursor == 2
+
+
+def test_block_c_port_balance_does_not_reverse_when_rotation_donor_is_missing() -> None:
+    nodes = [make_node(1, 23), make_node(2, 12), make_node(3, 22)]
+    plan = _parity_rebuild_plan(nodes, primary_node_id=1)
+    rebuild_calls = []
+
+    adjuster, result = _run_one_parity_rebuild_plan(
+        plan,
+        nodes,
+        parity_cursor=0,
+        rebuild_fn=lambda **kwargs: rebuild_calls.append(kwargs),
+    )
+
+    assert result.ok is False
+    assert result.stop_reason == "pre_rebuild_port_feasibility_failed"
+    assert rebuild_calls == []
+    assert adjuster._stage3_parity_balance_cursor == 0
+    audit = result.cycles[0].plan["diagnostics"][
+        "pre_rebuild_port_feasibility"
+    ]
+    assert audit["required_direction"] == [13, 12]
+    assert audit["attempted_directions"] == [{
+        "from_su": 13,
+        "to_su": 12,
+        "candidate_node_ids": [],
+    }]
+
+
+@pytest.mark.parametrize("failure_mode", ["rebuild", "validation"])
+def test_block_c_failed_candidate_does_not_advance_port_balance_cursor(
+    failure_mode,
+) -> None:
+    nodes = [make_node(1, 23), make_node(2, 13), make_node(3, 23)]
+    plan = _parity_rebuild_plan(nodes, primary_node_id=1)
+
+    def rebuild(**kwargs):
+        if failure_mode == "rebuild":
+            raise RuntimeError("test rebuild failure")
+        return (
+            _nodes_from_histogram(kwargs["H_seed"]),
+            kwargs["H_seed"],
+            {},
+            0.0,
+        )
+
+    adjuster, result = _run_one_parity_rebuild_plan(
+        plan,
+        nodes,
+        rebuild_fn=rebuild,
+        validate_fn=lambda **_kwargs: (
+            (False, "test validation failure")
+            if failure_mode == "validation"
+            else (True, "ok")
+        ),
+    )
+
+    assert result.accepted_cycles == 0
+    assert adjuster._stage3_parity_balance_cursor == 0
+    assert torch.equal(result.H, _histogram(nodes))
+    transaction = result.cycles[0].plan["phase_result"]["transactions"][0]
+    assert transaction["committed"] is False
+    attempted = transaction["infeasibility_proof"]["attempted_transaction"]
+    assert attempted["compensation_node_ids"] == []
+    assert "parity_balance_node_ids" not in attempted
+    assert result.cycles[0].plan["histogram_adjustment_plan"][
+        "parity_balance_op"
+    ]["node_ids"] == [2]
+
+
+def test_block_c_rejects_odd_port_batch_before_rebuild_without_unused_donor() -> None:
+    nodes = [make_node(1, 23)]
+    plan = _parity_rebuild_plan(nodes, primary_node_id=1)
+    rebuild_calls = []
+
+    adjuster, result = _run_one_parity_rebuild_plan(
+        plan,
+        nodes,
+        rebuild_fn=lambda **kwargs: rebuild_calls.append(kwargs),
+    )
+
+    assert rebuild_calls == []
+    assert result.stop_reason == "pre_rebuild_port_feasibility_failed"
+    assert result.cycles[0].blocked_reason == (
+        "odd_port_degree_no_unused_safe_balance_donor"
+    )
+    assert adjuster._stage3_parity_balance_cursor == 0
+
+
+def test_block_c_even_port_batch_allows_odd_su12_without_balance() -> None:
+    nodes = [make_node(1, 12), make_node(2, 23)]
+    plan = _parity_rebuild_plan(
+        nodes,
+        primary_node_id=2,
+        primary_source=23,
+        primary_target=11,
+    )
+
+    adjuster, result = _run_one_parity_rebuild_plan(plan, nodes)
+
+    assert result.ok is True
+    audit = result.cycles[0].plan["diagnostics"][
+        "pre_rebuild_port_feasibility"
+    ]
+    assert audit["reason"] == "port_degree_even"
+    assert audit["balance_applied"] is False
+    assert audit["before"]["degree_is_even"] is True
+    assert "su12_self_pair_is_even" not in audit["before"]
+    assert adjuster._stage3_parity_balance_cursor == 0
 
 
 def test_block_c_final_read_only_audit_promotes_complete_after_last_rebuild() -> None:
@@ -1329,7 +1634,11 @@ def test_block_c_retries_next_primary_transition_after_validation_rejection() ->
                         stop_reason="stage3_complete",
                     ),
                 )
-            source, node_id = ((12, 2) if "13>11" in forbidden else (13, 1))
+            source, node_id = (
+                (12, 2)
+                if any(value.endswith("|bundle:13>11") for value in forbidden)
+                else (13, 1)
+            )
             H_after = kwargs["H"].detach().clone()
             H_after[source] -= 1
             H_after[11] += 1
@@ -1350,7 +1659,11 @@ def test_block_c_retries_next_primary_transition_after_validation_rejection() ->
                 H_before=kwargs["H"].detach().clone(),
                 H_after=H_after,
                 inventory_before={12: 1, 13: 1},
-                inventory_after={12: int(source != 12), 13: int(source != 13), 11: 1},
+                inventory_after={
+                    12: int(source != 12),
+                    13: int(source != 13),
+                    11: 1,
+                },
             )
             return Stage3AdjustmentPlan(
                 ok=True,
@@ -1397,13 +1710,218 @@ def test_block_c_retries_next_primary_transition_after_validation_rejection() ->
 
     assert result.stop_reason == "stage3_complete"
     assert result.accepted_cycles == 1
-    assert adjuster.calls[:2] == [[], ["13>11"]]
+    assert adjuster.calls[0] == []
+    assert len(adjuster.calls[1]) == 1
+    assert adjuster.calls[1][0].endswith("|bundle:13>11")
+    assert adjuster.calls[2] == []
     assert int(result.H[13].item()) == 1
     assert int(result.H[12].item()) == 0
     assert int(result.H[11].item()) == 1
     assert result.cycles[0].diagnostics[
         "rejected_resource_conversion_signature"
-    ] == "13>11"
+    ].endswith("|bundle:13>11")
+
+
+def test_resource_step_signature_ignores_node_ids_and_keeps_parity_separate() -> None:
+    H = torch.zeros(40, dtype=torch.long)
+    H[13] = 2
+    H[24] = 2
+    histogram = HistogramAdjustmentPlan(
+        H_before=H,
+        groups=[AtomicAdjustmentGroup(
+            primary_op=HistogramConversion(
+                13,
+                11,
+                1,
+                "resource_rebalance",
+                node_ids=[225],
+            ),
+            h_compensation_ops=[
+                HistogramConversion(24, 11, 1, "soft_h_balance_compensation", node_ids=[488]),
+                HistogramConversion(24, 11, 1, "soft_h_balance_compensation", node_ids=[489]),
+            ],
+        )],
+        parity_balance_op=HistogramConversion(
+            13, 12, 1, "pre_rebuild_port_parity_balance", node_ids=[226]
+        ),
+    )
+
+    assert _last_resource_step_signature(histogram).endswith(
+        "|bundle:13>11|24>11,24>11"
+    )
+
+
+def test_rejected_resource_steps_remain_state_scoped_without_primary_escalation() -> None:
+    plan = SimpleNamespace(
+        diagnostics={"candidate_alternatives_enabled": True},
+    )
+    rejected = set()
+    for compensation_count in range(3):
+        histogram = HistogramAdjustmentPlan(
+            H_before=torch.zeros(40, dtype=torch.long),
+            groups=[AtomicAdjustmentGroup(
+                primary_op=HistogramConversion(13, 11, 1, "resource_rebalance"),
+                h_compensation_ops=[
+                    HistogramConversion(24, 11, 1, "soft_h_balance_compensation")
+                    for _ in range(compensation_count)
+                ],
+            )],
+        )
+        _register_rejected_resource_candidate(plan, histogram, rejected)
+
+    assert len(rejected) == 3
+    assert all(value.startswith("state:") for value in rejected)
+    assert "13>11" not in rejected
+
+
+def test_multi_primary_failure_rejects_only_last_step_at_its_intermediate_state() -> None:
+    plan = SimpleNamespace(
+        diagnostics={"candidate_alternatives_enabled": True},
+    )
+    histogram = HistogramAdjustmentPlan(
+        H_before=torch.tensor([0] * 12 + [1, 1] + [0] * 26),
+        groups=[
+            AtomicAdjustmentGroup(
+                primary_op=HistogramConversion(13, 11, 1, "resource_rebalance"),
+            ),
+            AtomicAdjustmentGroup(
+                primary_op=HistogramConversion(12, 11, 1, "resource_rebalance"),
+            ),
+        ],
+    )
+    rejected = set()
+
+    signature = _register_rejected_resource_candidate(plan, histogram, rejected)
+
+    assert signature.endswith("|bundle:12>11")
+    assert "bundle:13>11" not in signature
+    assert rejected == {signature}
+
+
+def test_multi_primary_validation_failure_keeps_fixed_primary_limit(
+    monkeypatch,
+) -> None:
+    nodes = [make_node(1, 13), make_node(2, 12)]
+    H = _histogram(nodes)
+
+    monkeypatch.setattr(
+        "model.inverse.layer4.inverse_layer4_block_c._append_stage3_parity_balance",
+        lambda **_kwargs: (True, {"enforced": False, "reason": "test_disabled"}),
+    )
+
+    class Adjuster:
+        def __init__(self):
+            self.calls = []
+
+        def plan_topology_resource_adjustments(self, **kwargs):
+            limit = int(kwargs["max_primary_adjustments_per_stage"])
+            forbidden = sorted(
+                kwargs.get("forbidden_resource_conversion_signatures", []) or []
+            )
+            self.calls.append((limit, forbidden))
+            if int(kwargs["H"][11].item()) == 1:
+                return Stage3AdjustmentPlan(
+                    ok=True,
+                    reason="stage3_complete",
+                    phase="complete",
+                    phase_result=Stage3PhaseResult(
+                        active_phase="complete",
+                        phase_completed=True,
+                        stop_reason="stage3_complete",
+                    ),
+                )
+
+            specs = (
+                [(13, 1)]
+                if forbidden
+                else [(13, 1), (12, 2)]
+            )
+            H_after = kwargs["H"].detach().clone()
+            groups = []
+            for source, node_id in specs:
+                H_after[source] -= 1
+                H_after[11] += 1
+                groups.append(AtomicAdjustmentGroup(
+                    primary_op=HistogramConversion(
+                        source,
+                        11,
+                        1,
+                        "fixed_limit_candidate_retry",
+                        node_ids=[node_id],
+                    ),
+                    combined_delta={source: -1, 11: 1},
+                ))
+            inventory_before = {12: 1, 13: 1, 11: 0}
+            inventory_after = dict(inventory_before)
+            for source, _ in specs:
+                inventory_after[source] -= 1
+                inventory_after[11] += 1
+            histogram = HistogramAdjustmentPlan(
+                phase="external_topology_assembly",
+                groups=groups,
+                primary_adjustment_count=len(groups),
+                physical_conversion_count=len(groups),
+                H_before=kwargs["H"].detach().clone(),
+                H_after=H_after,
+                inventory_before=inventory_before,
+                inventory_after=inventory_after,
+            )
+            return Stage3AdjustmentPlan(
+                ok=True,
+                reason="stage3_rebuild_required",
+                phase="external_topology_assembly",
+                histogram_adjustment_plan=histogram,
+                diagnostics={"candidate_alternatives_enabled": True},
+                phase_result=Stage3PhaseResult(
+                    active_phase="external_topology_assembly",
+                    rebuild_required=True,
+                    primary_adjustment_count=len(groups),
+                    stop_reason="stage3_rebuild_required",
+                ),
+            )
+
+        def apply_topology_resource_adjustments(self, **kwargs):
+            return apply_stage3_node_adjustments(
+                kwargs["nodes"],
+                kwargs["H"],
+                kwargs["plan"],
+            )
+
+    validation_count = 0
+
+    def validate(**_kwargs):
+        nonlocal validation_count
+        validation_count += 1
+        return validation_count > 1, "combined_batch_rejected"
+
+    adjuster = Adjuster()
+    result = run_block_c_resource_adjustment_loop_impl(
+        adjuster,
+        H,
+        nodes,
+        E_target=None,
+        rebuild_fn=lambda **kwargs: (
+            _nodes_from_histogram(kwargs["H_seed"]),
+            kwargs["H_seed"],
+            {},
+            0.0,
+        ),
+        validate_fn=validate,
+    )
+
+    assert result.ok is True
+    assert result.accepted_cycles == 1
+    assert [call[0] for call in adjuster.calls[:3]] == [10, 10, 10]
+    assert adjuster.calls[0][1] == []
+    assert len(adjuster.calls[1][1]) == 1
+    assert adjuster.calls[1][1][0].endswith("|bundle:12>11")
+    assert adjuster.calls[2][1] == []
+    assert int(result.H[11].item()) == 1
+    failed_cycle = result.cycles[0]
+    assert failed_cycle.diagnostics[
+        "rejected_resource_conversion_signature"
+    ].endswith("|bundle:12>11")
+    assert failed_cycle.diagnostics["primary_adjustment_limit"] == 10
 
 
 def test_failed_plan_rolls_back_direct_candidate_but_keeps_assembly_snapshot() -> None:
@@ -1718,19 +2236,9 @@ def test_below_soft_h_window_does_not_synthesize_aromatic_only_topology() -> Non
     assert int(H[23].item()) == 0
 
 
-def test_su11_external_anchor_errors_are_hard_consistency_failures() -> None:
-    errors = [
-        "节点273(SU11): 缺少必需外接锚点",
-        "节点273(SU11): 固定锚点边数不足",
-        "节点273(SU11): 固定锚点边数超过目标上限",
-    ]
+def test_layer1_has_no_soft_consistency_acceptance_path() -> None:
     assigner = Layer1Assigner()
-
-    accepted, diagnostics = assigner.assess_consistency_acceptance(errors)
-
-    assert accepted is False
-    assert diagnostics["n_soft"] == 0
-    assert diagnostics["hard_errors"] == errors
+    assert not hasattr(assigner, "assess_consistency_acceptance")
 
 
 def test_stage3_plan_logging_includes_resource_h_and_flex_scores(capsys) -> None:
@@ -1754,7 +2262,7 @@ def test_stage3_plan_logging_includes_resource_h_and_flex_scores(capsys) -> None
         h_after_primary=100.0,
         h_after_final=100.0,
         scoring_diagnostics={
-            "h": {"soft_penalty": 1.25, "drift_penalty": 0.5},
+            "h": {"hard_bound_penalty": 1.25, "drift_penalty": 0.5},
             "flex": {
                 "before": {"X": 8, "Y": 2, "Z": 6, "flex_lower": 7, "flex_upper": 6, "minimum_flex_gap": 1},
                 "after": {"X": 8, "Y": 2, "Z": 6, "flex_lower": 7, "flex_upper": 6, "minimum_flex_gap": 1},
@@ -1787,7 +2295,7 @@ def test_stage3_plan_logging_includes_resource_h_and_flex_scores(capsys) -> None
     assert "active_subphase=external_flex_closure" in output
     assert "SU13=1" in output and "SU11=1" in output
     assert "nodes=[7]" in output
-    assert "H_soft_penalty=1.2500" in output
+    assert "H_hard_bound_penalty=1.2500" in output
     assert "[Flex Impact]" in output
 
 

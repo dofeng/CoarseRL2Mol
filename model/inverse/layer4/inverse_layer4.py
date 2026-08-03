@@ -39,7 +39,6 @@ class Layer4Adjuster:
     def __init__(self, 
                  device: torch.device = None,
                  layer0_estimator: Optional[Layer0Estimator] = None,
-                 su_hop1_ranges_path: Optional[str] = None,
                  su_common_ranges_path: Optional[str] = None,
                  su_special_degree_ranges_path: Optional[str] = None):
         self.device = device or torch.device('cpu')
@@ -47,12 +46,6 @@ class Layer4Adjuster:
         self.layer0_estimator = layer0_estimator
         self.fixed_partition_meta: Dict[str, Any] = {}
         
-        # 加载 hop1 NMR范围数据
-        if su_hop1_ranges_path is None:
-            default_path = Z_LIBRARY_DIR / 'su_hop1_nmr_range_filtered.csv'
-            self.su_hop1_ranges_path = str(default_path) if default_path.exists() else None
-        else:
-            self.su_hop1_ranges_path = su_hop1_ranges_path
         if su_common_ranges_path is None:
             default_common = Z_LIBRARY_DIR / 'su_nmr_common_range_filtered.csv'
             self.su_common_ranges_path = str(default_common) if default_common.exists() else None
@@ -66,6 +59,7 @@ class Layer4Adjuster:
         self._su_common_stats_cache = None
         self._su_special_degree_stats_cache = None
         self._stage3_su11_rotation_index = 0
+        self._stage3_parity_balance_cursor = 0
         self.fixed_assignment_precheck = None
         self._h_tolerance: float = 0.08
         self._current_S_target: Optional[torch.Tensor] = None
@@ -1423,7 +1417,7 @@ class Layer4Adjuster:
                                            residual_flex_min_23: int = 2,
                                            residual_side_preferred_23: int = 2,
                                            residual_side_min_23: int = 1,
-                                           h_tolerance: float = 0.06,
+                                           h_tolerance: float = 0.08,
                                            generation_id: int = 0,
                                            difference_spectrum: Optional[Dict[str, Any]] = None,
                                            enable_post_external_spectrum: bool = True,
@@ -1617,7 +1611,7 @@ class Layer4Adjuster:
                 residual_flex_min_23=kwargs.get('residual_flex_min_23', 2),
                 residual_side_preferred_23=kwargs.get('residual_side_preferred_23', 2),
                 residual_side_min_23=kwargs.get('residual_side_min_23', 1),
-                h_tolerance=kwargs.get('h_tolerance', 0.06),
+                h_tolerance=kwargs.get('h_tolerance', 0.08),
                 outer_cycle=kwargs.get('outer_cycle', 0),
                 iteration_offset=kwargs.get('iteration_offset', 0),
                 context_snapshot_fn=kwargs.get('context_snapshot_fn'),
@@ -1669,7 +1663,7 @@ class Layer4Adjuster:
         residual_flex_min_23: int = 2,
         residual_side_preferred_23: int = 2,
         residual_side_min_23: int = 1,
-        h_tolerance: float = 0.06,
+        h_tolerance: float = 0.08,
         outer_cycle: int = 0,
         iteration_offset: int = 0,
         context_snapshot_fn: Any = None,

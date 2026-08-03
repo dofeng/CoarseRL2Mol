@@ -20,7 +20,7 @@ def test_classifier_creates_24_ab_m_for_single19d3_with_fixed_m_connector() -> N
     pool_11 = make_node(11, 11)
     open_23 = make_node(23, 23)
     connect(center, connector, fixed=True)
-    connect(connector, aromatic_5)
+    connect(connector, aromatic_5, fixed=True)
     connect(center, pool_11)
     connect(center, open_23)
 
@@ -37,7 +37,7 @@ def test_fixed_partition_meta_can_forbid_fixed_side_classification() -> None:
     pool_11 = make_node(1311, 11)
     open_23 = make_node(1323, 23)
     connect(center, connector, fixed=True)
-    connect(connector, aromatic)
+    connect(connector, aromatic, fixed=True)
     connect(center, pool_11)
     connect(center, open_23)
 
@@ -87,7 +87,7 @@ def test_su19_thio_partition_rejects_ether_connector() -> None:
     anchor = make_node(1411, 11)
     open_unit = make_node(1423, 23)
     connect(center, connector, fixed=True)
-    connect(connector, aromatic)
+    connect(connector, aromatic, fixed=True)
     connect(center, anchor)
     connect(center, open_unit)
 
@@ -114,7 +114,7 @@ def test_su19_thio_partition_accepts_su31_connector() -> None:
     anchor = make_node(1412, 11)
     open_unit = make_node(1424, 23)
     connect(center, connector, fixed=True)
-    connect(connector, aromatic)
+    connect(connector, aromatic, fixed=True)
     connect(center, anchor)
     connect(center, open_unit)
 
@@ -157,8 +157,8 @@ def test_classifier_prefers_m_primary_for_double19d3() -> None:
     connect(center, connector_2, fixed=True)
     connect(center, connector_31, fixed=True)
     connect(center, pool_11)
-    connect(connector_2, aromatic_9)
-    connect(connector_31, side_single19d2)
+    connect(connector_2, aromatic_9, fixed=True)
+    connect(connector_31, side_single19d2, fixed=True)
 
     result = classify_topology_units([center, connector_2, connector_31, aromatic_9, side_single19d2, pool_11])
     fragment = _fragment_by_class(result, "24_AB_M")
@@ -181,13 +181,14 @@ def test_double19d3_preserves_su28_and_long_terminal_fixed_paths() -> None:
     connect(center, aromatic_11)
     connect(center, terminal_28, fixed=True)
     connect(center, connector_29, fixed=True)
-    connect(connector_29, terminal_19)
+    connect(connector_29, terminal_19, fixed=True)
 
     result = classify_topology_units([aromatic_11, terminal_19, center, terminal_28, connector_29])
     fragment = _fragment_by_class(result, "24_AB_P")
 
     assert fragment is not None
-    assert sorted(fragment.claimed_node_ids) == [180, 317, 412, 505, 569]
+    assert sorted(fragment.claimed_node_ids) == [317, 412, 505, 569]
+    assert 180 in fragment.context_node_ids
     evidence = dict(fragment.evidence or {})
     assert int(dict(evidence.get("selected_primary_connector", {}) or {}).get("connector_node_id", -1)) == 569
     contracts = list(evidence.get("fixed_connection_contracts", []) or [])
@@ -283,8 +284,8 @@ def test_classifier_creates_24_cd_m_full_when_both_fixed_connectors_are_m() -> N
     aromatic_6 = make_node(6, 6)
     connect(center, connector_0, fixed=True)
     connect(center, connector_27, fixed=True)
-    connect(connector_0, aromatic_9)
-    connect(connector_27, aromatic_6)
+    connect(connector_0, aromatic_9, fixed=True)
+    connect(connector_27, aromatic_6, fixed=True)
 
     result = classify_topology_units([center, connector_0, connector_27, aromatic_9, aromatic_6])
     assert _fragment_by_class(result, "24_CD_M_FULL") is not None
@@ -299,9 +300,9 @@ def test_classifier_marks_non_primary_fixed_connector_as_branch_only_with_partne
     open_23 = make_node(523, 23)
     pool_11 = make_node(411, 11)
     connect(center, connector_0, fixed=True)
-    connect(connector_0, aromatic_9)
+    connect(connector_0, aromatic_9, fixed=True)
     connect(center, connector_27, fixed=True)
-    connect(connector_27, side_single20d3)
+    connect(connector_27, side_single20d3, fixed=True)
     connect(side_single20d3, open_23)
     connect(center, pool_11)
 
@@ -348,7 +349,18 @@ def test_classifier_covers_single19d3_with_fixed_28_and_open_neighbors() -> None
 
     result = classify_topology_units([center, fixed_28, unsaturated_15, open_23])
 
-    assert _fragment_by_class(result, "24_CD_P") is not None
+    fragment = _fragment_by_class(result, "24_D")
+    assert fragment is not None
+    assert _fragment_by_class(result, "24_CD_P") is None
+    assert {int(slot.anchor_node_id) for slot in fragment.open_mainline_slots} == {
+        int(center.global_id)
+    }
+    assert len(fragment.open_mainline_slots) == 2
+    contracts = list(dict(fragment.evidence or {}).get("fixed_connection_contracts", []) or [])
+    assert len(contracts) == 1
+    assert contracts[0]["base_path_node_ids"] == [int(fixed_28.global_id)]
+    assert contracts[0]["role_candidates"] == ["branch_only"]
+    assert fragment.branch_contracts == []
     assert not [
         reject
         for reject in result.classification_rejects
@@ -585,24 +597,18 @@ def test_classifier_blocks_ring_eligibility_when_0_connector_is_mainline() -> No
 
 def test_classifier_marks_24_ab_n_24_cd_as_side_path_capable() -> None:
     left = make_node(1000, 20, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
-    left_connector = make_node(1001, 27)
-    left_tail = make_node(1002, 20, target_hop1_degree=2, special_anchor_mode="single")
     left_11 = make_node(1003, 11)
-    connect(left, left_connector, fixed=True)
-    connect(left_connector, left_tail)
     connect(left, left_11)
 
     right = make_node(1010, 20, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
-    right_connector = make_node(1011, 27)
-    right_tail = make_node(1012, 20, target_hop1_degree=2, special_anchor_mode="single")
-    connect(right, right_connector, fixed=True)
-    connect(right_connector, right_tail)
+    right_open = make_node(1012, 23)
+    connect(right, right_open)
 
     bridge = make_node(1020, 27)
-    connect(bridge, left)
-    connect(bridge, right)
+    connect(bridge, left, fixed=True)
+    connect(bridge, right, fixed=True)
 
-    result = classify_topology_units([left, left_connector, left_tail, left_11, right, right_connector, right_tail, bridge])
+    result = classify_topology_units([left, left_11, right, right_open, bridge])
     fragment = _fragment_by_class(result, "24_AB_N_24_CD")
     assert fragment is not None
     evidence = dict(fragment.evidence or {})
@@ -612,10 +618,12 @@ def test_classifier_marks_24_ab_n_24_cd_as_side_path_capable() -> None:
     fused_caps = list(dict(evidence.get("ring_path_capabilities", {}) or {}).get("fused", []) or [])
     assert "terminal_core_pair" in side_caps
     assert fused_caps == []
-    assert {"b_like_open", "single_end_flex_source", "like24_open"} <= set(list(evidence.get("flex_reconcile_roles", []) or []))
-    assert str(evidence.get("flex_reconcile_main_kind", "")) == "b_like_open"
+    assert {"d_like_open", "double_end_flex_source", "like24_open"} <= set(
+        list(evidence.get("flex_reconcile_roles", []) or [])
+    )
+    assert str(evidence.get("flex_reconcile_main_kind", "")) == "d_like_open"
     assert str(evidence.get("flex_reconcile_preferred_product_type", "")) == "flex_chain"
-    assert int(evidence.get("flex_reconcile_priority", 0) or 0) == 30
+    assert int(evidence.get("flex_reconcile_priority", 0) or 0) == 40
     assert int(evidence.get("ring_like24_units", 0) or 0) == 2
     assert {"side_anchor", "side_middle"} <= set(list(evidence.get("ring_roles", []) or []))
     contract = dict(dict(evidence.get("ring_contracts", {}) or {}).get("side_ring_plan", {}) or {})
@@ -630,7 +638,7 @@ def test_classifier_allows_non_11_aromatic_terminal_path_capability() -> None:
     aromatic_5 = make_node(1202, 6)
     aromatic_11 = make_node(1203, 11)
     connect(center, connector, fixed=True)
-    connect(connector, aromatic_5)
+    connect(connector, aromatic_5, fixed=True)
     connect(center, aromatic_11)
 
     result = classify_topology_units([center, connector, aromatic_5, aromatic_11])
@@ -675,14 +683,14 @@ def test_ring_like24_units_are_mapped_by_fragment_type_not_center_count() -> Non
     ) == 1
 
 
-def test_classifier_marks_only_closed_mainline_like24_as_explicit_flex() -> None:
+def test_classifier_keeps_nonfixed_mainline_boundaries_open() -> None:
     closed_center = make_node(300, 19, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
     closed_connector = make_node(329, 29)
     aromatic_5 = make_node(5, 5)
     pool_11 = make_node(11, 11)
     open_23 = make_node(23, 23)
     connect(closed_center, closed_connector, fixed=True)
-    connect(closed_connector, aromatic_5)
+    connect(closed_connector, aromatic_5, fixed=True)
     connect(closed_center, pool_11)
     connect(closed_center, open_23)
 
@@ -704,20 +712,14 @@ def test_classifier_marks_only_closed_mainline_like24_as_explicit_flex() -> None
     connect(open_center, terminal_28)
 
     bridge_left = make_node(1000, 20, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
-    bridge_left_connector = make_node(1001, 27)
-    bridge_left_tail = make_node(1002, 20, target_hop1_degree=2, special_anchor_mode="single")
     bridge_left_11 = make_node(1003, 11)
-    connect(bridge_left, bridge_left_connector, fixed=True)
-    connect(bridge_left_connector, bridge_left_tail)
     connect(bridge_left, bridge_left_11)
     bridge_right = make_node(1010, 20, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
-    bridge_right_connector = make_node(1011, 27)
-    bridge_right_tail = make_node(1012, 20, target_hop1_degree=2, special_anchor_mode="single")
-    connect(bridge_right, bridge_right_connector, fixed=True)
-    connect(bridge_right_connector, bridge_right_tail)
+    bridge_right_open = make_node(1012, 23)
+    connect(bridge_right, bridge_right_open)
     bridge_mid = make_node(1020, 27)
-    connect(bridge_mid, bridge_left)
-    connect(bridge_mid, bridge_right)
+    connect(bridge_mid, bridge_left, fixed=True)
+    connect(bridge_mid, bridge_right, fixed=True)
 
     result = classify_topology_units([
         closed_center,
@@ -731,34 +733,35 @@ def test_classifier_marks_only_closed_mainline_like24_as_explicit_flex() -> None
         pool_11_b,
         terminal_28,
         bridge_left,
-        bridge_left_connector,
-        bridge_left_tail,
         bridge_left_11,
         bridge_right,
-        bridge_right_connector,
-        bridge_right_tail,
+        bridge_right_open,
         bridge_mid,
     ])
 
     closed_fragment = _fragment_by_class(result, "24_AB_M")
     assert closed_fragment is not None
     closed_evidence = dict(closed_fragment.evidence or {})
-    assert bool(closed_evidence.get("flex_range_mainline_closed", False))
-    assert str(closed_evidence.get("flex_range_candidate_kind", "")) == "explicit_flex"
-    assert bool(closed_evidence.get("flex_range_counts_as_explicit", False))
+    assert bool(closed_evidence.get("flex_range_mainline_open", False))
+    assert str(closed_evidence.get("flex_range_candidate_kind", "")) == "b_like_open"
+    assert not bool(closed_evidence.get("flex_range_counts_as_explicit", False))
+    assert any(
+        int(boundary.get("boundary_neighbor_id", -1)) == 11
+        for boundary in list(closed_fragment.open_boundaries or [])
+    )
 
     open_fragment = _fragment_by_class(result, "24_AB_N")
     assert open_fragment is not None
     open_evidence = dict(open_fragment.evidence or {})
     assert bool(open_evidence.get("flex_range_mainline_open", False))
-    assert str(open_evidence.get("flex_range_candidate_kind", "")) == "b_like_open"
+    assert str(open_evidence.get("flex_range_candidate_kind", "")) == "d_like_open"
     assert not bool(open_evidence.get("flex_range_counts_as_explicit", False))
 
     bridge_fragment = _fragment_by_class(result, "24_AB_N_24_CD")
     assert bridge_fragment is not None
     bridge_evidence = dict(bridge_fragment.evidence or {})
     assert bool(bridge_evidence.get("flex_range_mainline_open", False))
-    assert str(bridge_evidence.get("flex_range_candidate_kind", "")) == "b_like_open"
+    assert str(bridge_evidence.get("flex_range_candidate_kind", "")) == "d_like_open"
     assert not bool(bridge_evidence.get("flex_range_counts_as_explicit", False))
 
 

@@ -1,8 +1,10 @@
 import copy
 import time
 import numpy as np
+import pandas as pd
 import torch
 import random
+from pathlib import Path
 from typing import Any, List, Optional, Dict, Tuple, Set
 from collections import Counter, defaultdict
 
@@ -15,7 +17,6 @@ from ...shared.inverse_common import (
     rebuild_su19_partition_meta,
     SU_EXTERNAL_CONNECTIONS,
     format_port_patterns_debug,
-    get_effective_nodes_element_vector,
     has_forbidden_fixed_connector_special_combo,
     is_mode_specific_neighbor_forbidden,
     is_terminal_port_node,
@@ -23,120 +24,568 @@ from ...shared.inverse_common import (
     validate_connection,
     violates_special_d3_terminal_limit,
 )
-from ..hop1_adjuster import (
+from .hop1_adjuster import (
+    Hop1Adjuster,
     can_match_ports_exact,
     can_match_ports_partial,
     hop1_counter_to_multiset,
-    motif_penalty_alpha,
-    build_motif_usage_from_pairs,
 )
-from .layer1_eval import Layer1NmrEvaluator
-from .layer1_completion_solver import Layer1CompletionSolver
-from .layer1_refiner import Layer1Refiner
+from .layer1_validator import Layer1GraphValidator
 
 
-DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS = 3
+class Layer1GreedyCompleter:
+    """Deterministic diversity-first completion with bounded local repair."""
+
+    MAX_REPAIR_DEPTH = 2
+    MAX_REPAIR_ATTEMPTS = 64
+
+    def __init__(self, assigner: Any, nodes: List[_NodeV3]) -> None:
+        self.assigner = assigner
+        self.nodes = nodes
+        self.started_at = time.perf_counter()
+        self.decisions = 0
+        self.repair_attempts = 0
+        self.repair_rewinds = 0
+        self.domains: Dict[int, Set[int]] = {}
+        self._exact_options_cache: Dict[
+            Tuple[int, int, Tuple[int, ...], Optional[int]],
+            Tuple[Tuple[int, ...], ...],
+        ] = {}
+        self._decision_stack: List[Dict[str, Any]] = []
+        self._failed_edge_states: Set[Tuple[Tuple[int, int], ...]] = set()
+        self._rebuild_domains()
+
+    def _active_ids(self) -> List[int]:
+        return sorted(
+            int(node.global_id)
+            for node in self.nodes
+            if int(node.remaining_hop1_slots()) > 0
+        )
+
+    @staticmethod
+    def _is_subcounter(current: Counter, target: Counter) -> bool:
+        return not bool(current - target)
+
+    def _exact_options(
+        self,
+        node: _NodeV3,
+        proposed_su: Optional[int] = None,
+    ) -> Tuple[Tuple[int, ...], ...]:
+        if not self.assigner._exact_hop1_shift_constraints_enabled:
+            return ((),)
+        center_su = int(node.su_type)
+        if center_su not in self.assigner._carbon_su_set:
+            return ((),)
+        degree = self.assigner._node_target_degree(node)
+        if degree is None:
+            return ()
+        current = Counter(node.hop1_su)
+        cache_key = (
+            center_su,
+            int(degree),
+            tuple(sorted(int(x) for x in current.elements())),
+            None if proposed_su is None else int(proposed_su),
+        )
+        cached = self._exact_options_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if proposed_su is not None:
+            current[int(proposed_su)] += 1
+        options = tuple(
+            signature
+            for signature in self.assigner._exact_hop1_signatures_by_center_degree.get(
+                (center_su, int(degree)),
+                (),
+            )
+            if self._is_subcounter(current, Counter(signature))
+        )
+        self._exact_options_cache[cache_key] = options
+        return options
+
+    def _candidate_ids(self, node: _NodeV3) -> List[int]:
+        options = self._exact_options(node)
+        if not options or options == ((),):
+            return self._active_ids()
+        current = Counter(node.hop1_su)
+        missing_types: Set[int] = set()
+        for signature in options:
+            missing = Counter(signature) - current
+            missing_types.update(
+                int(su_type)
+                for su_type, count in missing.items()
+                if int(count) > 0
+            )
+        available = self.assigner._available_ids_by_su
+        return sorted({
+            int(node_id)
+            for su_type in missing_types
+            for node_id in available.get(int(su_type), set())
+            if int(self.nodes[int(node_id)].remaining_hop1_slots()) > 0
+        })
+
+    def _rebuild_domains(self) -> None:
+        active = self._active_ids()
+        self.domains = {node_id: set() for node_id in active}
+        seen: Set[Tuple[int, int]] = set()
+        for left_id in active:
+            left = self.nodes[left_id]
+            for right_id in self._candidate_ids(left):
+                if left_id == right_id or right_id not in self.domains:
+                    continue
+                edge = tuple(sorted((left_id, right_id)))
+                if edge in seen:
+                    continue
+                seen.add(edge)
+                right = self.nodes[right_id]
+                if self.assigner._can_add_hop1_connection(self.nodes, left, right):
+                    self.domains[left_id].add(right_id)
+                    self.domains[right_id].add(left_id)
+
+    def _refresh_endpoint_domains(self, endpoint_ids: Set[int]) -> None:
+        endpoint_ids = set(int(x) for x in endpoint_ids)
+        for candidates in self.domains.values():
+            candidates.difference_update(endpoint_ids)
+        for endpoint_id in endpoint_ids:
+            self.domains.pop(endpoint_id, None)
+
+        active = set(self._active_ids())
+        for endpoint_id in sorted(endpoint_ids & active):
+            self.domains[endpoint_id] = set()
+            endpoint = self.nodes[endpoint_id]
+            for candidate_id in self._candidate_ids(endpoint):
+                candidate_id = int(candidate_id)
+                if candidate_id == endpoint_id or candidate_id not in active:
+                    continue
+                candidate = self.nodes[candidate_id]
+                if self.assigner._can_add_hop1_connection(
+                    self.nodes,
+                    endpoint,
+                    candidate,
+                ):
+                    self.domains[endpoint_id].add(candidate_id)
+                    self.domains.setdefault(candidate_id, set()).add(endpoint_id)
+
+    def _add_edge(self, left_id: int, right_id: int) -> bool:
+        if not self.assigner._add_bidirectional_hop1(
+            self.nodes,
+            int(left_id),
+            int(right_id),
+        ):
+            return False
+        self._refresh_endpoint_domains({int(left_id), int(right_id)})
+        return True
+
+    def _remove_edge(self, left_id: int, right_id: int) -> bool:
+        if not self.assigner._remove_bidirectional_hop1_with_force(
+            self.nodes,
+            int(left_id),
+            int(right_id),
+            force=False,
+        ):
+            return False
+        self._refresh_endpoint_domains({int(left_id), int(right_id)})
+        return True
+
+    def _select_center(self) -> Tuple[Optional[_NodeV3], List[int]]:
+        best: Optional[Tuple[Tuple[int, int, int], _NodeV3, List[int]]] = None
+        for node_id in self._active_ids():
+            node = self.nodes[node_id]
+            partners = list(self.domains.get(node_id, set()))
+            key = (
+                len(partners),
+                int(node.remaining_hop1_slots()),
+                int(node_id),
+            )
+            if best is None or key < best[0]:
+                best = (key, node, partners)
+        if best is None:
+            return None, []
+        return best[1], best[2]
+
+    def _complete_motif_usage(self) -> Counter:
+        usage: Counter = Counter()
+        for node in self.nodes:
+            if int(node.su_type) not in self.assigner._carbon_su_set:
+                continue
+            if int(node.remaining_hop1_slots()) != 0:
+                continue
+            motif = tuple(sorted(int(x) for x in Counter(node.hop1_su).elements()))
+            usage[(int(node.su_type), motif)] += 1
+        return usage
+
+    def _projected_usage(
+        self,
+        node: _NodeV3,
+        proposed_su: int,
+        usage: Counter,
+    ) -> int:
+        if int(node.su_type) not in self.assigner._carbon_su_set:
+            return 0
+        options = self._exact_options(node, int(proposed_su))
+        if not options:
+            return 10**9
+        return min(
+            int(usage.get((int(node.su_type), tuple(option)), 0))
+            for option in options
+        )
+
+    def _component(self, start_id: int) -> Set[int]:
+        visited: Set[int] = set()
+        pending = [int(start_id)]
+        while pending:
+            node_id = int(pending.pop())
+            if node_id in visited:
+                continue
+            visited.add(node_id)
+            pending.extend(
+                int(x)
+                for x in list(self.nodes[node_id].hop1_ids or [])
+                if int(x) not in visited
+            )
+        return visited
+
+    def _order_partners(self, center: _NodeV3, partner_ids: List[int]) -> List[int]:
+        usage = self._complete_motif_usage()
+        component = self._component(int(center.global_id))
+        projected_cache: Dict[Tuple[int, int, Tuple[int, ...], int], int] = {}
+
+        def _projected(node: _NodeV3, proposed_su: int) -> int:
+            key = (
+                int(node.su_type),
+                int(self.assigner._node_target_degree(node) or -1),
+                tuple(sorted(int(x) for x in node.hop1_su.elements())),
+                int(proposed_su),
+            )
+            if key not in projected_cache:
+                projected_cache[key] = self._projected_usage(
+                    node,
+                    int(proposed_su),
+                    usage,
+                )
+            return int(projected_cache[key])
+        return sorted(
+            (int(x) for x in partner_ids),
+            key=lambda partner_id: (
+                _projected(
+                    center,
+                    int(self.nodes[partner_id].su_type),
+                )
+                + _projected(
+                    self.nodes[partner_id],
+                    int(center.su_type),
+                ),
+                -int(self.nodes[partner_id].remaining_hop1_slots()),
+                int(partner_id in component),
+                int(self.nodes[partner_id].su_type),
+                int(partner_id),
+            ),
+        )
+
+    def _all_complete_and_exact(self) -> bool:
+        return all(
+            int(node.remaining_hop1_slots()) == 0
+            and self.assigner._node_exact_hop1_shift_state_ok(
+                node,
+                require_full=True,
+            )
+            for node in self.nodes
+        )
+
+    def _edge_state_signature(self) -> Tuple[Tuple[int, int], ...]:
+        return tuple(
+            (int(node.global_id), int(neighbor_id))
+            for node in self.nodes
+            for neighbor_id in sorted(int(x) for x in list(node.hop1_ids or []))
+            if int(node.global_id) < int(neighbor_id)
+        )
+
+    def _restore_rewound_decisions(
+        self,
+        rewound_decisions: List[Dict[str, Any]],
+    ) -> None:
+        for decision in reversed(rewound_decisions):
+            center_id = int(decision['center_id'])
+            chosen_id = int(decision['chosen_id'])
+            if not self._add_edge(center_id, chosen_id):
+                raise RuntimeError(
+                    "layer1_rule_graph_repair_restore_failed: "
+                    f"edge=({center_id}, {chosen_id})"
+                )
+            self._decision_stack.append(decision)
+        # A failed repair is exceptional, so prefer a complete, consistent
+        # domain rebuild over leaving diagnostics based on incremental state.
+        self._rebuild_domains()
+
+    def _try_local_repair(self) -> bool:
+        self._failed_edge_states.add(self._edge_state_signature())
+        rewound = 0
+        rewound_decisions: List[Dict[str, Any]] = []
+        while (
+            self._decision_stack
+            and rewound < int(self.MAX_REPAIR_DEPTH)
+            and self.repair_attempts < int(self.MAX_REPAIR_ATTEMPTS)
+        ):
+            decision = self._decision_stack.pop()
+            if not self._remove_edge(decision['center_id'], decision['chosen_id']):
+                self._decision_stack.append(decision)
+                self._restore_rewound_decisions(rewound_decisions)
+                return False
+            rewound_decisions.append(decision)
+            rewound += 1
+            self.repair_rewinds += 1
+
+            center, partner_ids = self._select_center()
+            if center is None or not partner_ids:
+                continue
+            ordered = self._order_partners(center, partner_ids)
+            for alternative_index, partner_id in enumerate(ordered):
+                if self.repair_attempts >= int(self.MAX_REPAIR_ATTEMPTS):
+                    break
+                partner_id = int(partner_id)
+                self.repair_attempts += 1
+                center_id = int(center.global_id)
+                if not self._add_edge(center_id, partner_id):
+                    self.domains.get(center_id, set()).discard(partner_id)
+                    self.domains.get(partner_id, set()).discard(center_id)
+                    continue
+
+                state_signature = self._edge_state_signature()
+                next_center, next_partner_ids = self._select_center()
+                immediate_dead_end = bool(
+                    next_center is not None and not next_partner_ids
+                )
+                if (
+                    state_signature in self._failed_edge_states
+                    or immediate_dead_end
+                ):
+                    if immediate_dead_end:
+                        self._failed_edge_states.add(state_signature)
+                    if not self._remove_edge(center_id, partner_id):
+                        raise RuntimeError(
+                            "layer1_rule_graph_repair_trial_restore_failed: "
+                            f"edge=({center_id}, {partner_id})"
+                        )
+                    continue
+
+                self._decision_stack.append({
+                    'center_id': center_id,
+                    'chosen_id': partner_id,
+                    'alternatives': ordered,
+                    'next_index': int(alternative_index) + 1,
+                })
+                return True
+
+        self._restore_rewound_decisions(rewound_decisions)
+        return False
+
+    def solve(self) -> Dict[str, Any]:
+        initial_open_ports = sum(
+            int(node.remaining_hop1_slots()) for node in self.nodes
+        )
+
+        while not self._all_complete_and_exact():
+            center, partner_ids = self._select_center()
+            if center is None or not partner_ids:
+                if self._try_local_repair():
+                    continue
+                center, partner_ids = self._select_center()
+                if center is not None and partner_ids:
+                    continue
+                blocked = None if center is None else {
+                    'node_id': int(center.global_id),
+                    'su_type': int(center.su_type),
+                    'remaining_ports': int(center.remaining_hop1_slots()),
+                    'legal_partner_types': sorted({
+                        int(self.nodes[x].su_type)
+                        for x in partner_ids
+                    }),
+                }
+                raise RuntimeError(
+                    "layer1_rule_graph_search_exhausted: bounded_greedy_repair_exhausted "
+                    f"blocked={blocked} repair_attempts={self.repair_attempts}"
+                )
+
+            ordered = self._order_partners(center, partner_ids)
+            chosen_id = int(ordered[0])
+            if not self._add_edge(int(center.global_id), chosen_id):
+                self.domains.get(int(center.global_id), set()).discard(chosen_id)
+                self.domains.get(chosen_id, set()).discard(int(center.global_id))
+                continue
+            self.decisions += 1
+            self._decision_stack.append({
+                'center_id': int(center.global_id),
+                'chosen_id': chosen_id,
+                'alternatives': ordered,
+                'next_index': 1,
+            })
+            if self.decisions % 50 == 0:
+                open_ports = sum(
+                    int(node.remaining_hop1_slots()) for node in self.nodes
+                )
+                print(
+                    "  [Layer1 Rule Completion Progress] "
+                    f"decisions={self.decisions}, repairs={self.repair_attempts}, "
+                    f"open_ports={open_ports}",
+                    flush=True,
+                )
+
+        return {
+            'solver': 'diversity_first_greedy_bounded_repair',
+            'initial_open_ports': int(initial_open_ports),
+            'final_open_ports': 0,
+            'decisions': int(self.decisions),
+            'backtracks': int(self.repair_rewinds),
+            'repair_attempts': int(self.repair_attempts),
+            'elapsed_s': float(time.perf_counter() - self.started_at),
+            'stop_reason': 'rule_valid_graph_found',
+        }
 
 
 class Layer1Assigner:
     """Layer1的1-hop分配器"""
-    
+
     def __init__(self,
                  device: str = 'cpu',
                  E_SU_tensor: torch.Tensor = None,
                  layer0_estimator=None,
-                 intensity_scale: float = 1.0,
-                 unit_peak_intensity: bool = True,
                  deterministic: bool = True):
         """
         初始化Layer1分配器
         """
         self.device = device
         self.E_SU = E_SU_tensor.to(device) if E_SU_tensor is not None else E_SU.to(device)
-        self.intensity_scale = float(intensity_scale)
-        self.unit_peak_intensity = bool(unit_peak_intensity)
         self.deterministic = bool(deterministic)
-        self._build_variant = 0
         self._current_E_target: Optional[torch.Tensor] = None
         self.layer0_estimator = layer0_estimator
-        self._nmr_evaluator = Layer1NmrEvaluator(
-            device=self.device,
-            E_SU_tensor=self.E_SU,
-            intensity_scale=self.intensity_scale,
-            unit_peak_intensity=self.unit_peak_intensity,
-        )
-        self._refiner = Layer1Refiner(
-            device=self.device,
-            evaluator=self._nmr_evaluator,
-        )
+        self._hop1_adjuster: Optional[Hop1Adjuster] = None
+        self._validator = Layer1GraphValidator(self)
         self._runtime_nodes_ref: Optional[List[_NodeV3]] = None
         self._node_ids_by_su: Dict[int, List[int]] = {}
         self._available_ids_by_su: Dict[int, Set[int]] = {}
         self._port_pattern_cache: Dict[Tuple[int, Optional[int]], Any] = {}
         self._edge_semantics_cache: Dict[Tuple[int, int, Optional[int]], bool] = {}
         self._can_add_hop1_cache: Dict[Tuple[Any, Any], bool] = {}
+        self._exact_hop1_shift_constraints_enabled = False
+        self._exact_hop1_constraint_lib_path: Optional[str] = None
+        self._exact_hop1_signature_set: Set[Tuple[int, Tuple[int, ...]]] = set()
+        self._exact_hop1_mu_by_signature: Dict[Tuple[int, Tuple[int, ...]], float] = {}
+        self._exact_hop1_signatures_by_center_degree: Dict[
+            Tuple[int, int], Tuple[Tuple[int, ...], ...]
+        ] = {}
+        self._exact_hop1_partial_cache: Dict[Tuple[int, int, Tuple[int, ...]], bool] = {}
+        self._last_hop1_adjust_diagnostics: Dict[str, Any] = {}
         self._carbon_su_set = {
             int(i)
             for i in range(int(self.E_SU.shape[0]))
             if float(self.E_SU[int(i), 0].detach().cpu().item()) > 0.0
         }
-        self._hop1_templates_by_su: Dict[int, Tuple[Tuple[int, ...], ...]] = {}
-        self._enforce_hop1_template_contract = False
+    def _reset_layer1_search_caches(self) -> None:
+        self._edge_semantics_cache = {}
+        self._can_add_hop1_cache = {}
 
-    def _configure_hop1_template_contract(self, lib_path: Optional[str]) -> None:
-        lib_index = self._nmr_evaluator.get_library_index(lib_path)
-        center_to_hop1 = dict(lib_index.get('center_to_hop1', {}) or {})
-        self._hop1_templates_by_su = {
-            int(center_su): tuple(sorted({
-                tuple(sorted(int(x) for x in tuple(hop1_ms)))
-                for hop1_ms in list(hop1_sets or [])
-            }))
-            for center_su, hop1_sets in center_to_hop1.items()
-        }
-        missing_centers = sorted(
-            int(su) for su in self._carbon_su_set
-            if not self._hop1_templates_by_su.get(int(su))
-        )
-        if missing_centers:
-            raise RuntimeError(
-                "Layer1 template library has no exact 1-hop templates for carbon "
-                f"SU types: {missing_centers}"
-            )
-        self._enforce_hop1_template_contract = True
+    def _configure_exact_hop1_shift_constraints(
+        self,
+        lib_path: Optional[str],
+    ) -> None:
+        """Load the exact Layer1 shift keys without selecting any 2-hop template."""
+        self._exact_hop1_shift_constraints_enabled = False
+        self._exact_hop1_constraint_lib_path = None
+        self._exact_hop1_signature_set = set()
+        self._exact_hop1_mu_by_signature = {}
+        self._exact_hop1_signatures_by_center_degree = {}
+        self._exact_hop1_partial_cache = {}
         self._reset_layer1_search_caches()
+        if not lib_path:
+            return
 
-    def _hop1_template_feasible(self,
-                                node: _NodeV3,
-                                neighbor_su: Optional[int] = None,
-                                require_exact: bool = False) -> bool:
-        if not bool(self._enforce_hop1_template_contract):
+        self._hop1_adjuster = Hop1Adjuster(
+            template_lib_path=str(lib_path),
+            port_combinations=HOP1_PORT_COMBINATIONS,
+            validate_connection_fn=validate_connection,
+            enforce_external_requirements=False,
+            exact_hop1_required_centers=set(self._carbon_su_set),
+            carbon_su_set=set(self._carbon_su_set),
+            device=self.device,
+        )
+        median_index = self._hop1_adjuster.get_exact_hop1_median_index()
+        signatures = {
+            (
+                int(center_su),
+                tuple(sorted(int(x) for x in tuple(hop1_ms))),
+            )
+            for center_su, hop1_ms in median_index.keys()
+        }
+        if not signatures:
+            raise RuntimeError(
+                f"layer1_exact_hop1_shift_index_empty: lib_path={lib_path}"
+            )
+
+        grouped: Dict[Tuple[int, int], List[Tuple[int, ...]]] = defaultdict(list)
+        for center_su, hop1_ms in sorted(signatures):
+            grouped[(int(center_su), int(len(hop1_ms)))].append(tuple(hop1_ms))
+        self._exact_hop1_signature_set = set(signatures)
+        self._exact_hop1_mu_by_signature = {
+            (
+                int(center_su),
+                tuple(sorted(int(x) for x in tuple(hop1_ms))),
+            ): float(mu)
+            for (center_su, hop1_ms), mu in median_index.items()
+        }
+        self._exact_hop1_signatures_by_center_degree = {
+            key: tuple(values)
+            for key, values in grouped.items()
+        }
+        self._exact_hop1_constraint_lib_path = str(lib_path)
+        self._exact_hop1_shift_constraints_enabled = True
+
+    def _node_exact_hop1_shift_state_ok(
+        self,
+        node: _NodeV3,
+        *,
+        proposed_neighbor_su: Optional[int] = None,
+        require_full: bool = False,
+    ) -> bool:
+        """Check that a partial motif can still reach an exact Layer1 shift key."""
+        if not bool(self._exact_hop1_shift_constraints_enabled):
             return True
         center_su = int(getattr(node, 'su_type', -1))
         if center_su not in self._carbon_su_set:
             return True
-        current = Counter({
-            int(su): int(count)
-            for su, count in Counter(getattr(node, 'hop1_su', {}) or {}).items()
-            if int(count) > 0
-        })
-        if neighbor_su is not None:
-            current[int(neighbor_su)] += 1
-        current_ms = tuple(sorted(current.elements()))
-        templates = self._hop1_templates_by_su.get(center_su, ())
-        if bool(require_exact):
-            return current_ms in templates
-        target_degree = self._node_target_degree(node)
-        for template_ms in templates:
-            if target_degree is not None and len(template_ms) != int(target_degree):
-                continue
-            template_counter = Counter(template_ms)
-            if all(int(template_counter.get(su, 0)) >= int(count) for su, count in current.items()):
-                return True
-        return False
 
-    def _reset_layer1_search_caches(self) -> None:
-        self._edge_semantics_cache = {}
-        self._can_add_hop1_cache = {}
+        target_degree = self._node_target_degree(node)
+        if target_degree is None:
+            try:
+                target_degree = int(node.get_max_degree())
+            except Exception:
+                return False
+        current = list(
+            int(x)
+            for x in Counter(getattr(node, 'hop1_su', {}) or {}).elements()
+        )
+        if proposed_neighbor_su is not None:
+            current.append(int(proposed_neighbor_su))
+        partial = tuple(sorted(current))
+        degree = int(target_degree)
+        if len(partial) > degree:
+            return False
+        if bool(require_full) or len(partial) == degree:
+            return (int(center_su), tuple(partial)) in self._exact_hop1_signature_set
+
+        cache_key = (int(center_su), int(degree), tuple(partial))
+        cached = self._exact_hop1_partial_cache.get(cache_key)
+        if cached is not None:
+            return bool(cached)
+        partial_counts = Counter(partial)
+        options = self._exact_hop1_signatures_by_center_degree.get(
+            (int(center_su), int(degree)),
+            (),
+        )
+        feasible = any(
+            not bool(partial_counts - Counter(signature))
+            for signature in options
+        )
+        self._exact_hop1_partial_cache[cache_key] = bool(feasible)
+        return bool(feasible)
 
     def _runtime_index_matches(self, nodes: List[_NodeV3]) -> bool:
         return nodes is self._runtime_nodes_ref
@@ -180,13 +629,13 @@ class Layer1Assigner:
         ordered.sort(key=lambda n: (int(getattr(n, 'global_id', -1)), int(getattr(n, 'su_type', -1))))
         return ordered
 
-    def _maybe_shuffle_nodes(self, nodes: List[_NodeV3], salt: int = 0) -> List[_NodeV3]:
+    def _canonical_node_order(self, nodes: List[_NodeV3], salt: int = 0) -> List[_NodeV3]:
         ordered = list(nodes)
         if bool(self.deterministic):
             ordered = self._stable_node_order(ordered)
             if ordered:
-                offset = int(self._build_variant + int(salt)) % len(ordered)
-                if offset > 0:
+                offset = int(salt) % len(ordered)
+                if offset:
                     ordered = ordered[offset:] + ordered[:offset]
             return ordered
         random.shuffle(ordered)
@@ -525,16 +974,20 @@ class Layer1Assigner:
                     self._node_fixed_anchor_target(nb),
                     self._node_anchor_mode(nb),
                 ))
+        identity_sensitive = bool(
+            int(getattr(node, 'su_type', -1)) in {19, 20, 21, 27, 29, 31}
+            or any(int(state[0]) in {19, 20, 21, 27, 29, 31} for state in neighbor_states)
+        )
         return (
-            int(getattr(node, 'global_id', -1)),
+            int(getattr(node, 'global_id', -1)) if identity_sensitive else None,
             int(getattr(node, 'su_type', -1)),
             self._node_target_degree(node),
             self._node_anchor_partition(node),
             self._node_fixed_anchor_target(node),
             self._node_anchor_mode(node),
             int(node.remaining_hop1_slots()),
-            neighbor_ids,
-            tuple(neighbor_states),
+            neighbor_ids if identity_sensitive else None,
+            tuple(sorted(neighbor_states, key=repr)),
         )
 
     @staticmethod
@@ -1354,7 +1807,15 @@ class Layer1Assigner:
                     p_penalty = 10
                 elif int(owner_su) == 0:
                     p_penalty = 2
-            return (int(p_penalty), int(rank), int(slot['owner_id']), int(slot.get('slot_index', 0)))
+            slot_rank = int(slot.get('priority_rank', rank))
+            owner_order = int(slot.get('spread_rank', slot['owner_id']))
+            return (
+                int(p_penalty),
+                int(slot_rank),
+                int(owner_order),
+                int(slot['owner_id']),
+                int(slot.get('slot_index', 0)),
+            )
 
         def _candidate_slots(work_nodes: List[_NodeV3],
                              used_slots: List[bool],
@@ -1619,313 +2080,17 @@ class Layer1Assigner:
         if len(errors) > len(shown):
             print(f"    [{prefix}] ... 其余 {len(errors) - len(shown)} 条省略")
 
-    @staticmethod
-    def _is_soft_consistency_error(msg: str) -> bool:
-        text = str(msg)
-        if ('实际连接度' in text and '目标连接度' in text):
-            return False
-        if '未优先连接SU9' in text:
-            return True
-        return False
-
-    def assess_consistency_acceptance(self,
-                                      errors: List[str],
-                                      max_soft_errors: int = DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS) -> Tuple[bool, Dict[str, Any]]:
-        soft_errors: List[str] = []
-        hard_errors: List[str] = []
-        for msg in list(errors or []):
-            if self._is_soft_consistency_error(str(msg)):
-                soft_errors.append(str(msg))
-            else:
-                hard_errors.append(str(msg))
-        accepted = bool(len(hard_errors) == 0 and len(soft_errors) <= int(max_soft_errors))
-        return accepted, {
-            'accepted': bool(accepted),
-            'max_soft_errors': int(max_soft_errors),
-            'soft_errors': list(soft_errors),
-            'hard_errors': list(hard_errors),
-            'n_soft': int(len(soft_errors)),
-            'n_hard': int(len(hard_errors)),
-        }
-    
     def validate_graph_consistency(self, nodes: List[_NodeV3], 
                                     H: torch.Tensor, 
                                     E_target: Optional[torch.Tensor] = None,
                                     verbose: bool = False) -> Tuple[bool, List[str]]:
-        """
-        验证图的全局一致性
-        """
-        errors = []
-        
-        # 1. 检查节点数量
-        expected_total = int(H.sum().item())
-        actual_total = len(nodes)
-        if actual_total != expected_total:
-            errors.append(f"节点数量不匹配: 实际{actual_total} vs 预期{expected_total}")
-        
-        # 2. 检查SU类型分布
-        H_actual = self._histogram_from_nodes(nodes)
-        for su_type in range(NUM_SU_TYPES):
-            expected = int(H[su_type].item())
-            actual = int(H_actual[su_type].item())
-            if expected != actual:
-                errors.append(f"SU{su_type}数量不匹配: 实际{actual} vs 预期{expected}")
-        
-        # 3. 检查互为1-hop对称性
-        for n in nodes:
-            for neighbor_id in n.hop1_ids:
-                if neighbor_id >= len(nodes):
-                    errors.append(f"节点{n.global_id}: hop1_ids包含越界ID {neighbor_id}")
-                    continue
-                neighbor = nodes[neighbor_id]
-                if n.global_id not in neighbor.hop1_ids:
-                    errors.append(f"1-hop不对称: {n.global_id}->{neighbor_id} 但反向缺失")
-        
-        # 4. 检查hop1_su与hop1_ids一致性
-        for n in nodes:
-            actual_counter = Counter()
-            for nid in n.hop1_ids:
-                if nid < len(nodes):
-                    actual_counter[nodes[nid].su_type] += 1
-            
-            if actual_counter != n.hop1_su:
-                errors.append(f"节点{n.global_id}(SU{n.su_type}): hop1_su={dict(n.hop1_su)} != 实际={dict(actual_counter)}")
-        
-        # 5. 检查每个节点的内部一致性
-        for n in nodes:
-            is_valid, node_errors = n.validate_hop1_consistency()
-            if not is_valid:
-                errors.extend(node_errors)
-            target_degree = self._node_target_degree(n)
-            if target_degree is not None and int(n.get_hop1_degree()) != int(target_degree):
-                errors.append(
-                    f"节点{n.global_id}(SU{n.su_type}): 实际连接度{n.get_hop1_degree()} != 目标连接度{target_degree}"
-                )
-            if (
-                int(getattr(n, 'su_type', -1)) in self._carbon_su_set
-                and not self._hop1_template_feasible(n, require_exact=True)
-            ):
-                errors.append(
-                    f"节点{n.global_id}(SU{n.su_type}): 精确1-hop模板不存在, "
-                    f"hop1={list(hop1_counter_to_multiset(n.hop1_su))}"
-                )
-        
-        # 6. 检查 per-port 连接规则合规性
-        for n in nodes:
-            port_sets = self._port_sets_for_node(n)
-            if not port_sets:
-                continue
-            neighbor_types = [int(nodes[nid].su_type) for nid in n.hop1_ids if nid < len(nodes)]
-            neighbor_nodes = self._current_neighbor_nodes(nodes, n)
-            if not can_match_ports_partial(neighbor_nodes, port_sets, center_node=n):
-                errors.append(
-                    f"节点{n.global_id}(SU{n.su_type}): partial hop1={sorted(neighbor_types)} 不满足端口规则 "
-                    f"{format_port_patterns_debug(port_sets)}"
-                )
-            elif n.is_hop1_complete() and not can_match_ports_exact(neighbor_nodes, port_sets, center_node=n):
-                errors.append(
-                    f"节点{n.global_id}(SU{n.su_type}): hop1={sorted(neighbor_types)} 不满足端口规则 "
-                    f"{format_port_patterns_debug(port_sets)}"
-                )
-
-            su_i = int(getattr(n, 'su_type', -1))
-            if su_i in {14, 15, 16}:
-                unsaturated_pair_neighbors = [
-                    int(x)
-                    for x in neighbor_types
-                    if int(x) in {14, 15, 16}
-                ]
-                if len(unsaturated_pair_neighbors) != 1:
-                    errors.append(
-                        f"节点{n.global_id}(SU{n.su_type}): 14/15/16固定配对必须恰好一个, "
-                        f"pair_neighbors={sorted(unsaturated_pair_neighbors)}"
-                    )
-                if su_i == 16 and 16 in unsaturated_pair_neighbors:
-                    errors.append(f"节点{n.global_id}(SU16): 禁止16-16固定配对")
-                aromatic_neighbors = [
-                    int(x)
-                    for x in neighbor_types
-                    if 5 <= int(x) <= 13 and not (su_i == 15 and int(x) == 11)
-                ]
-                if aromatic_neighbors:
-                    errors.append(
-                        f"节点{n.global_id}(SU{n.su_type}): 14/16 不允许连接芳香5-13，"
-                        f"15只允许11作为骨架端口, "
-                        f"aromatic_neighbors={sorted(aromatic_neighbors)}"
-                    )
-
-            if su_i in {17, 18}:
-                triple_pair_neighbors = [
-                    int(x)
-                    for x in neighbor_types
-                    if int(x) in {17, 18}
-                ]
-                if len(triple_pair_neighbors) != 1:
-                    errors.append(
-                        f"节点{n.global_id}(SU{n.su_type}): 17/18固定配对必须恰好一个, "
-                        f"pair_neighbors={sorted(triple_pair_neighbors)}"
-                    )
-                if su_i == 18 and 18 in triple_pair_neighbors:
-                    errors.append(f"节点{n.global_id}(SU18): 禁止18-18固定配对")
-
-        # 27/29/31 fixed connectors may have two special partners, but not two
-        # double-d3 partners at the same connector.
-        for n in nodes:
-            if int(getattr(n, 'su_type', -1)) not in {27, 29, 31}:
-                continue
-            neighbor_nodes = self._current_neighbor_nodes(nodes, n)
-            if has_forbidden_fixed_connector_special_combo(n, neighbor_nodes):
-                labels = [
-                    f"{int(getattr(nb, 'global_id', -1))}(SU{int(getattr(nb, 'su_type', -1))},"
-                    f"deg={self._node_target_degree(nb)},mode={self._node_anchor_mode(nb)})"
-                    for nb in list(neighbor_nodes)
-                ]
-                errors.append(
-                    f"节点{n.global_id}(SU{n.su_type}): fixed connector 不能同时连接两个 double d3 special, "
-                    f"neighbors={labels}"
-                )
-            if self._violates_fixed_connector_special_end_rules(nodes, n):
-                labels = [
-                    f"{int(getattr(nb, 'global_id', -1))}(SU{int(getattr(nb, 'su_type', -1))},"
-                    f"deg={self._node_target_degree(nb)},mode={self._node_anchor_mode(nb)},"
-                    f"fixed={self._node_fixed_anchor_target(nb)})"
-                    for nb in list(neighbor_nodes)
-                ]
-                errors.append(
-                    f"节点{n.global_id}(SU{n.su_type}): SU27/29/31不能同时连接两个double d2/d3，"
-                    f"也不能同时连接single d3和double d2/d3, neighbors={labels}"
-                )
-
-        for n in nodes:
-            if self._violates_terminal_neighbor_limit(nodes, n):
-                neighbor_nodes = self._current_neighbor_nodes(nodes, n)
-                terminal_labels = [
-                    f"{int(getattr(nb, 'global_id', -1))}(SU{int(getattr(nb, 'su_type', -1))},"
-                    f"deg={self._node_target_degree(nb)},mode={self._node_anchor_mode(nb)})"
-                    for nb in list(neighbor_nodes)
-                    if self._is_terminal_like_neighbor(nb)
-                ]
-                errors.append(
-                    f"节点{n.global_id}(SU{n.su_type}): 结构单元最多只能连接一个端基结构, "
-                    f"terminal_neighbors={terminal_labels}"
-                )
-
-        forbidden_p_rows = self._forbidden_p_pair_rows(nodes)
-        for row in forbidden_p_rows:
-            errors.append(
-                "P+P固定锚点非法连接: "
-                f"double_id={int(row.get('double_id', -1))}(SU{int(row.get('double_su', -1))}) "
-                f"p_connectors={list(row.get('p_connector_ids', []) or [])} "
-                f"p_su={list(row.get('p_connector_su', []) or [])}"
-            )
-
-        # 6.5 检查外接结构要求（即使节点未满度，也不能缺失必须存在的外接锚点）
-        for n in nodes:
-            if int(getattr(n, 'su_type', -1)) == 19 and self._node_anchor_partition(n) not in {'thio', 'ether'}:
-                errors.append(
-                    f"节点{n.global_id}(SU19): 缺少严格分区标记 special_anchor_partition, part={self._node_anchor_partition(n)}"
-                )
-            required_external = self._required_external_candidates_for_node(n)
-            neighbor_types = [int(nodes[nid].su_type) for nid in n.hop1_ids if nid < len(nodes)]
-            if required_external and not self._has_required_external_for_node(n, nodes):
-                errors.append(
-                    f"节点{n.global_id}(SU{n.su_type}): 缺少必需外接锚点, hop1={sorted(neighbor_types)} | "
-                    f"required={sorted(required_external)} part={self._node_anchor_partition(n)}"
-                )
-            ext_cnt = int(sum(1 for x in neighbor_types if int(x) in set(required_external)))
-            target_ext_cnt = int(self._node_fixed_anchor_target(n))
-            if required_external and int(target_ext_cnt) > 0:
-                if ext_cnt < int(target_ext_cnt):
-                    errors.append(
-                        f"节点{n.global_id}(SU{n.su_type}): 固定锚点边数不足, hop1={sorted(neighbor_types)} | "
-                        f"required={sorted(required_external)} part={self._node_anchor_partition(n)} count={ext_cnt} target={target_ext_cnt}"
-                    )
-                if ext_cnt > int(target_ext_cnt):
-                    errors.append(
-                        f"节点{n.global_id}(SU{n.su_type}): 固定锚点边数超过目标上限, hop1={sorted(neighbor_types)} | "
-                        f"required={sorted(required_external)} part={self._node_anchor_partition(n)} count={ext_cnt} target={target_ext_cnt}"
-                    )
-
-        errors.extend(
-            self._fixed_anchor_invariant_errors(
-                nodes,
-                check_thio=True,
-                check_ether=True,
-                check_amine=True,
-                check_halogen=True,
-            )
+        """Compatibility wrapper for the pure Layer1 graph validator."""
+        return self._validator.validate(
+            nodes=nodes,
+            H=H,
+            E_target=E_target,
+            verbose=verbose,
         )
-
-        # 7. 检查羰基结构单元优先连接SU9的规则
-        carbonyl_sus = [0, 1, 2, 3]
-        for n in nodes:
-            if int(n.su_type) in carbonyl_sus and n.is_hop1_complete():
-                neighbor_types = [int(nodes[nid].su_type) for nid in n.hop1_ids if nid < len(nodes)]
-                # 检查是否优先连接了SU9（仅当存在真实可接入 carbonyl port3 的SU9时）
-                su9_available = any(
-                    int(getattr(cand, 'su_type', -1)) == 9 and
-                    int(getattr(cand, 'global_id', -1)) != int(n.global_id) and
-                    int(getattr(cand, 'global_id', -1)) not in n.hop1_ids and
-                    int(cand.remaining_hop1_slots()) > 0 and
-                    self._can_add_hop1_connection(nodes, n, cand)
-                    for cand in nodes
-                )
-                if su9_available and 9 not in neighbor_types:
-                    errors.append(
-                        f"羰基节点{n.global_id}(SU{n.su_type}): hop1={sorted(neighbor_types)} 未优先连接SU9"
-                    )
-
-        # Fixed-role edges may change identity during spectral swaps, but the
-        # role cardinality itself is a hard invariant.
-        for n in nodes:
-            if int(getattr(n, 'su_type', -1)) != 9:
-                continue
-            carbonyl_neighbors = [
-                int(nid)
-                for nid in list(getattr(n, 'hop1_ids', []) or [])
-                if 0 <= int(nid) < len(nodes) and int(nodes[int(nid)].su_type) in {0, 1, 2, 3}
-            ]
-            if len(carbonyl_neighbors) != 1:
-                errors.append(
-                    f"节点{n.global_id}(SU9): 羰基固定角色边必须恰好一个, "
-                    f"carbonyl_neighbors={carbonyl_neighbors}"
-                )
-
-        # 7.5 检查逐边语义合法性
-        seen_edges: Set[Tuple[int, int]] = set()
-        for n in nodes:
-            for neighbor_id in n.hop1_ids:
-                if neighbor_id < 0 or neighbor_id >= len(nodes):
-                    continue
-                edge = tuple(sorted((int(n.global_id), int(neighbor_id))))
-                if edge in seen_edges:
-                    continue
-                seen_edges.add(edge)
-                neighbor = nodes[neighbor_id]
-                if not self._node_edge_semantics_ok(nodes, n, neighbor, E_target=E_target):
-                    errors.append(
-                        f"非法1-hop边: {int(n.global_id)}(SU{int(n.su_type)}) <-> "
-                        f"{int(neighbor.global_id)}(SU{int(neighbor.su_type)})"
-                    )
-        
-        # 8. 检查元素组成（可选）
-        if E_target is not None:
-            E_pred = get_effective_nodes_element_vector(nodes, self.E_SU, device=torch.device(self.device))
-            E_target = E_target.to(self.device)
-            E_diff = torch.abs(E_pred - E_target)
-            rel_err = E_diff / (E_target + 1e-6)
-            
-            for i, elem_name in enumerate(['C', 'H', 'O', 'N', 'S', 'X']):
-                tol = 0.10 if str(elem_name) == 'H' else 0.05
-                if rel_err[i] > float(tol):
-                    errors.append(f"元素{elem_name}误差过大: 预测{E_pred[i]:.1f} vs 目标{E_target[i]:.1f} (相对误差{rel_err[i]:.2%})")
-
-        if bool(verbose) and errors:
-            self._print_consistency_errors(errors, prefix='Validate')
-        
-        return len(errors) == 0, errors
-    
-    # ========================================================================
     # Layer1: 1-hop分配辅助方法
     # ========================================================================
     
@@ -2021,11 +2186,6 @@ class Layer1Assigner:
             return False
         if self._violates_forbidden_p_pair_connection(nodes, node1, node2):
             return False
-        if not self._hop1_template_feasible(node1, int(node2.su_type)):
-            return False
-        if not self._hop1_template_feasible(node2, int(node1.su_type)):
-            return False
-        
         # 添加互为1-hop（SU类型计数）
         node1.hop1_su[node2.su_type] += 1
         node2.hop1_su[node1.su_type] += 1
@@ -2118,6 +2278,14 @@ class Layer1Assigner:
         return True
 
     def _can_add_hop1_connection(self, nodes: List[_NodeV3], node1: _NodeV3, node2: _NodeV3) -> bool:
+        if int(node1.global_id) == int(node2.global_id):
+            return False
+        if int(node2.global_id) in set(node1.hop1_ids or []):
+            return False
+        if int(node1.global_id) in set(node2.hop1_ids or []):
+            return False
+        if int(node1.remaining_hop1_slots()) <= 0 or int(node2.remaining_hop1_slots()) <= 0:
+            return False
         key = (
             self._can_add_state_signature(nodes, node1),
             self._can_add_state_signature(nodes, node2),
@@ -2211,9 +2379,15 @@ class Layer1Assigner:
             if not can_match_ports_partial(proposed2, port_sets2, center_node=node2):
                 return False
 
-        if not self._hop1_template_feasible(node1, int(node2.su_type)):
+        if not self._node_exact_hop1_shift_state_ok(
+            node1,
+            proposed_neighbor_su=int(node2.su_type),
+        ):
             return False
-        if not self._hop1_template_feasible(node2, int(node1.su_type)):
+        if not self._node_exact_hop1_shift_state_ok(
+            node2,
+            proposed_neighbor_su=int(node1.su_type),
+        ):
             return False
 
         return True
@@ -2246,13 +2420,6 @@ class Layer1Assigner:
             if not filtered:
                 return None
 
-        motif_usage_local = motif_usage if motif_usage is not None else (
-            build_motif_usage_from_pairs(
-                (int(node.su_type), hop1_counter_to_multiset(getattr(node, 'hop1_su', {}) or {}))
-                for node in nodes
-            ) if nodes is not None else Counter()
-        )
-
         weights = []
         current_neighbors = self._current_neighbor_types(nodes, center) if nodes is not None else []
         priority_rank = {int(su): int(idx) for idx, su in enumerate(priority_list)}
@@ -2276,14 +2443,6 @@ class Layer1Assigner:
                         w *= 0.10
                 elif cand_su in {19, 20, 21} and self._has_pending_required_external(n, nodes):
                     w *= 0.10
-            if nodes is not None:
-                center_after = tuple(sorted(current_neighbors + [int(n.su_type)]))
-                target_neighbors = self._current_neighbor_types(nodes, n)
-                target_after = tuple(sorted(target_neighbors + [int(center.su_type)]))
-                center_usage = int(motif_usage_local.get((int(center.su_type), tuple(center_after)), 0))
-                target_usage = int(motif_usage_local.get((int(n.su_type), tuple(target_after)), 0))
-                w /= (1.0 + float(motif_penalty_alpha(int(center.su_type))) * float(center_usage))
-                w /= (1.0 + 0.5 * float(motif_penalty_alpha(int(n.su_type))) * float(target_usage))
             weights.append(w)
 
         if bool(self.deterministic):
@@ -2300,11 +2459,14 @@ class Layer1Assigner:
                 return None
             top_weight = float(weights[int(ranked[0])])
             if top_weight > 0.0:
-                window = [idx for idx in ranked if float(weights[int(idx)]) >= 0.85 * float(top_weight)]
+                window = [
+                    idx for idx in ranked
+                    if float(weights[int(idx)]) >= 0.85 * float(top_weight)
+                ]
             else:
                 window = list(ranked)
             window = window[: max(1, min(4, len(window)))]
-            choose_pos = int(self._build_variant + int(center.global_id)) % len(window)
+            choose_pos = int(center.global_id) % len(window)
             return filtered[int(window[int(choose_pos)])]
         return random.choices(filtered, weights=weights, k=1)[0]
     
@@ -2705,7 +2867,10 @@ class Layer1Assigner:
         su9_nodes = [n for n in self._get_nodes_by_su_type(nodes, 9) if n.remaining_hop1_slots() > 0]
         
         # ---- 阶段1：先给每个0/1/2/3尽量分一个9号 ----
-        first_round = self._maybe_shuffle_nodes(list(su0_nodes) + list(su1_nodes) + list(su2_nodes) + list(su3_nodes), salt=401)
+        first_round = self._canonical_node_order(
+            list(su0_nodes) + list(su1_nodes) + list(su2_nodes) + list(su3_nodes),
+            salt=401,
+        )
         for carb in first_round:
             if carb.remaining_hop1_slots() <= 0:
                 continue
@@ -2715,7 +2880,12 @@ class Layer1Assigner:
             su9 = self._choose_weighted_candidate(carb, su9_cands, [9], nodes=nodes)
             if su9 is None:
                 continue
-            self._add_bidirectional_hop1(nodes, carb.global_id, su9.global_id)
+            self._add_bidirectional_hop1(
+                nodes,
+                carb.global_id,
+                su9.global_id,
+                lock=True,
+            )
 
         # ---- 阶段1.5：如果9号还有剩余，再继续给3号分配第二个9 ----
         for n3 in su3_nodes:
@@ -2726,7 +2896,12 @@ class Layer1Assigner:
                 su9 = self._choose_weighted_candidate(n3, su9_cands, [9], nodes=nodes)
                 if su9 is None:
                     break
-                self._add_bidirectional_hop1(nodes, n3.global_id, su9.global_id)
+                self._add_bidirectional_hop1(
+                    nodes,
+                    n3.global_id,
+                    su9.global_id,
+                    lock=True,
+                )
 
         invalid_su9 = []
         for su9 in su9_nodes:
@@ -2743,6 +2918,180 @@ class Layer1Assigner:
                 + str(invalid_su9[:8])
             )
 
+    def _su11_fixed_external_errors(self,
+                                    nodes: List[_NodeV3]) -> List[str]:
+        """Audit the single fixed external role edge required by every SU11."""
+        errors: List[str] = []
+        external_types = set(
+            int(x) for x in list(SU_EXTERNAL_CONNECTIONS.get(11, []) or [])
+        )
+        for node in self._get_nodes_by_su_type(nodes, 11):
+            external_ids = [
+                int(neighbor_id)
+                for neighbor_id in list(getattr(node, 'hop1_ids', []) or [])
+                if 0 <= int(neighbor_id) < len(nodes)
+                and int(nodes[int(neighbor_id)].su_type) in external_types
+            ]
+            if len(external_ids) != 1:
+                errors.append(
+                    f"SU11节点{int(node.global_id)}固定外接边数={len(external_ids)} != 1, "
+                    f"external_ids={sorted(external_ids)}"
+                )
+                continue
+            external_id = int(external_ids[0])
+            external = nodes[int(external_id)]
+            if not self._edge_is_fixed(node, external):
+                errors.append(
+                    f"SU11节点{int(node.global_id)}外接边未锁定: "
+                    f"neighbor={external_id}(SU{int(external.su_type)})"
+                )
+        return errors
+
+    def _assign_fixed_alkyl_aromatic_11(self,
+                                        nodes: List[_NodeV3]) -> None:
+        """Assign one fixed external-role edge to every alkyl-substituted aryl C."""
+        su11_nodes = self._canonical_node_order(
+            self._get_nodes_by_su_type(nodes, 11),
+            salt=451,
+        )
+        if not su11_nodes:
+            return
+
+        declared_external_order = tuple(
+            int(x) for x in list(SU_EXTERNAL_CONNECTIONS.get(11, []) or [])
+        )
+        allowed_external = set(declared_external_order)
+        ordered_external = [
+            int(su) for su in declared_external_order if int(su) in allowed_external
+        ]
+        ordered_external.extend(sorted(allowed_external - set(ordered_external)))
+        external_priority = {
+            int(su): int(rank) for rank, su in enumerate(ordered_external)
+        }
+        external_nodes = [
+            node
+            for node in nodes
+            if int(getattr(node, 'su_type', -1)) in allowed_external
+            and int(node.remaining_hop1_slots()) > 0
+        ]
+        owner_slots: List[Dict[str, int]] = []
+        ordered_external_nodes = self._stable_node_order(external_nodes)
+        external_count = len(ordered_external_nodes)
+        max_external_slots = max(
+            (int(owner.remaining_hop1_slots()) for owner in ordered_external_nodes),
+            default=0,
+        )
+        for slot_round in range(int(max_external_slots)):
+            for owner_rank, owner in enumerate(ordered_external_nodes):
+                if int(slot_round) >= int(owner.remaining_hop1_slots()):
+                    continue
+                # Spread fixed SU11 anchors across distinct external nodes
+                # whenever capacity permits.  If the pool is too small, later
+                # rounds still expose the remaining ports and sharing remains
+                # legal (e.g. two SU11 nodes on one SU23).
+                spread_rank = int(slot_round) * max(1, int(external_count)) + int(owner_rank)
+                owner_su = int(owner.su_type)
+                owner_slots.append({
+                    'owner_id': int(owner.global_id),
+                    'slot_index': int(slot_round),
+                    'kind': int(owner_su),
+                    'priority_rank': int(external_priority[int(owner_su)]),
+                    'spread_rank': int(spread_rank),
+                })
+
+        target_demands = [
+            {
+                'target_id': int(node.global_id),
+                'demand_index': 0,
+                'kind': '11_external',
+            }
+            for node in su11_nodes
+        ]
+        if len(owner_slots) < len(target_demands):
+            raise RuntimeError(
+                "[SU11 Fixed External Assign] 外接端口总容量不足: "
+                f"demand={len(target_demands)}, slots={len(owner_slots)}"
+            )
+
+        work_nodes = copy.deepcopy(nodes)
+
+        def _compat(work_local: List[_NodeV3],
+                    owner: _NodeV3,
+                    target: _NodeV3,
+                    slot: Dict[str, int],
+                    owner_d1_usage: Dict[int, int],
+                    demand: Dict[str, Any]) -> bool:
+            _ = slot
+            _ = owner_d1_usage
+            _ = demand
+            if int(getattr(target, 'su_type', -1)) != 11:
+                return False
+            if int(getattr(owner, 'su_type', -1)) not in allowed_external:
+                return False
+            if not self._fixed_connector_assignment_ok(
+                work_local,
+                owner,
+                target,
+            ):
+                return False
+            return bool(self._can_add_hop1_connection(work_local, owner, target))
+
+        edge_pairs = self._solve_exact_fixed_anchor_matching_demands(
+            work_nodes,
+            owner_slots,
+            target_demands,
+            _compat,
+        )
+        if edge_pairs is None:
+            capacity_by_su = Counter(
+                int(work_nodes[int(slot['owner_id'])].su_type)
+                for slot in owner_slots
+            )
+            raise RuntimeError(
+                "[SU11 Fixed External Assign] 无法为所有SU11分配双向合法的固定外接边: "
+                f"demand={len(target_demands)}, "
+                f"capacity_by_su={dict(sorted(capacity_by_su.items()))}"
+            )
+
+        target_usage = Counter()
+        for left_id, right_id in list(edge_pairs):
+            left = nodes[int(left_id)]
+            right = nodes[int(right_id)]
+            target_id = (
+                int(left_id)
+                if int(left.su_type) == 11
+                else int(right_id)
+            )
+            target_usage[int(target_id)] += 1
+        expected_targets = set(int(node.global_id) for node in su11_nodes)
+        if (
+            set(target_usage) != expected_targets
+            or any(int(count) != 1 for count in target_usage.values())
+        ):
+            raise RuntimeError(
+                "[SU11 Fixed External Assign] 匹配结果未覆盖每个SU11一次: "
+                f"usage={dict(sorted(target_usage.items()))}"
+            )
+
+        for left_id, right_id in list(edge_pairs):
+            if not self._add_bidirectional_hop1(
+                nodes,
+                int(left_id),
+                int(right_id),
+                lock=True,
+            ):
+                raise RuntimeError(
+                    "[SU11 Fixed External Assign] 提交固定外接边失败: "
+                    f"edge=({int(left_id)}, {int(right_id)})"
+                )
+
+        audit_errors = self._su11_fixed_external_errors(nodes)
+        if audit_errors:
+            raise RuntimeError(
+                "[SU11 Fixed External Assign] 固定外接审计失败: "
+                + "; ".join(audit_errors[:8])
+            )
+
     def _assign_unsaturated_pairs(self, nodes: List[_NodeV3]):
         """f) 14/15/16双键配对，17/18三键配对
         """
@@ -2757,11 +3106,15 @@ class Layer1Assigner:
         paired = set()
 
         def pair_from_pools(left_pool, right_pool) -> None:
-            for left in self._maybe_shuffle_nodes(list(left_pool), salt=503 + len(paired)):
+            for left in self._canonical_node_order(
+                list(left_pool), salt=503 + len(paired)
+            ):
                 if left.global_id in paired:
                     continue
                 candidates = [
-                    right for right in self._maybe_shuffle_nodes(list(right_pool), salt=509 + left.global_id)
+                    right for right in self._canonical_node_order(
+                        list(right_pool), salt=509 + left.global_id
+                    )
                     if right.global_id not in paired
                     and self._can_add_hop1_connection(nodes, left, right)
                 ]
@@ -2779,7 +3132,9 @@ class Layer1Assigner:
             node for node in list(su14_nodes) + list(su15_nodes)
             if node.global_id not in paired
         ]
-        remaining_double_bond_pool = self._maybe_shuffle_nodes(remaining_double_bond_pool, salt=517)
+        remaining_double_bond_pool = self._canonical_node_order(
+            remaining_double_bond_pool, salt=517
+        )
         while True:
             node1 = next((node for node in remaining_double_bond_pool if node.global_id not in paired), None)
             if node1 is None:
@@ -2860,127 +3215,237 @@ class Layer1Assigner:
                 + str(invalid_unsaturated[:8])
             )
     
-    def _assign_aryl_connections(self, nodes: List[_NodeV3]):
-        """f3) 10号芳基取代碳的port3={10}分配
-        
-        规则：
-        - SU10的外接端口只能放SU10
-        - SU4按新规范归入23/24/25脂肪端口分配
-        - SU10之间10-10配对，要求剩余数量为偶数
-        """
-        su10_nodes = self._get_nodes_by_su_type(nodes, 10)
-
-        # 收集port3尚未填充的SU10（即还没有SU10邻居占据port3）
-        su10_need_port3 = [n for n in su10_nodes 
-                          if n.remaining_hop1_slots() > 0
-                          and 10 not in n.hop1_su]
-        
-        su10_need_port3 = self._maybe_shuffle_nodes(su10_need_port3, salt=601)
-        while len(su10_need_port3) >= 2:
-            n1 = su10_need_port3.pop(0)
-            n2 = su10_need_port3.pop(0)
-            self._add_bidirectional_hop1(
-                nodes, n1.global_id, n2.global_id, lock=True
+    def _assign_fixed_su10_self_pairs(self, nodes: List[_NodeV3]) -> None:
+        """Assign the strict one-to-one SU10 self-pair role."""
+        self_nodes = self._canonical_node_order(
+            self._get_nodes_by_su_type(nodes, 10),
+            salt=601,
+        )
+        need_fixed_port = [
+            node
+            for node in self_nodes
+            if int(node.remaining_hop1_slots()) > 0
+            and int(node.hop1_su.get(10, 0)) == 0
+        ]
+        if len(need_fixed_port) % 2 != 0:
+            raise RuntimeError(
+                "[SU10 Fixed Assign] 自连接角色节点数必须为偶数: "
+                f"count={len(need_fixed_port)}"
             )
-        invalid_su10 = [
+        while need_fixed_port:
+            left = need_fixed_port.pop(0)
+            right = need_fixed_port.pop(0)
+            if not self._add_bidirectional_hop1(
+                nodes,
+                int(left.global_id),
+                int(right.global_id),
+                lock=True,
+            ):
+                raise RuntimeError(
+                    "[SU10 Fixed Assign] 固定自连接提交失败: "
+                    f"edge=({int(left.global_id)}, {int(right.global_id)})"
+                )
+
+        invalid = [
             (int(node.global_id), int(node.hop1_su.get(10, 0)))
-            for node in su10_nodes
+            for node in self_nodes
             if int(node.hop1_su.get(10, 0)) != 1
         ]
-        if invalid_su10:
+        if invalid:
             raise RuntimeError(
-                "[SU10 Fixed Assign] 10-10 fixed-role matching incomplete: "
-                + str(invalid_su10[:8])
+                "[SU10 Fixed Assign] fixed-role matching incomplete: "
+                + str(invalid[:8])
             )
+
+    def _assign_su12_self_edge_cover(self, nodes: List[_NodeV3]) -> None:
+        """Cover every SU12 with at least one SU12 neighbor.
+
+        An even pool is covered by disjoint pairs.  For an odd pool, one
+        uncovered node is attached to a paired node, producing a three-node
+        path whose middle node has two SU12 neighbors.  Additional SU12
+        neighbors remain legal on the two generic aromatic ports.
+        """
+        self_nodes = self._canonical_node_order(
+            self._get_nodes_by_su_type(nodes, 12),
+            salt=607,
+        )
+        if not self_nodes:
+            return
+
+        invalid_initial = []
+        uncovered = []
+        for node in self_nodes:
+            self_count = int(node.hop1_su.get(12, 0))
+            target_degree = self._node_target_degree(node)
+            if (
+                self_count < 0
+                or target_degree is None
+                or self_count > int(target_degree)
+            ):
+                invalid_initial.append((
+                    int(node.global_id),
+                    int(self_count),
+                    target_degree,
+                ))
+            elif self_count == 0:
+                uncovered.append(node)
+        if invalid_initial:
+            raise RuntimeError(
+                "[SU12 Edge Cover] 初始自连接状态非法: "
+                + str(invalid_initial[:8])
+            )
+
+        while len(uncovered) >= 2:
+            left = uncovered.pop(0)
+            right = uncovered.pop(0)
+            if not self._add_bidirectional_hop1(
+                nodes,
+                int(left.global_id),
+                int(right.global_id),
+                lock=True,
+            ):
+                raise RuntimeError(
+                    "[SU12 Edge Cover] 自连接边覆盖提交失败: "
+                    f"edge=({int(left.global_id)}, {int(right.global_id)})"
+                )
+
+        if uncovered:
+            leftover = uncovered.pop(0)
+            cover_candidates = self._canonical_node_order(
+                [
+                    node
+                    for node in self_nodes
+                    if int(node.global_id) != int(leftover.global_id)
+                    and int(node.hop1_su.get(12, 0)) >= 1
+                    and int(node.remaining_hop1_slots()) > 0
+                ],
+                salt=613,
+            )
+            attached = False
+            for candidate in cover_candidates:
+                if self._add_bidirectional_hop1(
+                    nodes,
+                    int(leftover.global_id),
+                    int(candidate.global_id),
+                    lock=True,
+                ):
+                    attached = True
+                    break
+            if not attached:
+                raise RuntimeError(
+                    "[SU12 Edge Cover] 奇数节点无法形成三节点链: "
+                    f"leftover={int(leftover.global_id)}, "
+                    f"candidate_count={len(cover_candidates)}"
+                )
+
+        invalid_final = []
+        for node in self_nodes:
+            self_count = int(node.hop1_su.get(12, 0))
+            target_degree = self._node_target_degree(node)
+            if (
+                self_count < 1
+                or target_degree is None
+                or self_count > int(target_degree)
+                or not self._node_exact_hop1_shift_state_ok(node)
+            ):
+                invalid_final.append((
+                    int(node.global_id),
+                    int(self_count),
+                    target_degree,
+                ))
+        if invalid_final:
+            raise RuntimeError(
+                "[SU12 Edge Cover] self-edge coverage incomplete: "
+                + str(invalid_final[:8])
+            )
+
+    def _assign_aryl_connections(self, nodes: List[_NodeV3]):
+        """Assign SU10 strict pairs and the SU12 minimum self-edge cover."""
+        self._assign_fixed_su10_self_pairs(nodes)
+        self._assign_su12_self_edge_cover(nodes)
         
     # ========================================================================
     # Layer1: 强制边、全局补全、结构验收和差谱调整
     # ========================================================================
-    
-    def layer1_assign(self, H_init: torch.Tensor, S_target: torch.Tensor,
-                      E_target: torch.Tensor,
-                      eval_nmr: bool = True,
-                      eval_output_dir: Optional[str] = None,
-                      eval_lib_path: Optional[str] = None,
-                      eval_hwhm: float = 1.0,
-                      build_variant: int = 0,
-                      enable_carbonyl_joint_adjust: bool = True,
-                      carbonyl_joint_iterations: int = 3,
-                      carbonyl_joint_max_adjustments: int = 3,
-                      carbonyl_joint_pos_threshold: float = 0.08,
-                      carbonyl_joint_neg_threshold: float = 0.08,
-                      enable_hop1_adjust: bool = True,
-                      hop1_adjust_iterations: int = 3,
-                      hop1_neg_threshold: float = -0.5,
-                      hop1_pos_threshold: float = 0.5,
-                      hop1_adjust_max_candidate_trials: int = 240,
-                      hop1_adjust_max_candidate_nodes_per_su: int = 24,
-                      hop1_adjust_max_alternatives_per_node: int = 4,
-                      hop1_adjust_region_order: Optional[List[str]] = None,
-                      hop1_adjust_max_moves_per_region: int = 8,
-                      hop1_adjust_max_full_evals: int = 32,
-                      hop1_adjust_min_r2_gain: float = 1e-4,
-                      hop1_completion_max_backtracks: Optional[int] = None,
-                      hop1_completion_branch_limit: Optional[int] = None,
-                      enable_hop1_diversity_refine: bool = True,
-                      hop1_diversity_max_moves: int = 12,
-                      hop1_diversity_max_trials: int = 96) -> List[_NodeV3]:
-        """
-        Layer1: 为每个中心SU分配1-hop邻居
-        
-        职责（仅限1-hop分配，不涉及SU直方图调整）：
-        1. 原子分配全部强制身份边和固定角色边。
-        2. 用全局 MRV/前向检查/有界回溯补全所有普通端口。
-        3. 对完整精确模板图执行结构验收。
-        4. 可选地基于差谱事务式调整1-hop分配。
-        
-        SU直方图的调整（羰基互转、SU9、O/N/S/X等）由Layer4负责。
-        
-        Args:
-            H_init: 初始SU直方图
-            S_target: 目标谱图
-            E_target: 目标元素组成
-            eval_nmr: 是否评估NMR
-            eval_output_dir: 评估结果输出目录
-            eval_lib_path: 子图库路径
-            eval_hwhm: 谱峰半高宽
-            enable_carbonyl_joint_adjust: 是否启用羰基-锚点联合调整
-            carbonyl_joint_iterations: 联合调整最大迭代次数
-            carbonyl_joint_max_adjustments: 每轮最大换边次数
-            carbonyl_joint_pos_threshold: 联合调整正峰相对阈值
-            carbonyl_joint_neg_threshold: 联合调整负峰相对阈值
-            enable_hop1_adjust: 是否启用1-hop调整
-            hop1_adjust_iterations: 1-hop调整最大迭代次数
-            hop1_neg_threshold: 负峰阈值
-            hop1_pos_threshold: 正峰阈值
-            hop1_completion_max_backtracks: 全局补全最大回溯次数；None表示不限制。
-            hop1_completion_branch_limit: 每一步最多尝试的伙伴数；None表示不限制。
-            enable_hop1_diversity_refine: 是否在完整图上执行事务式1-hop多样性换位。
-            hop1_diversity_max_moves: 多样性细化最多接受的换位次数。
-            hop1_diversity_max_trials: 多样性细化最多尝试的严格换位次数。
-        """
-        device = self.device
-        H_init = H_init.to(device)
-        S_target = S_target.to(device)
-        E_target = E_target.to(device)
-        self._current_E_target = E_target
-        self._build_variant = int(build_variant)
-        self._configure_hop1_template_contract(eval_lib_path)
-    
-        # 初始化全局节点池
-        nodes = self._initialize_node_pool(H_init)
-        self._init_runtime_node_index(nodes)
-        print("\n" + "="*60)
-        print(f"Layer1: 1-hop分配 ({len(nodes)}个节点)")
-        print("="*60)
 
-        layer1_t0 = time.perf_counter()
+    def audit_layer1_shift_coverage(
+        self,
+        nodes: List[_NodeV3],
+        lib_path: str,
+    ) -> Dict[str, Any]:
+        """Audit the shift index after structure construction; never guide it."""
+        if (
+            self._hop1_adjuster is None
+            or str(lib_path) != str(self._exact_hop1_constraint_lib_path)
+        ):
+            self._configure_exact_hop1_shift_constraints(str(lib_path))
+        if self._hop1_adjuster is None:
+            raise ValueError('Layer1 shift audit requires an active template library')
+        median_index = self._hop1_adjuster.get_exact_hop1_median_index()
+        missing: Counter = Counter()
+        carbon_count = 0
+        for node in nodes:
+            center_su = int(getattr(node, 'su_type', -1))
+            if center_su not in self._carbon_su_set:
+                continue
+            carbon_count += 1
+            hop1 = tuple(sorted(
+                int(x) for x in Counter(getattr(node, 'hop1_su', {}) or {}).elements()
+            ))
+            key = (center_su, hop1)
+            if key not in median_index:
+                missing[key] += 1
+        rows = [
+            {
+                'center_su': int(key[0]),
+                'hop1': list(key[1]),
+                'node_count': int(count),
+            }
+            for key, count in sorted(missing.items())
+        ]
+        return {
+            'ok': not bool(missing),
+            'carbon_count': int(carbon_count),
+            'matched_count': int(carbon_count - sum(missing.values())),
+            'missing_node_count': int(sum(missing.values())),
+            'missing_signatures': rows,
+        }
+
+    def build_rule_valid_graph(
+        self,
+        H_init: torch.Tensor,
+        E_target: torch.Tensor,
+        eval_lib_path: Optional[str] = None,
+    ) -> Tuple[List[_NodeV3], Dict[str, Any]]:
+        """Build one graph from fixed roles and exact Layer1 shift signatures."""
+        H_local = H_init.to(self.device)
+        E_local = E_target.to(self.device)
+        self._current_E_target = E_local
+        self._configure_exact_hop1_shift_constraints(eval_lib_path)
+        nodes = self._initialize_node_pool(H_local)
+        self._init_runtime_node_index(nodes)
+        initial_open_ports = sum(
+            int(node.remaining_hop1_slots()) for node in nodes
+        )
+        if initial_open_ports % 2:
+            raise RuntimeError(
+                'layer1_rule_graph_infeasible: odd entry open-port count '
+                f'({initial_open_ports}); Layer0/Stage3 must apply one 12/13 balance '
+                'before Layer1'
+            )
+        print("\n" + "=" * 60)
+        print(f"Layer1: 单次端口规则构图 ({len(nodes)}个节点)")
+        print("=" * 60)
+        build_t0 = time.perf_counter()
+        fixed_timings: Dict[str, float] = {}
+
         def _timed_step(label: str, fn, rebuild_index: bool = True) -> None:
             step_t0 = time.perf_counter()
             fn()
             if bool(rebuild_index):
                 self._init_runtime_node_index(nodes)
             elapsed = time.perf_counter() - step_t0
+            fixed_timings[str(label)] = float(elapsed)
             if float(elapsed) >= 0.05:
                 print(f"  [Layer1 Timing] {label}: {elapsed:.2f}s")
 
@@ -2990,7 +3455,15 @@ class Layer1Assigner:
         _timed_step("d fixed_ether_O", lambda: self._assign_fixed_ether_O(nodes))
         _timed_step("e fixed_carbonyl", lambda: self._assign_fixed_carbonyl(nodes))
         _timed_step("f unsaturated_pairs", lambda: self._assign_unsaturated_pairs(nodes))
-        _timed_step("f3 aryl_connections", lambda: self._assign_aryl_connections(nodes), rebuild_index=False)
+        _timed_step(
+            "g fixed_alkyl_aromatic_11",
+            lambda: self._assign_fixed_alkyl_aromatic_11(nodes),
+        )
+        _timed_step(
+            "h aryl_connections",
+            lambda: self._assign_aryl_connections(nodes),
+            rebuild_index=False,
+        )
         self._init_runtime_node_index(nodes)
         fixed_edge_count = sum(len(node.hop1_ids) for node in nodes) // 2
         fixed_open_ports = sum(int(node.remaining_hop1_slots()) for node in nodes)
@@ -2998,24 +3471,65 @@ class Layer1Assigner:
             "  [Layer1 Fixed Phase] "
             f"edges={fixed_edge_count}, open_ports={fixed_open_ports}"
         )
-        solver = Layer1CompletionSolver(
-            assigner=self,
+
+        completion = dict(Layer1GreedyCompleter(self, nodes).solve())
+        completion.update({
+            'fixed_edge_count': int(fixed_edge_count),
+            'fixed_open_ports': int(fixed_open_ports),
+            'fixed_timings_s': fixed_timings,
+            'build_elapsed_s': float(time.perf_counter() - build_t0),
+        })
+        valid, errors = self.validate_graph_consistency(
             nodes=nodes,
-            deadline=None,
-            max_backtracks=hop1_completion_max_backtracks,
-            branch_limit=hop1_completion_branch_limit,
+            H=H_local,
+            E_target=E_local,
+            verbose=False,
         )
-        completion_summary = solver.solve()
-        self._last_completion_diagnostics = dict(completion_summary)
+        if not bool(valid) or errors:
+            raise RuntimeError(
+                "layer1_rule_graph_validation_failed: "
+                + " | ".join(str(error) for error in list(errors or [])[:8])
+            )
+        self._last_completion_diagnostics = dict(completion)
         print(
-            "  [Layer1 Global Completion] "
-            f"edges={int(completion_summary.get('edges_added', 0))}, "
-            f"backtracks={int(completion_summary.get('backtracks', 0))}, "
-            f"elapsed={float(completion_summary.get('elapsed_s', 0.0)):.2f}s, "
-            f"stop={completion_summary.get('stop_reason', 'unknown')}"
+            "  [Layer1 Rule Completion] "
+            f"decisions={int(completion.get('decisions', 0))}, "
+            f"backtracks={int(completion.get('backtracks', 0))}, "
+            f"elapsed={float(completion.get('elapsed_s', 0.0)):.2f}s"
         )
+        return nodes, completion
+
+    def layer1_assign(self, H_init: torch.Tensor, S_target: torch.Tensor,
+                      E_target: torch.Tensor,
+                      eval_nmr: bool = True,
+                      eval_output_dir: Optional[str] = None,
+                      eval_lib_path: Optional[str] = None,
+                      neg_peak_threshold: float = -0.8,
+                      pos_peak_threshold: float = 0.8,
+                      max_candidate_trials_per_region: int = 40,
+                      max_moves_per_region: int = 4,
+                      prebuilt_nodes: Optional[List[_NodeV3]] = None) -> List[_NodeV3]:
+        """Build, validate, and regionally adjust one exact Layer1 graph."""
+        layer1_t0 = time.perf_counter()
+        H_init = H_init.to(self.device)
+        S_target = S_target.to(self.device)
+        E_target = E_target.to(self.device)
+        self._current_E_target = E_target
+        self._last_hop1_adjust_diagnostics = {}
+        if prebuilt_nodes is None:
+            nodes, _completion_summary = self.build_rule_valid_graph(
+                H_init=H_init,
+                E_target=E_target,
+                eval_lib_path=eval_lib_path,
+            )
+        else:
+            self._configure_exact_hop1_shift_constraints(eval_lib_path)
+            nodes = copy.deepcopy(prebuilt_nodes)
+            self._init_runtime_node_index(nodes)
+            print("\n" + "=" * 60)
+            print(f"Layer1: 单图精炼 ({len(nodes)}个节点)")
+            print("=" * 60)
     
-        # 一致性验证
         check_t0 = time.perf_counter()
         is_valid, errors = self.validate_graph_consistency(
             nodes=nodes, 
@@ -3029,217 +3543,104 @@ class Layer1Assigner:
         if not is_valid:
             print(f"  ⚠ 图结构存在{len(errors)}个不一致")
             self._print_consistency_errors(errors, prefix='Layer1')
-        hard_structure_invalid = bool(errors)
-        if hard_structure_invalid:
+        if errors:
             raise RuntimeError(
                 "layer1_global_completion_invalid: "
                 + " | ".join(str(error) for error in list(errors or [])[:8])
             )
+        if not eval_lib_path or self._hop1_adjuster is None:
+            raise ValueError('Layer1 requires an active exact template library')
+        coverage = self.audit_layer1_shift_coverage(nodes, str(eval_lib_path))
+        self._last_shift_coverage_audit = dict(coverage)
+        if not bool(coverage.get('ok', False)):
+            raise RuntimeError(
+                "rule_valid_but_shift_template_missing: "
+                f"matched={int(coverage.get('matched_count', 0))}/"
+                f"{int(coverage.get('carbon_count', 0))}, "
+                f"missing={list(coverage.get('missing_signatures', []) or [])[:8]}"
+            )
 
-        if bool(enable_hop1_diversity_refine):
-            diversity_t0 = time.perf_counter()
-            pre_diversity_nodes = copy.deepcopy(nodes)
-            try:
-                nodes, diversity_summary = self._refiner.diversify_hop1_motifs(
-                    nodes=nodes,
-                    E_target=E_target,
-                    output_dir=eval_output_dir,
-                    max_moves=int(hop1_diversity_max_moves),
-                    max_trials=int(hop1_diversity_max_trials),
-                    deadline_monotonic=None,
-                )
-                diversity_ok, diversity_errors = self.validate_graph_consistency(
-                    nodes=nodes,
+        raw_nodes = copy.deepcopy(nodes)
+        raw_snapshot = self._hop1_adjuster.build_eval_snapshot(raw_nodes, S_target)
+        raw_r2 = float(raw_snapshot.get('r2', 0.0))
+        try:
+            nodes, adjust_summary = self._hop1_adjuster.adjust_regions(
+                nodes=nodes,
+                S_target=S_target,
+                E_target=E_target,
+                validator=lambda candidate: self.validate_graph_consistency(
+                    nodes=candidate,
                     H=H_init,
                     E_target=E_target,
                     verbose=False,
-                )
-                if not bool(diversity_ok) or diversity_errors:
-                    nodes = pre_diversity_nodes
-                    print(
-                        "  [Hop1多样性细化回退] "
-                        f"结构校验失败, errors={len(diversity_errors)}"
-                    )
-                else:
-                    diversity_moves = int(diversity_summary.get('adjustments', 0))
-                    if diversity_moves > 0:
-                        print(
-                            "  [Hop1多样性细化] "
-                            f"moves={diversity_moves}, "
-                            f"trials={int(diversity_summary.get('trials', 0))}, "
-                            f"stop={diversity_summary.get('stop_reason', 'unknown')}"
-                        )
-            except Exception as e:
-                nodes = pre_diversity_nodes
-                print(f"  [Hop1多样性细化失败] {e}")
-            diversity_elapsed = time.perf_counter() - diversity_t0
-            if float(diversity_elapsed) >= 0.05:
-                print(f"  [Layer1 Timing] hop1_diversity_refine: {diversity_elapsed:.2f}s")
-
-        if (
-            eval_lib_path
-            and bool(enable_carbonyl_joint_adjust)
-            and not bool(hard_structure_invalid)
-        ):
-            try:
-                joint_t0 = time.perf_counter()
-                pre_joint_nodes = copy.deepcopy(nodes)
-                nodes, joint_summary = self.adjust_carbonyl_anchor_jointly(
-                    nodes=nodes,
-                    S_target=S_target,
-                    E_target=E_target,
-                    lib_path=eval_lib_path,
-                    hwhm=eval_hwhm,
-                    allow_approx=False,
-                    max_iterations=int(carbonyl_joint_iterations),
-                    max_adjustments_per_iter=int(carbonyl_joint_max_adjustments),
-                    pos_rel_threshold=float(carbonyl_joint_pos_threshold),
-                    neg_rel_threshold=float(carbonyl_joint_neg_threshold),
-                    deadline_monotonic=None,
-                )
-                n_joint = int(joint_summary.get('adjustments', 0))
-                joint_elapsed = time.perf_counter() - joint_t0
-                if float(joint_elapsed) >= 0.05:
-                    print(f"  [Layer1 Timing] carbonyl_joint_adjust: {joint_elapsed:.2f}s")
-                if n_joint > 0:
-                    print(f"  Carbonyl联合调整: {n_joint}次")
-                joint_ok, joint_errors = self.validate_graph_consistency(
-                    nodes=nodes,
-                    H=H_init,
-                    E_target=E_target,
-                    verbose=False,
-                )
-                if joint_errors:
-                    print(f"  [Carbonyl联合调整后校验失败] 回退到调整前状态，errors={len(joint_errors)}")
-                    self._print_consistency_errors(joint_errors, prefix='Carbonyl')
-                    nodes = pre_joint_nodes
-            except Exception as e:
-                nodes = pre_joint_nodes
-                print(f"  [Carbonyl联合调整失败] {e}")
-        elif bool(enable_carbonyl_joint_adjust) and bool(hard_structure_invalid):
-            print("  [Carbonyl联合调整跳过] 当前Layer1图仍存在硬结构约束缺口")
-        
-        # NMR评估
-        if eval_nmr and eval_lib_path:
-            round_metrics = {
-                'r2': 0.0,
-                'r2_carbonyl': 0.0,
-                'r2_aromatic': 0.0,
-                'r2_aliphatic': 0.0,
-                'matched_ratio': 0.0,
+                ),
+                neg_peak_threshold=float(neg_peak_threshold),
+                pos_peak_threshold=float(pos_peak_threshold),
+                max_candidate_trials_per_region=int(max_candidate_trials_per_region),
+                max_moves_per_region=int(max_moves_per_region),
+            )
+            self._last_hop1_adjust_diagnostics = dict(adjust_summary)
+        except Exception as exc:
+            nodes = raw_nodes
+            self._last_hop1_adjust_diagnostics = {
+                'error': str(exc),
+                'total_adjustments': 0,
             }
-            try:
-                nmr_t0 = time.perf_counter()
-                round_metrics = self.evaluate_layer1_nmr_with_library(
-                    nodes=nodes,
-                    S_target=S_target,
-                    lib_path=eval_lib_path,
-                    output_dir=eval_output_dir,
-                    hwhm=eval_hwhm,
-                    allow_approx=False,
-                )
-                nmr_elapsed = time.perf_counter() - nmr_t0
-                if float(nmr_elapsed) >= 0.05:
-                    print(f"  [Layer1 Timing] layer1_nmr_eval: {nmr_elapsed:.2f}s")
-            except Exception as e:
-                print(f"  [NMR评估失败] {e}")
-        # 可选的1-hop调整（基于差谱分析，Layer1.5）
-        if (
-            enable_hop1_adjust
-            and not bool(hard_structure_invalid)
-        ):
-            try:
-                hop1_t0 = time.perf_counter()
-                pre_adjust_nodes = copy.deepcopy(nodes)
-                nodes, adjust_summary = self.adjust_hop1_based_on_spectrum(
-                    nodes=nodes,
-                    S_target=S_target,
-                    E_target=E_target,
-                    lib_path=eval_lib_path,
-                    output_dir=eval_output_dir,
-                    hwhm=eval_hwhm,
-                    allow_approx=False,
-                    neg_threshold=hop1_neg_threshold,
-                    pos_threshold=hop1_pos_threshold,
-                    max_iterations=hop1_adjust_iterations,
-                    max_candidate_trials=hop1_adjust_max_candidate_trials,
-                    max_candidate_nodes_per_su=hop1_adjust_max_candidate_nodes_per_su,
-                    max_alternatives_per_node=hop1_adjust_max_alternatives_per_node,
-                    adjustment_groups=hop1_adjust_region_order,
-                    max_moves_per_region=hop1_adjust_max_moves_per_region,
-                    max_full_evals=hop1_adjust_max_full_evals,
-                    min_r2_gain=hop1_adjust_min_r2_gain,
-                    deadline_monotonic=None,
-                )
-                hop1_elapsed = time.perf_counter() - hop1_t0
-                if float(hop1_elapsed) >= 0.05:
-                    print(f"  [Layer1 Timing] hop1_spectrum_adjust: {hop1_elapsed:.2f}s")
-                total_adj = adjust_summary.get('total_adjustments', 0)
-                if total_adj > 0:
-                    print(f"  Hop1调整: {total_adj}次")
-                raw_candidates = int(adjust_summary.get('candidate_records_raw', 0))
-                if raw_candidates > 0:
-                    print(
-                        "  [Hop1候选优化] "
-                        f"raw={raw_candidates}, "
-                        f"unique={int(adjust_summary.get('candidate_records_unique', 0))}, "
-                        f"deduplicated={int(adjust_summary.get('candidate_records_deduplicated', 0))}, "
-                        f"cached_failures={int(adjust_summary.get('cached_structural_failures', 0))}, "
-                        f"structural_trials={int(adjust_summary.get('candidate_trials', 0))}, "
-                        f"full_evals={int(adjust_summary.get('full_eval_count', 0))}"
-                    )
-                if bool(adjust_summary.get('budget_exhausted', False)):
-                    print(
-                        "  [Hop1调整] 已达到候选评估预算，停止继续尝试: "
-                        f"{int(adjust_summary.get('candidate_trials', 0))}/"
-                        f"{int(adjust_summary.get('candidate_trial_budget', 0))}"
-                    )
-                adjust_ok, adjust_errors = self.validate_graph_consistency(
-                    nodes=nodes,
-                    H=H_init,
-                    E_target=E_target,
-                    verbose=False,
-                )
-                if adjust_errors:
-                    print(f"  [Hop1调整后校验失败] 回退到调整前状态，errors={len(adjust_errors)}")
-                    self._print_consistency_errors(adjust_errors, prefix='Hop1')
-                    nodes = pre_adjust_nodes
-            except Exception as e:
-                nodes = pre_adjust_nodes
-                print(f"  [Hop1调整失败] {e}")
-        elif bool(enable_hop1_adjust) and bool(hard_structure_invalid):
-            print("  [Hop1调整跳过] 当前Layer1图仍存在硬结构约束缺口")
+            print(f"  [Layer1区域调整回退] {exc}")
 
-        final_check_t0 = time.perf_counter()
         final_ok, final_errors = self.validate_graph_consistency(
             nodes=nodes,
             H=H_init,
             E_target=E_target,
             verbose=False,
         )
-        final_check_elapsed = time.perf_counter() - final_check_t0
-        if float(final_check_elapsed) >= 0.05:
-            print(f"  [Layer1 Timing] final_consistency_check: {final_check_elapsed:.2f}s")
-        if final_errors:
-            print(f"  [Layer1 Final Check] 仍存在{len(final_errors)}个不一致")
-            self._print_consistency_errors(final_errors, prefix='Final')
-            raise RuntimeError(
-                "layer1_final_validation_failed: "
-                + " | ".join(str(error) for error in list(final_errors or [])[:8])
+        final_snapshot = self._hop1_adjuster.build_eval_snapshot(nodes, S_target)
+        final_r2 = float(final_snapshot.get('r2', 0.0))
+        if not final_ok or final_errors or final_r2 + 1e-12 < raw_r2:
+            nodes = raw_nodes
+            final_snapshot = raw_snapshot
+            final_r2 = raw_r2
+            self._last_hop1_adjust_diagnostics['final_fallback_to_raw'] = True
+            self._last_hop1_adjust_diagnostics['final_validation_errors'] = list(
+                final_errors or []
             )
+        self._hop1_adjuster.apply_assignments_to_nodes(
+            nodes,
+            final_snapshot.get('assignments', {}),
+        )
 
+        final_coverage = self.audit_layer1_shift_coverage(nodes, str(eval_lib_path))
+        self._last_shift_coverage_audit = dict(final_coverage)
+        if not bool(final_coverage.get('ok', False)):
+            raise RuntimeError(
+                "rule_valid_but_shift_template_missing_after_refinement: "
+                f"missing={list(final_coverage.get('missing_signatures', []) or [])[:8]}"
+            )
+        if eval_output_dir:
+            out = Path(eval_output_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(
+                list(self._last_hop1_adjust_diagnostics.get('moves', []) or [])
+            ).to_csv(out / 'layer1_hop1_adjust_moves.csv', index=False)
+        if eval_nmr:
+            self._hop1_adjuster.evaluate_with_library(
+                nodes=nodes,
+                S_target=S_target,
+                output_dir=eval_output_dir,
+            )
+        print(
+            "  [Layer1 fixed-scale] "
+            f"raw_r2={raw_r2:.4f}, final_r2={final_r2:.4f}, "
+            f"moves={int(self._last_hop1_adjust_diagnostics.get('total_adjustments', 0))}"
+        )
         print(f"Layer1 完成 ({time.perf_counter() - layer1_t0:.2f}s)\n")
-        
         return nodes
-
     def precheck_fixed_assignment_feasibility(self,
                                               H_init: torch.Tensor,
-                                              E_target: torch.Tensor,
-                                              build_variant: int = 0) -> Tuple[bool, str]:
+                                              E_target: torch.Tensor) -> Tuple[bool, str]:
         """Cheaply reject histogram candidates whose fixed anchors cannot be matched."""
         H_local = H_init.to(self.device)
         self._current_E_target = E_target.to(self.device)
-        self._build_variant = int(build_variant)
         nodes = self._initialize_node_pool(H_local)
         self._init_runtime_node_index(nodes)
         steps = (
@@ -3257,150 +3658,19 @@ class Layer1Assigner:
                 return False, f'fixed_assignment_infeasible:{label}:{exc}'
         return True, 'ok'
 
-    def _compute_layer1_difference_spectrum(self,
-                                           nodes: List[_NodeV3],
-                                           S_target: torch.Tensor,
-                                           lib_path: Optional[str],
-                                           hwhm: float,
-                                           allow_approx: bool) -> Dict[str, object]:
-        try:
-            return self._nmr_evaluator.compute_difference_spectrum(
-                nodes=nodes,
-                S_target=S_target,
-                lib_path=lib_path,
-                hwhm=hwhm,
-                allow_approx=allow_approx,
-            )
-        except Exception as e:
-            _, ppm_axis = self._nmr_evaluator.resolve_inputs(S_target)
-            return {
-                'ppm': ppm_axis.detach().cpu().numpy(),
-                'diff': np.zeros(int(ppm_axis.numel()), dtype=np.float64),
-                'r2': 0.0,
-                'alpha': 0.0,
-                'n_peaks': 0,
-                'error': str(e),
-            }
-
-    def adjust_carbonyl_anchor_jointly(self,
-                                       nodes: List[_NodeV3],
-                                       S_target: torch.Tensor,
-                                       E_target: torch.Tensor,
-                                       lib_path: Optional[str] = None,
-                                       hwhm: float = 1.0,
-                                       allow_approx: bool = True,
-                                       max_iterations: int = 3,
-                                       max_adjustments_per_iter: int = 3,
-                                       pos_rel_threshold: float = 0.08,
-                                       neg_rel_threshold: float = 0.08,
-                                       deadline_monotonic: Optional[float] = None) -> Tuple[List[_NodeV3], Dict[str, object]]:
-        """
-        羰基类型 + SU9/脂肪锚点联合调整。
-
-        操作表:
-          - SU1/SU2: 9 -> 23/24/25
-          - SU1/SU2: 23/24/25 -> 9
-
-        判据表:
-          - 160-170 负峰显著 && 172-180 正峰显著: 往脂肪锚点迁移
-          - 160-170 正峰显著 && 172-180 负峰显著: 往 9 迁回
-
-        该阶段只重连 hop1，不直接修改 H 直方图。
-        """
-        return self._refiner.adjust_carbonyl_anchor_jointly(
+    def evaluate_layer1_nmr_with_library(
+        self,
+        nodes: List[_NodeV3],
+        S_target: torch.Tensor,
+        lib_path: Optional[str] = None,
+        output_dir: Optional[str] = None,
+    ) -> Dict[str, float]:
+        if lib_path and str(lib_path) != self._exact_hop1_constraint_lib_path:
+            self._configure_exact_hop1_shift_constraints(str(lib_path))
+        if self._hop1_adjuster is None:
+            raise ValueError('Layer1 evaluation requires an active template library')
+        return self._hop1_adjuster.evaluate_with_library(
             nodes=nodes,
             S_target=S_target,
-            E_target=E_target,
-            lib_path=lib_path,
-            hwhm=hwhm,
-            allow_approx=allow_approx,
-            max_iterations=max_iterations,
-            max_adjustments_per_iter=max_adjustments_per_iter,
-            pos_rel_threshold=pos_rel_threshold,
-            neg_rel_threshold=neg_rel_threshold,
-            deadline_monotonic=deadline_monotonic,
-        )
-
-    def evaluate_layer1_nmr_with_library(self,
-                                         nodes: List[_NodeV3],
-                                         S_target: torch.Tensor,
-                                         lib_path: Optional[str] = None,
-                                         output_dir: str = 'inverse_result',
-                                         hwhm: float = 1.0,
-                                         allow_approx: bool = True) -> Dict[str, float]:
-        return self._nmr_evaluator.evaluate_with_library(
-            nodes=nodes,
-            S_target=S_target,
-            lib_path=lib_path,
             output_dir=output_dir,
-            hwhm=hwhm,
-            allow_approx=allow_approx,
-        )
-    
-    # ========================================================================
-    # Layer1.5: 1-hop调整（基于差谱分析）
-    # ========================================================================
-    def adjust_hop1_based_on_spectrum(self,
-                                       nodes: List[_NodeV3],
-                                       S_target: torch.Tensor,
-                                       E_target: torch.Tensor,
-                                       lib_path: Optional[str] = None,
-                                       output_dir: str = 'inverse_result',
-                                       hwhm: float = 1.0,
-                                       allow_approx: bool = True,
-                                       neg_threshold: float = -0.5,
-                                       pos_threshold: float = 0.5,
-                                       max_iterations: int = 3,
-                                       adjustment_groups: Optional[List[str]] = None,
-                                       max_candidate_trials: int = 240,
-                                       max_candidate_nodes_per_su: int = 24,
-                                       max_alternatives_per_node: int = 4,
-                                       max_moves_per_region: int = 8,
-                                       max_full_evals: int = 32,
-                                       min_r2_gain: float = 1e-4,
-                                       deadline_monotonic: Optional[float] = None) -> Tuple[List[_NodeV3], Dict]:
-        """
-        基于差谱分析调整1-hop连接
-        
-        流程：
-        1. 计算当前差谱（目标-重建）
-        2. 识别负峰（过度集中区域）和正峰（缺失结构区域）
-        3. 对负峰区域的节点寻找替代1-hop组合（指向正峰区域）
-        4. 执行替换并处理互为1-hop的级联更新
-        5. 迭代调整直到收敛或达到最大迭代次数
-        
-        Args:
-            nodes: 节点列表
-            S_target: 目标谱图
-            E_target: 目标元素组成
-            lib_path: 子图库路径
-            output_dir: 输出目录
-            hwhm: 谱峰半高宽
-            neg_threshold: 负峰阈值
-            pos_threshold: 正峰阈值
-            max_iterations: 最大迭代次数
-            adjustment_groups: 调整组顺序
-        
-        Returns:
-            (adjusted_nodes, summary): 调整后的节点和调整摘要
-        """
-        return self._refiner.adjust_hop1_based_on_spectrum(
-            nodes=nodes,
-            S_target=S_target,
-            E_target=E_target,
-            lib_path=lib_path,
-            output_dir=output_dir,
-            hwhm=hwhm,
-            allow_approx=bool(allow_approx),
-            neg_threshold=neg_threshold,
-            pos_threshold=pos_threshold,
-            max_iterations=max_iterations,
-            max_candidate_trials=max_candidate_trials,
-            max_candidate_nodes_per_su=max_candidate_nodes_per_su,
-            max_alternatives_per_node=max_alternatives_per_node,
-            max_moves_per_region=max_moves_per_region,
-            max_full_evals=max_full_evals,
-            min_r2_gain=min_r2_gain,
-            adjustment_groups=adjustment_groups,
-            deadline_monotonic=deadline_monotonic,
         )

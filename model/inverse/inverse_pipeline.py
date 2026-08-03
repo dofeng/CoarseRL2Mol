@@ -1,6 +1,7 @@
 import torch
 import pandas as pd
 import copy
+import hashlib
 import numpy as np
 import json
 import re
@@ -27,7 +28,7 @@ from ..shared.inverse_common import (
     get_node_degree_hint,
 )
 from .layer0.inverse_layer0 import Layer0Estimator
-from .layer1.inverse_layer1 import Layer1Assigner, DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS
+from .layer1.inverse_layer1 import Layer1Assigner
 from .layer2.inverse_layer2 import Layer2Estimator
 from .layer3.inverse_layer3 import Layer3Estimator
 from .layer4.inverse_layer4 import Layer4Adjuster
@@ -52,9 +53,7 @@ class InversePipelineV3:
                  s2n_model: S2NModel,
                  vae_model: NMR_VAE,
                  templates: Optional[Any],
-                 device: str = 'cuda',
-                 nmr_intensity_scale: float = 1.0,
-                 unit_peak_intensity: bool = True):
+                 device: str = 'cuda'):
         """
         初始化推理管道
         
@@ -67,8 +66,6 @@ class InversePipelineV3:
         self.s2n = s2n_model.to(device).eval()
         self.vae = vae_model.to(device).eval()
         self.device = device
-        self.nmr_intensity_scale = float(nmr_intensity_scale)
-        self.unit_peak_intensity = bool(unit_peak_intensity)
         self.default_template_lib_path: Optional[str] = None
         if isinstance(templates, (str, Path)):
             self.default_template_lib_path = str(Path(templates))
@@ -94,8 +91,6 @@ class InversePipelineV3:
             device=device,
             E_SU_tensor=self.E_SU,
             layer0_estimator=self.layer0_estimator,  # 传递Layer0实例
-            intensity_scale=float(self.nmr_intensity_scale),
-            unit_peak_intensity=bool(self.unit_peak_intensity),
         )
         self.layer2_estimator = Layer2Estimator(
             device=torch.device(device),
@@ -109,17 +104,6 @@ class InversePipelineV3:
         if self.default_template_lib_path:
             self.layer2_estimator.lib_path = str(self.default_template_lib_path)
 
-        try:
-            self.layer2_estimator.intensity_scale = float(self.nmr_intensity_scale)
-            self.layer2_estimator.unit_peak_intensity = bool(self.unit_peak_intensity)
-        except Exception:
-            pass
-        try:
-            self.layer3_estimator.intensity_scale = float(self.nmr_intensity_scale)
-            self.layer3_estimator.unit_peak_intensity = bool(self.unit_peak_intensity)
-        except Exception:
-            pass
-        
         self.layer4_adjuster = Layer4Adjuster(
              device=torch.device(device),
              layer0_estimator=self.layer0_estimator,
@@ -234,47 +218,19 @@ class InversePipelineV3:
         fixed_meta['n19_total'] = int(fixed_meta['o_base_19'] + fixed_meta['s_reserved_19'])
         self._set_fixed_partition_meta(fixed_meta)
 
-    def _build_layer_runtime_configs(self,
-                                     eval_hwhm: float,
-                                     enable_hop1_adjust: bool,
-                                     hop1_adjust_iterations: int,
-                                     hop1_neg_threshold: float,
-                                     hop1_pos_threshold: float,
-                                     layer1_config: Optional[Dict[str, Any]] = None,
-                                     layer2_config: Optional[Dict[str, Any]] = None,
-                                     layer3_config: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    def _build_layer_runtime_configs(
+        self,
+        layer1_config: Optional[Dict[str, Any]] = None,
+        layer3_config: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         layer1_defaults = {
-            'eval_hwhm': float(eval_hwhm),
-            'enable_carbonyl_joint_adjust': True,
-            'carbonyl_joint_iterations': 10,
-            'carbonyl_joint_max_adjustments': 3,
-            'carbonyl_joint_pos_threshold': 0.1,
-            'carbonyl_joint_neg_threshold': 0.1,
-            'enable_hop1_adjust': bool(enable_hop1_adjust),
-            'hop1_adjust_iterations': int(hop1_adjust_iterations),
-            'hop1_neg_threshold': float(hop1_neg_threshold),
-            'hop1_pos_threshold': float(hop1_pos_threshold),
-            'hop1_adjust_max_candidate_trials': 240,
-            'hop1_adjust_max_candidate_nodes_per_su': 24,
-            'hop1_adjust_max_alternatives_per_node': 4,
-            'hop1_adjust_region_order': ['aromatic', 'carbonyl', 'unsaturated', 'aliphatic'],
-            'hop1_adjust_max_moves_per_region': 8,
-            'hop1_adjust_max_full_evals': 64,
-            'hop1_adjust_min_r2_gain': 1e-4,
-            'build_attempts': 3,
-            'hop1_completion_max_backtracks': None,
-            'hop1_completion_branch_limit': None,
-            'enable_hop1_diversity_refine': True,
-            'hop1_diversity_max_moves': 12,
-            'hop1_diversity_max_trials': 96,
-            'build_variant': 0,
-        }
-        layer2_defaults = {
-            'eval_hwhm': float(eval_hwhm),
+            'neg_peak_threshold': -0.8,
+            'pos_peak_threshold': 0.8,
+            'max_candidate_trials_per_region': 40,
+            'max_moves_per_region': 4,
         }
         layer3_defaults = {
             'max_iters': 40,
-            'hwhm': float(eval_hwhm),
             'pos_search_window': 15.0,
             'neg_assign_window': 2.0,
             'top_k_samples': 10,
@@ -283,66 +239,32 @@ class InversePipelineV3:
             'layer3_verbose': True,
         }
 
-        def _merge_strict(defaults: Dict[str, Any], user_cfg: Optional[Dict[str, Any]], label: str) -> Dict[str, Any]:
-            cfg = dict(user_cfg or {})
-            removed_by_layer = {
-                'layer1_config': {
-                    'layer1_total_time_budget_s': (
-                        "removed: Layer1 no longer uses wall-clock deadlines"
-                    ),
-                    'hop1_spectral_reserve_s': (
-                        "removed: Layer1 always runs the configured spectral refinement"
-                    ),
-                    'local_swap_max_attempts': (
-                        "removed: Layer1 now uses hop1_completion_max_backtracks and "
-                        "hop1_completion_branch_limit in the global completion solver"
-                    ),
-                },
-                'layer2_config': {
-                    'layer2_decoder_max_mu_delta': (
-                        "removed: Layer2 always uses template center_mu and never performs G2S decoding"
-                    ),
-                    'layer2_use_g2s_decoder': (
-                        "removed: Layer2 always uses template center_mu and never performs G2S decoding"
-                    ),
-                },
-            }
-            removed = dict(removed_by_layer.get(str(label), {}) or {})
-            supplied_removed = [str(key) for key in cfg if str(key) in removed]
-            if supplied_removed:
-                details = "; ".join(f"{key}: {removed[key]}" for key in sorted(supplied_removed))
-                raise ValueError(f"{label} contains removed configuration: {details}")
-            unknown = sorted(str(k) for k in cfg.keys() if str(k) not in defaults)
-            if unknown:
-                raise ValueError(f"{label} contains unsupported keys: {unknown}")
-            out = dict(defaults)
-            out.update(cfg)
-            return out
+        def _merge_strict(
+            defaults: Dict[str, Any],
+            user_config: Optional[Dict[str, Any]],
+            label: str,
+        ) -> Dict[str, Any]:
+            config = dict(user_config or {})
+            unsupported = sorted(
+                str(key) for key in config if str(key) not in defaults
+            )
+            if unsupported:
+                raise ValueError(f'{label} contains unsupported keys: {unsupported}')
+            merged = dict(defaults)
+            merged.update(config)
+            return merged
 
         return (
             _merge_strict(layer1_defaults, layer1_config, 'layer1_config'),
-            _merge_strict(layer2_defaults, layer2_config, 'layer2_config'),
             _merge_strict(layer3_defaults, layer3_config, 'layer3_config'),
         )
 
-    def get_default_runtime_configs(self,
-                                    eval_hwhm: float = 1.0,
-                                    enable_hop1_adjust: bool = True,
-                                    hop1_adjust_iterations: int = 10,
-                                    hop1_neg_threshold: float = -1.0,
-                                    hop1_pos_threshold: float = 1.0) -> Dict[str, Dict[str, Any]]:
-        """返回 Layer1/2/3 当前可调参数及默认值。"""
-        layer1_cfg, layer2_cfg, layer3_cfg = self._build_layer_runtime_configs(
-            eval_hwhm=eval_hwhm,
-            enable_hop1_adjust=enable_hop1_adjust,
-            hop1_adjust_iterations=hop1_adjust_iterations,
-            hop1_neg_threshold=hop1_neg_threshold,
-            hop1_pos_threshold=hop1_pos_threshold,
-        )
+    def get_default_runtime_configs(self) -> Dict[str, Dict[str, Any]]:
+        """Return the supported inverse Layer1 and Layer3 runtime settings."""
+        layer1_config, layer3_config = self._build_layer_runtime_configs()
         return {
-            'layer1_config': layer1_cfg,
-            'layer2_config': layer2_cfg,
-            'layer3_config': layer3_cfg,
+            'layer1_config': layer1_config,
+            'layer3_config': layer3_config,
         }
 
     @staticmethod
@@ -533,115 +455,110 @@ class InversePipelineV3:
             'h_error': float(errors.get('H', 0.0)),
         }
 
-    def _run_layer12_cycle(self,
-                           H_seed: torch.Tensor,
-                           S_target: torch.Tensor,
-                           E_target: torch.Tensor,
-                           eval_lib_path: Optional[str],
-                           layer1_runtime_cfg: Dict[str, Any],
-                           layer2_runtime_cfg: Dict[str, Any],
-                           eval_nmr: bool = False,
-                           eval_output_dir: Optional[str] = None,
-                           layer2_output_dir: Optional[str] = None) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], float]:
-        try:
-            current_fixed_meta = copy.deepcopy(getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {})
-            if current_fixed_meta:
-                self._set_fixed_partition_meta(current_fixed_meta)
-        except Exception:
-            current_fixed_meta = {}
+    def _run_layer12_cycle(
+        self,
+        H_seed: torch.Tensor,
+        S_target: torch.Tensor,
+        E_target: torch.Tensor,
+        eval_lib_path: Optional[str],
+        layer1_runtime_cfg: Dict[str, Any],
+        eval_nmr: bool = False,
+        eval_output_dir: Optional[str] = None,
+        layer2_output_dir: Optional[str] = None,
+    ) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], float]:
+        if not eval_lib_path:
+            raise ValueError('Layer1 requires eval_lib_path for exact shift lookup')
+        fixed_meta = copy.deepcopy(
+            getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {}
+        )
+        if fixed_meta:
+            self._set_fixed_partition_meta(fixed_meta)
 
-        def _first_layer1_error(errors: List[str]) -> str:
-            return str(errors[0]) if errors else 'unknown'
+        started_at = time.perf_counter()
+        nodes = self.layer1_assigner.layer1_assign(
+            H_init=H_seed.detach().clone(),
+            S_target=S_target,
+            E_target=E_target,
+            eval_nmr=bool(eval_nmr),
+            eval_output_dir=eval_output_dir,
+            eval_lib_path=str(eval_lib_path),
+            **dict(layer1_runtime_cfg),
+        )
+        valid, errors = self.layer1_assigner.validate_graph_consistency(
+            nodes=nodes,
+            H=H_seed.detach().clone(),
+            E_target=E_target,
+            verbose=False,
+        )
+        if not valid or errors:
+            raise RuntimeError(
+                'layer1_single_graph_invalid: '
+                + ' | '.join(str(error) for error in list(errors or [])[:8])
+            )
+        adjuster = self.layer1_assigner._hop1_adjuster
+        if adjuster is None:
+            raise RuntimeError('Layer1 exact template service was not initialized')
+        layer1_snapshot = adjuster.build_eval_snapshot(nodes, S_target)
+        adjust_summary = copy.deepcopy(
+            getattr(self.layer1_assigner, '_last_hop1_adjust_diagnostics', {}) or {}
+        )
+        layer1_signature_hash = self._layer1_signature_hash(nodes)
+        build_diagnostics = {
+            'build_count': 1,
+            'construction': copy.deepcopy(
+                getattr(self.layer1_assigner, '_last_completion_diagnostics', {}) or {}
+            ),
+            'shift_coverage': copy.deepcopy(
+                getattr(self.layer1_assigner, '_last_shift_coverage_audit', {}) or {}
+            ),
+            'raw_layer1_r2': float(adjust_summary.get(
+                'initial_r2', layer1_snapshot.get('r2', 0.0)
+            )),
+            'final_layer1_r2': float(layer1_snapshot.get('r2', 0.0)),
+            'region_adjustment': adjust_summary,
+            'final_signature_hash': layer1_signature_hash,
+            'elapsed_s': float(time.perf_counter() - started_at),
+        }
 
-        def _run_layer1_once(cfg_local: Dict[str, Any],
-                             attempt_name: str) -> Tuple[Optional[List[_NodeV3]], bool, List[str]]:
-            try:
-                if current_fixed_meta:
-                    self._set_fixed_partition_meta(current_fixed_meta)
-            except Exception:
-                pass
-            try:
-                nodes_local = self.layer1_assign(
-                    H_init=H_seed.detach().clone(),
-                    S_target=S_target,
-                    E_target=E_target,
-                    eval_nmr=bool(eval_nmr),
-                    eval_output_dir=eval_output_dir,
-                    eval_lib_path=eval_lib_path,
-                    **cfg_local,
-                )
-            except Exception as e:
-                err = f"layer1_exception: {e}"
-                print(f"  [Layer1 {attempt_name}失败] {err}")
-                return None, False, [err]
-            layer1_ok_local, layer1_errors_local = self.layer1_assigner.validate_graph_consistency(
-                nodes=nodes_local,
-                H=H_seed.detach().clone(),
-                E_target=E_target,
-                verbose=False,
-            )
-            layer1_accept_ok_local = bool(layer1_ok_local and not layer1_errors_local)
-            if not layer1_accept_ok_local:
-                print(
-                    f"  [Layer1 {attempt_name}校验失败] "
-                    f"{_first_layer1_error(list(layer1_errors_local or []))}"
-                )
-            return nodes_local, bool(layer1_accept_ok_local), list(layer1_errors_local or [])
-
-        layer1_cfg_base = dict(layer1_runtime_cfg)
-        build_attempts = max(1, int(layer1_cfg_base.pop('build_attempts', 3)))
-        base_variant = int(layer1_cfg_base.get('build_variant', 0) or 0)
-        nodes = None
-        layer1_ok = False
-        layer1_errors: List[str] = []
-        attempt_errors: List[str] = []
-        effective_build_variant = int(base_variant)
-        for attempt_idx in range(build_attempts):
-            layer1_cfg_attempt = dict(layer1_cfg_base)
-            layer1_cfg_attempt['build_variant'] = int(base_variant + 1009 * attempt_idx)
-            nodes, layer1_ok, layer1_errors = _run_layer1_once(
-                cfg_local=layer1_cfg_attempt,
-                attempt_name=f'fresh-build variant={int(layer1_cfg_attempt["build_variant"])}',
-            )
-            if bool(layer1_ok):
-                effective_build_variant = int(layer1_cfg_attempt['build_variant'])
-                break
-            attempt_errors.append(_first_layer1_error(list(layer1_errors or [])))
-        if not bool(layer1_ok):
-            raise RuntimeError("layer1_graph_invalid: " + " | ".join(attempt_errors or [_first_layer1_error(list(layer1_errors or []))]))
-        layer2_call_cfg = dict(layer2_runtime_cfg)
-        layer1_baseline_diff: Dict[str, object] = {}
-        if eval_lib_path:
-            _, layer1_baseline_diff = self._materialize_layer1_library_baseline(
-                nodes=copy.deepcopy(nodes),
-                S_target=S_target,
-                lib_path=eval_lib_path,
-                hwhm=float(layer2_runtime_cfg.get('eval_hwhm', 1.0)),
-                allow_approx=False,
-            )
         nodes = self.layer2_assign(
             nodes=nodes,
             S_target=S_target,
             E_target=E_target,
             lib_path=eval_lib_path,
             output_dir=layer2_output_dir,
-            **layer2_call_cfg,
         )
         H_nodes = self._histogram_from_nodes(nodes).detach().clone()
         diff_info = self._compute_difference_spectrum_from_nodes_mu(
             nodes=nodes,
             S_target=S_target,
-            hwhm=float(layer2_runtime_cfg.get('eval_hwhm', 1.0)),
         )
-        diff_info['source_stage'] = 'layer2'
-        diff_info['spectral_contract'] = 'template_center_mu'
-        diff_info['evaluation_hwhm'] = float(layer2_runtime_cfg.get('eval_hwhm', 1.0))
-        diff_info['effective_build_variant'] = int(effective_build_variant)
-        r2 = float(diff_info.get('r2', 0.0))
-        if layer1_baseline_diff:
-            diff_info['layer1_library_baseline_r2'] = float(layer1_baseline_diff.get('r2', float('nan')))
-            diff_info['layer1_library_baseline_alpha'] = float(layer1_baseline_diff.get('alpha', float('nan')))
-        return nodes, H_nodes, diff_info, r2
+        diff_info.update({
+            'source_stage': 'layer2',
+            'spectral_contract': 'template_center_mu',
+            'layer1_library_baseline_r2': float(layer1_snapshot.get('r2', 0.0)),
+            'layer1_library_baseline_matched_cnt': int(
+                layer1_snapshot.get('matched_cnt', 0)
+            ),
+            'layer1_library_baseline_carbon_cnt': int(
+                layer1_snapshot.get('carbon_cnt', 0)
+            ),
+            'layer1_final_signature_hash': layer1_signature_hash,
+            'layer1_build_diagnostics': build_diagnostics,
+            'layer2_stats': dict(self.layer2_estimator.stats),
+        })
+        return nodes, H_nodes, diff_info, float(diff_info.get('r2', 0.0))
+    def _layer1_signature_hash(self, nodes: Sequence[_NodeV3]) -> str:
+        signature = tuple(
+            sorted(
+                (
+                    int(node.su_type),
+                    tuple(sorted(int(x) for x in node.hop1_su.elements())),
+                )
+                for node in nodes
+                if int(node.su_type) in self.layer1_assigner._carbon_su_set
+            )
+        )
+        return hashlib.sha1(repr(signature).encode('utf-8')).hexdigest()
 
     @staticmethod
     def _topology_pending_summary(assembly_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -1499,23 +1416,13 @@ class InversePipelineV3:
         except Exception as e:
             print(f"[{tag}] 图校验失败: {e}")
             return False, 'graph_check_exception'
-        graph_accept_ok, graph_accept_meta = self.layer1_assigner.assess_consistency_acceptance(
-            list(graph_errors or []),
-            max_soft_errors=DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS,
-        )
-        if not bool(graph_accept_ok):
+        if not bool(graph_ok) or graph_errors:
             print(f"[{tag}] 回退: 图结构校验未通过，errors={len(graph_errors)}")
             try:
                 self.layer1_assigner._print_consistency_errors(graph_errors, prefix=tag, limit=6)
             except Exception:
                 pass
             return False, 'graph_invalid'
-        if (not bool(graph_ok)) and int(graph_accept_meta.get('n_soft', 0)) > 0:
-            print(
-                f"[{tag}] 接受少量1-hop软缺口: "
-                f"soft={int(graph_accept_meta.get('n_soft', 0))}/"
-                f"{int(graph_accept_meta.get('max_soft_errors', 0))}"
-            )
         try:
             self._sync_fixed_partition_meta_from_nodes(nodes)
         except Exception as e:
@@ -1579,8 +1486,6 @@ class InversePipelineV3:
                                              E_target: torch.Tensor,
                                              eval_lib_path: Optional[str],
                                              layer1_runtime_cfg: Dict[str, Any],
-                                             layer2_runtime_cfg: Dict[str, Any],
-                                             layer2_eval_hwhm: float,
                                              outer_idx: int,
                                              max_primary_adjustments_per_stage: int = 10,
                                              max_h_compensation_ops_per_adjustment: int = 8,
@@ -1588,7 +1493,7 @@ class InversePipelineV3:
                                              residual_flex_min_23: int = 2,
                                              residual_side_preferred_23: int = 2,
                                              residual_side_min_23: int = 1,
-                                             h_tolerance: float = 0.06,
+                                             h_tolerance: float = 0.08,
                                              enable_post_external_spectrum: bool = True,
                                              spectrum_candidate_limit: int = 2,
                                              spectrum_max_primary_adjustments: int = 10,
@@ -1604,29 +1509,14 @@ class InversePipelineV3:
 
         def rebuild_fn(H_seed: torch.Tensor,
                        phase: str,
-                       cycle_idx: int,
-                       build_variant: Optional[int] = None) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, Any], float]:
+                       cycle_idx: int) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, Any], float]:
             layer1_stage3_cfg = dict(layer1_runtime_cfg)
-            try:
-                base_variant = int(layer1_stage3_cfg.get('build_variant', 0))
-            except Exception:
-                base_variant = 0
-            layer1_stage3_cfg['build_variant'] = int(
-                build_variant
-                if build_variant is not None
-                else (
-                    int(base_variant)
-                    + 503 * int(outer_idx + 1)
-                    + 29 * int(cycle_idx + 1)
-                )
-            )
             cand_nodes, cand_H, cand_diff, cand_r2 = self._run_layer12_cycle(
                 H_seed=H_seed.detach().clone(),
                 S_target=S_target,
                 E_target=E_target,
                 eval_lib_path=eval_lib_path,
                 layer1_runtime_cfg=layer1_stage3_cfg,
-                layer2_runtime_cfg=layer2_runtime_cfg,
                 eval_nmr=False,
             )
             cand_H = self._histogram_from_nodes(cand_nodes).detach().clone()
@@ -1810,6 +1700,7 @@ class InversePipelineV3:
                 'primary_adjustment_count': 0,
                 'physical_conversion_count': 0,
                 'h_compensation_count': 0,
+                'parity_balance_count': 0,
                 'histogram_before': '{}',
                 'histogram_after': '{}',
                 'phase_inventory': '{}',
@@ -1920,6 +1811,7 @@ class InversePipelineV3:
                 'primary_adjustment_count': int(rec.get('primary_adjustment_count', 0) or 0),
                 'physical_conversion_count': int(rec.get('physical_conversion_count', 0) or 0),
                 'h_compensation_count': int(rec.get('h_compensation_count', 0) or 0),
+                'parity_balance_count': int(rec.get('parity_balance_count', 0) or 0),
                 'histogram_before': json.dumps(rec.get('histogram_before', {}), ensure_ascii=False, sort_keys=True),
                 'histogram_after': json.dumps(rec.get('histogram_after', {}), ensure_ascii=False, sort_keys=True),
                 'phase_inventory': json.dumps(rec.get('phase_inventory', {}), ensure_ascii=False, sort_keys=True),
@@ -2052,6 +1944,7 @@ class InversePipelineV3:
             'layer2_r2', 'spectrum_candidate_id', 'spectrum_r2_gain',
             'spectrum_window_loss_gain',
             'primary_adjustment_count', 'physical_conversion_count', 'h_compensation_count',
+            'parity_balance_count',
             'external_contracts_seen', 'external_directly_completed',
             'external_completed_after_conversion', 'external_blocked',
             'external_remaining_pending', 'external_primary_count',
@@ -2193,13 +2086,7 @@ class InversePipelineV3:
               save_intermediates: bool = True,
               output_dir: str = 'inverse_result',
               eval_lib_path: Optional[str] = None,
-              eval_hwhm: float = 1.0,
-              enable_hop1_adjust: bool = True,
-              hop1_adjust_iterations: int = 6,
-              hop1_neg_threshold: float = -0.8,
-              hop1_pos_threshold: float = 0.8,
               layer1_config: Optional[Dict[str, Any]] = None,
-              layer2_config: Optional[Dict[str, Any]] = None,
               layer3_config: Optional[Dict[str, Any]] = None,
               stage_configs: Optional[Dict[str, Dict]] = None,
               outer_max_cycles: int = 8,
@@ -2231,26 +2118,12 @@ class InversePipelineV3:
                     },
                 }
             layer1_config 可调参数:
-                - eval_hwhm, build_variant
-                - enable_carbonyl_joint_adjust, carbonyl_joint_iterations
-                - carbonyl_joint_max_adjustments
-                - carbonyl_joint_pos_threshold, carbonyl_joint_neg_threshold
-                - enable_hop1_adjust, hop1_adjust_iterations
-                - hop1_neg_threshold, hop1_pos_threshold
-                - hop1_adjust_region_order, hop1_adjust_max_candidate_trials
-                - hop1_adjust_max_moves_per_region
-                - hop1_adjust_max_full_evals
-                - hop1_adjust_min_r2_gain
-                - build_attempts
-                - hop1_completion_max_backtracks, hop1_completion_branch_limit
-                - enable_hop1_diversity_refine
-                - hop1_diversity_max_moves, hop1_diversity_max_trials
-            layer2_config 可调参数:
-                - eval_hwhm
+                - neg_peak_threshold, pos_peak_threshold
+                - max_candidate_trials_per_region, max_moves_per_region
                 Layer2 keeps center/1-hop exact, selects the nearest available
                 2-hop tier, and always reconstructs with template center_mu.
             layer3_config 可调参数:
-                - max_iters, hwhm, pos_search_window, neg_assign_window
+                - max_iters, pos_search_window, neg_assign_window
                 - top_k_samples, neg_top_k_peaks, neg_peak_min_sep_ppm
                 Layer3 keeps every Layer2 template fixed and always decodes
                 candidate z values with G2S. layer3_verbose controls logging.
@@ -2263,17 +2136,13 @@ class InversePipelineV3:
         print("InversePipelineV3: 开始逆向推理")
         print("=" * 80)
 
-        layer1_runtime_cfg, layer2_runtime_cfg, layer3_runtime_cfg = self._build_layer_runtime_configs(
-            eval_hwhm=eval_hwhm,
-            enable_hop1_adjust=enable_hop1_adjust,
-            hop1_adjust_iterations=hop1_adjust_iterations,
-            hop1_neg_threshold=hop1_neg_threshold,
-            hop1_pos_threshold=hop1_pos_threshold,
+        layer1_runtime_cfg, layer3_runtime_cfg = self._build_layer_runtime_configs(
             layer1_config=layer1_config,
-            layer2_config=layer2_config,
             layer3_config=layer3_config,
         )
-        layer2_eval_hwhm = float(layer2_runtime_cfg.get('eval_hwhm', eval_hwhm))
+        eval_lib_path = str(eval_lib_path or self.default_template_lib_path or '')
+        if not eval_lib_path:
+            raise ValueError('infer requires an active template library')
         save_round_outputs = bool(save_intermediates)
 
         default_stage_configs = {
@@ -2297,13 +2166,14 @@ class InversePipelineV3:
                 'residual_flex_min_23': 2,
                 'residual_side_preferred_23': 2,
                 'residual_side_min_23': 1,
-                'h_tolerance': 0.06,
+                'h_tolerance': 0.08,
                 'enable_post_external_spectrum': True,
                 'spectrum_candidate_limit': 2,
                 'spectrum_max_primary_adjustments': 10,
                 'spectrum_min_r2_gain': 0.002,
             },
         }
+        supported_block_a_keys = set(default_stage_configs['block_a'])
         supported_block_b_keys = set(default_stage_configs['block_b'])
         if stage_configs is not None:
             for stage, cfg in stage_configs.items():
@@ -2311,6 +2181,13 @@ class InversePipelineV3:
                     default_stage_configs[stage].update(cfg)
                 else:
                     raise ValueError(f"未知 stage_configs 键: {stage}")
+        block_a_user_cfg = dict((stage_configs or {}).get('block_a', {}) or {})
+        unknown_block_a_keys = set(block_a_user_cfg) - supported_block_a_keys
+        if unknown_block_a_keys:
+            raise ValueError(
+                "block_a contains unknown keys: "
+                + ", ".join(sorted(str(key) for key in unknown_block_a_keys))
+            )
         block_b_user_cfg = dict((stage_configs or {}).get('block_b', {}) or {})
         unknown_block_b_keys = set(block_b_user_cfg) - supported_block_b_keys
         if unknown_block_b_keys:
@@ -2339,6 +2216,11 @@ class InversePipelineV3:
                 "block_c_resource contains unknown keys: "
                 + ", ".join(sorted(str(key) for key in unknown_resource_keys))
             )
+        stage3_h_tolerance = float(resource_cfg.get('h_tolerance', 0.08))
+        if not 0.0 <= stage3_h_tolerance <= 1.0:
+            raise ValueError('block_c_resource.h_tolerance must be between 0 and 1')
+        resource_cfg['h_tolerance'] = stage3_h_tolerance
+        self.layer4_adjuster._h_tolerance = stage3_h_tolerance
 
         print("\n>>> Layer0: 估计SU直方图")
         H_init = self.estimate_su_histogram(S_target, E_target)
@@ -2355,7 +2237,6 @@ class InversePipelineV3:
             E_target=E_target,
             eval_lib_path=eval_lib_path,
             layer1_runtime_cfg=layer1_runtime_cfg,
-            layer2_runtime_cfg=layer2_runtime_cfg,
             eval_nmr=True,
             eval_output_dir=(str(Path(output_dir) / 'initial_layer12') if save_intermediates and output_dir else None),
             layer2_output_dir=(str(Path(output_dir) / 'initial_layer12') if save_intermediates and output_dir else None),
@@ -2396,20 +2277,10 @@ class InversePipelineV3:
                 except Exception as e:
                     print(f"[{tag}] 图校验失败: {e}")
                     return False, 'graph_check_exception'
-                graph_accept_ok, graph_accept_meta = self.layer1_assigner.assess_consistency_acceptance(
-                    list(graph_errors or []),
-                    max_soft_errors=DEFAULT_MAX_SOFT_CONSISTENCY_ERRORS,
-                )
-                if not bool(graph_accept_ok):
+                if not bool(graph_ok) or graph_errors:
                     print(f"[{tag}] 回退: 图结构校验未通过，errors={len(graph_errors)}")
                     self.layer1_assigner._print_consistency_errors(graph_errors, prefix=tag, limit=6)
                     return False, 'graph_invalid'
-                if (not bool(graph_ok)) and int(graph_accept_meta.get('n_soft', 0)) > 0:
-                    print(
-                        f"[{tag}] 接受少量1-hop软缺口: "
-                        f"soft={int(graph_accept_meta.get('n_soft', 0))}/"
-                        f"{int(graph_accept_meta.get('max_soft_errors', 0))}"
-                    )
                 try:
                     self._sync_fixed_partition_meta_from_nodes(nodes_local)
                 except Exception as e:
@@ -2501,7 +2372,6 @@ class InversePipelineV3:
                         E_target=E_target,
                         eval_lib_path=eval_lib_path,
                         layer1_runtime_cfg=layer1_runtime_cfg,
-                        layer2_runtime_cfg=layer2_runtime_cfg,
                         # After Layer4 changes the histogram, rebuild 1-hop
                         # from the current constraints.
                         eval_nmr=False,
@@ -2574,7 +2444,6 @@ class InversePipelineV3:
                             self.layer1_assigner.precheck_fixed_assignment_feasibility(
                                 H_candidate.detach().clone(),
                                 E_target,
-                                build_variant=int(layer1_runtime_cfg.get('build_variant', 0) or 0),
                             )
                         )
                         try:
@@ -2621,7 +2490,6 @@ class InversePipelineV3:
                         fixed_precheck_ok, fixed_precheck_reason = self.layer1_assigner.precheck_fixed_assignment_feasibility(
                             H_stage.detach().clone(),
                             E_target,
-                            build_variant=int(layer1_runtime_cfg.get('build_variant', 0) or 0),
                         )
                         if not bool(fixed_precheck_ok):
                             try:
@@ -2636,23 +2504,12 @@ class InversePipelineV3:
 
                         try:
                             layer1_stage_cfg = dict(layer1_runtime_cfg)
-                            try:
-                                base_variant = int(layer1_stage_cfg.get('build_variant', 0))
-                            except Exception:
-                                base_variant = 0
-                            layer1_stage_cfg['build_variant'] = (
-                                int(base_variant) +
-                                101 * int(block_b_iter) +
-                                17 * int(family_idx) +
-                                int(substage_idx)
-                            )
                             cand_nodes, cand_H, cand_diff, cand_r2 = self._run_layer12_cycle(
                                 H_seed=H_stage.detach().clone(),
                                 S_target=S_target,
                                 E_target=E_target,
                                 eval_lib_path=eval_lib_path,
                                 layer1_runtime_cfg=layer1_stage_cfg,
-                                layer2_runtime_cfg=layer2_runtime_cfg,
                                 eval_nmr=False,
                             )
                         except Exception as e:
@@ -2718,8 +2575,6 @@ class InversePipelineV3:
                         E_target=E_target,
                         eval_lib_path=eval_lib_path,
                         layer1_runtime_cfg=layer1_runtime_cfg,
-                        layer2_runtime_cfg=layer2_runtime_cfg,
-                        layer2_eval_hwhm=float(layer2_eval_hwhm),
                         outer_idx=int(outer_idx),
                         max_primary_adjustments_per_stage=int(resource_cfg.get('max_primary_adjustments_per_stage', 10)),
                         max_h_compensation_ops_per_adjustment=int(resource_cfg.get('max_h_compensation_ops_per_adjustment', 8)),
@@ -2727,7 +2582,7 @@ class InversePipelineV3:
                         residual_flex_min_23=int(resource_cfg.get('residual_flex_min_23', 2)),
                         residual_side_preferred_23=int(resource_cfg.get('residual_side_preferred_23', 2)),
                         residual_side_min_23=int(resource_cfg.get('residual_side_min_23', 1)),
-                        h_tolerance=float(resource_cfg.get('h_tolerance', 0.06)),
+                        h_tolerance=float(resource_cfg.get('h_tolerance', 0.08)),
                         enable_post_external_spectrum=bool(resource_cfg.get('enable_post_external_spectrum', True)),
                         spectrum_candidate_limit=int(resource_cfg.get('spectrum_candidate_limit', 2)),
                         spectrum_max_primary_adjustments=int(resource_cfg.get('spectrum_max_primary_adjustments', 10)),
@@ -2773,9 +2628,12 @@ class InversePipelineV3:
                 cycle_pre_layer3_r2 = float(current_layer2_diff.get('r2', float('nan')))
 
             if stage3_complete_for_layer3:
+                layer3_input_nodes = copy.deepcopy(current_nodes)
+                layer3_input_H = current_H.detach().clone()
+                layer3_input_diff = copy.deepcopy(current_diff)
                 try:
-                    current_nodes, _ = self.layer3_adjust_templates(
-                        nodes=copy.deepcopy(current_nodes),
+                    layer3_nodes, layer3_r2 = self.layer3_adjust_templates(
+                        nodes=copy.deepcopy(layer3_input_nodes),
                         S_target=S_target,
                         E_target=E_target,
                         lib_path=eval_lib_path,
@@ -2784,6 +2642,22 @@ class InversePipelineV3:
                     )
                 except Exception as e:
                     raise RuntimeError(f"Outer Cycle {outer_idx + 1} Layer3 failed: {e}") from e
+                layer3_diagnostics = dict(
+                    getattr(self.layer3_estimator, 'last_diagnostics', {}) or {}
+                )
+                layer3_accepted = bool(layer3_diagnostics.get('accepted', True))
+                if layer3_accepted:
+                    current_nodes = layer3_nodes
+                else:
+                    current_nodes = layer3_input_nodes
+                    current_H = layer3_input_H
+                    current_diff = layer3_input_diff
+                    print(
+                        f"[Outer Cycle {outer_idx + 1} Layer3] rejected: "
+                        f"candidate_r2={float(layer3_diagnostics.get('candidate_r2', layer3_r2)):.4f} "
+                        f"< baseline_r2={float(layer3_diagnostics.get('baseline_r2', cycle_pre_layer3_r2)):.4f}; "
+                        "retained pre-Layer3 state"
+                    )
                 last_layer3_success = True
             else:
                 print(
@@ -2796,15 +2670,16 @@ class InversePipelineV3:
                 current_diff = copy.deepcopy(current_layer2_diff)
                 continue
 
-            current_H = self._histogram_from_nodes(current_nodes).detach().clone()
-            current_diff = self._compute_difference_spectrum_from_nodes_mu(
-                nodes=current_nodes,
-                S_target=S_target,
-                hwhm=float(layer2_eval_hwhm),
-            )
-            current_diff['source_stage'] = 'post_layer3'
-            current_diff['spectral_contract'] = 'g2s_layer3'
-            current_diff['evaluation_hwhm'] = float(layer2_eval_hwhm)
+            if layer3_accepted:
+                current_H = self._histogram_from_nodes(current_nodes).detach().clone()
+                current_diff = self._compute_difference_spectrum_from_nodes_mu(
+                    nodes=current_nodes,
+                    S_target=S_target,
+                )
+                current_diff['source_stage'] = 'post_layer3'
+                current_diff['spectral_contract'] = 'g2s_layer3'
+            else:
+                current_diff['layer3_candidate_diagnostics'] = layer3_diagnostics
             cycle_post_layer3_r2 = float(current_diff.get('r2', float('nan')))
             cycle_pre_layer3_txt = (
                 f"{cycle_pre_layer3_r2:.4f}"
@@ -2821,17 +2696,18 @@ class InversePipelineV3:
                 f"accept_ref_layer2_r2={accepted_layer2_r2:.4f}, "
                 f"historical_best_layer2_r2={historical_best_layer2_r2:.4f}, "
                 f"pre_layer3_r2={cycle_pre_layer3_txt}, "
-                f"post_layer3_r2={cycle_post_layer3_txt}"
+                f"post_layer3_r2={cycle_post_layer3_txt}, "
+                f"layer3_committed={bool(layer3_accepted)}"
             )
             self._print_histogram_and_elements(
                 current_H,
                 E_target,
-                label=f'Outer Cycle {outer_idx + 1} Post-Layer3',
+                label=f'Outer Cycle {outer_idx + 1} Selected State',
                 nodes=current_nodes,
             )
             self._print_effective_resource_summary(
                 current_H,
-                label=f'Outer Cycle {outer_idx + 1} Post-Layer3',
+                label=f'Outer Cycle {outer_idx + 1} Selected State',
             )
 
             if save_round_outputs:
@@ -2848,7 +2724,6 @@ class InversePipelineV3:
                         S_target=S_target,
                         E_target=E_target,
                         output_dir=str(Path(outer_dir) / 'nmr_comparison'),
-                        hwhm=float(layer2_eval_hwhm),
                         save_full_outputs=False,
                     )
                 except Exception:
@@ -2858,7 +2733,7 @@ class InversePipelineV3:
             raise RuntimeError('final_result_requires_completed_stage3_and_layer3')
 
         print(
-            "[Final Topology] using final Post-Layer3 node state; no extra Layer1/2 rebuild",
+            "[Final Topology] using final accepted spectral state; no extra Layer1/2 rebuild",
             flush=True,
         )
 
@@ -2875,7 +2750,6 @@ class InversePipelineV3:
                 S_target=S_target,
                 E_target=E_target,
                 output_dir=str(Path(output_dir) / 'final_outputs'),
-                hwhm=float(layer2_eval_hwhm),
             )
         except Exception as e:
             print(f"[Final NMR Compare] 保存失败: {e}")
@@ -2891,16 +2765,17 @@ class InversePipelineV3:
         print("\n" + "=" * 80)
         print("最终结果汇总")
         print("=" * 80)
-        final_post_layer3_r2 = float(current_diff.get('r2', float('nan')))
-        final_post_layer3_txt = (
-            f"{final_post_layer3_r2:.4f}"
-            if np.isfinite(final_post_layer3_r2) else
+        final_selected_r2 = float(current_diff.get('r2', float('nan')))
+        final_selected_txt = (
+            f"{final_selected_r2:.4f}"
+            if np.isfinite(final_selected_r2) else
             "nan"
         )
         print(
             f"[Final R2] layer2_accept_ref={accepted_layer2_r2:.4f}, "
             f"historical_best_layer2_r2={historical_best_layer2_r2:.4f}, "
-            f"final_post_layer3_r2={final_post_layer3_txt}"
+            f"final_selected_r2={final_selected_txt}, "
+            f"spectral_contract={str(current_diff.get('spectral_contract', 'unknown'))}"
         )
         stage3_accepted = int(sum(
             1
@@ -2926,89 +2801,28 @@ class InversePipelineV3:
 
         return nodes, H_final
 
-    def _compute_difference_spectrum_from_nodes_mu(self,
-                                                    nodes: List[_NodeV3],
-                                                    S_target: torch.Tensor,
-                                                    hwhm: float) -> Dict[str, object]:
-        device = self.device
-        S_target = S_target.to(device).flatten()
-        ppm_axis = PPM_AXIS.to(device).flatten()
-
-        S_recon = self.reconstruct_spectrum(nodes, hwhm=float(hwhm)).to(device).flatten()
-        eval_info = evaluate_spectrum_reconstruction(
-            S_target,
-            S_recon,
+    def _compute_difference_spectrum_from_nodes_mu(
+        self,
+        nodes: List[_NodeV3],
+        S_target: torch.Tensor,
+    ) -> Dict[str, object]:
+        target = S_target.to(self.device).flatten()
+        ppm_axis = PPM_AXIS.to(self.device).flatten()
+        reconstructed = self.reconstruct_spectrum(nodes).to(self.device).flatten()
+        evaluation = evaluate_spectrum_reconstruction(
+            target,
+            reconstructed,
             ppm_axis=ppm_axis,
-            fit_scale=True,
-            nonnegative_alpha=True,
         )
-        ppm_eval = eval_info.get('ppm_axis', ppm_axis)
-        S_target_eval = eval_info['S_target']
-        S_fit = eval_info['S_fit']
-        diff = (S_target_eval - S_fit).detach().cpu().numpy()
-
+        ppm_eval = evaluation.get('ppm_axis', ppm_axis)
+        difference = (
+            evaluation['S_target'] - evaluation['S_recon']
+        ).detach().cpu().numpy()
         return {
             'ppm': ppm_eval.detach().cpu().numpy(),
-            'diff': diff,
-            'r2': float(eval_info.get('r2', 0.0)),
-            'alpha': float(eval_info.get('alpha', 1.0)),
+            'diff': difference,
+            'r2': float(evaluation.get('r2', 0.0)),
         }
-
-    def _materialize_layer1_library_baseline(self,
-                                             nodes: List[_NodeV3],
-                                             S_target: torch.Tensor,
-                                             lib_path: Optional[str],
-                                             hwhm: float,
-                                             allow_approx: bool) -> Tuple[List[_NodeV3], Dict[str, object]]:
-        baseline_nodes = copy.deepcopy(nodes)
-        try:
-            snapshot = self.layer1_assigner._nmr_evaluator.build_eval_snapshot(
-                nodes=baseline_nodes,
-                S_target=S_target,
-                lib_path=lib_path,
-                hwhm=float(hwhm),
-                allow_approx=bool(allow_approx),
-            )
-            assignments = dict(snapshot.get('assignments', {}) or {})
-            for node in baseline_nodes:
-                rec = assignments.get(int(getattr(node, 'global_id', -1)))
-                if not isinstance(rec, dict):
-                    continue
-                mu = rec.get('mu')
-                if mu is None:
-                    continue
-                try:
-                    node.mu = float(mu)
-                    node.pi = 1.0
-                    if isinstance(getattr(node, 'score_components', None), dict):
-                        node.score_components['layer1_library_baseline'] = True
-                except Exception:
-                    continue
-            diff = {
-                'ppm': np.asarray(snapshot.get('ppm', []), dtype=np.float64),
-                'diff': np.asarray(snapshot.get('diff', []), dtype=np.float64),
-                'r2': float(snapshot.get('r2', 0.0)),
-                'alpha': float(snapshot.get('alpha', 1.0)),
-                'matched_ratio': float(snapshot.get('matched_ratio', 0.0)),
-                'matched_cnt': int(snapshot.get('matched_cnt', 0)),
-                'carbon_cnt': int(snapshot.get('carbon_cnt', 0)),
-                'layer1_library_baseline': True,
-            }
-            print(
-                "  [Layer1 library baseline] "
-                f"r2={float(diff.get('r2', 0.0)):.4f} "
-                f"matched={int(diff.get('matched_cnt', 0))}/{int(diff.get('carbon_cnt', 0))}"
-            )
-            return baseline_nodes, diff
-        except Exception as e:
-            print(f"  [Layer1 library baseline失败] {e}")
-            diff = self._compute_difference_spectrum_from_nodes_mu(
-                nodes=baseline_nodes,
-                S_target=S_target,
-                hwhm=float(hwhm),
-            )
-            diff['layer1_library_baseline'] = False
-            return baseline_nodes, diff
 
     def _histogram_from_nodes(self, nodes: List[_NodeV3]) -> torch.Tensor:
         device = self.device
@@ -3022,91 +2836,103 @@ class InversePipelineV3:
     def estimate_su_histogram(self, S_target: torch.Tensor, E_target: torch.Tensor) -> torch.Tensor:
         """委托给Layer0Estimator执行SU直方图估计"""
         return self.layer0_estimator.estimate_su_histogram(S_target, E_target)
-    
-    def layer1_assign(self, H_init: torch.Tensor, S_target: torch.Tensor, E_target: torch.Tensor,
-                      eval_nmr: bool = True, eval_output_dir: str = 'inverse_result',
-                      eval_lib_path: Optional[str] = None, eval_hwhm: float = 1.0,
-                      build_variant: int = 0,
-                      enable_carbonyl_joint_adjust: bool = True,
-                      carbonyl_joint_iterations: int = 5,
-                      carbonyl_joint_max_adjustments: int = 4,
-                      carbonyl_joint_pos_threshold: float = 0.1,
-                      carbonyl_joint_neg_threshold: float = 0.1,
-                      enable_hop1_adjust: bool = True,
-                      hop1_adjust_iterations: int = 4,
-                      hop1_neg_threshold: float = -0.7,
-                      hop1_pos_threshold: float = 0.7,
-                      hop1_adjust_max_candidate_trials: int = 240,
-                      hop1_adjust_max_candidate_nodes_per_su: int = 24,
-                      hop1_adjust_max_alternatives_per_node: int = 4,
-                      hop1_adjust_region_order: Optional[List[str]] = None,
-                      hop1_adjust_max_moves_per_region: int = 8,
-                      hop1_adjust_max_full_evals: int = 32,
-                      hop1_adjust_min_r2_gain: float = 1e-4,
-                      hop1_completion_max_backtracks: Optional[int] = None,
-                      hop1_completion_branch_limit: Optional[int] = None,
-                      enable_hop1_diversity_refine: bool = True,
-                      hop1_diversity_max_moves: int = 12,
-                      hop1_diversity_max_trials: int = 96) -> List[_NodeV3]:
-        """委托给Layer1Assigner执行1-hop分配"""
-        eval_lib_path = eval_lib_path or self.default_template_lib_path
+
+    def run_layer12(
+        self,
+        S_target: torch.Tensor,
+        E_target: torch.Tensor,
+        *,
+        H_seed: Optional[torch.Tensor] = None,
+        save_intermediates: bool = True,
+        output_dir: Optional[str] = None,
+        eval_lib_path: Optional[str] = None,
+        layer1_config: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], float]:
+        """Run Layer0/1/2 once with the fixed inverse spectral contract."""
+        started = time.perf_counter()
+        target = S_target.to(self.device).flatten()
+        elements = E_target.to(self.device).flatten()
+        layer1_runtime_config, _layer3_config = self._build_layer_runtime_configs(
+            layer1_config=layer1_config,
+        )
+        resolved_lib = str(eval_lib_path or self.default_template_lib_path or '')
+        if not resolved_lib:
+            raise ValueError('run_layer12 requires an active template library')
+
+        layer0_started = time.perf_counter()
+        if H_seed is None:
+            histogram = self.estimate_su_histogram(target, elements)
+            self._set_fixed_partition_meta(
+                getattr(self.layer0_estimator, 'fixed_partition_meta', {}) or {}
+            )
+        else:
+            histogram = H_seed.to(self.device).detach().clone()
+        layer0_elapsed = time.perf_counter() - layer0_started
+
+        stage_output = None
+        if save_intermediates and output_dir:
+            stage_output = str(Path(output_dir))
+            Path(stage_output).mkdir(parents=True, exist_ok=True)
+        cycle_started = time.perf_counter()
+        nodes, final_histogram, difference, layer2_r2 = self._run_layer12_cycle(
+            H_seed=histogram.detach().clone(),
+            S_target=target,
+            E_target=elements,
+            eval_lib_path=resolved_lib,
+            layer1_runtime_cfg=layer1_runtime_config,
+            eval_nmr=True,
+            eval_output_dir=stage_output,
+            layer2_output_dir=stage_output,
+        )
+        difference['layer0_elapsed_s'] = float(layer0_elapsed)
+        difference['layer12_compute_elapsed_s'] = float(
+            time.perf_counter() - cycle_started
+        )
+        difference['run_layer12_total_elapsed_s'] = float(
+            time.perf_counter() - started
+        )
+        return nodes, final_histogram, difference, float(layer2_r2)
+    def layer1_assign(
+        self,
+        H_init: torch.Tensor,
+        S_target: torch.Tensor,
+        E_target: torch.Tensor,
+        eval_nmr: bool = True,
+        eval_output_dir: Optional[str] = 'inverse_result',
+        eval_lib_path: Optional[str] = None,
+        layer1_config: Optional[Dict[str, Any]] = None,
+    ) -> List[_NodeV3]:
+        runtime_config, _layer3_config = self._build_layer_runtime_configs(
+            layer1_config=layer1_config,
+        )
         return self.layer1_assigner.layer1_assign(
-            H_init=H_init, S_target=S_target, E_target=E_target,
-            eval_nmr=eval_nmr, eval_output_dir=eval_output_dir,
-            eval_lib_path=eval_lib_path, eval_hwhm=eval_hwhm,
-            build_variant=int(build_variant),
-            enable_carbonyl_joint_adjust=enable_carbonyl_joint_adjust,
-            carbonyl_joint_iterations=carbonyl_joint_iterations,
-            carbonyl_joint_max_adjustments=carbonyl_joint_max_adjustments,
-            carbonyl_joint_pos_threshold=carbonyl_joint_pos_threshold,
-            carbonyl_joint_neg_threshold=carbonyl_joint_neg_threshold,
-            enable_hop1_adjust=enable_hop1_adjust,
-            hop1_adjust_iterations=hop1_adjust_iterations,
-            hop1_neg_threshold=hop1_neg_threshold,
-            hop1_pos_threshold=hop1_pos_threshold,
-            hop1_adjust_max_candidate_trials=hop1_adjust_max_candidate_trials,
-            hop1_adjust_max_candidate_nodes_per_su=hop1_adjust_max_candidate_nodes_per_su,
-            hop1_adjust_max_alternatives_per_node=hop1_adjust_max_alternatives_per_node,
-            hop1_adjust_region_order=hop1_adjust_region_order,
-            hop1_adjust_max_moves_per_region=hop1_adjust_max_moves_per_region,
-            hop1_adjust_max_full_evals=hop1_adjust_max_full_evals,
-            hop1_adjust_min_r2_gain=hop1_adjust_min_r2_gain,
-            hop1_completion_max_backtracks=hop1_completion_max_backtracks,
-            hop1_completion_branch_limit=hop1_completion_branch_limit,
-            enable_hop1_diversity_refine=enable_hop1_diversity_refine,
-            hop1_diversity_max_moves=hop1_diversity_max_moves,
-            hop1_diversity_max_trials=hop1_diversity_max_trials,
-        )
-    
-    def _compute_layer1_difference_spectrum(self, nodes: List[_NodeV3], S_target: torch.Tensor,
-                                            lib_path: Optional[str], hwhm: float,
-                                            allow_approx: bool) -> Dict[str, object]:
-        """委托给Layer1Assigner计算差谱"""
-        lib_path = lib_path or self.default_template_lib_path
-        return self.layer1_assigner._compute_layer1_difference_spectrum(
-            nodes=nodes, S_target=S_target, lib_path=lib_path,
-            hwhm=hwhm, allow_approx=allow_approx
-        )
-    
-    def evaluate_layer1_nmr_with_library(self, nodes: List[_NodeV3], S_target: torch.Tensor,
-                                         lib_path: Optional[str] = None, output_dir: str = 'inverse_result',
-                                         hwhm: float = 1.0, allow_approx: bool = True) -> Dict[str, float]:
-        """委托给Layer1Assigner评估Layer1 NMR"""
-        lib_path = lib_path or self.default_template_lib_path
-        return self.layer1_assigner.evaluate_layer1_nmr_with_library(
-            nodes=nodes, S_target=S_target, lib_path=lib_path,
-            output_dir=output_dir, hwhm=hwhm, allow_approx=allow_approx
+            H_init=H_init,
+            S_target=S_target,
+            E_target=E_target,
+            eval_nmr=eval_nmr,
+            eval_output_dir=eval_output_dir,
+            eval_lib_path=eval_lib_path or self.default_template_lib_path,
+            **runtime_config,
         )
 
-    # ========================================================================
-    # Layer2: 2-hop分配（改进版）
-    # ========================================================================
-    
+    def evaluate_layer1_nmr_with_library(
+        self,
+        nodes: List[_NodeV3],
+        S_target: torch.Tensor,
+        lib_path: Optional[str] = None,
+        output_dir: Optional[str] = 'inverse_result',
+    ) -> Dict[str, float]:
+        return self.layer1_assigner.evaluate_layer1_nmr_with_library(
+            nodes=nodes,
+            S_target=S_target,
+            lib_path=lib_path or self.default_template_lib_path,
+            output_dir=output_dir,
+        )
+
     def layer2_assign(self, nodes: List[_NodeV3],
                       S_target: torch.Tensor, E_target: torch.Tensor,
                       lib_path: Optional[str] = None,
-                      output_dir: Optional[str] = None,
-                      eval_hwhm: float = 1.0) -> List[_NodeV3]:
+                      output_dir: Optional[str] = None) -> List[_NodeV3]:
         """
         Layer2: 委托给Layer2Estimator进行2-hop推导和模板检索
         
@@ -3131,7 +2957,6 @@ class InversePipelineV3:
             S_target=S_target,
             E_target=E_target,
             output_dir=output_dir,
-            hwhm=eval_hwhm,
         )
 
     def _share_layer2_template_cache_with_layer3(self, lib_path: Optional[str]) -> bool:
@@ -3155,7 +2980,6 @@ class InversePipelineV3:
                                 max_iters: int = 150,
                                 lib_path: Optional[str] = None,
                                 output_dir: Optional[str] = None,
-                                hwhm: float = 1.0,
                                 pos_search_window: float = 15.0,
                                 neg_assign_window: float = 2.0,
                                 top_k_samples: int = 8,
@@ -3178,7 +3002,6 @@ class InversePipelineV3:
             max_iters=int(max_iters),
             lib_path=lib_path,
             output_dir=output_dir,
-            hwhm=float(hwhm),
             pos_search_window=float(pos_search_window),
             neg_assign_window=float(neg_assign_window),
             top_k_samples=int(top_k_samples),
@@ -3195,7 +3018,6 @@ class InversePipelineV3:
         max_iters: int = 150,
         lib_path: Optional[str] = None,
         output_dir: Optional[str] = None,
-        hwhm: float = 1.0,
         pos_search_window: float = 15.0,
         neg_assign_window: float = 2.0,
         top_k_samples: int = 8,
@@ -3223,7 +3045,6 @@ class InversePipelineV3:
             S_target=S_target,
             E_target=E_target,
             max_iters=int(max_iters),
-            hwhm=float(hwhm),
             output_dir=output_dir,
             pos_search_window=float(pos_search_window),
             neg_assign_window=float(neg_assign_window),
@@ -3238,40 +3059,34 @@ class InversePipelineV3:
                                    S_target: torch.Tensor,
                                    E_target: torch.Tensor,
                                    output_dir: str,
-                                   hwhm: float = 1.0,
                                    save_full_outputs: bool = True) -> None:
         final_dir = Path(output_dir)
         final_dir.mkdir(parents=True, exist_ok=True)
         diff_info = self._compute_difference_spectrum_from_nodes_mu(
             nodes=nodes,
             S_target=S_target,
-            hwhm=float(hwhm),
         )
         ppm_np = np.asarray(diff_info.get('ppm', []), dtype=np.float64)
-        alpha = float(diff_info.get('alpha', 1.0))
         S_target_np = np.asarray(S_target.detach().cpu().numpy(), dtype=np.float64).reshape(-1)
-        S_recon_np = self.reconstruct_spectrum(
-            nodes,
-            hwhm=float(hwhm),
-        ).detach().cpu().numpy().astype(np.float64).reshape(-1)
+        S_recon_np = self.reconstruct_spectrum(nodes).detach().cpu().numpy().astype(np.float64).reshape(-1)
         n = min(len(ppm_np), len(S_target_np), len(S_recon_np))
         ppm_np = ppm_np[:n]
         S_target_np = S_target_np[:n]
-        S_fit_np = (alpha * S_recon_np[:n]).astype(np.float64)
+        S_recon_np = S_recon_np[:n]
 
         pd.DataFrame({
             'ppm': ppm_np,
             'target': S_target_np,
-            'reconstructed': S_fit_np,
+            'reconstructed': S_recon_np,
         }).to_csv(final_dir / 'final_nmr_comparison.csv', index=False)
 
         try:
             import matplotlib.pyplot as plt
             fig, ax = plt.subplots(figsize=(12, 5))
             ax.fill_between(ppm_np, 0, S_target_np, alpha=0.25, color='#1f77b4', label='Target')
-            ax.fill_between(ppm_np, 0, S_fit_np, alpha=0.25, color='#ff7f0e', label='Reconstructed')
+            ax.fill_between(ppm_np, 0, S_recon_np, alpha=0.25, color='#ff7f0e', label='Reconstructed')
             ax.plot(ppm_np, S_target_np, lw=1.8, color='#1f77b4', label='Target')
-            ax.plot(ppm_np, S_fit_np, lw=1.8, color='#ff7f0e', linestyle='--', label='Reconstructed')
+            ax.plot(ppm_np, S_recon_np, lw=1.8, color='#ff7f0e', linestyle='--', label='Reconstructed')
             ax.invert_xaxis()
             ax.set_xlabel('Chemical Shift (ppm)')
             ax.set_ylabel('Intensity')
@@ -3573,9 +3388,8 @@ class InversePipelineV3:
     # 辅助方法
     # ========================================================================
     
-    def reconstruct_spectrum(self, nodes: List[_NodeV3], 
-                             hwhm: float = 1.0) -> torch.Tensor:
-        """从节点列表重构NMR谱图"""
+    def reconstruct_spectrum(self, nodes: List[_NodeV3]) -> torch.Tensor:
+        """Reconstruct the inverse spectrum with unit peaks and HWHM 1.0."""
         device = self.device
         ppm_axis = PPM_AXIS.to(device)
 
@@ -3595,33 +3409,19 @@ class InversePipelineV3:
 
             try:
                 mu = float(getattr(n, 'mu', 0.0))
-                pi = float(getattr(n, 'pi', 0.0))
             except Exception:
-                continue
-            if float(pi) <= 0.0:
                 continue
             if float(mu) == 0.0:
                 continue
             mus.append(float(mu))
-            if bool(getattr(self, 'unit_peak_intensity', False)):
-                pis.append(1.0)
-            else:
-                pis.append(float(pi))
+            pis.append(1.0)
 
         if not mus:
             return torch.zeros_like(ppm_axis)
 
         mu_t = torch.tensor(mus, dtype=torch.float, device=device)
         pi_t = torch.tensor(pis, dtype=torch.float, device=device)
-        try:
-            s = float(getattr(self, 'nmr_intensity_scale', 1.0))
-        except Exception:
-            s = 1.0
-        if float(s) != 1.0:
-            pi_t = pi_t * float(s)
-        if bool(getattr(self, 'unit_peak_intensity', False)):
-            pi_t = torch.ones_like(pi_t)
-        return lorentzian_spectrum(mu_t, pi_t, ppm_axis, hwhm=float(hwhm))
+        return lorentzian_spectrum(mu_t, pi_t, ppm_axis, hwhm=1.0)
 
 # ============================================================================
 # 工具函数（用于外部调用）
@@ -3736,6 +3536,7 @@ if __name__ == '__main__':
         E_target,
         save_intermediates=True,
         output_dir=args.output,
+        eval_lib_path=args.templates,
     )
     
     print(f"\n推理完成！结果已保存至 {args.output}/")

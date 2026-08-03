@@ -73,4 +73,4 @@ def test_pipeline_does_not_rebuild_layer12_after_final_outer_layer3() -> None:
     ]
 
     assert post_outer_layer12_calls == []
-    assert "using final Post-Layer3 node state" in source
+    assert "using final accepted spectral state" in source

@@ -19,15 +19,14 @@ from .conversion_scoring import (
     ConversionContext,
     apply_conversions_to_H,
     apply_conversions_to_inventory,
+    h_within_context_hard_bounds,
     rank_conversions,
     score_conversion_bundle,
 )
 from .resource_profiles import (
-    H_SOFT_LOWER_RATIO,
-    H_SOFT_UPPER_RATIO,
+    DEFAULT_STAGE3_H_HARD_TOLERANCE,
     MAX_FLEX_LOWER_INCREASE_PER_ADJUSTMENT_PLAN,
     SU11_AROMATIC_ROTATION,
-    h_within_soft_bounds,
 )
 from .resource_accounting import (
     positive_resource_gap,
@@ -39,8 +38,6 @@ from .resource_accounting import (
 RESOURCE_TYPES = (11, 23, 22, 24)
 TARGET_PRIORITY = {23: 0, 11: 1, 22: 2, 24: 3}
 AROMATIC_PATTERN = (12, 13)
-
-
 def _counts(H: torch.Tensor, keys: Iterable[int]) -> Dict[int, int]:
     return {
         int(key): int(H[int(key)].item()) if 0 <= int(key) < int(H.numel()) else 0
@@ -259,12 +256,14 @@ def _scoring_context(
     preferred_demand: Optional[Dict[int, int]],
     target_h: Optional[float],
     aromatic_cursor: int,
+    h_tolerance: float,
 ) -> ConversionContext:
     return ConversionContext(
         inventory={int(key): int(value) for key, value in dict(inventory or {}).items()},
         demand={int(key): int(value) for key, value in dict(demand or {}).items()},
         current_H=H.detach().clone().long(),
         target_h=target_h,
+        h_tolerance=float(h_tolerance),
         preferred_demand={
             int(key): int(value)
             for key, value in dict(preferred_demand or {}).items()
@@ -315,6 +314,52 @@ def _conversion_signature(conversion: HistogramConversion) -> str:
         else ""
     )
     return f"{int(conversion.from_su)}>{int(conversion.to_su)}{via}"
+
+
+def _conversion_bundle_signature(
+    conversions: Iterable[HistogramConversion],
+) -> str:
+    ops = list(conversions or [])
+    if not ops:
+        return ""
+
+    def op_signature(op: HistogramConversion) -> str:
+        count = max(1, int(op.count))
+        suffix = f"x{count}" if count != 1 else ""
+        return f"{_conversion_signature(op)}{suffix}"
+
+    primary = op_signature(ops[0])
+    compensation = sorted(op_signature(op) for op in ops[1:])
+    if compensation:
+        primary = f"{primary}|{','.join(compensation)}"
+    return f"bundle:{primary}"
+
+
+def _stateful_conversion_bundle_signature(
+    H: torch.Tensor,
+    conversions: Iterable[HistogramConversion],
+) -> str:
+    bundle = _conversion_bundle_signature(conversions)
+    if not bundle:
+        return ""
+    state = ",".join(
+        str(int(value))
+        for value in torch.clamp(H.detach().cpu(), min=0).long().tolist()
+    )
+    return f"state:{state}|{bundle}"
+
+
+def _bundle_is_forbidden(
+    H: torch.Tensor,
+    conversions: Iterable[HistogramConversion],
+    forbidden: Iterable[str],
+) -> bool:
+    blocked = {str(value) for value in list(forbidden or []) if str(value)}
+    ops = list(conversions or [])
+    return bool(
+        _conversion_bundle_signature(ops) in blocked
+        or _stateful_conversion_bundle_signature(H, ops) in blocked
+    )
 
 
 def _forbidden_primary_signatures(plan: Stage3AdjustmentPlan) -> set[str]:
@@ -444,7 +489,7 @@ def _h_compensation_candidates(
                 from_su=int(source),
                 to_su=int(target),
                 count=1,
-                reason="soft_h_balance_compensation",
+                reason="stage3_hard_bound_compensation",
                 via_su=11 if int(source) in AROMATIC_PATTERN and int(target) != 11 else None,
             ))
     return candidates
@@ -454,21 +499,21 @@ def _h_ratio(value: float, target_h: float) -> float:
     return (float(value) - float(target_h)) / float(target_h)
 
 
-def _h_outside_distance(value: float, target_h: float) -> float:
-    ratio = _h_ratio(value, target_h)
-    if ratio < float(H_SOFT_LOWER_RATIO):
-        return float(H_SOFT_LOWER_RATIO) - float(ratio)
-    if ratio > float(H_SOFT_UPPER_RATIO):
-        return float(ratio) - float(H_SOFT_UPPER_RATIO)
-    return 0.0
+def _stage3_h_hard_tolerance(value: float) -> float:
+    try:
+        tolerance = float(value)
+    except (TypeError, ValueError):
+        tolerance = float(DEFAULT_STAGE3_H_HARD_TOLERANCE)
+    return min(1.0, max(0.0, float(tolerance)))
 
 
-def _h_nearest_margin(value: float, target_h: float) -> float:
+def _h_compensation_outside_distance(
+    value: float,
+    target_h: float,
+    tolerance: float,
+) -> float:
     ratio = _h_ratio(value, target_h)
-    return min(
-        float(ratio) - float(H_SOFT_LOWER_RATIO),
-        float(H_SOFT_UPPER_RATIO) - float(ratio),
-    )
+    return max(0.0, abs(float(ratio)) - float(tolerance))
 
 
 def _compensation_improves_h_state(
@@ -476,43 +521,42 @@ def _compensation_improves_h_state(
     primary_score: ConversionBundleScore,
     bundle_score: ConversionBundleScore,
     target_h: Optional[float],
+    h_tolerance: float = DEFAULT_STAGE3_H_HARD_TOLERANCE,
 ) -> bool:
     if target_h is None or float(target_h) <= 0:
         return False
     if primary_score.h_before is None or primary_score.h_after is None or bundle_score.h_after is None:
         return False
-    h_before = float(primary_score.h_before)
     h_primary = float(primary_score.h_after)
     h_bundle = float(bundle_score.h_after)
-    primary_inside = h_within_soft_bounds(h_primary, float(target_h))
-    bundle_inside = h_within_soft_bounds(h_bundle, float(target_h))
-    window_width = float(H_SOFT_UPPER_RATIO) - float(H_SOFT_LOWER_RATIO)
-    critical_margin = 0.25 * float(window_width)
+    tolerance = _stage3_h_hard_tolerance(h_tolerance)
+    primary_ratio = _h_ratio(h_primary, float(target_h))
+    bundle_ratio = _h_ratio(h_bundle, float(target_h))
 
-    if primary_inside:
-        before_inside = h_within_soft_bounds(h_before, float(target_h))
-        before_margin = _h_nearest_margin(h_before, float(target_h))
-        primary_margin = _h_nearest_margin(h_primary, float(target_h))
-        # A primary that leaves the current soft-window margin unchanged must
-        # remain primary-only.  Compensation is justified inside the window
-        # only when the topology conversion itself moves H toward a critical
-        # boundary; merely starting near a boundary is not enough.
-        if before_inside and float(primary_margin) >= float(before_margin) - 1e-12:
+    if abs(float(primary_ratio)) <= float(tolerance) + 1e-12:
+        return False
+    if float(primary_ratio) < -float(tolerance):
+        if float(bundle_ratio) <= float(primary_ratio) + 1e-12:
             return False
-        if float(primary_margin) >= float(critical_margin):
+        if float(bundle_ratio) > float(tolerance) + 1e-12:
             return False
-        return bool(
-            bundle_inside
-            and _h_nearest_margin(h_bundle, float(target_h)) > float(primary_margin) + 1e-12
-        )
+    else:
+        if float(bundle_ratio) >= float(primary_ratio) - 1e-12:
+            return False
+        if float(bundle_ratio) < -float(tolerance) - 1e-12:
+            return False
 
-    primary_outside = _h_outside_distance(h_primary, float(target_h))
-    bundle_outside = _h_outside_distance(h_bundle, float(target_h))
-    if bundle_outside + 1e-12 < primary_outside:
-        return True
-    if not h_within_soft_bounds(h_before, float(target_h)):
-        return abs(h_bundle - float(target_h)) + 1e-9 < abs(h_primary - float(target_h))
-    return False
+    primary_outside = _h_compensation_outside_distance(
+        h_primary,
+        float(target_h),
+        tolerance,
+    )
+    bundle_outside = _h_compensation_outside_distance(
+        h_bundle,
+        float(target_h),
+        tolerance,
+    )
+    return bool(float(bundle_outside) + 1e-12 < float(primary_outside))
 
 
 def _bundle_preserves_primary_effect(ops: Iterable[HistogramConversion]) -> bool:
@@ -537,6 +581,7 @@ def _enumerate_scored_bundles(
     *,
     context: ConversionContext,
     max_h_compensation_ops: int,
+    h_tolerance: float,
     special_degree_meta: Optional[Dict[str, Any]],
 ) -> List[ConversionBundleScore]:
     bundles: List[List[HistogramConversion]] = [[candidate] for candidate in list(primary_candidates or [])]
@@ -582,6 +627,7 @@ def _enumerate_scored_bundles(
                 demand=context.demand,
                 current_H=H_after,
                 target_h=context.target_h,
+                h_tolerance=float(context.h_tolerance),
                 preferred_demand=context.preferred_demand,
                 flex_audit=context.flex_audit,
                 protected_resource_counts=context.protected_resource_counts,
@@ -619,6 +665,7 @@ def _enumerate_scored_bundles(
                     primary_score=primary_score,
                     bundle_score=score,
                     target_h=context.target_h,
+                    h_tolerance=h_tolerance,
                 ):
                     continue
                 if dict(score.resource_gap_after) != dict(
@@ -662,6 +709,7 @@ def _choose_bundle_from_gap(
     target_h: Optional[float],
     special_degree_meta: Optional[Dict[str, Any]],
     max_h_compensation_ops: int,
+    h_tolerance: float,
 ) -> Tuple[List[HistogramConversion], int, Optional[ConversionBundleScore]]:
     gap = {su: int(demand.get(su, 0)) - int(inventory.get(su, 0)) for su in RESOURCE_TYPES}
     targets = [su for su in RESOURCE_TYPES if int(gap.get(su, 0)) > 0]
@@ -684,6 +732,7 @@ def _choose_bundle_from_gap(
         preferred_demand,
         target_h,
         aromatic_cursor,
+        h_tolerance,
     )
     ranked_primary = rank_conversions(
         context,
@@ -698,11 +747,14 @@ def _choose_bundle_from_gap(
         primary_candidates,
         context=context,
         max_h_compensation_ops=max_h_compensation_ops,
+        h_tolerance=h_tolerance,
         special_degree_meta=special_degree_meta,
     )
     feasible = [
         score for score in scored_bundles
         if score.feasible
+        and h_within_context_hard_bounds(context, score.h_after)
+        and not _bundle_is_forbidden(H, score.ops, forbidden)
         and _bundle_preserves_primary_effect(score.ops)
         and _gap_total(score.resource_gap_after) < _gap_total(score.resource_gap_before)
         and _does_not_worsen_resource_gap(context.demand, context.inventory, score.inventory_after)
@@ -730,6 +782,7 @@ def _choose_from_gap(
     preferred_demand: Optional[Dict[int, int]] = None,
     special_degree_meta: Optional[Dict[str, Any]] = None,
     max_h_compensation_ops: int = 0,
+    h_tolerance: float = DEFAULT_STAGE3_H_HARD_TOLERANCE,
 ) -> Tuple[Optional[HistogramConversion], int]:
     del current_h
     scoring_plan = plan or Stage3AdjustmentPlan(phase="")
@@ -743,6 +796,7 @@ def _choose_from_gap(
         target_h=target_h,
         special_degree_meta=special_degree_meta,
         max_h_compensation_ops=max_h_compensation_ops,
+        h_tolerance=h_tolerance,
     )
     if not bundle:
         return None, int(aromatic_cursor)
@@ -808,7 +862,7 @@ def build_histogram_adjustment_plan(
     E_target: Any = None,
     max_primary_adjustments: int = 10,
     max_h_compensation_ops: int = 8,
-    h_tolerance: float = 0.06,
+    h_tolerance: float = DEFAULT_STAGE3_H_HARD_TOLERANCE,
     special_degree_meta: Optional[Dict[str, Any]] = None,
     su11_rotation_index: int = 0,
 ) -> HistogramAdjustmentPlan:
@@ -866,6 +920,7 @@ def build_histogram_adjustment_plan(
                 target_h=target_h,
                 special_degree_meta=special_degree_meta,
                 max_h_compensation_ops=max_h_compensation_ops,
+                h_tolerance=h_tolerance,
             )
             primary = selected_bundle[0] if selected_bundle else None
             if primary is None and target_h is not None:
@@ -893,6 +948,7 @@ def build_histogram_adjustment_plan(
                     target_h=target_h,
                     special_degree_meta=special_degree_meta,
                     max_h_compensation_ops=max_h_compensation_ops,
+                    h_tolerance=h_tolerance,
                 )
                 primary = selected_bundle[0] if selected_bundle else None
                 if primary is None and target_h is not None:
@@ -921,17 +977,25 @@ def build_histogram_adjustment_plan(
                     preferred_demand,
                     target_h,
                     aromatic_cursor,
+                    h_tolerance,
                 )
                 scored = _enumerate_scored_bundles(
                     [candidate],
                     context=context,
                     max_h_compensation_ops=max_h_compensation_ops,
+                    h_tolerance=h_tolerance,
                     special_degree_meta=special_degree_meta,
                 )
                 selected_score = min(
                     [
                         item for item in scored
                         if item.feasible
+                        and h_within_context_hard_bounds(context, item.h_after)
+                        and not _bundle_is_forbidden(
+                            H_work,
+                            item.ops,
+                            _forbidden_primary_signatures(plan),
+                        )
                         and _bundle_preserves_primary_effect(item.ops)
                         and _does_not_worsen_resource_gap(demand, inventory, item.inventory_after)
                         and _bundle_uses_only_initial_donors(inventory, item.ops)
@@ -1053,8 +1117,10 @@ def build_histogram_adjustment_plan(
         protected_resource_counts=_runtime_protected_counts(plan),
         accounting_diagnostics={
             "mode": "authorized_inventory_planning",
-            "h_tolerance_deprecated": True,
-            "received_h_tolerance": float(h_tolerance),
+            "h_tolerance_mode": "stage3_symmetric_hard_bound",
+            "effective_h_tolerance": float(_stage3_h_hard_tolerance(h_tolerance)),
+            "stage3_hard_lower_ratio": -float(_stage3_h_hard_tolerance(h_tolerance)),
+            "stage3_hard_upper_ratio": float(_stage3_h_hard_tolerance(h_tolerance)),
             "flex_lower_increase_limit": int(
                 MAX_FLEX_LOWER_INCREASE_PER_ADJUSTMENT_PLAN
             ),
@@ -1232,6 +1298,75 @@ def apply_histogram_adjustment_plan(
                 setattr(node, "stage3_conversion_history", history)
         convertible_inventory = candidate_inventory
         applied_ops.append(group.to_dict())
+
+    parity_op = getattr(histogram_plan, "parity_balance_op", None)
+    if parity_op is not None:
+        source = int(parity_op.from_su)
+        target = int(parity_op.to_su)
+        count = max(1, int(parity_op.count))
+        node_ids = [int(value) for value in list(parity_op.node_ids or [])]
+        if int(convertible_inventory.get(source, 0)) < count:
+            return Stage3AdjustmentApplyResult(
+                nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],
+                rejected_ops=[{
+                    "reason": "parity_balance_donor_not_in_authorized_stage3_pool",
+                    "from_su": source,
+                    "required": count,
+                    "available": int(convertible_inventory.get(source, 0)),
+                }],
+                changed=False,
+                conservation_before={"su_count": initial_total},
+                conservation_after={"su_count": initial_total},
+            )
+        if len(node_ids) != count:
+            return Stage3AdjustmentApplyResult(
+                nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],
+                rejected_ops=[{
+                    "reason": "parity_balance_real_donor_ids_missing",
+                    "from_su": source,
+                    "required": count,
+                    "provided_node_ids": node_ids,
+                }],
+                changed=False,
+                conservation_before={"su_count": initial_total},
+                conservation_after={"su_count": initial_total},
+            )
+        candidate = _apply_delta(H_out, _conversion_delta(source, target, count))
+        if candidate is None or int(candidate.sum().item()) != initial_total:
+            return Stage3AdjustmentApplyResult(
+                nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],
+                rejected_ops=[{"reason": "parity_balance_histogram_conservation_failed"}],
+                changed=False,
+                conservation_before={"su_count": initial_total},
+                conservation_after={"su_count": initial_total},
+            )
+        for node_id in node_ids:
+            node = nodes_by_id.get(int(node_id))
+            if node is None or int(getattr(node, "su_type", -1)) != source:
+                return Stage3AdjustmentApplyResult(
+                    nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],
+                    rejected_ops=[{
+                        "reason": "parity_balance_real_donor_node_type_mismatch",
+                        "node_id": int(node_id),
+                        "from_su": source,
+                    }],
+                    changed=False,
+                    conservation_before={"su_count": initial_total},
+                    conservation_after={"su_count": initial_total},
+                )
+            history = list(getattr(node, "stage3_conversion_history", []) or [])
+            history.append({
+                "from_su": source,
+                "to_su": target,
+                "reason": str(parity_op.reason),
+            })
+            setattr(node, "su_type", target)
+            setattr(node, "stage3_conversion_history", history)
+        H_out = candidate
+        convertible_inventory[source] = int(convertible_inventory.get(source, 0)) - count
+        convertible_inventory[target] = int(convertible_inventory.get(target, 0)) + count
+        applied_ops.append({"parity_balance_op": parity_op.to_dict()})
+
     planned_h_after = getattr(histogram_plan, "H_after", None)
     if planned_h_after is not None:
         expected_h = torch.clamp(planned_h_after.detach().cpu(), min=0).long()

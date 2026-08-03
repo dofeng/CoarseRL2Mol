@@ -1177,41 +1177,12 @@ def normalize_spectrum_to_carbon_count(
     return y * scale
 
 
-def fit_spectrum_scale(
-    y_true: torch.Tensor,
-    y_pred: torch.Tensor,
-    nonnegative: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    计算最优全局缩放因子 alpha，使 alpha * y_pred 最贴近 y_true。
-    """
-    y_true = y_true.flatten().float()
-    y_pred = y_pred.flatten().float().to(y_true.device)
-
-    n = int(min(y_true.numel(), y_pred.numel()))
-    y_true = y_true[:n]
-    y_pred = y_pred[:n]
-
-    denom = torch.sum(y_pred * y_pred).clamp(min=1e-8)
-    alpha = torch.sum(y_true * y_pred) / denom
-    if bool(nonnegative):
-        alpha = torch.clamp(alpha, min=0.0)
-    y_fit = alpha * y_pred
-    return y_fit, alpha
-
-
 def evaluate_spectrum_reconstruction(
     y_true: torch.Tensor,
     y_pred: torch.Tensor,
     ppm_axis: Optional[torch.Tensor] = None,
-    fit_scale: bool = True,
-    nonnegative_alpha: bool = True,
 ) -> Dict[str, Any]:
-    """
-    统一的谱图评估入口。
-
-    返回 raw recon、alpha-fitted recon、R² 与分段 R²，确保各层评估口径一致。
-    """
+    """Evaluate an inverse reconstruction at its fixed unit-peak scale."""
     y_true_t = y_true.flatten().float()
     y_pred_t = y_pred.flatten().float().to(y_true_t.device)
 
@@ -1223,29 +1194,17 @@ def evaluate_spectrum_reconstruction(
     if ppm_axis is not None:
         ppm_eval = ppm_axis.flatten().float().to(y_true_t.device)[:n]
 
-    if bool(fit_scale):
-        y_fit_t, alpha_t = fit_spectrum_scale(
-            y_true_t,
-            y_pred_t,
-            nonnegative=bool(nonnegative_alpha),
-        )
-    else:
-        y_fit_t = y_pred_t
-        alpha_t = torch.tensor(1.0, dtype=y_true_t.dtype, device=y_true_t.device)
-
     out: Dict[str, Any] = {
         'S_target': y_true_t,
-        'S_recon_raw': y_pred_t,
-        'S_fit': y_fit_t,
-        'alpha': float(alpha_t.detach().cpu().item()),
-        'r2': float(compute_r2_score(y_true_t, y_fit_t)),
+        'S_recon': y_pred_t,
+        'r2': float(compute_r2_score(y_true_t, y_pred_t)),
     }
 
     if ppm_eval is not None and int(ppm_eval.numel()) == int(y_true_t.numel()):
         out['ppm_axis'] = ppm_eval
-        out['r2_carbonyl'] = float(compute_segment_r2(y_true_t, y_fit_t, ppm_eval, 'carbonyl'))
-        out['r2_aromatic'] = float(compute_segment_r2(y_true_t, y_fit_t, ppm_eval, 'aromatic'))
-        out['r2_aliphatic'] = float(compute_segment_r2(y_true_t, y_fit_t, ppm_eval, 'aliphatic'))
+        out['r2_carbonyl'] = float(compute_segment_r2(y_true_t, y_pred_t, ppm_eval, 'carbonyl'))
+        out['r2_aromatic'] = float(compute_segment_r2(y_true_t, y_pred_t, ppm_eval, 'aromatic'))
+        out['r2_aliphatic'] = float(compute_segment_r2(y_true_t, y_pred_t, ppm_eval, 'aliphatic'))
 
     return out
 
@@ -1293,7 +1252,6 @@ def evaluate_mu_pi_assignments(S_target: torch.Tensor,
     if not mus:
         return {
             'S_target': S_target,
-            'alpha': 0.0,
             'r2': 0.0,
             'r2_carbonyl': 0.0,
             'r2_aromatic': 0.0,
@@ -1314,19 +1272,15 @@ def evaluate_mu_pi_assignments(S_target: torch.Tensor,
         S_target,
         S_recon,
         ppm_axis=ppm_axis,
-        fit_scale=True,
-        nonnegative_alpha=True,
     )
     return {
         'S_target': eval_info['S_target'],
-        'S_recon_raw': S_recon,
-        'S_fit': eval_info['S_fit'],
-        'alpha': float(eval_info.get('alpha', 1.0)),
+        'S_recon': S_recon,
         'r2': float(eval_info.get('r2', 0.0)),
         'r2_carbonyl': float(eval_info.get('r2_carbonyl', 0.0)),
         'r2_aromatic': float(eval_info.get('r2_aromatic', 0.0)),
         'r2_aliphatic': float(eval_info.get('r2_aliphatic', 0.0)),
-        'diff': (eval_info['S_target'] - eval_info['S_fit']).detach().cpu().numpy(),
+        'diff': (eval_info['S_target'] - eval_info['S_recon']).detach().cpu().numpy(),
     }
 
 
@@ -1373,8 +1327,7 @@ def save_node_peak_rows(rows: Iterable[Dict[str, Any]],
 
 def save_spectrum_comparison(S_target: torch.Tensor,
                              ppm: np.ndarray,
-                             S_recon_raw: np.ndarray,
-                             S_fit: np.ndarray,
+                             S_recon: np.ndarray,
                              diff: np.ndarray,
                              output_dir: str,
                              prefix: str = 'layer1_library') -> None:
@@ -1382,20 +1335,19 @@ def save_spectrum_comparison(S_target: torch.Tensor,
     pd.DataFrame({
         'ppm': ppm,
         'target': S_target.detach().cpu().numpy(),
-        'reconstructed_raw': S_recon_raw,
-        'reconstructed': S_fit,
+        'reconstructed': S_recon,
         'difference': diff,
     }).to_csv(str(Path(output_dir) / f'{prefix}_spectrum_comparison.csv'), index=False)
 
 
 def save_spectrum_figure(S_target: torch.Tensor,
-                         S_fit: torch.Tensor,
+                         S_recon: torch.Tensor,
                          ppm: np.ndarray,
                          output_dir: str,
                          layer_name: str) -> None:
     visualize_spectrum_comparison(
         S_target.detach().cpu(),
-        S_fit.detach().cpu(),
+        S_recon.detach().cpu(),
         torch.tensor(ppm, dtype=torch.float32),
         layer_name,
         save_dir=output_dir,

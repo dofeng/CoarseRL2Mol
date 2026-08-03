@@ -18,16 +18,17 @@ from .conversion_scoring import (
     ConversionContext,
     apply_conversions_to_H,
     apply_conversions_to_inventory,
+    h_within_context_hard_bounds,
     rank_conversions,
     score_conversion_bundle,
 )
 from .resource_profiles import (
-    H_SOFT_LOWER_RATIO,
-    H_SOFT_UPPER_RATIO,
+    DEFAULT_STAGE3_H_HARD_TOLERANCE,
     MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
     audit_raw_su24_resource_profiles,
     build_raw_su24_resource_profiles,
-    h_soft_bounds,
+    h_hard_bounds,
+    h_within_hard_bounds,
 )
 from .resource_accounting import build_resource_accounting_snapshot
 from .iteration_ledger import (
@@ -55,6 +56,7 @@ from .stage3_models import (
     TopologyClosureSlot,
     TopologyResourceTransaction,
     merge_stage3_contracts_by_owner,
+    stage3_contract_owner_key,
 )
 
 RESOURCE_TYPES = (11, 22, 23, 24)
@@ -67,20 +69,52 @@ EXTERNAL_STAGE = "external_topology_assembly"
 EXTERNAL_PHASE_NAMES = frozenset(phase for phase, _ in EXTERNAL_ROLE_ORDER)
 
 
-def _h_soft_rule_diagnostics(h_tolerance: float) -> Dict[str, Any]:
+def _h_hard_rule_diagnostics(h_tolerance: float) -> Dict[str, Any]:
+    effective_tolerance = min(1.0, max(0.0, float(h_tolerance)))
     return {
-        "h_tolerance_deprecated": True,
-        "received_h_tolerance": float(h_tolerance),
-        "soft_lower_ratio": float(H_SOFT_LOWER_RATIO),
-        "soft_upper_ratio": float(H_SOFT_UPPER_RATIO),
+        "h_tolerance_mode": "stage3_symmetric_hard_bound",
+        "effective_h_tolerance": float(effective_tolerance),
+        "stage3_hard_lower_ratio": -float(effective_tolerance),
+        "stage3_hard_upper_ratio": float(effective_tolerance),
     }
 
 
-def _annotate_h_soft_rule(plan: Stage3AdjustmentPlan, h_tolerance: float) -> Stage3AdjustmentPlan:
+def _annotate_h_hard_rule(plan: Stage3AdjustmentPlan, h_tolerance: float) -> Stage3AdjustmentPlan:
     diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
-    diagnostics.setdefault("h_soft_rule", _h_soft_rule_diagnostics(h_tolerance))
+    diagnostics.setdefault("h_constraint", _h_hard_rule_diagnostics(h_tolerance))
     plan.diagnostics = diagnostics
     return plan
+
+
+def _filter_spectrum_candidates_by_stage3_hard_constraint(
+    candidates: Sequence[Any],
+    *,
+    target_h: Optional[float],
+    h_tolerance: float,
+) -> Tuple[List[Any], List[Dict[str, Any]]]:
+    valid: List[Any] = []
+    rejected: List[Dict[str, Any]] = []
+    for candidate in list(candidates or []):
+        balance = dict(
+            dict(getattr(candidate, "diagnostics", {}) or {}).get(
+                "preflight_balance", {}
+            )
+            or {}
+        )
+        candidate_h = balance.get("h_after")
+        if (
+            target_h is None
+            or candidate_h is None
+            or h_within_hard_bounds(float(candidate_h), target_h, h_tolerance)
+        ):
+            valid.append(candidate)
+            continue
+        rejected.append({
+            "candidate_id": str(getattr(candidate, "candidate_id", "") or ""),
+            "h_after": candidate_h,
+            "reason": "stage3_hard_constraint_violation",
+        })
+    return valid, rejected
 
 
 def _evaluate_external_phases(
@@ -260,14 +294,14 @@ def _deficit(pool: Dict[int, List[int]], required: Dict[int, int]) -> Dict[int, 
     }
 
 
-def _contract_id(contract: Dict[str, Any], fallback: int) -> int:
+def _contract_id(contract: Dict[str, Any]) -> int:
     value = dict(contract or {}).get("contract_id")
     if value is None:
         raise ValueError(f"canonical topology contract is missing contract_id: {contract}")
     return int(value)
 
 
-def _closure_contract(contract: Dict[str, Any], phase: str, fallback: int) -> TopologyClosureContract:
+def _closure_contract(contract: Dict[str, Any], phase: str) -> TopologyClosureContract:
     data = dict(contract or {})
     contract_kind = str(data.get("contract_kind", "") or "")
     target_role = str(data.get("target_role", "") or "")
@@ -288,7 +322,7 @@ def _closure_contract(contract: Dict[str, Any], phase: str, fallback: int) -> To
         for value in list(data.get("claimed_source_node_ids", []) or [])
     ]
     return TopologyClosureContract(
-        contract_id=_contract_id(data, fallback),
+        contract_id=_contract_id(data),
         contract_kind=str(contract_kind),
         phase=str(phase),
         priority=int(contract_priority(data)[0]),
@@ -318,6 +352,35 @@ def _external_contracts(phase_eval: Any, nodes: Sequence[Any]) -> List[Dict[str,
         if dict(item or {})
     ]
     return sorted(merge_stage3_contracts_by_owner(contracts), key=contract_priority)
+
+
+def _partition_active_external_contracts(
+    phase_eval: Any,
+    contracts: Sequence[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str, str]:
+    all_contracts = [dict(contract or {}) for contract in list(contracts or [])]
+    active_phase = str(getattr(phase_eval, "active_phase", "") or "")
+    active_role = next(
+        (
+            str(role)
+            for phase_name, role in EXTERNAL_ROLE_ORDER
+            if str(phase_name) == active_phase
+        ),
+        "",
+    )
+    if not active_role:
+        return all_contracts, [], active_phase, ""
+    active = [
+        contract
+        for contract in all_contracts
+        if str(contract.get("target_role", "") or "") == active_role
+    ]
+    dormant = [
+        contract
+        for contract in all_contracts
+        if str(contract.get("target_role", "") or "") != active_role
+    ]
+    return active, dormant, active_phase, active_role
 
 
 def _external_product_materialization_errors(phase_eval: Any) -> List[Dict[str, Any]]:
@@ -633,7 +696,7 @@ def _plan_next_residual_product(
         target_h = float(E_target.detach().cpu().float()[1].item())
     except Exception:
         target_h = None
-    h_lower, h_upper = h_soft_bounds(target_h)
+    h_lower, h_upper = h_hard_bounds(target_h, h_tolerance)
 
     for template_index, (product_role, chain_23_count, required_counts) in enumerate(template_specs):
         direct_coverage = sum(
@@ -717,35 +780,24 @@ def _plan_next_residual_product(
                 if target_h is not None
                 else 0.0
             )
-            optional_h_worsened = bool(
+            optional_h_invalid = bool(
                 not required_flex
                 and h_lower is not None
                 and h_upper is not None
-                and (
-                    (float(h_before) <= float(h_upper) < float(h_after_primary))
-                    or (float(h_before) >= float(h_lower) > float(h_after_primary))
-                    or (
-                        float(h_before) > float(h_upper)
-                        and float(h_after_primary) >= float(h_before)
-                    )
-                    or (
-                        float(h_before) < float(h_lower)
-                        and float(h_after_primary) <= float(h_before)
-                    )
-                )
+                and not float(h_lower) <= float(h_after) <= float(h_upper)
             )
             missing_slot_count = max(0, int(template_size) - int(direct_coverage))
             if not required_flex and (
                 int(primary_count) > int(missing_slot_count)
-                or bool(optional_h_worsened)
+                or bool(optional_h_invalid)
             ):
                 attempts.append({
                     "product_role": product_role,
                     "chain_23_count": int(chain_23_count),
                     "required_counts": dict(required_counts),
                     "reason": (
-                        "optional_conversion_worsens_h_soft_balance"
-                        if optional_h_worsened
+                        "optional_conversion_violates_h_hard_constraint"
+                        if optional_h_invalid
                         else "optional_template_uses_excess_conversions"
                     ),
                     "mode": "conversion",
@@ -877,7 +929,7 @@ def _residual_orphan_terminalization_plan(
     max_conversions: int,
     prefix_transactions: Optional[Sequence[TopologyResourceTransaction]] = None,
 ) -> Optional[Stage3AdjustmentPlan]:
-    limit = max(0, min(10, int(max_conversions)))
+    limit = max(0, int(max_conversions))
     operations: List[Stage3AdjustmentOp] = []
     cursor = int(su11_rotation_index)
     for source in (22, 23, 24):
@@ -987,7 +1039,7 @@ def _residual_orphan_terminalization_plan(
         "su11_rotation_index_after": int(histogram.su11_rotation_index_after),
         "resource_accounting": dict(accounting),
     }
-    return _annotate_h_soft_rule(plan, h_tolerance)
+    return _annotate_h_hard_rule(plan, h_tolerance)
 
 
 def _flex_excess_reduction_plan(
@@ -1004,7 +1056,7 @@ def _flex_excess_reduction_plan(
     audit = dict(getattr(phase_eval, "flex_audit", {}) or {})
     pool = _resource_ids(phase_eval)
     excess = max(0, int(audit.get("above_range_excess", 0) or 0))
-    limit = max(0, min(10, int(max_primary_adjustments)))
+    limit = max(0, int(max_primary_adjustments))
     operations: List[Stage3AdjustmentOp] = []
     target_h = None
     try:
@@ -1062,6 +1114,7 @@ def _flex_excess_reduction_plan(
             demand={},
             current_H=H_work,
             target_h=target_h,
+            h_tolerance=float(h_tolerance),
             flex_audit=dict(audit or {}),
             su11_rotation_index=int(su11_rotation_index),
             phase="flex_range_reconciliation",
@@ -1075,7 +1128,7 @@ def _flex_excess_reduction_plan(
                 h_total_fn=_h_total,
                 special_degree_meta=special_degree_meta,
             )
-            if score.feasible:
+            if score.feasible and h_within_context_hard_bounds(context, score.h_after):
                 scored.append((score.sort_key, bundle, int(unit_count), score))
         if not scored:
             break
@@ -1110,7 +1163,7 @@ def _flex_excess_reduction_plan(
         "primary_conversion_limit": int(limit),
     }
     if not operations:
-        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+        return _annotate_h_hard_rule(Stage3AdjustmentPlan(
             ok=False,
             reason="phase_resource_infeasible",
             blocked_reason=str(proof["reason"]),
@@ -1165,7 +1218,7 @@ def _flex_excess_reduction_plan(
             "stage3_phase": "flex_range_reconciliation",
             "infeasibility_proof": proof,
         }
-        return _annotate_h_soft_rule(plan, h_tolerance)
+        return _annotate_h_hard_rule(plan, h_tolerance)
 
     all_ops = [
         op
@@ -1196,7 +1249,7 @@ def _flex_excess_reduction_plan(
             "stage3_phase": "flex_range_reconciliation",
             "infeasibility_proof": proof,
         }
-        return _annotate_h_soft_rule(plan, h_tolerance)
+        return _annotate_h_hard_rule(plan, h_tolerance)
     transaction = TopologyResourceTransaction(
         phase="flex_range_reconciliation",
         contract_id=-1002,
@@ -1241,7 +1294,7 @@ def _flex_excess_reduction_plan(
         "su11_rotation_index_after": int(histogram.su11_rotation_index_after),
         "resource_accounting": dict(accounting),
     }
-    return _annotate_h_soft_rule(plan, h_tolerance)
+    return _annotate_h_hard_rule(plan, h_tolerance)
 
 
 def _runtime_with_pool(
@@ -1841,6 +1894,17 @@ def _finalize_phase_plan(
             },
         })
     if phase_infeasible_contracts:
+        first_contract_proof = dict(
+            phase_infeasible_contracts[0].get("proof", {}) or {}
+        )
+        first_failure_domain = str(
+            first_contract_proof.get("failure_domain", "") or ""
+        )
+        phase_failure_reason = (
+            "stage3_topology_materialization_invalid"
+            if first_failure_domain == "topology_materialization"
+            else "stage3_completion_invariants_failed"
+        )
         pending_required_counts = {
             str(key): int(value)
             for key, value in dict(
@@ -1850,7 +1914,8 @@ def _finalize_phase_plan(
         }
         proof = {
             "phase": str(phase),
-            "reason": "stage3_completion_invariants_failed",
+            "reason": str(phase_failure_reason),
+            "failure_domain": str(first_failure_domain),
             "failed_contract": dict(phase_infeasible_contracts[0]),
             "required_counts": dict(
                 phase_infeasible_contracts[0].get("required_counts", {}) or {}
@@ -1877,12 +1942,16 @@ def _finalize_phase_plan(
             stop_reason="phase_resource_infeasible",
             infeasibility_proof=proof,
         )
-        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+        return _annotate_h_hard_rule(Stage3AdjustmentPlan(
             ok=False,
             reason="phase_resource_infeasible",
             blocked_reason=str(proof["reason"]),
             phase=str(phase),
-            plan_kind="sequential_phase_infeasible_after_progress",
+            plan_kind=(
+                "sequential_phase_topology_materialization_invalid"
+                if first_failure_domain == "topology_materialization"
+                else "sequential_phase_infeasible_after_progress"
+            ),
             pre_assembly_gate=str(phase),
             active_subphase=str(phase),
             requirement_contracts=list(requirement_contracts),
@@ -1913,7 +1982,7 @@ def _finalize_phase_plan(
         transactions=list(transactions),
         stop_reason="stage3_rebuild_required",
     )
-    return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+    return _annotate_h_hard_rule(Stage3AdjustmentPlan(
         ok=True,
         reason="stage3_rebuild_required",
         phase=str(phase),
@@ -2162,6 +2231,7 @@ def _transaction_plan(
         phase=str(contract.phase),
         contract_id=int(contract.contract_id),
         target_role=str(contract.target_role),
+        transaction_origin="current_plan_candidate",
         source_node_ids=(
             list(contract.source_node_ids)
             if bool(reserve_contract_after_conversion)
@@ -2281,7 +2351,7 @@ def _transaction_plan(
     plan.requested_counts = {str(key): int(value) for key, value in contract.required_counts.items()}
     if ledger_after_conversion is not None:
         plan.runtime["iteration_topology_ledger"] = ledger_after_conversion
-    return _annotate_h_soft_rule(plan, h_tolerance)
+    return _annotate_h_hard_rule(plan, h_tolerance)
 
 
 def plan_stage3_state_machine(
@@ -2301,7 +2371,7 @@ def plan_stage3_state_machine(
     forbidden_spectrum_inverse_signatures: Optional[Sequence[str]] = None,
     max_primary_adjustments_per_stage: int = 10,
     max_h_compensation_ops_per_adjustment: int = 8,
-    h_tolerance: float = 0.06,
+    h_tolerance: float = DEFAULT_STAGE3_H_HARD_TOLERANCE,
     residual_flex_preferred_23: int = 3,
     residual_flex_min_23: int = 2,
     residual_side_preferred_23: int = 2,
@@ -2310,9 +2380,9 @@ def plan_stage3_state_machine(
     su11_rotation_index: int = 0,
     forbidden_resource_conversion_signatures: Optional[Sequence[str]] = None,
 ) -> Stage3AdjustmentPlan:
-    max_primary_adjustments_per_stage = max(
-        0,
-        min(10, int(max_primary_adjustments_per_stage)),
+    max_primary_adjustments_per_stage = min(
+        10,
+        max(0, int(max_primary_adjustments_per_stage)),
     )
     if H is None:
         histogram_size = max(
@@ -2354,7 +2424,7 @@ def plan_stage3_state_machine(
                 "flex_counts": dict(getattr(phase_eval, "flex_counts", {}) or {}),
             },
         )
-        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+        return _annotate_h_hard_rule(Stage3AdjustmentPlan(
             ok=False,
             reason="phase_resource_infeasible",
             blocked_reason=flex_block,
@@ -2398,7 +2468,7 @@ def plan_stage3_state_machine(
             "reason": "external_physical_product_validation_failed",
             "materialization_errors": materialization_errors,
         }
-        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+        return _annotate_h_hard_rule(Stage3AdjustmentPlan(
             ok=False,
             reason="phase_resource_infeasible",
             blocked_reason=str(proof["reason"]),
@@ -2422,12 +2492,23 @@ def plan_stage3_state_machine(
         ), h_tolerance)
     pool = _resource_ids(phase_eval)
     H_work = H.detach().clone()
-    contracts = _external_contracts(phase_eval, nodes)
+    all_contracts = _external_contracts(phase_eval, nodes)
+    (
+        active_contracts,
+        dormant_contracts,
+        active_external_phase,
+        active_external_role,
+    ) = _partition_active_external_contracts(phase_eval, all_contracts)
+    contracts = list(all_contracts or [])
+    dormant_contract_owner_keys = {
+        stage3_contract_owner_key(contract)
+        for contract in dormant_contracts
+    }
     iteration_ledger = _iteration_ledger_for_phase_eval(
         phase_eval,
         nodes,
         pool,
-        contracts,
+        all_contracts,
     )
     pool = deepcopy(iteration_ledger.available_ids_by_su)
     initial_pool = deepcopy(pool)
@@ -2447,7 +2528,7 @@ def plan_stage3_state_machine(
                 str(key): len(values) for key, values in pool.items()
             },
         }
-        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+        return _annotate_h_hard_rule(Stage3AdjustmentPlan(
             ok=False,
             reason="phase_resource_infeasible",
             blocked_reason=str(proof["reason"]),
@@ -2482,7 +2563,6 @@ def plan_stage3_state_machine(
     infeasible_contracts: List[Dict[str, Any]] = []
     stale_identity_contracts: List[Dict[str, Any]] = []
     rotation_cursor = int(su11_rotation_index)
-    fallback_id = 1
     external_contracts_seen = 0
     materialized_external_products = [
         dict(product or {})
@@ -2505,12 +2585,12 @@ def plan_stage3_state_machine(
         )
         role_converted = 0
         role_blocked = 0
+        role_deferred = 0
         phase_contracts = [item for item in contracts if str(item.get("target_role", "")) == role]
         for contract_index, raw in enumerate(phase_contracts):
             external_contracts_seen += 1
             role_seen += 1
-            contract = _closure_contract(raw, phase, fallback_id)
-            fallback_id += 1
+            contract = _closure_contract(raw, phase)
             source_status, source_proof = contract_source_status(
                 iteration_ledger,
                 list(contract.claimed_source_node_ids or contract.source_node_ids or []),
@@ -2555,14 +2635,29 @@ def plan_stage3_state_machine(
                 continue
             missing_counts = _deficit(pool, contract.required_counts)
             if not missing_counts:
+                if stage3_contract_owner_key(raw) in dormant_contract_owner_keys:
+                    # Resource deficits may be batched across later phases,
+                    # but physical materialization remains sequential.  A
+                    # resource-satisfied later contract has not failed; its
+                    # assembler subphase simply has not run yet.
+                    role_deferred += 1
+                    continue
+                assembler_diagnostics = dict(raw.get("diagnostics", {}) or {})
+                materialization_failure = dict(
+                    assembler_diagnostics.get("materialization_failure", {}) or {}
+                )
+                assembler_reason = str(
+                    materialization_failure.get("validation_reason", "")
+                    or raw.get("reason", contract.reason)
+                    or "external_product_not_created"
+                )
                 materialization_proof = {
                     "phase": str(phase),
                     "contract_id": int(contract.contract_id),
                     "target_role": str(contract.target_role),
-                    "reason": "external_physical_materialization_failed",
-                    "assembler_reason": str(
-                        raw.get("reason", contract.reason) or "external_product_not_created"
-                    ),
+                    "reason": "external_topology_materialization_invalid",
+                    "failure_domain": "topology_materialization",
+                    "assembler_reason": str(assembler_reason),
                     "source_fragment_ids": list(contract.source_fragment_ids),
                     "source_node_ids": list(contract.source_node_ids),
                     "required_counts": dict(contract.required_counts),
@@ -2577,7 +2672,7 @@ def plan_stage3_state_machine(
                     "branch_slots": [
                         slot.to_dict() for slot in list(contract.branch_slots or [])
                     ],
-                    "assembler_diagnostics": dict(raw.get("diagnostics", {}) or {}),
+                    "assembler_diagnostics": assembler_diagnostics,
                 }
                 infeasible_contracts.append({
                     "phase": str(phase),
@@ -2598,7 +2693,7 @@ def plan_stage3_state_machine(
             for _, future_role in EXTERNAL_ROLE_ORDER[int(role_index) + 1:]:
                 future_contracts.extend(
                     item
-                    for item in contracts
+                    for item in all_contracts
                     if str(item.get("target_role", "")) == str(future_role)
                 )
             future_required_11 = sum(
@@ -2637,10 +2732,11 @@ def plan_stage3_state_machine(
                 protected_resource_counts=protected_aromatic_donors,
                 accounting_initial_pool=initial_pool,
                 forbidden_primary_conversion_signatures=forbidden_resource_conversion_signatures,
-                reserve_contract_after_conversion=False,
+                reserve_contract_after_conversion=True,
             )
             if not candidate_plan.ok:
                 if phase_groups:
+                    budget_exhausted = int(remaining_limit) <= 0
                     return _finalize_phase_plan(
                         phase_eval=phase_eval,
                         phase=EXTERNAL_STAGE,
@@ -2655,11 +2751,18 @@ def plan_stage3_state_machine(
                         h_tolerance=h_tolerance,
                         stage_diagnostics={
                             "external_stage_completed": False,
-                            "external_rebuild_reason": "blocker_after_conversion",
+                            "external_rebuild_reason": (
+                                "resource_conversion_requires_fresh_assembly"
+                                if budget_exhausted
+                                else "external_blocker_after_conversion"
+                            ),
                             "external_contracts_seen": int(external_contracts_seen),
                             "external_directly_completed": int(external_directly_completed),
-                            "external_completed_after_conversion": int(external_completed_after_conversion),
-                            "external_blocked": 1,
+                            "external_reserved_after_conversion": int(
+                                external_completed_after_conversion
+                            ),
+                            "external_completed_after_conversion": 0,
+                            "external_blocked": 0 if budget_exhausted else 1,
                             "external_remaining_pending": max(
                                 1,
                                 len(contracts) - int(external_contracts_seen) + 1,
@@ -2669,6 +2772,10 @@ def plan_stage3_state_machine(
                                 0,
                                 int(max_primary_adjustments_per_stage) - len(phase_groups),
                             ),
+                            "external_conversion_budget_exhausted": bool(
+                                budget_exhausted
+                            ),
+                            "physical_materialization_required_after_rebuild": True,
                         },
                     )
                 failed_transactions = list(candidate_plan.phase_result.transactions or [])
@@ -2706,45 +2813,18 @@ def plan_stage3_state_machine(
             direct_transactions.extend(list(candidate_plan.phase_result.transactions or []))
             external_completed_after_conversion += 1
             role_converted += 1
-            return _finalize_phase_plan(
-                phase_eval=phase_eval,
-                phase=EXTERNAL_STAGE,
-                H_before=H,
-                H_after=H_work,
-                initial_pool=initial_pool,
-                final_pool=pool,
-                groups=phase_groups,
-                transactions=direct_transactions,
-                rotation_before=su11_rotation_index,
-                rotation_after=rotation_cursor,
-                h_tolerance=h_tolerance,
-                stage_diagnostics={
-                    "external_stage_completed": False,
-                    "external_rebuild_reason": (
-                        "external_blocker_after_conversion"
-                        if infeasible_contracts
-                        else "resource_conversion_requires_fresh_assembly"
-                    ),
-                    "external_contracts_seen": int(external_contracts_seen),
-                    "external_directly_completed": int(external_directly_completed),
-                    "external_completed_after_conversion": 0,
-                    "external_blocked": len(infeasible_contracts),
-                    "external_remaining_pending": len(contracts),
-                    "external_primary_count": len(phase_groups),
-                    "external_remaining_budget": max(
-                        0,
-                        int(max_primary_adjustments_per_stage) - len(phase_groups),
-                    ),
-                    "physical_materialization_required_after_rebuild": True,
-                },
-            )
         external_status[str(role)] = {
             "phase": str(phase),
             "contracts_seen": int(role_seen),
             "directly_completed": int(role_direct),
             "completed_after_conversion": int(role_converted),
             "blocked": int(role_blocked),
-            "completed": bool(role_blocked == 0),
+            "deferred": int(role_deferred),
+            "completed": bool(
+                role_blocked == 0
+                and role_converted == 0
+                and role_deferred == 0
+            ),
         }
         completed_phases.append(phase)
 
@@ -2755,20 +2835,37 @@ def plan_stage3_state_machine(
         "external_superseded": int(external_superseded),
         "external_materialized_product_count": len(materialized_external_products),
         "external_blocked": len(infeasible_contracts),
-        "external_remaining_pending": len(infeasible_contracts),
+        "external_remaining_pending": len(infeasible_contracts) + len(dormant_contracts),
         "external_primary_count": len(phase_groups),
         "external_remaining_budget": max(
             0,
             int(max_primary_adjustments_per_stage) - len(phase_groups),
         ),
         "external_subphase_status": dict(external_status),
-        "external_stage_completed": not bool(infeasible_contracts),
+        "external_stage_completed": not bool(infeasible_contracts or dormant_contracts),
+        "active_external_phase": str(active_external_phase),
+        "active_external_role": str(active_external_role),
+        "dormant_external_contract_count": len(dormant_contracts),
+        "dormant_external_contract_ids": [
+            int(dict(contract or {}).get("contract_id", -1) or -1)
+            for contract in dormant_contracts
+        ],
     }
     if phase_groups:
+        # Resource reservations above are round-local.  They let the planner
+        # aggregate all classified contract deficits into one histogram batch,
+        # but only a fresh Layer1/2 graph may materialize the products.
+        external_diagnostics["external_stage_completed"] = False
+        external_diagnostics["external_reserved_after_conversion"] = int(
+            external_completed_after_conversion
+        )
+        external_diagnostics["external_completed_after_conversion"] = 0
+        external_diagnostics["external_remaining_pending"] = len(all_contracts)
+        external_diagnostics["physical_materialization_required_after_rebuild"] = True
         external_diagnostics["external_rebuild_reason"] = (
-            "external_stage_completed_after_conversion"
-            if not infeasible_contracts
-            else "external_blocker_after_conversion"
+            "external_blocker_after_conversion"
+            if infeasible_contracts
+            else "resource_conversion_requires_fresh_assembly"
         )
         return _finalize_phase_plan(
             phase_eval=phase_eval,
@@ -2828,6 +2925,21 @@ def plan_stage3_state_machine(
             special_degree_meta=special_degree_meta,
             flex_audit=dict(getattr(phase_eval, "flex_audit", {}) or {}),
         )
+        target_h: Optional[float]
+        try:
+            target_h = float(E_target.detach().cpu().float()[1].item())
+        except Exception:
+            target_h = None
+        spectrum_candidates, hard_rejected_candidates = (
+            _filter_spectrum_candidates_by_stage3_hard_constraint(
+                spectrum_candidates,
+                target_h=target_h,
+                h_tolerance=h_tolerance,
+            )
+        )
+        spectrum_audit = dict(spectrum_audit or {})
+        spectrum_audit["stage3_hard_tolerance"] = float(h_tolerance)
+        spectrum_audit["stage3_hard_rejected_candidates"] = hard_rejected_candidates
         if spectrum_candidates:
             phase_result = Stage3PhaseResult(
                 active_phase="remaining_pool_spectrum_rebalance",
@@ -2835,7 +2947,7 @@ def plan_stage3_state_machine(
                 rebuild_required=False,
                 stop_reason="stage3_spectrum_candidates_ready",
             )
-            return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+            return _annotate_h_hard_rule(Stage3AdjustmentPlan(
                 ok=True,
                 reason="stage3_spectrum_candidates_ready",
                 phase="remaining_pool_spectrum_rebalance",
@@ -3315,7 +3427,7 @@ def plan_stage3_state_machine(
                     },
                     "remaining_node_ids": list(remaining_closure_ids),
                 }
-                return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+                return _annotate_h_hard_rule(Stage3AdjustmentPlan(
                     ok=False,
                     reason="phase_resource_infeasible",
                     blocked_reason=str(proof["reason"]),
@@ -3403,7 +3515,7 @@ def plan_stage3_state_machine(
             "direct_residual_template_fits": list(direct_residual_template_fits),
             "residual_candidate_attempts": list(residual_candidate_attempts),
         }
-        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+        return _annotate_h_hard_rule(Stage3AdjustmentPlan(
             ok=False,
             reason="phase_resource_infeasible",
             blocked_reason=str(proof["reason"]),
@@ -3560,7 +3672,7 @@ def plan_stage3_state_machine(
             "flex_final": int(flex_final),
             "direct_residual_template_fits": list(direct_residual_template_fits),
         }
-        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+        return _annotate_h_hard_rule(Stage3AdjustmentPlan(
             ok=False,
             reason="phase_resource_infeasible",
             blocked_reason=str(proof["reason"]),
@@ -3597,7 +3709,7 @@ def plan_stage3_state_machine(
         stop_reason="stage3_complete",
         infeasibility_proof={},
     )
-    return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+    return _annotate_h_hard_rule(Stage3AdjustmentPlan(
         ok=True,
         reason="stage3_complete",
         phase="complete",

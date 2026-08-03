@@ -15,8 +15,9 @@ CLOSURE_TEMPLATE_SEQUENCES: Dict[str, Tuple[Tuple[int, ...], ...]] = {
     "FIXED22": ((22,),),
 }
 
-H_SOFT_LOWER_RATIO = -0.02
-H_SOFT_UPPER_RATIO = 0.03
+DEFAULT_STAGE3_H_HARD_TOLERANCE = 0.08
+H_HARD_LOWER_RATIO = -DEFAULT_STAGE3_H_HARD_TOLERANCE
+H_HARD_UPPER_RATIO = DEFAULT_STAGE3_H_HARD_TOLERANCE
 SU11_AROMATIC_ROTATION = (12, 13, 13)
 MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES = 3
 MAX_FLEX_LOWER_INCREASE_PER_ADJUSTMENT_PLAN = 1
@@ -104,17 +105,25 @@ def alternative_closure_required_counts(kind: str) -> List[Dict[int, int]]:
     return [dict(item) for item in closure_required_count_options(str(kind))[1:]]
 
 
-def h_soft_bounds(target_h: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
+def h_hard_bounds(
+    target_h: Optional[float],
+    tolerance: float = DEFAULT_STAGE3_H_HARD_TOLERANCE,
+) -> Tuple[Optional[float], Optional[float]]:
     if target_h is None or float(target_h) <= 0:
         return None, None
+    effective_tolerance = min(1.0, max(0.0, float(tolerance)))
     return (
-        float(target_h) * (1.0 + float(H_SOFT_LOWER_RATIO)),
-        float(target_h) * (1.0 + float(H_SOFT_UPPER_RATIO)),
+        float(target_h) * (1.0 - float(effective_tolerance)),
+        float(target_h) * (1.0 + float(effective_tolerance)),
     )
 
 
-def h_within_soft_bounds(current_h: float, target_h: Optional[float]) -> bool:
-    lower, upper = h_soft_bounds(target_h)
+def h_within_hard_bounds(
+    current_h: float,
+    target_h: Optional[float],
+    tolerance: float = DEFAULT_STAGE3_H_HARD_TOLERANCE,
+) -> bool:
+    lower, upper = h_hard_bounds(target_h, tolerance)
     if lower is None or upper is None:
         return True
     return float(lower) <= float(current_h) <= float(upper)

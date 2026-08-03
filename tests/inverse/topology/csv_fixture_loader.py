@@ -88,4 +88,9 @@ def load_nodes_from_final_csv(path: str | Path, *, fixture_infer_fixed_connector
                 score_components = dict(getattr(node, "score_components", {}) or {})
                 score_components["fixture_inferred_fixed_connectors"] = True
                 node.score_components = score_components
+        for node in nodes:
+            for neighbor_id in list(getattr(node, "fixed_hop1_ids", set()) or set()):
+                neighbor = nodes_by_id.get(int(neighbor_id))
+                if neighbor is not None:
+                    neighbor.fixed_hop1_ids.add(int(node.global_id))
     return nodes
