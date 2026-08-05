@@ -169,8 +169,10 @@ class MyData(Data):
 class LocalNMRDataset(InMemoryDataset):
     """Extract center-carbon k-hop subgraphs from molecular graphs."""
 
-    def __init__(self, raw_list: Sequence, k: int = 3):
+    def __init__(self, raw_list: Sequence, k: int = 3,
+                 require_real_ppm: bool = True):
         self.k = int(k)
+        self.require_real_ppm = bool(require_real_ppm)
         super().__init__(".", transform=None, pre_transform=None)
         self.data, self.slices = self._process(raw_list)
 
@@ -189,8 +191,13 @@ class LocalNMRDataset(InMemoryDataset):
             smiles = _mol_get(mol, "smiles", "")
             source_path = _mol_get(mol, "source_path", "")
 
-            if edge_index is None or x_node is None or is_carbon is None or real_ppm is None:
+            if edge_index is None or x_node is None or is_carbon is None:
                 continue
+
+            if real_ppm is None:
+                if self.require_real_ppm:
+                    continue
+                real_ppm = torch.zeros(x_node.size(0), dtype=torch.float, device=x_node.device)
 
             if edge_attr is None:
                 edge_attr = torch.zeros((edge_index.size(1), 2), dtype=torch.float, device=edge_index.device)
@@ -212,7 +219,7 @@ class LocalNMRDataset(InMemoryDataset):
                 if not bool(is_carbon[center]):
                     continue
                 ppm_value = float(real_ppm[center].item())
-                if not (0.0 < ppm_value <= 260.0):
+                if self.require_real_ppm and not (0.0 < ppm_value <= 260.0):
                     continue
 
                 sub_nodes, sub_edge_index, mapping, mask = k_hop_subgraph(

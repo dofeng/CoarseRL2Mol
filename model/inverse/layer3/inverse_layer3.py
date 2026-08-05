@@ -16,7 +16,9 @@ from ...shared.inverse_common import (
 
 
 class Layer3Estimator:
-    """Optimize z inside each node's fixed Layer2 template."""
+    """Optimize paired z/mu samples inside each node's fixed Layer2 template."""
+
+    SPECTRAL_SOURCE = 'template_sample_mu_layer3'
 
     def __init__(self, device: torch.device, vae_model=None, lib_path: Optional[str] = None):
         self.device = device
@@ -192,6 +194,29 @@ class Layer3Estimator:
         return [int(idx) for idx in np.argsort(distances)[:max(1, int(top_k))]]
 
     @staticmethod
+    def _resolve_template_sample_index(z_samples: torch.Tensor,
+                                       z_vec: torch.Tensor,
+                                       preferred_index: Optional[int] = None) -> Optional[int]:
+        if not torch.is_tensor(z_samples) or not torch.is_tensor(z_vec):
+            return None
+        bank = z_samples.detach().cpu().float()
+        if bank.ndim == 1:
+            bank = bank.view(1, -1)
+        current = z_vec.detach().cpu().float().reshape(-1)
+        if bank.ndim != 2 or int(bank.shape[1]) != int(current.numel()):
+            return None
+
+        if preferred_index is not None:
+            index = int(preferred_index)
+            if 0 <= index < int(bank.shape[0]) and torch.equal(bank[index], current):
+                return index
+
+        matches = torch.nonzero(torch.all(bank == current.view(1, -1), dim=1), as_tuple=False).view(-1)
+        if int(matches.numel()) <= 0:
+            return None
+        return int(matches[0].item())
+
+    @staticmethod
     def _peak(mu: float, ppm_axis: torch.Tensor) -> torch.Tensor:
         return lorentzian_spectrum(
             torch.tensor([float(mu)], dtype=torch.float, device=ppm_axis.device),
@@ -235,10 +260,6 @@ class Layer3Estimator:
         templates = (lib or {}).get('templates', {}) if isinstance(lib, dict) else {}
         if not templates:
             raise RuntimeError("Layer3 template library is unavailable or empty")
-        if self.vae is None:
-            raise RuntimeError("Layer3 requires G2S decoding for every z candidate")
-        if hasattr(self.vae, 'eval'):
-            self.vae.eval()
 
         ppm_axis = PPM_AXIS.to(self.device)
         target = S_target.to(self.device).view(-1)
@@ -256,10 +277,10 @@ class Layer3Estimator:
             ppm_axis=ppm_axis,
         )
         baseline_r2 = float(baseline_eval.get('r2', float('-inf')))
-        g_embed = self._global_embed_from_elements(E_target)
         carbon_nodes: List[_NodeV3] = []
         fixed_template_keys: Dict[int, Tuple] = {}
-        unique_template_keys: Dict[Tuple, int] = {}
+        selected_sample_indices: Dict[int, int] = {}
+        template_sample_mu: Dict[Tuple, torch.Tensor] = {}
         coverage_errors: List[str] = []
 
         for node in nodes:
@@ -287,36 +308,55 @@ class Layer3Estimator:
                     f"z sample shape={tuple(z_samples.shape)}"
                 )
                 continue
+            mu_samples = samples.get('mu')
+            if not torch.is_tensor(mu_samples) or int(mu_samples.numel()) <= 0:
+                coverage_errors.append(
+                    f"node={int(node.global_id)} template={template_key} has no mu sample bank"
+                )
+                continue
+            mu_samples = mu_samples.detach().float().reshape(-1)
+            if int(mu_samples.numel()) != int(z_samples.shape[0]):
+                coverage_errors.append(
+                    f"node={int(node.global_id)} template={template_key} sample bank mismatch: "
+                    f"z={int(z_samples.shape[0])}, mu={int(mu_samples.numel())}"
+                )
+                continue
+            if not bool(torch.isfinite(mu_samples).all()):
+                coverage_errors.append(
+                    f"node={int(node.global_id)} template={template_key} has non-finite mu samples"
+                )
+                continue
+
+            score_components = getattr(node, 'score_components', None)
+            preferred_index = None
+            if isinstance(score_components, dict):
+                preferred_index = score_components.get('layer3_sample_idx')
+                if preferred_index is None:
+                    preferred_index = score_components.get('layer2_sample_idx')
+            sample_index = self._resolve_template_sample_index(
+                z_samples,
+                getattr(node, 'z_vec', None),
+                preferred_index=preferred_index,
+            )
+            if sample_index is None:
+                coverage_errors.append(
+                    f"node={int(node.global_id)} template={template_key} current z is not in sample bank"
+                )
+                continue
+
             fixed_template_keys[int(node.global_id)] = template_key
-            unique_template_keys[template_key] = int(su_type)
+            selected_sample_indices[int(node.global_id)] = int(sample_index)
+            template_sample_mu[template_key] = mu_samples
+            node.mu = float(mu_samples[int(sample_index)].item())
             node.pi = 1.0
+            if isinstance(score_components, dict):
+                score_components['layer3_sample_idx'] = int(sample_index)
+                score_components['layer3_spectral_source'] = self.SPECTRAL_SOURCE
+                score_components['spectral_source'] = self.SPECTRAL_SOURCE
+                score_components['layer3_template_mu'] = float(node.mu)
 
         if coverage_errors:
             raise RuntimeError("Layer3 fixed-template coverage failed: " + " | ".join(coverage_errors[:8]))
-
-        decoded_template_mu: Dict[Tuple, torch.Tensor] = {}
-        for template_key, center_su in sorted(unique_template_keys.items(), key=lambda item: repr(item[0])):
-            template = templates[template_key]
-            z_samples = template['samples']['z']
-            if z_samples.ndim == 1:
-                z_samples = z_samples.view(1, -1)
-            decoded_template_mu[template_key] = self._decode_mu_batch(
-                [int(center_su)] * int(z_samples.shape[0]),
-                [z_samples[index] for index in range(int(z_samples.shape[0]))],
-                g_embed,
-                context=f"template={template_key} sample bank",
-            )
-
-        entry_mu = self._decode_nodes(carbon_nodes, g_embed, context="entry all-node decode")
-        for node, mu_tensor in zip(carbon_nodes, entry_mu):
-            mu_value = float(mu_tensor.item())
-            node.mu = mu_value
-            node.pi = 1.0
-            score_components = getattr(node, 'score_components', None)
-            if isinstance(score_components, dict):
-                score_components['layer3_spectral_source'] = 'g2s_layer3'
-                score_components['spectral_source'] = 'g2s_layer3'
-                score_components['layer3_decoder_mu'] = mu_value
 
         recon, peak_cache = self._build_recon(nodes, ppm_axis)
         eval_current = evaluate_spectrum_reconstruction(
@@ -367,7 +407,7 @@ class Layer3Estimator:
                     z_samples = samples['z']
                     if z_samples.ndim == 1:
                         z_samples = z_samples.view(1, -1)
-                    decoded_mu_samples = decoded_template_mu[template_key]
+                    mu_samples = template_sample_mu[template_key]
                     coarse_lo, coarse_hi = get_su_ppm_range(int(node.su_type))
                     search_lo = max(float(coarse_lo), float(negative_ppm) - float(pos_search_window))
                     search_hi = min(float(coarse_hi), float(negative_ppm) + float(pos_search_window))
@@ -378,7 +418,7 @@ class Layer3Estimator:
                         continue
                     positive_ppm, positive_value = positive
                     sample_indices = self._mu_sorted_candidates(
-                        decoded_mu_samples,
+                        mu_samples,
                         positive_ppm,
                         top_k=int(top_k_samples),
                     )
@@ -387,6 +427,8 @@ class Layer3Estimator:
                         continue
 
                     for sample_idx in sample_indices:
+                        if int(sample_idx) == selected_sample_indices[int(node.global_id)]:
+                            continue
                         z_candidate = z_samples[int(sample_idx)].detach().clone().to(self.device)
                         old_z = getattr(node, 'z_vec', None)
                         if (
@@ -398,7 +440,7 @@ class Layer3Estimator:
                             )
                         ):
                             continue
-                        mu_candidate = float(decoded_mu_samples[int(sample_idx)].item())
+                        mu_candidate = float(mu_samples[int(sample_idx)].item())
                         if not (float(coarse_lo) <= float(mu_candidate) <= float(coarse_hi)):
                             continue
 
@@ -445,12 +487,13 @@ class Layer3Estimator:
             node.z_vec = best_move['z']
             node.mu = float(best_move['mu'])
             node.pi = 1.0
+            selected_sample_indices[int(node.global_id)] = int(best_move['sample_idx'])
             score_components = getattr(node, 'score_components', None)
             if isinstance(score_components, dict):
                 score_components['layer3_sample_idx'] = int(best_move['sample_idx'])
-                score_components['layer3_spectral_source'] = 'g2s_layer3'
-                score_components['spectral_source'] = 'g2s_layer3'
-                score_components['layer3_decoder_mu'] = float(best_move['mu'])
+                score_components['layer3_spectral_source'] = self.SPECTRAL_SOURCE
+                score_components['spectral_source'] = self.SPECTRAL_SOURCE
+                score_components['layer3_template_mu'] = float(best_move['mu'])
             if isinstance(getattr(node, 'z_history', None), list):
                 node.z_history.append(best_move['z'].detach().clone())
 
@@ -479,26 +522,40 @@ class Layer3Estimator:
             if getattr(node, 'template_key', None) != fixed_template_keys[int(node.global_id)]:
                 raise RuntimeError(f"Layer3 changed fixed template for node={int(node.global_id)}")
 
-        exit_mu = self._decode_nodes(carbon_nodes, g_embed, context="exit all-node decode")
-        max_decode_error = 0.0
-        for node, mu_tensor in zip(carbon_nodes, exit_mu):
-            decoded_mu = float(mu_tensor.item())
-            stored_mu = float(getattr(node, 'mu', float('nan')))
-            error = abs(stored_mu - decoded_mu)
-            max_decode_error = max(max_decode_error, error)
-            if not np.isfinite(error) or error > 1e-5:
+        max_template_mu_error = 0.0
+        for node in carbon_nodes:
+            template_key = fixed_template_keys[int(node.global_id)]
+            template = templates[template_key]
+            z_samples = template['samples']['z']
+            sample_index = self._resolve_template_sample_index(
+                z_samples,
+                getattr(node, 'z_vec', None),
+                preferred_index=selected_sample_indices[int(node.global_id)],
+            )
+            if sample_index is None:
                 raise RuntimeError(
-                    f"Layer3 final G2S consistency failed for node={int(node.global_id)}: "
-                    f"stored_mu={stored_mu}, decoded_mu={decoded_mu}, error={error}"
+                    f"Layer3 final template sample consistency failed for node={int(node.global_id)}: "
+                    "current z is not in the fixed template sample bank"
                 )
-            node.mu = decoded_mu
+            expected_mu = float(template_sample_mu[template_key][int(sample_index)].item())
+            stored_mu = float(getattr(node, 'mu', float('nan')))
+            error = abs(stored_mu - expected_mu)
+            max_template_mu_error = max(max_template_mu_error, error)
+            if not np.isfinite(error) or error > 1e-7:
+                raise RuntimeError(
+                    f"Layer3 final template sample consistency failed for node={int(node.global_id)}: "
+                    f"stored_mu={stored_mu}, expected_mu={expected_mu}, error={error}"
+                )
+            selected_sample_indices[int(node.global_id)] = int(sample_index)
+            node.mu = expected_mu
             node.pi = 1.0
             score_components = getattr(node, 'score_components', None)
             if isinstance(score_components, dict):
-                score_components['layer3_spectral_source'] = 'g2s_layer3'
-                score_components['spectral_source'] = 'g2s_layer3'
-                score_components['layer3_decoder_mu'] = decoded_mu
-                score_components['layer3_final_decode_error'] = float(error)
+                score_components['layer3_sample_idx'] = int(sample_index)
+                score_components['layer3_spectral_source'] = self.SPECTRAL_SOURCE
+                score_components['spectral_source'] = self.SPECTRAL_SOURCE
+                score_components['layer3_template_mu'] = expected_mu
+                score_components['layer3_final_template_mu_error'] = float(error)
 
         recon, peak_cache = self._build_recon(nodes, ppm_axis)
         eval_current = evaluate_spectrum_reconstruction(
@@ -519,19 +576,20 @@ class Layer3Estimator:
         self.last_diagnostics = {
             'accepted': bool(accepted),
             'reason': (
-                'g2s_layer3_required_complete_decode'
+                'template_sample_layer3_required_complete_assignment'
                 if accepted and not baseline_has_complete_peaks
-                else 'g2s_layer3_not_worse_than_input'
+                else 'template_sample_layer3_not_worse_than_input'
                 if accepted
-                else 'g2s_layer3_below_input_baseline'
+                else 'template_sample_layer3_below_input_baseline'
             ),
             'baseline_r2': float(baseline_r2),
-            'decoded_initial_r2': float(current_r2 if not moves else moves[0]['r2_before']),
+            'template_initial_r2': float(current_r2 if not moves else moves[0]['r2_before']),
             'candidate_r2': float(r2),
             'r2_gain': float(r2 - baseline_r2),
             'z_moves': int(len(moves)),
             'stop_reason': str(stop_reason),
-            'max_decode_error': float(max_decode_error),
+            'spectral_contract': self.SPECTRAL_SOURCE,
+            'max_template_mu_error': float(max_template_mu_error),
         }
 
         if not accepted:
@@ -555,7 +613,7 @@ class Layer3Estimator:
 
         print(
             f"  最终调整结果: z_moves={len(moves)}, template_moves=0, "
-            f"stop={stop_reason}, max_decode_error={max_decode_error:.2e}, "
+            f"stop={stop_reason}, max_template_mu_error={max_template_mu_error:.2e}, "
             f"R²={r2:.4f}"
         )
         print("Layer3 完成\n")

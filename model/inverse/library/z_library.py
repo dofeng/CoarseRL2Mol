@@ -8,14 +8,14 @@ import torch.nn.functional as F
 import pandas as pd
 import os
 import pickle
-from typing import Tuple, List, Set, Dict, Optional
+from typing import Any, Tuple, List, Set, Dict, Optional
 
 # 从现有模块导入所需组件
 try:
-    from ...forward.g2s.g2s_model import NMR_VAE, LocalNMRDataset, load_raw_data
+    from ...forward.g2s.g2s_model import G2SConfig, NMR_VAE, LocalNMRDataset, load_raw_data
     from ...shared.coarse_graph import NUM_SU_TYPES, SU_DEFS, SU_MAX_DEGREE, SU_PPM_RANGES
 except ImportError:
-    from model.forward.g2s.g2s_model import NMR_VAE, LocalNMRDataset, load_raw_data
+    from model.forward.g2s.g2s_model import G2SConfig, NMR_VAE, LocalNMRDataset, load_raw_data
     from model.shared.coarse_graph import NUM_SU_TYPES, SU_DEFS, SU_MAX_DEGREE, SU_PPM_RANGES
 from torch_geometric.utils import k_hop_subgraph, to_undirected
 
@@ -42,6 +42,96 @@ try:
     from ..layer1.hop1_adjuster import can_match_ports_exact
 except ImportError:
     from model.inverse.layer1.hop1_adjuster import can_match_ports_exact
+
+
+MIN_SOURCE_GRAPH_NODES = 5
+
+
+def _graph_value(graph: Any, key: str, default: Any = None) -> Any:
+    if isinstance(graph, dict):
+        return graph.get(key, default)
+    return getattr(graph, key, default)
+
+
+def _source_graph_num_nodes(graph: Any) -> int:
+    x = _graph_value(graph, 'x')
+    if x is not None and hasattr(x, 'size'):
+        return int(x.size(0))
+    num_nodes = _graph_value(graph, 'num_nodes')
+    if num_nodes is None:
+        raise ValueError("Source graph has neither x nor num_nodes")
+    return int(num_nodes)
+
+
+def _filter_source_graphs(raw_graphs: List[Any],
+                          min_nodes: int = MIN_SOURCE_GRAPH_NODES) -> Tuple[List[Any], int]:
+    """Exclude whole coarse graphs that are too small for library construction."""
+    kept: List[Any] = []
+    excluded = 0
+    for graph in list(raw_graphs or []):
+        if _source_graph_num_nodes(graph) < int(min_nodes):
+            excluded += 1
+            continue
+        kept.append(graph)
+    return kept, excluded
+
+
+def _normalize_g2s_state_dict(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    normalized: Dict[str, torch.Tensor] = {}
+    for key, value in dict(state_dict or {}).items():
+        key_s = str(key)
+        if key_s.startswith('decoder.decoder.'):
+            key_s = 'decoder.' + key_s[len('decoder.decoder.'):]
+        normalized[key_s] = value
+    return normalized
+
+
+def _predict_intensity_from_state_dict(state_dict: Dict[str, torch.Tensor],
+                                       fallback: bool) -> bool:
+    decoder_weight = state_dict.get('decoder.net.5.weight')
+    if decoder_weight is None:
+        return bool(fallback)
+    return bool(int(decoder_weight.shape[0]) > 1)
+
+
+def _load_library_g2s_checkpoint(g2s_ckpt: str,
+                                 device: str,
+                                 k_hop: int,
+                                 hid_dim: int,
+                                 latent_dim: int) -> Tuple[NMR_VAE, G2SConfig, Dict[str, Any]]:
+    checkpoint = torch.load(g2s_ckpt, map_location=device, weights_only=False)
+    metadata: Dict[str, Any]
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+        metadata = dict(checkpoint)
+        config = G2SConfig.from_dict(checkpoint.get('config'))
+    elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+        metadata = dict(checkpoint)
+        config = G2SConfig.from_dict(checkpoint.get('config'))
+    else:
+        state_dict = checkpoint
+        metadata = {'legacy_state_dict_only': True}
+        config = G2SConfig(
+            k_hop=int(k_hop),
+            hid=int(hid_dim),
+            latent_dim=int(latent_dim),
+        )
+
+    state_dict = _normalize_g2s_state_dict(state_dict)
+    config.predict_intensity = _predict_intensity_from_state_dict(
+        state_dict,
+        fallback=bool(config.predict_intensity),
+    )
+    if int(config.k_hop) != int(k_hop):
+        raise ValueError(
+            f"G2S checkpoint k_hop={int(config.k_hop)} does not match requested k_hop={int(k_hop)}"
+        )
+
+    vae = NMR_VAE.from_config(config).to(device)
+    vae.load_state_dict(state_dict, strict=True)
+    vae.eval()
+    return vae, config, metadata
 
 # ============================================================================
 # 端口匹配辅助函数
@@ -168,7 +258,8 @@ def filter_subgraph_library(
     input_lib_path: str,
     output_lib_path: str,
     strict_mode: bool = True,
-    verbose: bool = True
+    verbose: bool = True,
+    min_samples: int = 3,
 ) -> dict:
     """
     根据连接规则筛选子图模板库
@@ -188,6 +279,10 @@ def filter_subgraph_library(
     print(f"输入库: {input_lib_path}")
     print(f"输出库: {output_lib_path}")
     print(f"严格模式: {strict_mode}")
+    min_samples = int(min_samples)
+    if min_samples < 1:
+        raise ValueError("min_samples must be at least 1")
+    print(f"最小模板样本数: {min_samples}")
     
     # 1. 加载原始库
     lib = torch.load(input_lib_path, map_location='cpu')
@@ -213,7 +308,23 @@ def filter_subgraph_library(
         center_su, hop1_multiset, hop2_multiset = tpl_key
         
         stats['by_su'][center_su]['total'] += 1
-        
+
+        sample_count = int(tpl_info.get('sample_count', 0))
+        if sample_count < min_samples:
+            stats['invalid'] += 1
+            stats['by_su'][center_su]['invalid'] += 1
+            violation = f"Sample count {sample_count} < minimum {min_samples}"
+            stats['violation_types'][violation] += 1
+            if len(stats['invalid_examples']) < 100:
+                stats['invalid_examples'].append({
+                    'center_su': center_su,
+                    'center_su_name': su_names[center_su],
+                    'hop1_multiset': hop1_multiset,
+                    'violations': [violation],
+                    'sample_count': sample_count,
+                })
+            continue
+
         # 验证1-hop多重集
         is_valid, violations = validate_hop1_multiset(center_su, hop1_multiset)
         
@@ -242,8 +353,9 @@ def filter_subgraph_library(
     print(f"\n{'='*60}")
     print("筛选结果统计")
     print(f"{'='*60}")
-    print(f"有效模板: {stats['valid']} / {stats['total']} ({100*stats['valid']/stats['total']:.1f}%)")
-    print(f"无效模板: {stats['invalid']} / {stats['total']} ({100*stats['invalid']/stats['total']:.1f}%)")
+    total_templates = max(int(stats['total']), 1)
+    print(f"有效模板: {stats['valid']} / {stats['total']} ({100*stats['valid']/total_templates:.1f}%)")
+    print(f"无效模板: {stats['invalid']} / {stats['total']} ({100*stats['invalid']/total_templates:.1f}%)")
     
     print(f"\n按SU类型统计:")
     for su_idx in sorted(stats['by_su'].keys()):
@@ -300,21 +412,33 @@ def filter_subgraph_library(
         'su_max_degrees': lib.get('su_max_degrees'),
         'library_type': lib.get('library_type', '3hop_enhanced_v2') + '_filtered',
         'total_templates': len(filtered_templates),
+        'g2s_config': dict(lib.get('g2s_config', {}) or {}),
+        'build_stats': dict(lib.get('build_stats', {}) or {}),
         'filter_stats': {
             'original_count': stats['total'],
             'filtered_count': stats['valid'],
             'removed_count': stats['invalid'],
-            'strict_mode': strict_mode
+            'strict_mode': strict_mode,
+            'min_samples': int(min_samples),
         }
     }
     
     # 6. 保存筛选后的库
+    output_dir = os.path.dirname(output_lib_path) or '.'
+    os.makedirs(output_dir, exist_ok=True)
     torch.save(filtered_lib, output_lib_path)
+    index_dir = os.path.join(output_dir, 'indexes')
+    os.makedirs(index_dir, exist_ok=True)
+    with open(os.path.join(index_dir, 'center_index.pkl'), 'wb') as file_obj:
+        pickle.dump(filtered_lib['center_index'], file_obj)
+    with open(os.path.join(index_dir, 'role_index.pkl'), 'wb') as file_obj:
+        pickle.dump(filtered_lib['role_index'], file_obj)
     print(f"\n筛选后的库已保存: {output_lib_path}")
     print(f"  -> 有效模板数: {len(filtered_templates)}")
+    print(f"  -> 筛选后的索引已保存: {index_dir}/")
     
     # 7. 生成筛选后的CSV统计
-    out_dir = os.path.dirname(output_lib_path) or '.'
+    out_dir = output_dir
     rows = []
     for tpl_key, tpl_info in filtered_templates.items():
         center_su_idx, hop1_multiset, hop2_multiset = tpl_key
@@ -753,7 +877,9 @@ def get_3hop_template_key_v2(subgraph, su_types_in_subgraph):
 def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
                          latent_dim: int = 16, hid_dim: int = 384, batch_size: int = 32, device: str = 'cuda',
                          num_workers: int = 4, mols_per_chunk: int = 2000, skip_role_index: bool = False,
-                         amp: bool = False, prefetch_factor: int = 2):
+                         amp: bool = False, prefetch_factor: int = 2,
+                         allow_missing_shifts: bool = False,
+                         min_template_samples: int = 3):
     """
     V2: 重构3-hop子图模板库，按多重集精确分桶
     
@@ -763,13 +889,34 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
     3. 构建center_index和role_index索引
     """
     print("开始构建V2版本3-hop子图模板库...")
+    min_template_samples = int(min_template_samples)
+    if min_template_samples < 1:
+        raise ValueError("min_template_samples must be at least 1")
     
     # 1. 加载数据和预训练模型
-    raw_all = load_raw_data(pt_dir)
+    raw_loaded = load_raw_data(pt_dir)
+    raw_all, excluded_small_graphs = _filter_source_graphs(raw_loaded)
+    print(
+        f"源图节点数筛选: 保留={len(raw_all)}, "
+        f"排除(<{MIN_SOURCE_GRAPH_NODES}节点)={excluded_small_graphs}"
+    )
+    if not raw_all:
+        raise ValueError(
+            f"No source graphs with at least {MIN_SOURCE_GRAPH_NODES} nodes were found in '{pt_dir}'"
+        )
 
-    vae = NMR_VAE(hid=hid_dim, latent_dim=latent_dim).to(device)
-    vae.load_state_dict(torch.load(g2s_ckpt, map_location=device, weights_only=False))
-    vae.eval()
+    vae, g2s_config, _ = _load_library_g2s_checkpoint(
+        g2s_ckpt=g2s_ckpt,
+        device=device,
+        k_hop=k_hop,
+        hid_dim=hid_dim,
+        latent_dim=latent_dim,
+    )
+    print(
+        "G2S配置: "
+        f"k_hop={g2s_config.k_hop}, hid={g2s_config.hid}, "
+        f"latent_dim={g2s_config.latent_dim}, predict_intensity={g2s_config.predict_intensity}"
+    )
 
     # 2. 收集桶级数据
     template_buckets = defaultdict(list)  # 桶级收集器
@@ -791,7 +938,11 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
         raw = raw_all[processed_mols:end]
         processed_mols = end
 
-        dset = LocalNMRDataset(raw, k=k_hop)
+        dset = LocalNMRDataset(
+            raw,
+            k=k_hop,
+            require_real_ppm=not bool(allow_missing_shifts),
+        )
         loader = DataLoader(
             dset,
             batch_size=batch_size,
@@ -879,11 +1030,12 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
 
     # 2.b 额外增加：为非碳中心节点收集“结构-only”模板（不做VAE）
     # 目的：逆向约束 1-hop/2-hop 组合，避免凭空捏造
-    raw_list_all = raw_all  # load_raw_data 返回的列表
-    for mol in tqdm(raw_list_all, desc='阶段1+/2: 收集非碳中心的结构模板'):
+    for mol in tqdm(raw_all, desc='阶段1+/2: 收集非碳中心的结构模板'):
         try:
-            x_node = mol["x"]
-            edge_index = mol["edge_index"]
+            x_node = _graph_value(mol, 'x')
+            edge_index = _graph_value(mol, 'edge_index')
+            if x_node is None or edge_index is None:
+                continue
             is_carbon_mask = (x_node[:, :26].sum(-1) > 0)
             # 确保无向
             if edge_index.numel() > 0:
@@ -913,12 +1065,19 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
                 template_buckets[template_key].append(sample_info)
                 center_index[template_key[0]].add(template_key)
 
-                # 角色索引仅用于“存在性”，不需要 z/μ/π；填充空字典
-                center_su_type = template_key[0]
-                for su_t, cnt in node_layers['hop1_counter'].items():
-                    role_index[(center_su_type, 'hop1', su_t)].append({})
-                for su_t, cnt in node_layers['hop2_counter'].items():
-                    role_index[(center_su_type, 'hop2', su_t)].append({})
+                if not skip_role_index:
+                    # 角色索引仅用于“存在性”，不需要 z/μ/π。
+                    center_su_type = template_key[0]
+                    for su_t in node_layers['hop1_counter']:
+                        role_index[(center_su_type, 'hop1', su_t)].append({
+                            'template_key': template_key,
+                            'struct_only': True,
+                        })
+                    for su_t in node_layers['hop2_counter']:
+                        role_index[(center_su_type, 'hop2', su_t)].append({
+                            'template_key': template_key,
+                            'struct_only': True,
+                        })
         except Exception:
             continue
 
@@ -926,7 +1085,7 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
     templates = {}
     
     for template_key, samples in tqdm(template_buckets.items(), desc="阶段2/2: 构建桶级统计"):
-        if len(samples) < 3:  # 过滤样本数太少的桶
+        if len(samples) < min_template_samples:
             continue
 
         # 提取桶内所有样本
@@ -999,15 +1158,41 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
     sorted_items = sorted(templates.items(), key=lambda kv: kv[0])
     templates = {k: v for k, v in sorted_items}
 
-    print(f"生成了 {len(templates)} 个有效的多重集模板桶（已按 center→hop1→hop2 排序）")
+    print(
+        f"生成了 {len(templates)} 个有效的多重集模板桶 "
+        f"（样本数阈值={min_template_samples}，已按 center→hop1→hop2 排序）"
+    )
+    if not templates:
+        raise ValueError(
+            "No template buckets remained after applying min_template_samples"
+        )
 
     # 4. 构建最终库和索引
     su_names = [name for name, _ in SU_DEFS]
     su_max_degrees = torch.tensor([SU_MAX_DEGREE.get(name, 4) for name in su_names], dtype=torch.long)
     
-    # 转换center_index为普通dict（便于序列化）
-    center_index_dict = {k: sorted(list(v), key=lambda key: key) for k, v in center_index.items()}
-    role_index_dict = dict(role_index)
+    # 只保留最终模板对应的索引，避免低频桶被删除后出现悬空键。
+    valid_template_keys = set(templates.keys())
+    center_index_dict = {
+        int(center_su): sorted(
+            [key for key in keys if key in valid_template_keys],
+            key=lambda key: key,
+        )
+        for center_su, keys in center_index.items()
+        if any(key in valid_template_keys for key in keys)
+    }
+    role_index_dict = {
+        role_key: [
+            sample for sample in samples
+            if not sample or sample.get('template_key') in valid_template_keys
+        ]
+        for role_key, samples in role_index.items()
+    }
+    role_index_dict = {
+        role_key: samples
+        for role_key, samples in role_index_dict.items()
+        if samples
+    }
 
     final_library = {
         'templates': templates,
@@ -1015,7 +1200,16 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
         'role_index': role_index_dict,        # (center_su, role, su_type) -> list(sample_info)
         'su_max_degrees': su_max_degrees,
         'library_type': '3hop_enhanced_v2',
-        'total_templates': len(templates)
+        'total_templates': len(templates),
+        'g2s_config': g2s_config.to_dict(),
+        'build_stats': {
+            'source_graphs_loaded': int(len(raw_loaded)),
+            'source_graphs_included': int(len(raw_all)),
+            'source_graphs_excluded_small': int(excluded_small_graphs),
+            'minimum_source_graph_nodes': int(MIN_SOURCE_GRAPH_NODES),
+            'allow_missing_shifts': bool(allow_missing_shifts),
+            'min_template_samples': int(min_template_samples),
+        },
     }
     
     print("V2版本3-hop模板库构建完成！")
@@ -1038,6 +1232,25 @@ def merge_3hop_libraries_v2(base_lib: dict, add_lib: dict) -> dict:
     """将 add_lib 的模板与索引增量合并到 base_lib 上，返回合并后的库。"""
     if base_lib is None or not isinstance(base_lib, dict):
         return add_lib
+
+    base_config = dict(base_lib.get('g2s_config', {}) or {})
+    add_config = dict(add_lib.get('g2s_config', {}) or {})
+    if base_config and add_config:
+        config_keys = (
+            'k_hop', 'hid', 'latent_dim', 'n_node_feat', 'n_edge_feat',
+            'n_su_feat', 'n_layers', 'g_dim', 'predict_intensity',
+        )
+        incompatible = [
+            key for key in config_keys
+            if key in base_config and key in add_config
+            and base_config[key] != add_config[key]
+        ]
+        if incompatible:
+            details = ', '.join(
+                f"{key}: {base_config[key]} != {add_config[key]}"
+                for key in incompatible
+            )
+            raise ValueError(f"Cannot merge libraries with incompatible G2S configs: {details}")
 
     base_templates = base_lib.get('templates', {})
     add_templates = add_lib.get('templates', {})
@@ -1090,6 +1303,7 @@ def merge_3hop_libraries_v2(base_lib: dict, add_lib: dict) -> dict:
         a['center_mu'] = center_mu
         a['center_pi'] = center_pi
         a['sorted_idx_by_mu'] = sorted_idx_by_mu if has_numeric else None
+        a['nmr_range'] = (mu_min, mu_max)
         a['sample_count'] = sample_count
         # 其余字段（center_su, hop1_counts, hop2_counts, nmr_range）保持不变
 
@@ -1127,6 +1341,25 @@ def merge_3hop_libraries_v2(base_lib: dict, add_lib: dict) -> dict:
 
     base_lib['total_templates'] = len(base_lib.get('templates', {}))
     base_lib['library_type'] = add_lib.get('library_type', base_lib.get('library_type', '3hop_enhanced_v2'))
+    if add_lib.get('g2s_config'):
+        base_lib['g2s_config'] = dict(add_lib['g2s_config'])
+    base_stats = dict(base_lib.get('build_stats', {}) or {})
+    add_stats = dict(add_lib.get('build_stats', {}) or {})
+    for key in ('source_graphs_loaded', 'source_graphs_included', 'source_graphs_excluded_small'):
+        if key in add_stats:
+            base_stats[key] = int(base_stats.get(key, 0)) + int(add_stats[key])
+    if 'minimum_source_graph_nodes' in add_stats:
+        base_stats['minimum_source_graph_nodes'] = int(add_stats['minimum_source_graph_nodes'])
+    if 'allow_missing_shifts' in add_stats:
+        base_stats['allow_missing_shifts'] = bool(
+            base_stats.get('allow_missing_shifts', False) or add_stats['allow_missing_shifts']
+        )
+    if 'min_template_samples' in add_stats:
+        base_stats['min_template_samples'] = min(
+            int(base_stats.get('min_template_samples', add_stats['min_template_samples'])),
+            int(add_stats['min_template_samples']),
+        )
+    base_lib['build_stats'] = base_stats
     if 'su_max_degrees' not in base_lib:
         base_lib['su_max_degrees'] = add_lib.get('su_max_degrees')
     return base_lib
@@ -1157,6 +1390,14 @@ if __name__ == '__main__':
     build_parser.add_argument('--skip_role_index', action='store_true', help='跳过 hop1/hop2 角色索引采样以提速降内存')
     build_parser.add_argument('--amp', action='store_true', help='启用半精度推理（需要GPU）')
     build_parser.add_argument('--prefetch_factor', type=int, default=2, help='DataLoader 预取批次数（workers>0时生效）')
+    build_parser.add_argument(
+        '--allow_missing_shifts', action='store_true',
+        help='结构扩展模式：允许 real_ppm 缺失/为0，使用G2S生成 z 和预测 mu。'
+    )
+    build_parser.add_argument(
+        '--min_template_samples', type=int, default=3,
+        help='当前构建保留模板的最小样本数；分片扩展时应设为1，最终筛选再统一设为3。'
+    )
     build_parser.add_argument('--base_lib', type=str, default=None,
                       help='已有库文件路径；提供则将此次构建的库合并进该库')
     build_parser.add_argument('--merge_in_place', action='store_true',
@@ -1172,6 +1413,10 @@ if __name__ == '__main__':
                       help='严格模式（默认开启，只保留完全合法的模板）')
     filter_parser.add_argument('--verbose', '-v', action='store_true', default=True,
                       help='输出详细信息')
+    filter_parser.add_argument(
+        '--min_samples', type=int, default=3,
+        help='最终库中每个模板的最小样本数（默认3）。'
+    )
     
     # ========== rules 子命令 ==========
     rules_parser = subparsers.add_parser('rules', help='打印SU连接规则摘要')
@@ -1184,7 +1429,8 @@ if __name__ == '__main__':
             input_lib_path=args.input,
             output_lib_path=args.output,
             strict_mode=args.strict,
-            verbose=args.verbose
+            verbose=args.verbose,
+            min_samples=args.min_samples,
         )
         exit(0)
     
@@ -1212,6 +1458,8 @@ if __name__ == '__main__':
         parser_legacy.add_argument('--skip_role_index', action='store_true')
         parser_legacy.add_argument('--amp', action='store_true')
         parser_legacy.add_argument('--prefetch_factor', type=int, default=2)
+        parser_legacy.add_argument('--allow_missing_shifts', action='store_true')
+        parser_legacy.add_argument('--min_template_samples', type=int, default=3)
         parser_legacy.add_argument('--base_lib', type=str, default=None)
         parser_legacy.add_argument('--merge_in_place', action='store_true')
         args = parser_legacy.parse_args()
@@ -1235,7 +1483,9 @@ if __name__ == '__main__':
         mols_per_chunk=args.mols_per_chunk,
         skip_role_index=args.skip_role_index,
         amp=args.amp,
-        prefetch_factor=args.prefetch_factor
+        prefetch_factor=args.prefetch_factor,
+        allow_missing_shifts=args.allow_missing_shifts,
+        min_template_samples=args.min_template_samples,
     )
     
     # 若存在 base_lib，则执行合并
@@ -1249,9 +1499,11 @@ if __name__ == '__main__':
                 out_path = args.base_lib
             print(f"已将新库与基库合并，输出路径将为: {out_path}")
         except Exception as e:
-            print(f"  -> 警告: 读取/合并 base_lib 失败，将仅保存新库: {e}")
+            raise RuntimeError(f"读取/合并 base_lib 失败，已停止以避免丢失基础库: {e}") from e
 
     # 保存库文件
+    out_dir = os.path.dirname(out_path) or '.'
+    os.makedirs(out_dir, exist_ok=True)
     torch.save(lib, out_path)
     print(f"\nV2 3-hop模板库已保存到: {out_path}")
     print(f" -> 找到 {lib['total_templates']} 个独特的多重集模板桶")
@@ -1288,8 +1540,6 @@ if __name__ == '__main__':
         })
 
     if rows:
-        out_dir = os.path.dirname(out_path) or '.'
-        os.makedirs(out_dir, exist_ok=True)
         # 根据 (center_su_idx, hop1_multiset, hop2_multiset) 排序
         rows_sorted = sorted(rows, key=lambda r: (r['center_su_idx'], r['hop1_multiset'], r['hop2_multiset']))
         df = pd.DataFrame(rows_sorted, columns=['center_su_idx','center_su','hop1_multiset','hop2_multiset','sample_count','mu_min','mu_max','center_mu_median'])

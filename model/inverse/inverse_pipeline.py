@@ -2677,7 +2677,7 @@ class InversePipelineV3:
                     S_target=S_target,
                 )
                 current_diff['source_stage'] = 'post_layer3'
-                current_diff['spectral_contract'] = 'g2s_layer3'
+                current_diff['spectral_contract'] = 'template_sample_mu_layer3'
             else:
                 current_diff['layer3_candidate_diagnostics'] = layer3_diagnostics
             cycle_post_layer3_r2 = float(current_diff.get('r2', float('nan')))

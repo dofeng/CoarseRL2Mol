@@ -11,7 +11,12 @@ from model.inverse.layer1.hop1_adjuster import Hop1Adjuster, PeakRegion
 from model.inverse.inverse_pipeline import InversePipelineV3
 from model.inverse.layer1.inverse_layer1 import Layer1Assigner, Layer1GreedyCompleter
 from model.inverse.layer1.layer1_validator import Layer1GraphValidator
-from model.shared.coarse_graph import NUM_SU_TYPES, PPM_AXIS
+from model.inverse.layer1.port_role_balance import (
+    apply_layer1_port_balance,
+    audit_layer1_port_roles,
+    select_layer1_port_balance,
+)
+from model.shared.coarse_graph import E_SU, NUM_SU_TYPES, PPM_AXIS
 from model.shared.inverse_common import _NodeV3, lorentzian_spectrum
 
 
@@ -49,6 +54,46 @@ def test_inverse_constructors_do_not_expose_obsolete_intensity_controls() -> Non
     assert 'unit_peak_intensity' not in inspect.signature(InversePipelineV3).parameters
     assert 'intensity_scale' not in inspect.signature(Layer1Assigner).parameters
     assert 'unit_peak_intensity' not in inspect.signature(Hop1Adjuster).parameters
+
+
+def test_failed_616_histogram_is_balanced_by_one_su12_to_su11_conversion() -> None:
+    H = torch.tensor([
+        1, 10, 11, 12, 0, 80, 2, 0, 0, 23, 30, 35, 57, 59, 1, 8, 3,
+        2, 2, 90, 3, 0, 17, 50, 3, 1, 3, 2, 56, 55, 0, 0, 0,
+    ])
+    special_degree_meta = {
+        19: {1: 53, 2: 20, 3: 17},
+        20: {1: 0, 2: 0, 3: 3},
+        21: {2: 0, 3: 0},
+    }
+
+    before = audit_layer1_port_roles(H, special_degree_meta)
+    selection = select_layer1_port_balance(H, before)
+    H_after, diagnostics = apply_layer1_port_balance(
+        H,
+        selection,
+        special_degree_meta,
+    )
+
+    assert before['total_ports'] == 1344
+    assert before['aromatic_internal_ports'] == 635
+    assert before['non_aromatic_internal_ports'] == 399
+    assert selection == {
+        'required': True,
+        'possible': True,
+        'from_su': 12,
+        'to_su': 11,
+        'count': 1,
+        'reason': 'pre_layer1_port_role_balance',
+    }
+    assert int(H_after[11].item()) == 36
+    assert int(H_after[12].item()) == 56
+    assert int(H_after.sum().item()) == int(H.sum().item()) == 616
+    assert torch.equal(H_after.float() @ E_SU, H.float() @ E_SU)
+    assert diagnostics['after']['total_ports'] == 1344
+    assert diagnostics['after']['aromatic_internal_ports'] == 634
+    assert diagnostics['after']['non_aromatic_internal_ports'] == 398
+    assert diagnostics['after']['ok'] is True
 
 
 def test_active_library_supplies_weighted_median_unit_peak(tmp_path) -> None:
@@ -156,6 +201,25 @@ class _CompletionAssigner:
     def _node_exact_hop1_shift_state_ok(_node, **_kwargs):
         return True
 
+    @staticmethod
+    def _node_fixed_anchor_target(node):
+        return 1 if int(node.su_type) == 11 else 0
+
+    @staticmethod
+    def _required_external_count_for_node(node, nodes):
+        if int(node.su_type) != 11:
+            return 0
+        return sum(
+            1
+            for neighbor_id in node.hop1_ids
+            if int(nodes[int(neighbor_id)].su_type) == 22
+        )
+
+    def _has_required_external_for_node(self, node, nodes):
+        if int(node.su_type) != 11:
+            return True
+        return self._required_external_count_for_node(node, nodes) == 1
+
     def _can_add_hop1_connection(self, _nodes, left, right):
         return tuple(sorted((left.global_id, right.global_id))) in self.allowed
 
@@ -260,6 +324,170 @@ def test_completion_failed_repair_restores_graph_and_reports_fresh_domain() -> N
     assert nodes[1].hop1_ids == [0]
 
 
+def test_two_phase_completion_finishes_external_side_before_aromatic_side() -> None:
+    nodes = [
+        _NodeV3(global_id=0, su_type=11, target_hop1_degree=3),
+        _NodeV3(global_id=1, su_type=22, target_hop1_degree=1),
+        _NodeV3(global_id=2, su_type=13, target_hop1_degree=1),
+        _NodeV3(global_id=3, su_type=13, target_hop1_degree=1),
+    ]
+    assigner = _CompletionAssigner(nodes, {(0, 1), (0, 2), (0, 3)})
+
+    non_aromatic = Layer1GreedyCompleter(
+        assigner,
+        nodes,
+        phase='non_aromatic',
+    ).solve()
+
+    assert non_aromatic['final_open_ports'] == 0
+    assert nodes[0].hop1_ids == [1]
+    assert nodes[0].remaining_hop1_slots() == 2
+    assert nodes[1].remaining_hop1_slots() == 0
+    assert nodes[2].hop1_ids == []
+    assert nodes[3].hop1_ids == []
+
+    aromatic = Layer1GreedyCompleter(
+        assigner,
+        nodes,
+        phase='aromatic',
+    ).solve()
+
+    assert aromatic['final_open_ports'] == 0
+    assert set(nodes[0].hop1_ids) == {1, 2, 3}
+    assert all(node.remaining_hop1_slots() == 0 for node in nodes)
+
+
+def test_aromatic_completion_covers_even_su12_pool_without_fixed_edges() -> None:
+    nodes = [
+        _NodeV3(global_id=index, su_type=12, target_hop1_degree=3)
+        for index in range(56)
+    ]
+    allowed = {
+        (left, right)
+        for left in range(len(nodes))
+        for right in range(left + 1, len(nodes))
+    }
+    completer = Layer1GreedyCompleter(
+        _CompletionAssigner(nodes, allowed),
+        nodes,
+        phase='aromatic',
+    )
+
+    completer._complete_required_su12_roles()
+
+    assert sum(len(node.hop1_ids) for node in nodes) // 2 == 28
+    assert all(int(node.hop1_su.get(12, 0)) == 1 for node in nodes)
+    assert all(not node.fixed_hop1_ids for node in nodes)
+
+
+def test_aromatic_completion_covers_odd_su12_pool_with_unlocked_chain() -> None:
+    nodes = [
+        _NodeV3(global_id=index, su_type=12, target_hop1_degree=3)
+        for index in range(5)
+    ]
+    allowed = {
+        (left, right)
+        for left in range(len(nodes))
+        for right in range(left + 1, len(nodes))
+    }
+    completer = Layer1GreedyCompleter(
+        _CompletionAssigner(nodes, allowed),
+        nodes,
+        phase='aromatic',
+    )
+
+    completer._complete_required_su12_roles()
+
+    self_counts = [int(node.hop1_su.get(12, 0)) for node in nodes]
+    assert sum(len(node.hop1_ids) for node in nodes) // 2 == 3
+    assert sorted(self_counts) == [1, 1, 1, 1, 2]
+    assert all(not node.fixed_hop1_ids for node in nodes)
+
+
+def test_aromatic_completion_rejects_single_su12_role() -> None:
+    nodes = [_NodeV3(global_id=0, su_type=12, target_hop1_degree=3)]
+    completer = Layer1GreedyCompleter(
+        _CompletionAssigner(nodes, set()),
+        nodes,
+        phase='aromatic',
+    )
+
+    with pytest.raises(RuntimeError, match='single SU12'):
+        completer._complete_required_su12_roles()
+
+
+def test_repair_uses_the_saved_next_partner_branch() -> None:
+    nodes = [
+        _NodeV3(global_id=index, su_type=10 + index, target_hop1_degree=1)
+        for index in range(4)
+    ]
+    assigner = _CompletionAssigner(nodes, {(0, 1), (0, 2), (1, 3)})
+    completer = Layer1GreedyCompleter(assigner, nodes)
+
+    assert completer._add_edge(0, 1)
+    completer._decision_stack.append({
+        'center_id': 0,
+        'chosen_id': 1,
+        'alternatives': [1, 2],
+        'next_index': 1,
+        'decision_kind': 'ordinary',
+    })
+
+    summary = completer.solve()
+
+    assert summary['final_open_ports'] == 0
+    assert nodes[0].hop1_ids == [2]
+    assert nodes[1].hop1_ids == [3]
+    assert completer.repair_rewinds == 1
+
+
+def test_su11_role_reservation_does_not_choose_or_lock_a_partner() -> None:
+    assigner = Layer1Assigner(device='cpu')
+    nodes = [
+        _NodeV3(global_id=0, su_type=11, target_hop1_degree=3),
+        _NodeV3(global_id=1, su_type=22, target_hop1_degree=1),
+        _NodeV3(global_id=2, su_type=23, target_hop1_degree=2),
+    ]
+
+    assigner._reserve_alkyl_aromatic_11_external_roles(nodes)
+
+    assert all(node.hop1_ids == [] for node in nodes)
+    assert all(node.fixed_hop1_ids == set() for node in nodes)
+
+
+def test_completed_su11_external_role_is_not_a_fixed_partner() -> None:
+    assigner = Layer1Assigner(device='cpu')
+    nodes = [
+        _NodeV3(global_id=0, su_type=11, target_hop1_degree=3),
+        _NodeV3(global_id=1, su_type=22, target_hop1_degree=1),
+    ]
+    nodes[0].hop1_ids = [1]
+    nodes[0].hop1_su = Counter({22: 1})
+    nodes[1].hop1_ids = [0]
+    nodes[1].hop1_su = Counter({11: 1})
+
+    assert assigner._su11_external_role_errors(nodes) == []
+    assert all(not node.fixed_hop1_ids for node in nodes)
+
+
+def test_phase_port_audit_counts_reserved_su11_boundary_once() -> None:
+    assigner = Layer1Assigner(device='cpu')
+    nodes = [
+        _NodeV3(global_id=0, su_type=11, target_hop1_degree=3),
+        _NodeV3(global_id=1, su_type=12, target_hop1_degree=3),
+        _NodeV3(global_id=2, su_type=23, target_hop1_degree=2),
+    ]
+
+    diagnostics = assigner._layer1_phase_port_diagnostics(nodes)
+
+    assert diagnostics['su11_external_demands'] == 1
+    assert diagnostics['non_aromatic_open_ports'] == 2
+    assert diagnostics['projected_non_aromatic_internal_ports'] == 1
+    assert diagnostics['aromatic_open_ports_including_su11_external'] == 6
+    assert diagnostics['projected_aromatic_ring_ports'] == 5
+    assert diagnostics['ok'] is False
+
+
 class _ValidatorAssigner:
     _carbon_su_set = set()
 
@@ -275,7 +503,7 @@ class _ValidatorAssigner:
         return int(node.target_hop1_degree)
 
     @staticmethod
-    def _su11_fixed_external_errors(_nodes):
+    def _su11_external_role_errors(_nodes):
         return []
 
     @staticmethod
@@ -355,6 +583,53 @@ def test_validator_requires_the_su9_carbonyl_edge_to_be_bidirectionally_fixed() 
     valid, errors = validator.validate(nodes, histogram)
     assert valid is True
     assert errors == []
+
+
+def test_validator_requires_exactly_one_fixed_su10_external_neighbor() -> None:
+    nodes = [
+        _NodeV3(global_id=0, su_type=10, target_hop1_degree=1),
+        _NodeV3(global_id=1, su_type=10, target_hop1_degree=1),
+    ]
+    nodes[0].hop1_ids = [1]
+    nodes[0].hop1_su = Counter({10: 1})
+    nodes[1].hop1_ids = [0]
+    nodes[1].hop1_su = Counter({10: 1})
+    histogram = torch.zeros(NUM_SU_TYPES, dtype=torch.long)
+    histogram[10] = 2
+    validator = Layer1GraphValidator(_ValidatorAssigner())
+
+    valid, errors = validator.validate(nodes, histogram)
+    assert valid is False
+    assert any('SU10边' in error and '未双向锁定' in error for error in errors)
+
+    nodes[0].fixed_hop1_ids.add(1)
+    nodes[1].fixed_hop1_ids.add(0)
+    valid, errors = validator.validate(nodes, histogram)
+    assert valid is True
+    assert errors == []
+
+
+def test_validator_requires_su12_neighbor_without_requiring_fixed_edge() -> None:
+    nodes = [
+        _NodeV3(global_id=0, su_type=12, target_hop1_degree=1),
+        _NodeV3(global_id=1, su_type=12, target_hop1_degree=1),
+    ]
+    histogram = torch.zeros(NUM_SU_TYPES, dtype=torch.long)
+    histogram[12] = 2
+    validator = Layer1GraphValidator(_ValidatorAssigner())
+
+    valid, errors = validator.validate(nodes, histogram)
+    assert valid is False
+    assert any('至少包含一个SU12邻居' in error for error in errors)
+
+    nodes[0].hop1_ids = [1]
+    nodes[0].hop1_su = Counter({12: 1})
+    nodes[1].hop1_ids = [0]
+    nodes[1].hop1_su = Counter({12: 1})
+    valid, errors = validator.validate(nodes, histogram)
+    assert valid is True
+    assert errors == []
+    assert all(not node.fixed_hop1_ids for node in nodes)
 
 
 @pytest.mark.parametrize(

@@ -85,10 +85,12 @@ class Layer1GraphValidator:
                 if node_id not in set(nodes[fixed_id].fixed_hop1_ids or set()):
                     errors.append(f"fixed边不对称: {node_id}<->{fixed_id}")
 
-        errors.extend(a._su11_fixed_external_errors(nodes))
+        errors.extend(a._su11_external_role_errors(nodes))
 
         for node in nodes:
             node_id = int(node.global_id)
+            ids = [int(x) for x in list(node.hop1_ids or [])]
+            fixed_ids = set(int(x) for x in set(node.fixed_hop1_ids or set()))
             neighbor_nodes = a._current_neighbor_nodes(nodes, node)
             neighbor_types = [int(x.su_type) for x in neighbor_nodes]
             port_sets = a._port_sets_for_node(node)
@@ -131,6 +133,31 @@ class Layer1GraphValidator:
                     )
                 if su_type == 18 and 18 in paired:
                     errors.append(f"节点{node_id}(SU18): 禁止18-18固定配对")
+
+            if su_type == 10:
+                su10_ids = [
+                    int(neighbor_id)
+                    for neighbor_id in ids
+                    if 0 <= int(neighbor_id) < len(nodes)
+                    and int(nodes[int(neighbor_id)].su_type) == 10
+                ]
+                if len(su10_ids) != 1:
+                    errors.append(
+                        f"节点{node_id}(SU10): 外接SU10角色边必须恰好一个, "
+                        f"su10_neighbors={su10_ids}"
+                    )
+                elif (
+                    su10_ids[0] not in fixed_ids
+                    or node_id not in set(nodes[su10_ids[0]].fixed_hop1_ids or set())
+                ):
+                    errors.append(
+                        f"节点{node_id}(SU10): 外接SU10边{su10_ids[0]}未双向锁定"
+                    )
+
+            if su_type == 12 and 12 not in neighbor_types:
+                errors.append(
+                    f"节点{node_id}(SU12): 完整1-hop必须至少包含一个SU12邻居"
+                )
 
             if su_type in set(a._carbon_su_set) and not a._node_exact_hop1_shift_state_ok(
                 node,

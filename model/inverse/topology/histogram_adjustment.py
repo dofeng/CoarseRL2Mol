@@ -1299,17 +1299,24 @@ def apply_histogram_adjustment_plan(
         convertible_inventory = candidate_inventory
         applied_ops.append(group.to_dict())
 
-    parity_op = getattr(histogram_plan, "parity_balance_op", None)
-    if parity_op is not None:
-        source = int(parity_op.from_su)
-        target = int(parity_op.to_su)
-        count = max(1, int(parity_op.count))
-        node_ids = [int(value) for value in list(parity_op.node_ids or [])]
+    for balance_field in ("parity_balance_op", "port_role_balance_op"):
+        balance_op = getattr(histogram_plan, balance_field, None)
+        if balance_op is None:
+            continue
+        reason_prefix = (
+            "parity_balance"
+            if balance_field == "parity_balance_op"
+            else "port_role_balance"
+        )
+        source = int(balance_op.from_su)
+        target = int(balance_op.to_su)
+        count = max(1, int(balance_op.count))
+        node_ids = [int(value) for value in list(balance_op.node_ids or [])]
         if int(convertible_inventory.get(source, 0)) < count:
             return Stage3AdjustmentApplyResult(
                 nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],
                 rejected_ops=[{
-                    "reason": "parity_balance_donor_not_in_authorized_stage3_pool",
+                    "reason": f"{reason_prefix}_donor_not_in_authorized_stage3_pool",
                     "from_su": source,
                     "required": count,
                     "available": int(convertible_inventory.get(source, 0)),
@@ -1322,7 +1329,7 @@ def apply_histogram_adjustment_plan(
             return Stage3AdjustmentApplyResult(
                 nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],
                 rejected_ops=[{
-                    "reason": "parity_balance_real_donor_ids_missing",
+                    "reason": f"{reason_prefix}_real_donor_ids_missing",
                     "from_su": source,
                     "required": count,
                     "provided_node_ids": node_ids,
@@ -1335,7 +1342,9 @@ def apply_histogram_adjustment_plan(
         if candidate is None or int(candidate.sum().item()) != initial_total:
             return Stage3AdjustmentApplyResult(
                 nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],
-                rejected_ops=[{"reason": "parity_balance_histogram_conservation_failed"}],
+                rejected_ops=[{
+                    "reason": f"{reason_prefix}_histogram_conservation_failed"
+                }],
                 changed=False,
                 conservation_before={"su_count": initial_total},
                 conservation_after={"su_count": initial_total},
@@ -1346,7 +1355,7 @@ def apply_histogram_adjustment_plan(
                 return Stage3AdjustmentApplyResult(
                     nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],
                     rejected_ops=[{
-                        "reason": "parity_balance_real_donor_node_type_mismatch",
+                        "reason": f"{reason_prefix}_real_donor_node_type_mismatch",
                         "node_id": int(node_id),
                         "from_su": source,
                     }],
@@ -1358,14 +1367,14 @@ def apply_histogram_adjustment_plan(
             history.append({
                 "from_su": source,
                 "to_su": target,
-                "reason": str(parity_op.reason),
+                "reason": str(balance_op.reason),
             })
             setattr(node, "su_type", target)
             setattr(node, "stage3_conversion_history", history)
         H_out = candidate
         convertible_inventory[source] = int(convertible_inventory.get(source, 0)) - count
         convertible_inventory[target] = int(convertible_inventory.get(target, 0)) + count
-        applied_ops.append({"parity_balance_op": parity_op.to_dict()})
+        applied_ops.append({balance_field: balance_op.to_dict()})
 
     planned_h_after = getattr(histogram_plan, "H_after", None)
     if planned_h_after is not None:

@@ -31,6 +31,10 @@ from .hop1_adjuster import (
     hop1_counter_to_multiset,
 )
 from .layer1_validator import Layer1GraphValidator
+from .port_role_balance import (
+    LAYER1_AROMATIC_RING_TYPES,
+    audit_layer1_port_roles,
+)
 
 
 class Layer1GreedyCompleter:
@@ -39,9 +43,17 @@ class Layer1GreedyCompleter:
     MAX_REPAIR_DEPTH = 2
     MAX_REPAIR_ATTEMPTS = 64
 
-    def __init__(self, assigner: Any, nodes: List[_NodeV3]) -> None:
+    def __init__(
+        self,
+        assigner: Any,
+        nodes: List[_NodeV3],
+        phase: str = 'all',
+    ) -> None:
+        if str(phase) not in {'all', 'non_aromatic', 'aromatic'}:
+            raise ValueError(f"unsupported Layer1 completion phase: {phase}")
         self.assigner = assigner
         self.nodes = nodes
+        self.phase = str(phase)
         self.started_at = time.perf_counter()
         self.decisions = 0
         self.repair_attempts = 0
@@ -53,14 +65,52 @@ class Layer1GreedyCompleter:
         ] = {}
         self._decision_stack: List[Dict[str, Any]] = []
         self._failed_edge_states: Set[Tuple[Tuple[int, int], ...]] = set()
+        self._repair_branch_keys: Set[Tuple[Any, ...]] = set()
         self._rebuild_domains()
+
+    def _su11_external_complete(self, node: _NodeV3) -> bool:
+        return bool(self.assigner._has_required_external_for_node(node, self.nodes))
+
+    def _node_is_in_phase(self, node: _NodeV3) -> bool:
+        su_type = int(node.su_type)
+        if self.phase == 'all':
+            return True
+        if self.phase == 'aromatic':
+            return su_type in LAYER1_AROMATIC_RING_TYPES
+        if su_type == 11:
+            return not self._su11_external_complete(node)
+        return su_type not in LAYER1_AROMATIC_RING_TYPES
 
     def _active_ids(self) -> List[int]:
         return sorted(
             int(node.global_id)
             for node in self.nodes
             if int(node.remaining_hop1_slots()) > 0
+            and self._node_is_in_phase(node)
         )
+
+    def _phase_open_ports(self) -> int:
+        if self.phase != 'non_aromatic':
+            return int(sum(
+                int(node.remaining_hop1_slots())
+                for node in self.nodes
+                if self._node_is_in_phase(node)
+            ))
+        non_aromatic = int(sum(
+            int(node.remaining_hop1_slots())
+            for node in self.nodes
+            if int(node.su_type) not in LAYER1_AROMATIC_RING_TYPES
+        ))
+        pending_su11 = int(sum(
+            max(
+                0,
+                int(self.assigner._node_fixed_anchor_target(node))
+                - int(self.assigner._required_external_count_for_node(node, self.nodes)),
+            )
+            for node in self.nodes
+            if int(node.su_type) == 11
+        ))
+        return int(non_aromatic + pending_su11)
 
     @staticmethod
     def _is_subcounter(current: Counter, target: Counter) -> bool:
@@ -202,6 +252,77 @@ class Layer1GreedyCompleter:
             return None, []
         return best[1], best[2]
 
+    @staticmethod
+    def _su12_role_is_complete(node: _NodeV3) -> bool:
+        return bool(
+            int(getattr(node, 'su_type', -1)) != 12
+            or int(Counter(getattr(node, 'hop1_su', {}) or {}).get(12, 0)) >= 1
+        )
+
+    def _uncovered_su12_ids(self) -> List[int]:
+        if self.phase != 'aromatic':
+            return []
+        return sorted(
+            int(node.global_id)
+            for node in self.nodes
+            if int(node.su_type) == 12
+            and not self._su12_role_is_complete(node)
+        )
+
+    def _select_su12_role_center(self) -> Tuple[Optional[_NodeV3], List[int]]:
+        """Select an uncovered SU12 and a legal SU12 partner.
+
+        SU12-SU12 is a required aromatic role, not a fixed edge. Prefer pairing
+        two uncovered nodes so one node cannot consume several SU12 ports while
+        another node is still uncovered. An odd final node may attach to an
+        already covered SU12 with remaining capacity.
+        """
+        uncovered = set(self._uncovered_su12_ids())
+        if not uncovered:
+            return None, []
+
+        best: Optional[Tuple[Tuple[int, int, int], _NodeV3, List[int]]] = None
+        for node_id in sorted(uncovered):
+            node = self.nodes[int(node_id)]
+            all_partners = [
+                int(partner_id)
+                for partner_id in self.domains.get(int(node_id), set())
+                if int(self.nodes[int(partner_id)].su_type) == 12
+                and int(self.nodes[int(partner_id)].remaining_hop1_slots()) > 0
+            ]
+            uncovered_partners = [
+                int(partner_id)
+                for partner_id in all_partners
+                if int(partner_id) in uncovered
+            ]
+            partners = uncovered_partners or all_partners
+            key = (
+                len(partners),
+                int(node.remaining_hop1_slots()),
+                int(node_id),
+            )
+            if best is None or key < best[0]:
+                best = (key, node, partners)
+        if best is None:
+            return None, []
+
+        center, partners = best[1], best[2]
+        base_order = self._order_partners(center, partners)
+        base_rank = {
+            int(partner_id): int(rank)
+            for rank, partner_id in enumerate(base_order)
+        }
+        ordered = sorted(
+            (int(partner_id) for partner_id in partners),
+            key=lambda partner_id: (
+                int(partner_id not in uncovered),
+                int(Counter(self.nodes[partner_id].hop1_su).get(12, 0)),
+                int(base_rank.get(int(partner_id), len(base_rank))),
+                int(partner_id),
+            ),
+        )
+        return center, ordered
+
     def _complete_motif_usage(self) -> Counter:
         usage: Counter = Counter()
         for node in self.nodes:
@@ -282,6 +403,22 @@ class Layer1GreedyCompleter:
         )
 
     def _all_complete_and_exact(self) -> bool:
+        if self.phase == 'non_aromatic':
+            non_aromatic_complete = all(
+                int(node.remaining_hop1_slots()) == 0
+                and self.assigner._node_exact_hop1_shift_state_ok(
+                    node,
+                    require_full=True,
+                )
+                for node in self.nodes
+                if int(node.su_type) not in LAYER1_AROMATIC_RING_TYPES
+            )
+            su11_external_complete = all(
+                self._su11_external_complete(node)
+                for node in self.nodes
+                if int(node.su_type) == 11
+            )
+            return bool(non_aromatic_complete and su11_external_complete)
         return all(
             int(node.remaining_hop1_slots()) == 0
             and self.assigner._node_exact_hop1_shift_state_ok(
@@ -289,6 +426,7 @@ class Layer1GreedyCompleter:
                 require_full=True,
             )
             for node in self.nodes
+            if self._node_is_in_phase(node)
         )
 
     def _edge_state_signature(self) -> Tuple[Tuple[int, int], ...]:
@@ -316,7 +454,74 @@ class Layer1GreedyCompleter:
         # domain rebuild over leaving diagnostics based on incremental state.
         self._rebuild_domains()
 
-    def _try_local_repair(self) -> bool:
+    def _repair_branch_key(
+        self,
+        center_id: int,
+        partner_id: int,
+        decision_kind: str,
+    ) -> Tuple[Any, ...]:
+        center = self.nodes[int(center_id)]
+        partner = self.nodes[int(partner_id)]
+        partition_fn = getattr(
+            self.assigner,
+            '_node_anchor_partition',
+            lambda _node: None,
+        )
+        anchor_target_fn = getattr(
+            self.assigner,
+            '_node_fixed_anchor_target',
+            lambda _node: 0,
+        )
+        anchor_mode_fn = getattr(
+            self.assigner,
+            '_node_anchor_mode',
+            lambda _node: None,
+        )
+
+        def _node_key(node: _NodeV3) -> Tuple[Any, ...]:
+            return (
+                int(node.su_type),
+                int(self.assigner._node_target_degree(node) or -1),
+                tuple(sorted(int(x) for x in Counter(node.hop1_su).elements())),
+                int(node.remaining_hop1_slots()),
+                partition_fn(node),
+                int(anchor_target_fn(node)),
+                anchor_mode_fn(node),
+                bool(self._su12_role_is_complete(node)),
+            )
+
+        partner_component_profile = tuple(sorted(
+            (_node_key(self.nodes[int(node_id)]) for node_id in self._component(partner_id)),
+            key=repr,
+        ))
+        open_state_profile = tuple(sorted(
+            (
+                _node_key(node)
+                for node in self.nodes
+                if int(node.remaining_hop1_slots()) > 0
+                and self._node_is_in_phase(node)
+            ),
+            key=repr,
+        ))
+
+        return (
+            str(decision_kind),
+            _node_key(center),
+            _node_key(partner),
+            bool(int(partner_id) in self._component(int(center_id))),
+            partner_component_profile,
+            open_state_profile,
+        )
+
+    def _selection_has_immediate_dead_end(self, decision_kind: str) -> bool:
+        if str(decision_kind) == 'su12_role' and self._uncovered_su12_ids():
+            center, partner_ids = self._select_su12_role_center()
+        else:
+            center, partner_ids = self._select_center()
+        return bool(center is not None and not partner_ids)
+
+    def _try_local_repair(self, decision_kind: str = 'ordinary') -> bool:
+        """Backtrack the saved decision branches, preserving the fixed limits."""
         self._failed_edge_states.add(self._edge_state_signature())
         rewound = 0
         rewound_decisions: List[Dict[str, Any]] = []
@@ -334,25 +539,46 @@ class Layer1GreedyCompleter:
             rewound += 1
             self.repair_rewinds += 1
 
-            center, partner_ids = self._select_center()
-            if center is None or not partner_ids:
-                continue
-            ordered = self._order_partners(center, partner_ids)
+            center_id = int(decision['center_id'])
+            saved_order = [
+                int(x) for x in list(decision.get('alternatives', []) or [])
+            ]
+            next_index = max(0, int(decision.get('next_index', 0) or 0))
+            frame_kind = str(decision.get('decision_kind', decision_kind) or decision_kind)
+            saved_untried = saved_order[next_index:]
+            center = self.nodes[int(center_id)]
+            refreshed = self._order_partners(
+                center,
+                list(self.domains.get(int(center_id), set())),
+            )
+            ordered = list(saved_untried)
+            ordered.extend(
+                int(partner_id)
+                for partner_id in refreshed
+                if int(partner_id) != int(decision['chosen_id'])
+                and int(partner_id) not in set(ordered)
+            )
             for alternative_index, partner_id in enumerate(ordered):
+                partner_id = int(partner_id)
+                if int(partner_id) not in self.domains.get(int(center_id), set()):
+                    continue
+                branch_key = self._repair_branch_key(
+                    center_id,
+                    partner_id,
+                    frame_kind,
+                )
+                if branch_key in self._repair_branch_keys:
+                    continue
                 if self.repair_attempts >= int(self.MAX_REPAIR_ATTEMPTS):
                     break
-                partner_id = int(partner_id)
+                self._repair_branch_keys.add(branch_key)
                 self.repair_attempts += 1
-                center_id = int(center.global_id)
                 if not self._add_edge(center_id, partner_id):
-                    self.domains.get(center_id, set()).discard(partner_id)
-                    self.domains.get(partner_id, set()).discard(center_id)
                     continue
 
                 state_signature = self._edge_state_signature()
-                next_center, next_partner_ids = self._select_center()
-                immediate_dead_end = bool(
-                    next_center is not None and not next_partner_ids
+                immediate_dead_end = self._selection_has_immediate_dead_end(
+                    frame_kind
                 )
                 if (
                     state_signature in self._failed_edge_states
@@ -372,58 +598,183 @@ class Layer1GreedyCompleter:
                     'chosen_id': partner_id,
                     'alternatives': ordered,
                     'next_index': int(alternative_index) + 1,
+                    'decision_kind': frame_kind,
                 })
                 return True
 
         self._restore_rewound_decisions(rewound_decisions)
         return False
 
+    def _commit_first_candidate(
+        self,
+        center: _NodeV3,
+        ordered: List[int],
+        decision_kind: str,
+    ) -> bool:
+        if not ordered:
+            return False
+        center_id = int(center.global_id)
+        for candidate_index, chosen_id in enumerate(ordered):
+            chosen_id = int(chosen_id)
+            if not self._add_edge(center_id, chosen_id):
+                continue
+            self.decisions += 1
+            self._decision_stack.append({
+                'center_id': center_id,
+                'chosen_id': chosen_id,
+                'alternatives': [int(x) for x in ordered],
+                'next_index': int(candidate_index) + 1,
+                'decision_kind': str(decision_kind),
+            })
+            return True
+        return False
+
+    def _complete_required_su12_roles(self) -> None:
+        if self.phase != 'aromatic':
+            return
+        su12_count = int(sum(
+            int(node.su_type) == 12 for node in self.nodes
+        ))
+        if int(su12_count) == 1:
+            raise RuntimeError(
+                "layer1_su12_required_role_infeasible: "
+                "a single SU12 cannot have a distinct SU12 neighbor"
+            )
+
+        while self._uncovered_su12_ids():
+            center, partner_ids = self._select_su12_role_center()
+            if center is None or not partner_ids:
+                if self._try_local_repair(decision_kind='su12_role'):
+                    continue
+                uncovered = self._uncovered_su12_ids()
+                raise RuntimeError(
+                    "layer1_su12_required_role_infeasible: "
+                    f"uncovered_ids={uncovered[:16]} "
+                    f"repair_attempts={self.repair_attempts}"
+                )
+            if not self._commit_first_candidate(
+                center,
+                [int(x) for x in partner_ids],
+                decision_kind='su12_role',
+            ):
+                if self._try_local_repair(decision_kind='su12_role'):
+                    continue
+                raise RuntimeError(
+                    "layer1_su12_required_role_infeasible: "
+                    f"center_id={int(center.global_id)}"
+                )
+
+    def _failure_diagnostics(
+        self,
+        center: Optional[_NodeV3],
+        partner_ids: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        open_nodes = [
+            node for node in self.nodes
+            if int(node.remaining_hop1_slots()) > 0
+            and self._node_is_in_phase(node)
+        ]
+        open_ports_by_su: Counter = Counter()
+        for node in open_nodes:
+            open_ports_by_su[int(node.su_type)] += int(
+                node.remaining_hop1_slots()
+            )
+        su12_nodes = [
+            node for node in self.nodes if int(node.su_type) == 12
+        ]
+        uncovered_su12 = [
+            int(node.global_id)
+            for node in su12_nodes
+            if not self._su12_role_is_complete(node)
+        ]
+        multi_covered_su12 = [
+            int(node.global_id)
+            for node in su12_nodes
+            if int(Counter(node.hop1_su).get(12, 0)) > 1
+        ]
+        blocked: Optional[Dict[str, Any]] = None
+        if center is not None:
+            partner_ids = [int(x) for x in list(partner_ids or [])]
+            blocked = {
+                'node_id': int(center.global_id),
+                'su_type': int(center.su_type),
+                'remaining_ports': int(center.remaining_hop1_slots()),
+                'current_hop1': sorted(
+                    int(x) for x in Counter(center.hop1_su).elements()
+                ),
+                'legal_partner_types': sorted({
+                    int(self.nodes[x].su_type) for x in partner_ids
+                }),
+                'exact_options': [
+                    list(int(x) for x in option)
+                    for option in self._exact_options(center)[:12]
+                ],
+            }
+        return {
+            'blocked': blocked,
+            'open_node_count': int(len(open_nodes)),
+            'open_ports_by_su': dict(sorted(open_ports_by_su.items())),
+            'open_nodes': [
+                {
+                    'node_id': int(node.global_id),
+                    'su_type': int(node.su_type),
+                    'remaining_ports': int(node.remaining_hop1_slots()),
+                    'current_hop1': sorted(
+                        int(x) for x in Counter(node.hop1_su).elements()
+                    ),
+                }
+                for node in open_nodes[:16]
+            ],
+            'su12': {
+                'total': int(len(su12_nodes)),
+                'covered': int(len(su12_nodes) - len(uncovered_su12)),
+                'uncovered_ids': uncovered_su12[:16],
+                'multi_covered_ids': multi_covered_su12[:16],
+            },
+            'last_decisions': [
+                {
+                    'center_id': int(row.get('center_id', -1)),
+                    'chosen_id': int(row.get('chosen_id', -1)),
+                    'next_index': int(row.get('next_index', 0) or 0),
+                    'decision_kind': str(row.get('decision_kind', 'ordinary')),
+                }
+                for row in self._decision_stack[-2:]
+            ],
+        }
+
     def solve(self) -> Dict[str, Any]:
-        initial_open_ports = sum(
-            int(node.remaining_hop1_slots()) for node in self.nodes
-        )
+        initial_open_ports = int(self._phase_open_ports())
+
+        self._complete_required_su12_roles()
 
         while not self._all_complete_and_exact():
             center, partner_ids = self._select_center()
             if center is None or not partner_ids:
-                if self._try_local_repair():
+                if self._try_local_repair(decision_kind='ordinary'):
                     continue
                 center, partner_ids = self._select_center()
                 if center is not None and partner_ids:
                     continue
-                blocked = None if center is None else {
-                    'node_id': int(center.global_id),
-                    'su_type': int(center.su_type),
-                    'remaining_ports': int(center.remaining_hop1_slots()),
-                    'legal_partner_types': sorted({
-                        int(self.nodes[x].su_type)
-                        for x in partner_ids
-                    }),
-                }
+                diagnostics = self._failure_diagnostics(center, partner_ids)
                 raise RuntimeError(
                     "layer1_rule_graph_search_exhausted: bounded_greedy_repair_exhausted "
-                    f"blocked={blocked} repair_attempts={self.repair_attempts}"
+                    f"phase={self.phase} diagnostics={diagnostics} "
+                    f"repair_attempts={self.repair_attempts}"
                 )
 
             ordered = self._order_partners(center, partner_ids)
-            chosen_id = int(ordered[0])
-            if not self._add_edge(int(center.global_id), chosen_id):
-                self.domains.get(int(center.global_id), set()).discard(chosen_id)
-                self.domains.get(chosen_id, set()).discard(int(center.global_id))
+            if not self._commit_first_candidate(
+                center,
+                ordered,
+                decision_kind='ordinary',
+            ):
                 continue
-            self.decisions += 1
-            self._decision_stack.append({
-                'center_id': int(center.global_id),
-                'chosen_id': chosen_id,
-                'alternatives': ordered,
-                'next_index': 1,
-            })
             if self.decisions % 50 == 0:
                 open_ports = sum(
                     int(node.remaining_hop1_slots()) for node in self.nodes
                 )
                 print(
-                    "  [Layer1 Rule Completion Progress] "
+                    f"  [Layer1 {self.phase} Completion Progress] "
                     f"decisions={self.decisions}, repairs={self.repair_attempts}, "
                     f"open_ports={open_ports}",
                     flush=True,
@@ -431,8 +782,9 @@ class Layer1GreedyCompleter:
 
         return {
             'solver': 'diversity_first_greedy_bounded_repair',
+            'phase': str(self.phase),
             'initial_open_ports': int(initial_open_ports),
-            'final_open_ports': 0,
+            'final_open_ports': int(self._phase_open_ports()),
             'decisions': int(self.decisions),
             'backtracks': int(self.repair_rewinds),
             'repair_attempts': int(self.repair_attempts),
@@ -2918,9 +3270,9 @@ class Layer1Assigner:
                 + str(invalid_su9[:8])
             )
 
-    def _su11_fixed_external_errors(self,
-                                    nodes: List[_NodeV3]) -> List[str]:
-        """Audit the single fixed external role edge required by every SU11."""
+    def _su11_external_role_errors(self,
+                                   nodes: List[_NodeV3]) -> List[str]:
+        """Audit the single external role required by every SU11."""
         errors: List[str] = []
         external_types = set(
             int(x) for x in list(SU_EXTERNAL_CONNECTIONS.get(11, []) or [])
@@ -2934,163 +3286,138 @@ class Layer1Assigner:
             ]
             if len(external_ids) != 1:
                 errors.append(
-                    f"SU11节点{int(node.global_id)}固定外接边数={len(external_ids)} != 1, "
+                    f"SU11节点{int(node.global_id)}外接角色边数={len(external_ids)} != 1, "
                     f"external_ids={sorted(external_ids)}"
-                )
-                continue
-            external_id = int(external_ids[0])
-            external = nodes[int(external_id)]
-            if not self._edge_is_fixed(node, external):
-                errors.append(
-                    f"SU11节点{int(node.global_id)}外接边未锁定: "
-                    f"neighbor={external_id}(SU{int(external.su_type)})"
                 )
         return errors
 
-    def _assign_fixed_alkyl_aromatic_11(self,
-                                        nodes: List[_NodeV3]) -> None:
-        """Assign one fixed external-role edge to every alkyl-substituted aryl C."""
-        su11_nodes = self._canonical_node_order(
-            self._get_nodes_by_su_type(nodes, 11),
-            salt=451,
-        )
-        if not su11_nodes:
-            return
-
-        declared_external_order = tuple(
+    def _reserve_alkyl_aromatic_11_external_roles(
+        self,
+        nodes: List[_NodeV3],
+    ) -> None:
+        """Reserve one external role on every SU11 without choosing a partner."""
+        allowed_external = set(
             int(x) for x in list(SU_EXTERNAL_CONNECTIONS.get(11, []) or [])
         )
-        allowed_external = set(declared_external_order)
-        ordered_external = [
-            int(su) for su in declared_external_order if int(su) in allowed_external
-        ]
-        ordered_external.extend(sorted(allowed_external - set(ordered_external)))
-        external_priority = {
-            int(su): int(rank) for rank, su in enumerate(ordered_external)
-        }
-        external_nodes = [
-            node
-            for node in nodes
-            if int(getattr(node, 'su_type', -1)) in allowed_external
-            and int(node.remaining_hop1_slots()) > 0
-        ]
-        owner_slots: List[Dict[str, int]] = []
-        ordered_external_nodes = self._stable_node_order(external_nodes)
-        external_count = len(ordered_external_nodes)
-        max_external_slots = max(
-            (int(owner.remaining_hop1_slots()) for owner in ordered_external_nodes),
-            default=0,
-        )
-        for slot_round in range(int(max_external_slots)):
-            for owner_rank, owner in enumerate(ordered_external_nodes):
-                if int(slot_round) >= int(owner.remaining_hop1_slots()):
-                    continue
-                # Spread fixed SU11 anchors across distinct external nodes
-                # whenever capacity permits.  If the pool is too small, later
-                # rounds still expose the remaining ports and sharing remains
-                # legal (e.g. two SU11 nodes on one SU23).
-                spread_rank = int(slot_round) * max(1, int(external_count)) + int(owner_rank)
-                owner_su = int(owner.su_type)
-                owner_slots.append({
-                    'owner_id': int(owner.global_id),
-                    'slot_index': int(slot_round),
-                    'kind': int(owner_su),
-                    'priority_rank': int(external_priority[int(owner_su)]),
-                    'spread_rank': int(spread_rank),
+        if not allowed_external:
+            raise RuntimeError("[SU11 External Role] 合法外接类型集合为空")
+        invalid = []
+        for node in self._get_nodes_by_su_type(nodes, 11):
+            target_count = int(self._node_fixed_anchor_target(node))
+            current_count = int(self._required_external_count_for_node(node, nodes))
+            pending_count = max(0, int(target_count) - int(current_count))
+            if (
+                int(target_count) != 1
+                or int(current_count) > int(target_count)
+                or int(node.remaining_hop1_slots()) < int(pending_count)
+            ):
+                invalid.append({
+                    'node_id': int(node.global_id),
+                    'target': int(target_count),
+                    'current': int(current_count),
+                    'remaining_ports': int(node.remaining_hop1_slots()),
                 })
-
-        target_demands = [
-            {
-                'target_id': int(node.global_id),
-                'demand_index': 0,
-                'kind': '11_external',
-            }
-            for node in su11_nodes
-        ]
-        if len(owner_slots) < len(target_demands):
+        if invalid:
             raise RuntimeError(
-                "[SU11 Fixed External Assign] 外接端口总容量不足: "
-                f"demand={len(target_demands)}, slots={len(owner_slots)}"
+                "[SU11 External Role] 角色预留失败: " + str(invalid[:8])
             )
 
-        work_nodes = copy.deepcopy(nodes)
+    def _layer1_phase_port_diagnostics(
+        self,
+        nodes: List[_NodeV3],
+    ) -> Dict[str, Any]:
+        aromatic_open_by_su: Counter = Counter()
+        non_aromatic_open_by_su: Counter = Counter()
+        for node in nodes:
+            remaining = int(node.remaining_hop1_slots())
+            if remaining <= 0:
+                continue
+            if int(node.su_type) in LAYER1_AROMATIC_RING_TYPES:
+                aromatic_open_by_su[int(node.su_type)] += int(remaining)
+            else:
+                non_aromatic_open_by_su[int(node.su_type)] += int(remaining)
 
-        def _compat(work_local: List[_NodeV3],
-                    owner: _NodeV3,
-                    target: _NodeV3,
-                    slot: Dict[str, int],
-                    owner_d1_usage: Dict[int, int],
-                    demand: Dict[str, Any]) -> bool:
-            _ = slot
-            _ = owner_d1_usage
-            _ = demand
-            if int(getattr(target, 'su_type', -1)) != 11:
-                return False
-            if int(getattr(owner, 'su_type', -1)) not in allowed_external:
-                return False
-            if not self._fixed_connector_assignment_ok(
-                work_local,
-                owner,
-                target,
-            ):
-                return False
-            return bool(self._can_add_hop1_connection(work_local, owner, target))
-
-        edge_pairs = self._solve_exact_fixed_anchor_matching_demands(
-            work_nodes,
-            owner_slots,
-            target_demands,
-            _compat,
+        pending_su11_external = int(sum(
+            max(
+                0,
+                int(self._node_fixed_anchor_target(node))
+                - int(self._required_external_count_for_node(node, nodes)),
+            )
+            for node in self._get_nodes_by_su_type(nodes, 11)
+        ))
+        non_aromatic_open = int(sum(non_aromatic_open_by_su.values()))
+        aromatic_open = int(sum(aromatic_open_by_su.values()))
+        projected_non_aromatic_internal = int(
+            non_aromatic_open - pending_su11_external
         )
-        if edge_pairs is None:
-            capacity_by_su = Counter(
-                int(work_nodes[int(slot['owner_id'])].su_type)
-                for slot in owner_slots
-            )
-            raise RuntimeError(
-                "[SU11 Fixed External Assign] 无法为所有SU11分配双向合法的固定外接边: "
-                f"demand={len(target_demands)}, "
-                f"capacity_by_su={dict(sorted(capacity_by_su.items()))}"
-            )
+        projected_aromatic_ring = int(
+            aromatic_open - pending_su11_external
+        )
+        enough_external_ports = bool(
+            int(projected_non_aromatic_internal) >= 0
+            and int(projected_aromatic_ring) >= 0
+        )
+        return {
+            'ok': bool(
+                enough_external_ports
+                and int(projected_non_aromatic_internal) % 2 == 0
+                and int(projected_aromatic_ring) % 2 == 0
+            ),
+            'su11_external_demands': int(pending_su11_external),
+            'non_aromatic_open_ports': int(non_aromatic_open),
+            'projected_non_aromatic_internal_ports': int(
+                projected_non_aromatic_internal
+            ),
+            'projected_non_aromatic_internal_is_even': bool(
+                int(projected_non_aromatic_internal) >= 0
+                and int(projected_non_aromatic_internal) % 2 == 0
+            ),
+            'aromatic_open_ports_including_su11_external': int(aromatic_open),
+            'projected_aromatic_ring_ports': int(projected_aromatic_ring),
+            'projected_aromatic_ring_is_even': bool(
+                int(projected_aromatic_ring) >= 0
+                and int(projected_aromatic_ring) % 2 == 0
+            ),
+            'non_aromatic_open_by_su': dict(sorted(non_aromatic_open_by_su.items())),
+            'aromatic_open_by_su': dict(sorted(aromatic_open_by_su.items())),
+        }
 
-        target_usage = Counter()
-        for left_id, right_id in list(edge_pairs):
-            left = nodes[int(left_id)]
-            right = nodes[int(right_id)]
-            target_id = (
-                int(left_id)
-                if int(left.su_type) == 11
-                else int(right_id)
-            )
-            target_usage[int(target_id)] += 1
-        expected_targets = set(int(node.global_id) for node in su11_nodes)
-        if (
-            set(target_usage) != expected_targets
-            or any(int(count) != 1 for count in target_usage.values())
-        ):
-            raise RuntimeError(
-                "[SU11 Fixed External Assign] 匹配结果未覆盖每个SU11一次: "
-                f"usage={dict(sorted(target_usage.items()))}"
-            )
+    def _raise_if_layer1_phase_ports_infeasible(
+        self,
+        nodes: List[_NodeV3],
+    ) -> Dict[str, Any]:
+        diagnostics = self._layer1_phase_port_diagnostics(nodes)
+        if bool(diagnostics.get('ok', False)):
+            return diagnostics
+        raise RuntimeError(
+            "layer1_phase_port_infeasible: "
+            f"su11_external_demands={diagnostics['su11_external_demands']} "
+            f"non_aromatic_open={diagnostics['non_aromatic_open_ports']} "
+            f"non_aromatic_internal={diagnostics['projected_non_aromatic_internal_ports']} "
+            f"aromatic_open={diagnostics['aromatic_open_ports_including_su11_external']} "
+            f"aromatic_ring={diagnostics['projected_aromatic_ring_ports']} "
+            f"non_aromatic_by_su={diagnostics['non_aromatic_open_by_su']} "
+            f"aromatic_by_su={diagnostics['aromatic_open_by_su']}"
+        )
 
-        for left_id, right_id in list(edge_pairs):
-            if not self._add_bidirectional_hop1(
-                nodes,
-                int(left_id),
-                int(right_id),
-                lock=True,
-            ):
-                raise RuntimeError(
-                    "[SU11 Fixed External Assign] 提交固定外接边失败: "
-                    f"edge=({int(left_id)}, {int(right_id)})"
+    def _non_aromatic_completion_errors(
+        self,
+        nodes: List[_NodeV3],
+    ) -> List[str]:
+        errors = [
+            f"node={int(node.global_id)} SU{int(node.su_type)} "
+            f"remaining_ports={int(node.remaining_hop1_slots())}"
+            for node in nodes
+            if int(node.su_type) not in LAYER1_AROMATIC_RING_TYPES
+            and int(node.remaining_hop1_slots()) != 0
+        ]
+        for node in self._get_nodes_by_su_type(nodes, 11):
+            external_count = int(self._required_external_count_for_node(node, nodes))
+            if external_count != int(self._node_fixed_anchor_target(node)):
+                errors.append(
+                    f"node={int(node.global_id)} SU11 external_count={external_count}"
                 )
-
-        audit_errors = self._su11_fixed_external_errors(nodes)
-        if audit_errors:
-            raise RuntimeError(
-                "[SU11 Fixed External Assign] 固定外接审计失败: "
-                + "; ".join(audit_errors[:8])
-            )
+        return errors
 
     def _assign_unsaturated_pairs(self, nodes: List[_NodeV3]):
         """f) 14/15/16双键配对，17/18三键配对
@@ -3215,7 +3542,7 @@ class Layer1Assigner:
                 + str(invalid_unsaturated[:8])
             )
     
-    def _assign_fixed_su10_self_pairs(self, nodes: List[_NodeV3]) -> None:
+    def _assign_fixed_su10_external_roles(self, nodes: List[_NodeV3]) -> None:
         """Assign the strict one-to-one SU10 self-pair role."""
         self_nodes = self._canonical_node_order(
             self._get_nodes_by_su_type(nodes, 10),
@@ -3257,113 +3584,6 @@ class Layer1Assigner:
                 + str(invalid[:8])
             )
 
-    def _assign_su12_self_edge_cover(self, nodes: List[_NodeV3]) -> None:
-        """Cover every SU12 with at least one SU12 neighbor.
-
-        An even pool is covered by disjoint pairs.  For an odd pool, one
-        uncovered node is attached to a paired node, producing a three-node
-        path whose middle node has two SU12 neighbors.  Additional SU12
-        neighbors remain legal on the two generic aromatic ports.
-        """
-        self_nodes = self._canonical_node_order(
-            self._get_nodes_by_su_type(nodes, 12),
-            salt=607,
-        )
-        if not self_nodes:
-            return
-
-        invalid_initial = []
-        uncovered = []
-        for node in self_nodes:
-            self_count = int(node.hop1_su.get(12, 0))
-            target_degree = self._node_target_degree(node)
-            if (
-                self_count < 0
-                or target_degree is None
-                or self_count > int(target_degree)
-            ):
-                invalid_initial.append((
-                    int(node.global_id),
-                    int(self_count),
-                    target_degree,
-                ))
-            elif self_count == 0:
-                uncovered.append(node)
-        if invalid_initial:
-            raise RuntimeError(
-                "[SU12 Edge Cover] 初始自连接状态非法: "
-                + str(invalid_initial[:8])
-            )
-
-        while len(uncovered) >= 2:
-            left = uncovered.pop(0)
-            right = uncovered.pop(0)
-            if not self._add_bidirectional_hop1(
-                nodes,
-                int(left.global_id),
-                int(right.global_id),
-                lock=True,
-            ):
-                raise RuntimeError(
-                    "[SU12 Edge Cover] 自连接边覆盖提交失败: "
-                    f"edge=({int(left.global_id)}, {int(right.global_id)})"
-                )
-
-        if uncovered:
-            leftover = uncovered.pop(0)
-            cover_candidates = self._canonical_node_order(
-                [
-                    node
-                    for node in self_nodes
-                    if int(node.global_id) != int(leftover.global_id)
-                    and int(node.hop1_su.get(12, 0)) >= 1
-                    and int(node.remaining_hop1_slots()) > 0
-                ],
-                salt=613,
-            )
-            attached = False
-            for candidate in cover_candidates:
-                if self._add_bidirectional_hop1(
-                    nodes,
-                    int(leftover.global_id),
-                    int(candidate.global_id),
-                    lock=True,
-                ):
-                    attached = True
-                    break
-            if not attached:
-                raise RuntimeError(
-                    "[SU12 Edge Cover] 奇数节点无法形成三节点链: "
-                    f"leftover={int(leftover.global_id)}, "
-                    f"candidate_count={len(cover_candidates)}"
-                )
-
-        invalid_final = []
-        for node in self_nodes:
-            self_count = int(node.hop1_su.get(12, 0))
-            target_degree = self._node_target_degree(node)
-            if (
-                self_count < 1
-                or target_degree is None
-                or self_count > int(target_degree)
-                or not self._node_exact_hop1_shift_state_ok(node)
-            ):
-                invalid_final.append((
-                    int(node.global_id),
-                    int(self_count),
-                    target_degree,
-                ))
-        if invalid_final:
-            raise RuntimeError(
-                "[SU12 Edge Cover] self-edge coverage incomplete: "
-                + str(invalid_final[:8])
-            )
-
-    def _assign_aryl_connections(self, nodes: List[_NodeV3]):
-        """Assign SU10 strict pairs and the SU12 minimum self-edge cover."""
-        self._assign_fixed_su10_self_pairs(nodes)
-        self._assign_su12_self_edge_cover(nodes)
-        
     # ========================================================================
     # Layer1: 强制边、全局补全、结构验收和差谱调整
     # ========================================================================
@@ -3422,6 +3642,18 @@ class Layer1Assigner:
         E_local = E_target.to(self.device)
         self._current_E_target = E_local
         self._configure_exact_hop1_shift_constraints(eval_lib_path)
+        role_audit = audit_layer1_port_roles(
+            H_local,
+            self._get_special_degree_meta(H_local),
+        )
+        if not bool(role_audit.get('ok', False)):
+            raise RuntimeError(
+                "layer1_port_roles_unbalanced: "
+                f"total={role_audit['total_ports']} "
+                f"aromatic_internal={role_audit['aromatic_internal_ports']} "
+                f"non_aromatic_internal={role_audit['non_aromatic_internal_ports']}; "
+                "Layer0/Stage3 must apply pre-Layer1 port-role balance"
+            )
         nodes = self._initialize_node_pool(H_local)
         self._init_runtime_node_index(nodes)
         initial_open_ports = sum(
@@ -3456,12 +3688,12 @@ class Layer1Assigner:
         _timed_step("e fixed_carbonyl", lambda: self._assign_fixed_carbonyl(nodes))
         _timed_step("f unsaturated_pairs", lambda: self._assign_unsaturated_pairs(nodes))
         _timed_step(
-            "g fixed_alkyl_aromatic_11",
-            lambda: self._assign_fixed_alkyl_aromatic_11(nodes),
+            "g reserve_alkyl_aromatic_11",
+            lambda: self._reserve_alkyl_aromatic_11_external_roles(nodes),
         )
         _timed_step(
-            "h aryl_connections",
-            lambda: self._assign_aryl_connections(nodes),
+            "h fixed_su10_external",
+            lambda: self._assign_fixed_su10_external_roles(nodes),
             rebuild_index=False,
         )
         self._init_runtime_node_index(nodes)
@@ -3472,13 +3704,71 @@ class Layer1Assigner:
             f"edges={fixed_edge_count}, open_ports={fixed_open_ports}"
         )
 
-        completion = dict(Layer1GreedyCompleter(self, nodes).solve())
-        completion.update({
+        phase_ports = self._raise_if_layer1_phase_ports_infeasible(nodes)
+        print(
+            "  [Layer1 Phase Ports] "
+            f"SU11_external={int(phase_ports['su11_external_demands'])}, "
+            f"non_aromatic={int(phase_ports['non_aromatic_open_ports'])}"
+            f"->{int(phase_ports['projected_non_aromatic_internal_ports'])}, "
+            f"aromatic={int(phase_ports['aromatic_open_ports_including_su11_external'])}"
+            f"->{int(phase_ports['projected_aromatic_ring_ports'])}"
+        )
+
+        non_aromatic_completion = dict(
+            Layer1GreedyCompleter(self, nodes, phase='non_aromatic').solve()
+        )
+        non_aromatic_errors = self._non_aromatic_completion_errors(nodes)
+        if non_aromatic_errors:
+            raise RuntimeError(
+                "layer1_non_aromatic_completion_incomplete: "
+                + " | ".join(non_aromatic_errors[:8])
+            )
+        self._init_runtime_node_index(nodes)
+        print(
+            "  [Layer1 Non-Aromatic Completion] "
+            f"decisions={int(non_aromatic_completion.get('decisions', 0))}, "
+            f"backtracks={int(non_aromatic_completion.get('backtracks', 0))}, "
+            f"elapsed={float(non_aromatic_completion.get('elapsed_s', 0.0)):.2f}s"
+        )
+
+        aromatic_open_ports = int(sum(
+            int(node.remaining_hop1_slots())
+            for node in nodes
+            if int(node.su_type) in LAYER1_AROMATIC_RING_TYPES
+        ))
+        if int(aromatic_open_ports) % 2 != 0:
+            raise RuntimeError(
+                "layer1_aromatic_phase_infeasible: "
+                f"open_ports={aromatic_open_ports}"
+            )
+        aromatic_completion = dict(
+            Layer1GreedyCompleter(self, nodes, phase='aromatic').solve()
+        )
+        print(
+            "  [Layer1 Aromatic Completion] "
+            f"decisions={int(aromatic_completion.get('decisions', 0))}, "
+            f"backtracks={int(aromatic_completion.get('backtracks', 0))}, "
+            f"elapsed={float(aromatic_completion.get('elapsed_s', 0.0)):.2f}s"
+        )
+
+        completion = {
+            'solver': 'two_phase_diversity_first_greedy_bounded_repair',
+            'phase_port_diagnostics': dict(phase_ports),
+            'non_aromatic': dict(non_aromatic_completion),
+            'aromatic': dict(aromatic_completion),
+            'decisions': int(non_aromatic_completion.get('decisions', 0))
+            + int(aromatic_completion.get('decisions', 0)),
+            'backtracks': int(non_aromatic_completion.get('backtracks', 0))
+            + int(aromatic_completion.get('backtracks', 0)),
+            'repair_attempts': int(non_aromatic_completion.get('repair_attempts', 0))
+            + int(aromatic_completion.get('repair_attempts', 0)),
+            'elapsed_s': float(non_aromatic_completion.get('elapsed_s', 0.0))
+            + float(aromatic_completion.get('elapsed_s', 0.0)),
             'fixed_edge_count': int(fixed_edge_count),
             'fixed_open_ports': int(fixed_open_ports),
             'fixed_timings_s': fixed_timings,
             'build_elapsed_s': float(time.perf_counter() - build_t0),
-        })
+        }
         valid, errors = self.validate_graph_consistency(
             nodes=nodes,
             H=H_local,
@@ -3641,6 +3931,17 @@ class Layer1Assigner:
         """Cheaply reject histogram candidates whose fixed anchors cannot be matched."""
         H_local = H_init.to(self.device)
         self._current_E_target = E_target.to(self.device)
+        role_audit = audit_layer1_port_roles(
+            H_local,
+            self._get_special_degree_meta(H_local),
+        )
+        if not bool(role_audit.get('ok', False)):
+            return False, (
+                'fixed_assignment_infeasible:port_roles:'
+                f"total={role_audit['total_ports']},"
+                f"aromatic_internal={role_audit['aromatic_internal_ports']},"
+                f"non_aromatic_internal={role_audit['non_aromatic_internal_ports']}"
+            )
         nodes = self._initialize_node_pool(H_local)
         self._init_runtime_node_index(nodes)
         steps = (
@@ -3649,6 +3950,9 @@ class Layer1Assigner:
             ('amine', self._assign_fixed_amine_N),
             ('ether', self._assign_fixed_ether_O),
             ('carbonyl', self._assign_fixed_carbonyl),
+            ('unsaturated', self._assign_unsaturated_pairs),
+            ('su11_role', self._reserve_alkyl_aromatic_11_external_roles),
+            ('su10_external', self._assign_fixed_su10_external_roles),
         )
         for label, fn in steps:
             try:
@@ -3656,6 +3960,15 @@ class Layer1Assigner:
                 self._init_runtime_node_index(nodes)
             except Exception as exc:
                 return False, f'fixed_assignment_infeasible:{label}:{exc}'
+        diagnostics = self._layer1_phase_port_diagnostics(nodes)
+        if not bool(diagnostics.get('ok', False)):
+            return False, (
+                'fixed_assignment_infeasible:phase_ports:'
+                f"su11_external={diagnostics['su11_external_demands']},"
+                f"non_aromatic_internal="
+                f"{diagnostics['projected_non_aromatic_internal_ports']},"
+                f"aromatic_ring={diagnostics['projected_aromatic_ring_ports']}"
+            )
         return True, 'ok'
 
     def evaluate_layer1_nmr_with_library(

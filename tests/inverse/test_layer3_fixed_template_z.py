@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import pytest
 
 from model.inverse.layer3.inverse_layer3 import Layer3Estimator
 from model.shared.coarse_graph import PPM_AXIS
@@ -24,6 +25,7 @@ def test_layer3_can_adjust_su19_above_90_without_changing_template() -> None:
             template_key: {
                 "samples": {
                     "z": torch.tensor([[0.0], [1.0]]),
+                    "mu": torch.tensor([80.0, 95.0]),
                 }
             }
         }
@@ -54,18 +56,21 @@ def test_layer3_can_adjust_su19_above_90_without_changing_template() -> None:
     assert result[0].mu == 95.0
     assert result[0].mu > 90.0
     assert result[0].pi == 1.0
-    assert result[0].score_components["layer3_spectral_source"] == "g2s_layer3"
-    assert result[0].score_components["spectral_source"] == "g2s_layer3"
+    assert result[0].score_components["layer3_spectral_source"] == "template_sample_mu_layer3"
+    assert result[0].score_components["spectral_source"] == "template_sample_mu_layer3"
     assert r2 > 0.99
 
 
-def test_layer3_zero_move_still_decodes_every_carbon_node() -> None:
+def test_layer3_zero_move_assigns_every_carbon_node_from_paired_template_mu() -> None:
     template_key = (22, (), ())
     estimator = Layer3Estimator(device=torch.device("cpu"), vae_model=_FakeG2S())
     estimator._template_cache = {
         "templates": {
             template_key: {
-                "samples": {"z": torch.tensor([[0.25], [0.5]])},
+                "samples": {
+                    "z": torch.tensor([[0.25], [0.5]]),
+                    "mu": torch.tensor([83.75, 87.5]),
+                },
             }
         }
     }
@@ -85,8 +90,14 @@ def test_layer3_zero_move_still_decodes_every_carbon_node() -> None:
 
     assert [node.mu for node in result] == [83.75, 87.5]
     assert all(node.pi == 1.0 for node in result)
-    assert all(node.score_components["spectral_source"] == "g2s_layer3" for node in result)
-    assert all(node.score_components["layer3_final_decode_error"] <= 1e-5 for node in result)
+    assert all(
+        node.score_components["spectral_source"] == "template_sample_mu_layer3"
+        for node in result
+    )
+    assert all(
+        node.score_components["layer3_final_template_mu_error"] == 0.0
+        for node in result
+    )
 
 
 def test_layer3_rolls_back_full_decode_when_it_is_worse_than_input() -> None:
@@ -95,7 +106,10 @@ def test_layer3_rolls_back_full_decode_when_it_is_worse_than_input() -> None:
     estimator._template_cache = {
         "templates": {
             template_key: {
-                "samples": {"z": torch.tensor([[0.0], [0.5]])},
+                "samples": {
+                    "z": torch.tensor([[0.0], [0.5]]),
+                    "mu": torch.tensor([80.0, 87.5]),
+                },
             }
         }
     }
@@ -133,9 +147,38 @@ class _FailingG2S(_FakeG2S):
         raise RuntimeError("decoder failure")
 
 
-def test_layer3_decoder_failure_is_fatal() -> None:
+def test_layer3_transition_does_not_call_g2s_decoder() -> None:
     template_key = (22, (), ())
     estimator = Layer3Estimator(device=torch.device("cpu"), vae_model=_FailingG2S())
+    estimator._template_cache = {
+        "templates": {
+            template_key: {
+                "samples": {
+                    "z": torch.tensor([[0.0]]),
+                    "mu": torch.tensor([80.0]),
+                }
+            }
+        }
+    }
+    node = _NodeV3(global_id=0, su_type=22)
+    node.template_key = template_key
+    node.z_vec = torch.tensor([0.0])
+
+    result, _ = estimator.layer3_adjust_templates(
+        [node],
+        S_target=torch.zeros_like(PPM_AXIS),
+        E_target=torch.zeros(6),
+        max_iters=0,
+        verbose=False,
+    )
+
+    assert result[0].mu == 80.0
+    assert result[0].score_components["spectral_source"] == "template_sample_mu_layer3"
+
+
+def test_layer3_transition_rejects_template_without_paired_mu_bank() -> None:
+    template_key = (22, (), ())
+    estimator = Layer3Estimator(device=torch.device("cpu"), vae_model=None)
     estimator._template_cache = {
         "templates": {template_key: {"samples": {"z": torch.tensor([[0.0]])}}}
     }
@@ -143,8 +186,7 @@ def test_layer3_decoder_failure_is_fatal() -> None:
     node.template_key = template_key
     node.z_vec = torch.tensor([0.0])
 
-    import pytest
-    with pytest.raises(RuntimeError, match="G2S decoding failed"):
+    with pytest.raises(RuntimeError, match="has no mu sample bank"):
         estimator.layer3_adjust_templates(
             [node],
             S_target=torch.zeros_like(PPM_AXIS),

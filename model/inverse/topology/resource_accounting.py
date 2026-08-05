@@ -193,12 +193,17 @@ def build_resource_accounting_snapshot(
 
     seen_conversion_ids: set[int] = set()
     operations_by_group = [
-        [getattr(group, "primary_op", None)]
-        + list(getattr(group, "h_compensation_ops", []) or [])
+        (
+            [getattr(group, "primary_op", None)]
+            + list(getattr(group, "h_compensation_ops", []) or []),
+            False,
+        )
         for group in list(groups or [])
     ]
-    operations_by_group.append(list(extra_ops or []))
-    for operations in operations_by_group:
+    # The two pre-rebuild balances may legally form one sequential chain,
+    # e.g. SU13->SU12 followed by SU12->SU11 on the same unused node.
+    operations_by_group.append((list(extra_ops or []), True))
+    for operations, allow_sequential_chain in operations_by_group:
         for op in operations:
             if op is None:
                 continue
@@ -214,7 +219,7 @@ def build_resource_accounting_snapshot(
                 })
                 continue
             for node_id in node_ids:
-                if int(node_id) in seen_conversion_ids:
+                if int(node_id) in seen_conversion_ids and not allow_sequential_chain:
                     errors.append({
                         "reason": "resource_node_converted_more_than_once",
                         "node_id": int(node_id),
@@ -334,6 +339,7 @@ def build_resource_accounting_snapshot(
 
 def preflight_histogram_accounting(plan: Any) -> Tuple[bool, Dict[str, Any]]:
     parity_op = getattr(plan, "parity_balance_op", None)
+    role_op = getattr(plan, "port_role_balance_op", None)
     parity_errors: List[Dict[str, Any]] = []
     if parity_op is not None:
         source = int(getattr(parity_op, "from_su", -1))
@@ -355,6 +361,22 @@ def preflight_histogram_accounting(plan: Any) -> Tuple[bool, Dict[str, Any]]:
                 "to_su": target,
                 "count": count,
                 "via_su": getattr(parity_op, "via_su", None),
+            })
+    if role_op is not None:
+        source = int(getattr(role_op, "from_su", -1))
+        target = int(getattr(role_op, "to_su", -1))
+        count = int(getattr(role_op, "count", 0) or 0)
+        if (
+            (source, target) not in {(12, 11), (11, 12)}
+            or count != 1
+            or getattr(role_op, "via_su", None) is not None
+        ):
+            parity_errors.append({
+                "reason": "invalid_port_role_balance_contract",
+                "from_su": source,
+                "to_su": target,
+                "count": count,
+                "via_su": getattr(role_op, "via_su", None),
             })
     authorized_before = normalize_counts(
         getattr(plan, "inventory_before", {}) or {}
@@ -389,7 +411,9 @@ def preflight_histogram_accounting(plan: Any) -> Tuple[bool, Dict[str, Any]]:
             "errors": list(planning_accounting.get("errors", []) or []),
         })
 
-    extra_ops = [parity_op] if parity_op is not None else []
+    extra_ops = [
+        op for op in (parity_op, role_op) if op is not None
+    ]
     aggregate_after, delta_errors = apply_count_delta(
         aggregate_before,
         combined_group_delta(

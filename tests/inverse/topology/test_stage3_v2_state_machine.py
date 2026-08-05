@@ -852,10 +852,11 @@ def test_block_c_balances_odd_spectrum_candidate_from_remaining_pool() -> None:
     assert len(rebuild_histograms) == 1
     assert int(rebuild_histograms[0][23].item()) == 2
     assert int(rebuild_histograms[0][24].item()) == 1
-    assert int(rebuild_histograms[0][12].item()) == 1
+    assert int(rebuild_histograms[0][11].item()) == 1
+    assert int(rebuild_histograms[0][12].item()) == 0
     assert int(rebuild_histograms[0][13].item()) == 0
     assert result.accepted_cycles == 1
-    assert result.cycles[0].parity_balance_count == 1
+    assert result.cycles[0].parity_balance_count == 2
     assert adjuster._stage3_parity_balance_cursor == 1
 
 
@@ -1132,10 +1133,10 @@ def test_block_c_uses_saved_layer2_baseline_without_noop_rebuild() -> None:
 def test_block_c_spectrum_gain_outranks_h_balance_penalty(
     monkeypatch,
 ) -> None:
-    nodes = [make_node(100 + index, 22) for index in range(10)]
+    nodes = [make_node(100 + index, 22) for index in range(20)]
     H = torch.zeros(600, dtype=torch.long)
-    H[13] = 490
-    H[22] = 10
+    H[13] = 460
+    H[22] = 20
     candidate = Stage3SpectrumCandidate(
         candidate_id="spectrum:22:11:10",
         histogram_signature="h-loss-histogram",
@@ -1184,7 +1185,7 @@ def test_block_c_spectrum_gain_outranks_h_balance_penalty(
 
     assert result.stop_reason == "stage3_complete"
     assert result.accepted_cycles == 1
-    assert int(result.H[22].item()) == 0
+    assert int(result.H[22].item()) == 10
     assert int(result.H[11].item()) == 10
     diagnostics = result.cycles[0].diagnostics
     assert diagnostics["r2_gain"] > 0.05

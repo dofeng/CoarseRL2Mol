@@ -1,0 +1,90 @@
+ RL_MTCS/RL_allocator.py                                                                 | 2110 [31m---------------------[m
+ RL_MTCS/RL_init.py                                                                      |  703 [32m++[m[31m-----[m
+ RL_MTCS/RL_mcts.py                                                                      | 1887 [32m++[m[31m-----------------[m
+ RL_MTCS/RL_state.py                                                                     |  714 [31m--------[m
+ RL_MTCS/__init__.py                                                                     |   12 [32m+[m
+ RL_MTCS/allocator_branch.py                                                             | 2578 [31m--------------------------[m
+ RL_MTCS/allocator_models.py                                                             |  529 [31m------[m
+ RL_MTCS/allocator_patterns.py                                                           |  230 [31m---[m
+ RL_MTCS/branch_assembler.py                                                             | 4153 [31m------------------------------------------[m
+ RL_MTCS/hex_assembly_state.py                                                           |  326 [32m++++[m
+ RL_MTCS/inverse_contract.py                                                             |  524 [32m++++++[m
+ RL_MTCS/inverse_mcts.py                                                                 |  413 [32m+++++[m
+ RL_MTCS/stage_branch.py                                                                 | 1397 [31m--------------[m
+ RL_MTCS/stage_flex.py                                                                   | 2164 [31m----------------------[m
+ RL_MTCS/stage_rigid.py                                                                  | 1018 [31m-----------[m
+ RL_MTCS/stage_side.py                                                                   |  661 [31m-------[m
+ RL_MTCS/state_substitutor.py                                                            | 2071 [31m---------------------[m
+ RL_MTCS/topology_solver.py                                                              |  996 [31m----------[m
+ RL_MTCS/visualization.py                                                                |  894 [31m---------[m
+ data/demo/model_test/g2s_validation_results-1/C1_CC_C2C_C_C_CC2_C1_CC__O_O_mu.png       |  Bin [31m139013[m -> [32m0[m bytes
+ data/demo/model_test/g2s_validation_results-1/C1_CC_C2C_C_C_CC2_C1_CC__O_O_pi.png       |  Bin [31m127475[m -> [32m0[m bytes
+ data/demo/model_test/g2s_validation_results-1/C1_CC_C2C_C_C_CC2_C1_CC__O_O_spectrum.png |  Bin [31m190302[m -> [32m0[m bytes
+ .../g2s_validation_results-1/C1_CC_C_C_C1_COC__O_N_C__H__CCC__O_O_C__O_O_mu.png         |  Bin [31m144568[m -> [32m0[m bytes
+ .../g2s_validation_results-1/C1_CC_C_C_C1_COC__O_N_C__H__CCC__O_O_C__O_O_pi.png         |  Bin [31m138496[m -> [32m0[m bytes
+ .../g2s_validation_results-1/C1_CC_C_C_C1_COC__O_N_C__H__CCC__O_O_C__O_O_spectrum.png   |  Bin [31m224138[m -> [32m0[m bytes
+ .../model_test/g2s_validation_results-1/C1_CC__CC_C1C_C__H__C__O_O_NC__O_CN_O_mu.png    |  Bin [31m141757[m -> [32m0[m bytes
+ .../model_test/g2s_validation_results-1/C1_CC__CC_C1C_C__H__C__O_O_NC__O_CN_O_pi.png    |  Bin [31m113510[m -> [32m0[m bytes
+ .../g2s_validation_results-1/C1_CC__CC_C1C_C__H__C__O_O_NC__O_CN_O_spectrum.png         |  Bin [31m267158[m -> [32m0[m bytes
+ .../g2s_validation_results-1/CC_C__C_C1_CC__C_C__C1_C_C__C_C_O_CC2_CC_C_C_C2_OC_mu.png  |  Bin [31m149399[m -> [32m0[m bytes
+ .../g2s_validation_results-1/CC_C__C_C1_CC__C_C__C1_C_C__C_C_O_CC2_CC_C_C_C2_OC_pi.png  |  Bin [31m126656[m -> [32m0[m bytes
+ .../CC_C__C_C1_CC__C_C__C1_C_C__C_C_O_CC2_CC_C_C_C2_OC_spectrum.png                     |  Bin [31m272330[m -> [32m0[m bytes
+ data/demo/model_test/g2s_validation_results-1/validation_metrics.csv                    |    2 [31m-[m
+ .../model_test/g2s_validation_results-2/C1_CC__CC_C1C_C__H__C__O_O_NC__O_CN_O_mu.png    |  Bin [31m141757[m -> [32m0[m bytes
+ .../model_test/g2s_validation_results-2/C1_CC__CC_C1C_C__H__C__O_O_NC__O_CN_O_pi.png    |  Bin [31m113510[m -> [32m0[m bytes
+ .../g2s_validation_results-2/C1_CC__CC_C1C_C__H__C__O_O_NC__O_CN_O_spectrum.png         |  Bin [31m267149[m -> [32m0[m bytes
+ data/demo/model_test/g2s_validation_results-2/validation_metrics.csv                    |    2 [31m-[m
+ .../demo/model_test/g2s_validation_results/C1_CC__CC_C1C_C__H__C__O_O_NC__O_CN_O_mu.png |  Bin [31m141502[m -> [32m0[m bytes
+ .../demo/model_test/g2s_validation_results/C1_CC__CC_C1C_C__H__C__O_O_NC__O_CN_O_pi.png |  Bin [31m114868[m -> [32m0[m bytes
+ .../g2s_validation_results/C1_CC__CC_C1C_C__H__C__O_O_NC__O_CN_O_spectrum.png           |  Bin [31m268147[m -> [32m0[m bytes
+ .../g2s_validation_results/CC_C__C_C1_CC__C_C__C1_C_C__C_C_O_CC2_CC_C_C_C2_OC_mu.png    |  Bin [31m146995[m -> [32m0[m bytes
+ .../g2s_validation_results/CC_C__C_C1_CC__C_C__C1_C_C__C_C_O_CC2_CC_C_C_C2_OC_pi.png    |  Bin [31m128801[m -> [32m0[m bytes
+ .../CC_C__C_C1_CC__C_C__C1_C_C__C_C_O_CC2_CC_C_C_C2_OC_spectrum.png                     |  Bin [31m262803[m -> [32m0[m bytes
+ data/demo/model_test/g2s_validation_results/validation_metrics.csv                      |    2 [31m-[m
+ data/demo/model_test/s2n_prediction_results/prediction_pred_su_hist.csv                 |   17 [31m-[m
+ data/demo/model_test/s2n_prediction_results/test_pred_su_hist.csv                       |   21 [31m-[m
+ data/demo/model_test/s2n_prediction_results/test_pred_su_hist.png                       |  Bin [31m201672[m -> [32m0[m bytes
+ data/demo/model_test/s2n_validation_results/100_02_validation.png                       |  Bin [31m323404[m -> [32m0[m bytes
+ data/demo/model_test/s2n_validation_results/100_09_validation.png                       |  Bin [31m317887[m -> [32m0[m bytes
+ data/demo/model_test/s2n_validation_results/30_02_validation.png                        |  Bin [31m314464[m -> [32m0[m bytes
+ data/demo/model_test/s2n_validation_results/400_09_validation.png                       |  Bin [31m100388[m -> [32m0[m bytes
+ data/demo/model_test/s2n_validation_results/50_02_validation.png                        |  Bin [31m316979[m -> [32m0[m bytes
+ data/z_copy/center_index.pkl                                                            |  Bin [31m0[m -> [32m59882[m bytes
+ data/z_copy/indexes/center_index.pkl                                                    |  Bin [31m0[m -> [32m59882[m bytes
+ data/z_copy/indexes/role_index.pkl                                                      |    1 [32m+[m
+ data/z_copy/invalid_templates_hop1.csv                                                  |  101 [32m+[m
+ data/z_copy/role_index.pkl                                                              |    1 [32m+[m
+ data/z_copy/su_hop1_nmr_range_filtered.csv                                              |  533 [32m++++++[m
+ data/z_copy/su_multiset_distribution.csv                                                | 3684 [32m+++++++++++++++++++++++++++++++++++++[m
+ data/z_copy/su_multiset_distribution_filtered.csv                                       | 3240 [32m++++++++++++++++++++++++++++++++[m
+ data/z_copy/su_nmr_common_range_filtered.csv                                            |   25 [32m+[m
+ data/z_copy/su_special_anchor_mode_detail_filtered.csv                                  |  423 [32m+++++[m
+ data/z_copy/su_special_anchor_mode_nmr_range_filtered.csv                               |    9 [32m+[m
+ data/z_copy/su_special_degree_nmr_common_range_filtered.csv                             |    7 [32m+[m
+ data/z_copy/subgraph_library.pt                                                         |  Bin [31m0[m -> [32m9107651[m bytes
+ data/z_copy/subgraph_library_filtered.pt                                                |  Bin [31m0[m -> [32m8615540[m bytes
+ final_comparison.png                                                                    |  Bin [31m0[m -> [32m431312[m bytes
+ model/data/smiles.py                                                                    |  188 [32m+[m[31m-[m
+ model/forward/g2s/g2s_model.py                                                          |   13 [32m+[m[31m-[m
+ model/inverse/inverse_pipeline.py                                                       |    2 [32m+[m[31m-[m
+ model/inverse/layer0/inverse_layer0.py                                                  |   69 [32m+[m
+ model/inverse/layer1/inverse_layer1.py                                                  |  913 [32m+++++++[m[31m---[m
+ model/inverse/layer1/layer1_validator.py                                                |   29 [32m+[m[31m-[m
+ model/inverse/layer1/port_role_balance.py                                               |  213 [32m+++[m
+ model/inverse/layer3/inverse_layer3.py                                                  |  174 [32m+[m[31m-[m
+ model/inverse/layer4/inverse_layer4_block_c.py                                          |  430 [32m+++[m[31m--[m
+ model/inverse/library/z_library.py                                                      |  322 [32m+++[m[31m-[m
+ model/inverse/topology/histogram_adjustment.py                                          |   33 [32m+[m[31m-[m
+ model/inverse/topology/resource_accounting.py                                           |   36 [32m+[m[31m-[m
+ model/inverse/topology/spectrum_rebalance.py                                            |   11 [32m+[m[31m-[m
+ model/inverse/topology/stage3_models.py                                                 |    1 [32m+[m
+ read copy.ipynb                                                                         |    2 [32m+[m
+ test.ipynb                                                                              |  174 [32m+[m[31m-[m
+ tests/inverse/test_layer1_refactor_contract.py                                          |  279 [32m++[m[31m-[m
+ tests/inverse/test_layer3_fixed_template_z.py                                           |   62 [32m+[m[31m-[m
+ tests/inverse/test_z_library_build.py                                                   |  249 [32m+++[m
+ tests/inverse/topology/test_stage3_resource_loop.py                                     |   93 [32m+[m[31m-[m
+ tests/inverse/topology/test_stage3_v2_state_machine.py                                  |   13 [32m+[m[31m-[m
+ tests/rl_mtcs/test_inverse_mcts_initialization.py                                       |  120 [32m++[m
+ tests/test_smiles_parallel.py                                                           |   81 [32m+[m
+ 89 files changed, 12398 insertions(+), 22557 deletions(-)

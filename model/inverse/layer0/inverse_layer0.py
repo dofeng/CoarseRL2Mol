@@ -17,6 +17,11 @@ from ..special_anchor_evidence import (
     SU19_DOUBLE_EVIDENCE_WINDOWS,
     split_su19_double_area,
 )
+from ..layer1.port_role_balance import (
+    apply_layer1_port_balance,
+    audit_layer1_port_roles,
+    select_layer1_port_balance,
+)
 
 LAYER0_SPECIAL_MODE_WINDOWS: Dict[int, Dict[str, Tuple[float, float]]] = {
     19: {
@@ -51,6 +56,7 @@ class Layer0Estimator:
         self.special_partition_meta: Dict[int, Dict[str, Dict[int, int]]] = {}
         self.special_anchor_mode_meta: Dict[int, Dict[str, Dict[int, int]]] = {}
         self.degree_parity_adjustment: Dict[str, Any] = {}
+        self.port_role_balance_adjustment: Dict[str, Any] = {}
 
     def _record_fixed_partition_meta(self,
                                      H: torch.Tensor,
@@ -88,13 +94,35 @@ class Layer0Estimator:
             'degree_parity_adjustment': dict(
                 getattr(self, 'degree_parity_adjustment', {}) or {}
             ),
+            'layer1_port_role_balance': dict(
+                getattr(self, 'port_role_balance_adjustment', {}) or {}
+            ),
         }
         self.fixed_partition_meta = dict(meta)
         self.special_degree_meta = dict(meta.get('special_degree_meta', {}) or {})
         self.special_partition_meta = dict(meta.get('special_partition_meta', {}) or {})
         self.special_anchor_mode_meta = dict(meta.get('special_anchor_mode_meta', {}) or {})
         self.degree_parity_adjustment = dict(meta.get('degree_parity_adjustment', {}) or {})
+        self.port_role_balance_adjustment = dict(
+            meta.get('layer1_port_role_balance', {}) or {}
+        )
         return dict(meta)
+
+    def _enforce_layer1_port_role_balance(
+        self,
+        H: torch.Tensor,
+        special_degree_meta: Optional[Dict[int, Dict[int, int]]] = None,
+    ) -> torch.Tensor:
+        """Balance aromatic/non-aromatic internal roles after total parity."""
+        audit = audit_layer1_port_roles(H, special_degree_meta)
+        conversion = select_layer1_port_balance(H, audit)
+        H_out, diagnostics = apply_layer1_port_balance(
+            H,
+            conversion,
+            special_degree_meta=special_degree_meta,
+        )
+        self.port_role_balance_adjustment = dict(diagnostics)
+        return torch.clamp(H_out, min=0).long().to(H.device)
 
     def _enforce_even_target_degree_sum(
         self,
@@ -1085,6 +1113,10 @@ class Layer0Estimator:
                 S_target=S_target,
                 allow_degree_parity_adjustment=True,
             )
+        H_corrected = self._enforce_layer1_port_role_balance(
+            H_corrected,
+            special_degree_meta=special_degree_meta,
+        )
         fixed_partition_meta = self._record_fixed_partition_meta(
             H_corrected,
             ether_meta=ether_meta,
@@ -1665,6 +1697,43 @@ class Layer0Estimator:
             n_fixed_edges_20=int(amine_fixed_edges_20),
             x_fixed_edges_21=int(halogen_fixed_edges_21),
             S_target=S_hint,
+            allow_degree_parity_adjustment=False,
+        )
+        parity_preview = dict(getattr(self, 'degree_parity_adjustment', {}) or {})
+        H_parity, histogram_parity = self._enforce_even_histogram_degree_sum(
+            H_work,
+            E_target,
+            parity_preview,
+        )
+        if bool(histogram_parity.get('adjusted', False)):
+            H_work = torch.clamp(H_parity, min=0).long()
+            special_degree_meta = self._allocate_special_degree_meta(
+                H_work,
+                o_base_19=int((ether_meta or {}).get('o_base_19', 0)),
+                s_reserved_19=int((thio_meta or {}).get('s_reserved_19', 0)),
+                o_fixed_edges_19=int((ether_meta or {}).get('o_fixed_edges_19', (ether_meta or {}).get('o_base_19', 0))),
+                s_fixed_edges_19=int((thio_meta or {}).get('s_fixed_edges_19', (thio_meta or {}).get('s_reserved_19', 0))),
+                n_fixed_edges_20=int(amine_fixed_edges_20),
+                x_fixed_edges_21=int(halogen_fixed_edges_21),
+                S_target=S_hint,
+                allow_degree_parity_adjustment=False,
+            )
+            self.degree_parity_adjustment = dict(histogram_parity)
+        elif int(parity_preview.get('target_degree_sum_before', 0) or 0) % 2 != 0:
+            special_degree_meta = self._allocate_special_degree_meta(
+                H_work,
+                o_base_19=int((ether_meta or {}).get('o_base_19', 0)),
+                s_reserved_19=int((thio_meta or {}).get('s_reserved_19', 0)),
+                o_fixed_edges_19=int((ether_meta or {}).get('o_fixed_edges_19', (ether_meta or {}).get('o_base_19', 0))),
+                s_fixed_edges_19=int((thio_meta or {}).get('s_fixed_edges_19', (thio_meta or {}).get('s_reserved_19', 0))),
+                n_fixed_edges_20=int(amine_fixed_edges_20),
+                x_fixed_edges_21=int(halogen_fixed_edges_21),
+                S_target=S_hint,
+                allow_degree_parity_adjustment=True,
+            )
+        H_work = self._enforce_layer1_port_role_balance(
+            H_work,
+            special_degree_meta=special_degree_meta,
         )
         fixed_partition_meta = self._record_fixed_partition_meta(
             H_work,

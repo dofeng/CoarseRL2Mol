@@ -12,7 +12,6 @@ import torch
 
 from ...shared.inverse_common import (
     SPECIAL_DEGREE_PRIORS,
-    SU_CONNECTION_DEGREE,
     normalize_special_degree_meta,
 )
 from ..topology import Stage3WorkflowCycleRecord, Stage3WorkflowResult
@@ -40,6 +39,10 @@ from ..topology.spectrum_rebalance import (
     inverse_bundle_signature,
     spectrum_candidate_balance_penalty,
     spectrum_window_loss,
+)
+from ..layer1.port_role_balance import (
+    audit_layer1_port_roles,
+    select_layer1_port_balance,
 )
 
 
@@ -211,7 +214,8 @@ def _print_stage3_plan_summary(
 def _print_stage3_histogram_adjustments(cycle_number: int, histogram_plan: Any) -> None:
     groups = list(getattr(histogram_plan, "groups", []) or [])
     parity_op = getattr(histogram_plan, "parity_balance_op", None)
-    if not groups and parity_op is None:
+    role_op = getattr(histogram_plan, "port_role_balance_op", None)
+    if not groups and parity_op is None and role_op is None:
         print(f"[Block C:resource #{cycle_number}] no physical histogram adjustment", flush=True)
         return
     if groups:
@@ -268,6 +272,11 @@ def _print_stage3_histogram_adjustments(cycle_number: int, histogram_plan: Any) 
             f"  [Port Parity Balance] {_format_conversion(parity_op)}",
             flush=True,
         )
+    if role_op is not None:
+        print(
+            f"  [Port Role Balance] {_format_conversion(role_op)}",
+            flush=True,
+        )
 
 
 def _histogram_h_compensation_count(histogram_plan: Any) -> int:
@@ -278,7 +287,10 @@ def _histogram_h_compensation_count(histogram_plan: Any) -> int:
 
 
 def _histogram_parity_balance_count(histogram_plan: Any) -> int:
-    return 1 if getattr(histogram_plan, "parity_balance_op", None) is not None else 0
+    return sum(
+        getattr(histogram_plan, field, None) is not None
+        for field in ("parity_balance_op", "port_role_balance_op")
+    )
 
 
 def _last_resource_step_signature(histogram_plan: Any) -> str:
@@ -373,32 +385,6 @@ def _restore_stage3_parity_cursor(adjuster: Any, cursor_before: int) -> None:
         adjuster._stage3_parity_balance_cursor = int(cursor_before)
 
 
-def _stage3_total_port_degree(
-    H: torch.Tensor,
-    special_degree_meta: Optional[Dict[str, Any]] = None,
-) -> int:
-    histogram = torch.clamp(H.detach().cpu(), min=0).long()
-    special_counts = {
-        int(su_type): int(histogram[int(su_type)].item())
-        for su_type in SPECIAL_DEGREE_PRIORS
-        if int(su_type) < int(histogram.numel())
-    }
-    normalized_special = normalize_special_degree_meta(
-        special_counts,
-        special_degree_meta=special_degree_meta,
-    )
-    total = 0
-    for su_type, count in enumerate(histogram.tolist()):
-        if int(su_type) in normalized_special:
-            total += sum(
-                int(degree) * int(degree_count)
-                for degree, degree_count in normalized_special[int(su_type)].items()
-            )
-        else:
-            total += int(count) * int(SU_CONNECTION_DEGREE.get(int(su_type), 0))
-    return int(total)
-
-
 def _stage3_port_capacity_diagnostics(
     H: torch.Tensor,
     special_degree_meta: Optional[Dict[str, Any]] = None,
@@ -435,7 +421,8 @@ def _stage3_port_capacity_diagnostics(
     }
     su11_count = count(11)
     aromatic_unit_count = sum(count(su_type) for su_type in range(5, 14))
-    total_degree = _stage3_total_port_degree(histogram, special_degree_meta)
+    role_audit = audit_layer1_port_roles(histogram, special_degree_meta)
+    total_degree = int(role_audit["total_ports"])
     return {
         "total_port_degree": int(total_degree),
         "degree_is_even": bool(int(total_degree) % 2 == 0),
@@ -449,6 +436,16 @@ def _stage3_port_capacity_diagnostics(
         ),
         "su11_aromatic_ports_required": int(2 * su11_count),
         "coarse_aromatic_unit_count": int(aromatic_unit_count),
+        "aromatic_internal_ports": int(role_audit["aromatic_internal_ports"]),
+        "non_aromatic_internal_ports": int(
+            role_audit["non_aromatic_internal_ports"]
+        ),
+        "aromatic_internal_even": bool(role_audit["aromatic_internal_even"]),
+        "non_aromatic_internal_even": bool(
+            role_audit["non_aromatic_internal_even"]
+        ),
+        "port_roles_ok": bool(role_audit["ok"]),
+        "layer1_port_role_audit": dict(role_audit),
         "scope": "necessary_coarse_preflight_not_exact_template_proof",
     }
 
@@ -513,12 +510,13 @@ def _stage3_used_conversion_ids(histogram_plan: Any) -> set[int]:
         if op is not None
         for node_id in list(getattr(op, "node_ids", []) or [])
     }
-    parity_op = getattr(histogram_plan, "parity_balance_op", None)
-    if parity_op is not None:
-        used.update(
-            int(node_id)
-            for node_id in list(getattr(parity_op, "node_ids", []) or [])
-        )
+    for field in ("parity_balance_op", "port_role_balance_op"):
+        balance_op = getattr(histogram_plan, field, None)
+        if balance_op is not None:
+            used.update(
+                int(node_id)
+                for node_id in list(getattr(balance_op, "node_ids", []) or [])
+            )
     return used
 
 
@@ -530,7 +528,7 @@ def _append_stage3_parity_balance(
     special_degree_meta: Optional[Dict[str, Any]],
     balance_cursor: int,
 ) -> Tuple[bool, Dict[str, Any]]:
-    """Balance odd total port degree with one unused SU12/SU13 conversion."""
+    """Apply total-port and Layer1 port-role balance before a fresh rebuild."""
     H_after = getattr(histogram_plan, "H_after", None)
     groups = list(getattr(histogram_plan, "groups", []) or [])
     if not isinstance(H_after, torch.Tensor) or not groups:
@@ -540,11 +538,10 @@ def _append_stage3_parity_balance(
         }
 
     audit_before = _stage3_port_capacity_diagnostics(H_after, special_degree_meta)
-    degree_even = bool(audit_before["degree_is_even"])
-    if bool(degree_even):
+    if bool(audit_before["port_roles_ok"]):
         return True, {
             "enforced": True,
-            "reason": "port_degree_even",
+            "reason": "pre_rebuild_ports_balanced",
             "balance_applied": False,
             "before": audit_before,
             "after": audit_before,
@@ -567,17 +564,37 @@ def _append_stage3_parity_balance(
                 "resource_ledger"
             )
         )
-        return (False if snapshot_declared else True), {
-            "enforced": bool(snapshot_declared),
-            "reason": (
+        if snapshot_declared:
+            missing_reason = (
                 "odd_port_degree_no_unused_safe_balance_donor"
-                if snapshot_declared
-                else "port_audit_not_enforced_without_resource_identity_snapshot"
-            ),
-            "balance_applied": False,
-            "before": audit_before,
-            "pool_source": pool_source,
+                if not bool(audit_before["degree_is_even"])
+                else "port_role_balance_no_unused_safe_donor"
+            )
+            return False, {
+                "enforced": True,
+                "reason": missing_reason,
+                "balance_applied": False,
+                "before": audit_before,
+                "pool_source": pool_source,
+            }
+        remaining = {}
+        for node in list(nodes or []):
+            node_id = int(getattr(node, "global_id", -1))
+            su_type = int(getattr(node, "su_type", -1))
+            if node_id >= 0 and su_type >= 0:
+                remaining.setdefault(int(su_type), []).append(int(node_id))
+        remaining = {
+            int(key): sorted(set(values)) for key, values in remaining.items()
         }
+        pool_source = "fresh_rebuild_node_pool"
+        if not remaining:
+            return False, {
+                "enforced": True,
+                "reason": "pre_rebuild_balance_node_identity_unavailable",
+                "balance_applied": False,
+                "before": audit_before,
+                "pool_source": pool_source,
+            }
 
     accounting_before = dict(
         getattr(histogram_plan, "accounting_diagnostics", {}) or {}
@@ -597,90 +614,165 @@ def _append_stage3_parity_balance(
         "remaining_closure_resource",
         "remaining_aromatic_donor",
     }
-    preferred = (13, 12) if int(balance_cursor) % 2 == 0 else (12, 13)
-    selected: Optional[Tuple[int, int, int]] = None
-    attempted_directions: List[Dict[str, Any]] = []
-    for source, target in (preferred,):
-        candidates = []
-        for node_id in list(remaining.get(int(source), []) or []):
-            if int(node_id) in used_ids:
-                continue
-            if int(node_types.get(int(node_id), -1)) != int(source):
-                continue
-            owner_state = str(ownership.get(int(node_id), "") or "")
-            if owner_state and owner_state not in allowed_states:
-                continue
-            if authorized_before and int(node_id) not in set(
-                authorized_before.get(int(source), [])
-            ):
-                continue
-            if aggregate_before and int(node_id) not in set(
-                aggregate_before.get(int(source), [])
-            ):
-                continue
-            candidates.append(int(node_id))
-        attempted_directions.append({
-            "from_su": int(source),
-            "to_su": int(target),
-            "candidate_node_ids": sorted(candidates),
-        })
-        if candidates:
-            selected = (int(source), int(target), min(candidates))
-            break
-    if selected is None:
-        return False, {
-            "enforced": True,
-            "reason": "odd_port_degree_no_unused_safe_balance_donor",
-            "balance_applied": False,
-            "before": audit_before,
-            "pool_source": pool_source,
-            "required_direction": [int(preferred[0]), int(preferred[1])],
-            "attempted_directions": attempted_directions,
-        }
-
-    source, target, node_id = selected
     working_histogram = deepcopy(histogram_plan)
     working_groups = list(getattr(working_histogram, "groups", []) or [])
-    balance_op = HistogramConversion(
-        from_su=int(source),
-        to_su=int(target),
-        count=1,
-        reason="pre_rebuild_port_parity_balance",
-        node_ids=[int(node_id)],
-    )
-    working_histogram.parity_balance_op = balance_op
     H_balanced = H_after.detach().clone()
-    if (
-        int(source) >= int(H_balanced.numel())
-        or int(target) >= int(H_balanced.numel())
-        or int(H_balanced[int(source)].item()) <= 0
+    attempted_directions: List[Dict[str, Any]] = []
+    balance_ops: List[HistogramConversion] = []
+
+    def _select_unused(
+        directions: Tuple[Tuple[int, int], ...],
+        kind: str,
+        *,
+        allow_balance_chain: bool = False,
     ):
-        return False, {
+        for source, target in directions:
+            candidates: List[int] = []
+            for node_id in list(remaining.get(int(source), []) or []):
+                chained = bool(
+                    allow_balance_chain
+                    and int(node_id) in used_ids
+                    and int(node_types.get(int(node_id), -1)) == int(source)
+                )
+                if int(node_id) in used_ids and not chained:
+                    continue
+                if int(node_types.get(int(node_id), -1)) != int(source):
+                    continue
+                owner_state = str(ownership.get(int(node_id), "") or "")
+                if owner_state and owner_state not in allowed_states:
+                    continue
+                if not chained and authorized_before and int(node_id) not in set(
+                    authorized_before.get(int(source), [])
+                ):
+                    continue
+                if not chained and aggregate_before and int(node_id) not in set(
+                    aggregate_before.get(int(source), [])
+                ):
+                    continue
+                candidates.append(int(node_id))
+            attempted_directions.append({
+                "kind": str(kind),
+                "from_su": int(source),
+                "to_su": int(target),
+                "candidate_node_ids": sorted(candidates),
+            })
+            if candidates:
+                return int(source), int(target), min(candidates)
+        return None
+
+    def _append_balance(
+        selected: Tuple[int, int, int],
+        *,
+        field: str,
+        reason: str,
+    ) -> None:
+        source, target, node_id = selected
+        op = HistogramConversion(
+            from_su=int(source),
+            to_su=int(target),
+            count=1,
+            reason=str(reason),
+            node_ids=[int(node_id)],
+        )
+        setattr(working_histogram, field, op)
+        H_balanced[int(source)] -= 1
+        H_balanced[int(target)] += 1
+        remaining[int(source)] = [
+            int(value)
+            for value in list(remaining.get(int(source), []) or [])
+            if int(value) != int(node_id)
+        ]
+        remaining.setdefault(int(target), []).append(int(node_id))
+        remaining[int(target)] = sorted(set(remaining[int(target)]))
+        node_types[int(node_id)] = int(target)
+        used_ids.add(int(node_id))
+        balance_ops.append(op)
+
+    total_preferred = (
+        ((13, 12),) if int(balance_cursor) % 2 == 0 else ((12, 13),)
+    )
+    if not bool(audit_before["degree_is_even"]):
+        selected = _select_unused(total_preferred, "total_port_parity")
+        if selected is None:
+            return False, {
+                "enforced": True,
+                "reason": "odd_port_degree_no_unused_safe_balance_donor",
+                "balance_applied": False,
+                "before": audit_before,
+                "pool_source": pool_source,
+                "required_direction": list(total_preferred[0]),
+                "attempted_directions": attempted_directions,
+            }
+        _append_balance(
+            selected,
+            field="parity_balance_op",
+            reason="pre_rebuild_port_parity_balance",
+        )
+
+    role_audit = audit_layer1_port_roles(H_balanced, special_degree_meta)
+    role_selection = select_layer1_port_balance(H_balanced, role_audit)
+    if bool(role_selection.get("required", False)):
+        if not bool(role_selection.get("possible", False)):
+            return False, {
+                "enforced": True,
+                "reason": str(role_selection.get(
+                    "reason", "layer1_port_role_balance_impossible"
+                )),
+                "balance_applied": bool(balance_ops),
+                "before": audit_before,
+                "intermediate": _stage3_port_capacity_diagnostics(
+                    H_balanced, special_degree_meta
+                ),
+                "attempted_directions": attempted_directions,
+            }
+        role_directions = tuple(
+            (int(source), int(target))
+            for source, target in ((12, 11), (11, 12))
+            if int(H_balanced[int(source)].item()) > 0
+        )
+        selected = _select_unused(
+            role_directions,
+            "layer1_port_roles",
+            allow_balance_chain=True,
+        )
+        if selected is None:
+            return False, {
+                "enforced": True,
+                "reason": "port_role_balance_no_unused_safe_donor",
+                "balance_applied": bool(balance_ops),
+                "before": audit_before,
+                "intermediate": _stage3_port_capacity_diagnostics(
+                    H_balanced, special_degree_meta
+                ),
+                "pool_source": pool_source,
+                "attempted_directions": attempted_directions,
+            }
+        _append_balance(
+            selected,
+            field="port_role_balance_op",
+            reason="pre_rebuild_layer1_port_role_balance",
+        )
+
+    if not balance_ops:
+        return True, {
             "enforced": True,
-            "reason": "odd_port_degree_balance_histogram_source_unavailable",
+            "reason": "pre_rebuild_ports_balanced",
             "balance_applied": False,
             "before": audit_before,
-            "selected_node_id": int(node_id),
+            "after": audit_before,
         }
-    H_balanced[int(source)] -= 1
-    H_balanced[int(target)] += 1
+
     working_histogram.H_after = H_balanced
     working_histogram.physical_conversion_count = int(
         getattr(working_histogram, "physical_conversion_count", 0) or 0
-    ) + 1
+    ) + len(balance_ops)
 
     updated_accounting: Dict[str, Any] = {}
     if aggregate_before and authorized_before:
-        final_remaining = _ids_by_su(
-            accounting_before.get("final_remaining_ids_by_su", {})
-        )
-        final_remaining[int(source)] = [
-            int(value)
-            for value in final_remaining.get(int(source), [])
-            if int(value) != int(node_id)
-        ]
-        final_remaining.setdefault(int(target), []).append(int(node_id))
-        final_remaining[int(target)] = sorted(set(final_remaining[int(target)]))
+        final_remaining = {
+            int(key): sorted(set(int(value) for value in values))
+            for key, values in remaining.items()
+        }
         updated_accounting = build_resource_accounting_snapshot(
             aggregate_ids_before_by_su=aggregate_before,
             authorized_ids_before_by_su=authorized_before,
@@ -689,7 +781,7 @@ def _append_stage3_parity_balance(
                 accounting_before.get("committed_claimed_ids_by_su", {})
             ),
             groups=working_groups,
-            extra_ops=[balance_op],
+            extra_ops=balance_ops,
         )
         if not bool(updated_accounting.get("ok", False)):
             return False, {
@@ -697,7 +789,6 @@ def _append_stage3_parity_balance(
                 "reason": "parity_balance_resource_accounting_failed",
                 "balance_applied": False,
                 "before": audit_before,
-                "selected_node_id": int(node_id),
                 "resource_accounting": updated_accounting,
             }
         working_histogram.inventory_before = {
@@ -734,7 +825,7 @@ def _append_stage3_parity_balance(
     else:
         inventory_after, inventory_errors = apply_count_delta(
             getattr(working_histogram, "inventory_before", {}) or {},
-            combined_group_delta(working_groups, extra_ops=[balance_op]),
+            combined_group_delta(working_groups, extra_ops=balance_ops),
         )
         if inventory_errors:
             return False, {
@@ -753,22 +844,29 @@ def _append_stage3_parity_balance(
     if phase_result is not None:
         phase_result.parity_balance_count = int(
             getattr(phase_result, "parity_balance_count", 0) or 0
-        ) + 1
+        ) + len(balance_ops)
 
     audit_after = _stage3_port_capacity_diagnostics(H_balanced, special_degree_meta)
     diagnostics = {
         "enforced": True,
-        "reason": "port_degree_balanced_before_rebuild",
+        "reason": "pre_rebuild_ports_balanced",
         "balance_applied": True,
         "before": audit_before,
         "after": audit_after,
         "pool_source": pool_source,
-        "required_direction": [int(preferred[0]), int(preferred[1])],
-        "applied_direction": [int(source), int(target)],
-        "node_id": int(node_id),
+        "applied_operations": [op.to_dict() for op in balance_ops],
         "attempted_directions": attempted_directions,
-        "next_cursor": int(balance_cursor) + 1,
+        "next_cursor": int(balance_cursor) + (
+            1 if getattr(working_histogram, "parity_balance_op", None) is not None else 0
+        ),
     }
+    parity_op = getattr(working_histogram, "parity_balance_op", None)
+    if parity_op is not None:
+        diagnostics["required_direction"] = list(total_preferred[0])
+        diagnostics["applied_direction"] = [
+            int(parity_op.from_su), int(parity_op.to_su)
+        ]
+        diagnostics["node_id"] = int(parity_op.node_ids[0])
     plan_diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
     plan_diagnostics["pre_rebuild_port_feasibility"] = diagnostics
     plan_diagnostics["histogram_adjustment_plan"] = histogram_plan.to_dict()
@@ -777,7 +875,7 @@ def _append_stage3_parity_balance(
     if updated_accounting:
         plan_diagnostics["resource_accounting"] = dict(updated_accounting)
     plan.diagnostics = plan_diagnostics
-    return bool(audit_after["degree_is_even"]), diagnostics
+    return bool(audit_after["port_roles_ok"]), diagnostics
 
 
 def _prepare_spectrum_candidate_for_rebuild(
@@ -809,10 +907,10 @@ def _prepare_spectrum_candidate_for_rebuild(
         candidate_H,
         special_degree_meta,
     )
-    if bool(audit_before["degree_is_even"]):
+    if bool(audit_before["port_roles_ok"]):
         return effective_candidate, candidate_nodes, candidate_H, {
             "ok": True,
-            "reason": "spectrum_candidate_port_parity_valid",
+            "reason": "spectrum_candidate_pre_rebuild_ports_valid",
             "balance_applied": False,
             "before": audit_before,
             "after": audit_before,
@@ -859,8 +957,16 @@ def _prepare_spectrum_candidate_for_rebuild(
         special_degree_meta=special_degree_meta,
         balance_cursor=int(balance_cursor),
     )
-    balance_op = getattr(trial_histogram_plan, "parity_balance_op", None)
-    if not bool(parity_ok) or balance_op is None:
+    balance_fields = (
+        ("parity_balance_op", "parity_balance"),
+        ("port_role_balance_op", "port_role_balance"),
+    )
+    balance_ops = [
+        (field, kind, getattr(trial_histogram_plan, field, None))
+        for field, kind in balance_fields
+        if getattr(trial_histogram_plan, field, None) is not None
+    ]
+    if not bool(parity_ok) or not balance_ops:
         return effective_candidate, None, None, {
             **dict(parity_diagnostics or {}),
             "ok": False,
@@ -869,28 +975,30 @@ def _prepare_spectrum_candidate_for_rebuild(
             )),
         }
 
-    balance_node_ids = [
-        int(node_id)
-        for node_id in list(getattr(balance_op, "node_ids", []) or [])
-    ]
-    if len(balance_node_ids) != 1:
-        return effective_candidate, None, None, {
-            **dict(parity_diagnostics or {}),
-            "ok": False,
-            "reason": "spectrum_candidate_parity_balance_id_invalid",
-            "balance_node_ids": balance_node_ids,
-        }
-    parity_operation = {
-        "op": "convert",
-        "node_id": int(balance_node_ids[0]),
-        "from_su": int(getattr(balance_op, "from_su")),
-        "to_su": int(getattr(balance_op, "to_su")),
-        "reason": "pre_rebuild_port_parity_balance",
-        "operation_kind": "parity_balance",
-    }
+    balance_operations: List[Dict[str, Any]] = []
+    for _field, kind, balance_op in balance_ops:
+        balance_node_ids = [
+            int(node_id)
+            for node_id in list(getattr(balance_op, "node_ids", []) or [])
+        ]
+        if len(balance_node_ids) != 1:
+            return effective_candidate, None, None, {
+                **dict(parity_diagnostics or {}),
+                "ok": False,
+                "reason": f"spectrum_candidate_{kind}_id_invalid",
+                "balance_node_ids": balance_node_ids,
+            }
+        balance_operations.append({
+            "op": "convert",
+            "node_id": int(balance_node_ids[0]),
+            "from_su": int(getattr(balance_op, "from_su")),
+            "to_su": int(getattr(balance_op, "to_su")),
+            "reason": str(getattr(balance_op, "reason", kind)),
+            "operation_kind": str(kind),
+        })
     effective_candidate.operations = list(
         getattr(effective_candidate, "operations", []) or []
-    ) + [parity_operation]
+    ) + balance_operations
     effective_candidate.histogram_signature = histogram_signature_after_operations(
         H,
         effective_candidate.operations,
@@ -898,9 +1006,13 @@ def _prepare_spectrum_candidate_for_rebuild(
     effective_candidate.inverse_signature = inverse_bundle_signature(
         effective_candidate.operations
     )
+    balance_suffix = ":".join(
+        f"{op['operation_kind']}:{int(op['from_su'])}-{int(op['to_su'])}"
+        for op in balance_operations
+    )
     effective_candidate.candidate_id = (
         f"{str(getattr(effective_candidate, 'candidate_id', '') or '')}:"
-        f"parity:{int(parity_operation['from_su'])}-{int(parity_operation['to_su'])}"
+        f"{balance_suffix}"
     )
     candidate_diagnostics = dict(
         getattr(effective_candidate, "diagnostics", {}) or {}
@@ -929,17 +1041,17 @@ def _prepare_spectrum_candidate_for_rebuild(
         candidate_H,
         special_degree_meta,
     )
-    final_ok = bool(audit_after["degree_is_even"])
+    final_ok = bool(audit_after["port_roles_ok"])
     return effective_candidate, candidate_nodes, candidate_H, {
         **dict(parity_diagnostics or {}),
         "ok": bool(final_ok),
         "reason": (
-            "spectrum_candidate_port_parity_balanced"
+            "spectrum_candidate_pre_rebuild_ports_balanced"
             if final_ok
             else "spectrum_candidate_pre_rebuild_port_infeasible"
         ),
         "after": audit_after,
-        "parity_operation": parity_operation,
+        "balance_operations": balance_operations,
     }
 
 
@@ -1531,8 +1643,8 @@ def run_block_c_resource_adjustment_loop_impl(
                     accepted=True,
                     acceptance_reason="layer2_r2_gain_threshold_met",
                     primary_adjustment_count=int(getattr(candidate, "primary_adjustment_count", 0) or 0),
-                    parity_balance_count=(
-                        1 if bool(selected_parity.get("balance_applied", False)) else 0
+                    parity_balance_count=len(
+                        list(selected_parity.get("applied_operations", []) or [])
                     ),
                     histogram_before=_histogram_dict(spectrum_H_before),
                     histogram_after=_histogram_dict(H_current),

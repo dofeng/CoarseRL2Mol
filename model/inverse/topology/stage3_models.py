@@ -764,6 +764,7 @@ class HistogramAdjustmentPlan(Stage3Serializable):
     primary_adjustment_count: int = 0
     physical_conversion_count: int = 0
     parity_balance_op: Optional[HistogramConversion] = None
+    port_role_balance_op: Optional[HistogramConversion] = None
     H_before: Optional[torch.Tensor] = None
     H_after: Optional[torch.Tensor] = None
     demand_before: Dict[int, int] = field(default_factory=dict)

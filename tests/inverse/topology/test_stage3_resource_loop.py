@@ -1057,8 +1057,8 @@ def test_block_c_balances_odd_degree_with_first_su13_to_su12_rotation() -> None:
 
     assert result.ok is True
     assert len(rebuild_calls) == 1
-    assert int(rebuild_calls[0][11].item()) == 1
-    assert int(rebuild_calls[0][12].item()) == 1
+    assert int(rebuild_calls[0][11].item()) == 2
+    assert int(rebuild_calls[0][12].item()) == 0
     assert int(rebuild_calls[0][13].item()) == 0
     assert int(rebuild_calls[0][23].item()) == 1
     assert int(rebuild_calls[0][24].item()) == 0
@@ -1072,13 +1072,16 @@ def test_block_c_balances_odd_degree_with_first_su13_to_su12_rotation() -> None:
     assert audit["applied_direction"] == [13, 12]
     assert audit["node_id"] == 2
     histogram = first_cycle.plan["histogram_adjustment_plan"]
-    assert histogram["physical_conversion_count"] == 2
+    assert histogram["physical_conversion_count"] == 3
     assert histogram["parity_balance_op"]["from_su"] == 13
     assert histogram["parity_balance_op"]["to_su"] == 12
+    assert histogram["port_role_balance_op"]["from_su"] == 12
+    assert histogram["port_role_balance_op"]["to_su"] == 11
+    assert histogram["port_role_balance_op"]["node_ids"] == [2]
     assert histogram["groups"][0]["h_compensation_ops"] == []
     assert histogram["accounting_diagnostics"]["ok"] is True
     assert first_cycle.h_compensation_count == 0
-    assert first_cycle.parity_balance_count == 1
+    assert first_cycle.parity_balance_count == 2
     transaction = first_cycle.plan["phase_result"]["transactions"][0]
     assert transaction["compensation_node_ids"] == []
     assert "parity_balance_node_ids" not in transaction
@@ -1127,6 +1130,7 @@ def test_block_c_port_balance_does_not_reverse_when_rotation_donor_is_missing() 
     ]
     assert audit["required_direction"] == [13, 12]
     assert audit["attempted_directions"] == [{
+        "kind": "total_port_parity",
         "from_su": 13,
         "to_su": 12,
         "candidate_node_ids": [],
@@ -1172,6 +1176,9 @@ def test_block_c_failed_candidate_does_not_advance_port_balance_cursor(
     assert result.cycles[0].plan["histogram_adjustment_plan"][
         "parity_balance_op"
     ]["node_ids"] == [2]
+    assert result.cycles[0].plan["histogram_adjustment_plan"][
+        "port_role_balance_op"
+    ]["node_ids"] == [2]
 
 
 def test_block_c_rejects_odd_port_batch_before_rebuild_without_unused_donor() -> None:
@@ -1193,8 +1200,8 @@ def test_block_c_rejects_odd_port_batch_before_rebuild_without_unused_donor() ->
     assert adjuster._stage3_parity_balance_cursor == 0
 
 
-def test_block_c_even_port_batch_allows_odd_su12_without_balance() -> None:
-    nodes = [make_node(1, 12), make_node(2, 23)]
+def test_block_c_even_total_still_balances_odd_layer1_port_roles() -> None:
+    nodes = [make_node(1, 12), make_node(2, 23), make_node(3, 23)]
     plan = _parity_rebuild_plan(
         nodes,
         primary_node_id=2,
@@ -1208,16 +1215,22 @@ def test_block_c_even_port_batch_allows_odd_su12_without_balance() -> None:
     audit = result.cycles[0].plan["diagnostics"][
         "pre_rebuild_port_feasibility"
     ]
-    assert audit["reason"] == "port_degree_even"
-    assert audit["balance_applied"] is False
+    assert audit["reason"] == "pre_rebuild_ports_balanced"
+    assert audit["balance_applied"] is True
     assert audit["before"]["degree_is_even"] is True
-    assert "su12_self_pair_is_even" not in audit["before"]
+    assert audit["before"]["port_roles_ok"] is False
+    assert audit["after"]["port_roles_ok"] is True
+    histogram = result.cycles[0].plan["histogram_adjustment_plan"]
+    assert histogram["parity_balance_op"] is None
+    assert histogram["port_role_balance_op"]["from_su"] == 12
+    assert histogram["port_role_balance_op"]["to_su"] == 11
     assert adjuster._stage3_parity_balance_cursor == 0
 
 
 def test_block_c_final_read_only_audit_promotes_complete_after_last_rebuild() -> None:
     node = make_node(7, 12)
-    H = _histogram([node])
+    nodes = [node, make_node(8, 13), make_node(9, 22)]
+    H = _histogram(nodes)
     H_after = H.detach().clone()
     H_after[12] = 0
     H_after[11] = 1
@@ -1262,7 +1275,7 @@ def test_block_c_final_read_only_audit_promotes_complete_after_last_rebuild() ->
     result = run_block_c_resource_adjustment_loop_impl(
         Adjuster(),
         H,
-        [node],
+        nodes,
         E_target=None,
         rebuild_fn=lambda **kwargs: (
             _nodes_from_histogram(kwargs["H_seed"]),
@@ -1283,7 +1296,8 @@ def test_block_c_final_read_only_audit_promotes_complete_after_last_rebuild() ->
 
 def test_block_c_accepts_valid_fresh_rebuild_without_cross_round_metric_gate() -> None:
     node = make_node(7, 12)
-    H = _histogram([node])
+    nodes = [node, make_node(8, 13), make_node(9, 22)]
+    H = _histogram(nodes)
     H_after = H.detach().clone()
     H_after[12] = 0
     H_after[11] = 1
@@ -1362,7 +1376,7 @@ def test_block_c_accepts_valid_fresh_rebuild_without_cross_round_metric_gate() -
     result = run_block_c_resource_adjustment_loop_impl(
         adjuster,
         H,
-        [node],
+        nodes,
         E_target=None,
         rebuild_fn=rebuild,
         validate_fn=lambda **_kwargs: (True, "ok"),
@@ -1384,13 +1398,20 @@ def test_block_c_accepts_valid_fresh_rebuild_without_cross_round_metric_gate() -
 
 
 def test_block_c_repeated_physical_histogram_exports_cycle_proof() -> None:
-    node = make_node(7, 12)
-    H = _histogram([node])
+    node = make_node(7, 22)
+    nodes = [node, make_node(8, 22)]
+    H = _histogram(nodes)
     class Adjuster:
         def plan_topology_resource_adjustments(self, **kwargs):
             H_before = kwargs["H"].detach().clone()
-            node_id = int(kwargs["nodes"][0].global_id)
-            source, target = (12, 11) if int(H_before[12].item()) else (11, 12)
+            source, target = (
+                (22, 24) if int(H_before[24].item()) == 0 else (24, 22)
+            )
+            node_id = next(
+                int(value.global_id)
+                for value in kwargs["nodes"]
+                if int(value.su_type) == int(source)
+            )
             H_after = H_before.detach().clone()
             H_after[source] -= 1
             H_after[target] += 1
@@ -1426,7 +1447,7 @@ def test_block_c_repeated_physical_histogram_exports_cycle_proof() -> None:
     result = run_block_c_resource_adjustment_loop_impl(
         Adjuster(),
         H,
-        [node],
+        nodes,
         E_target=None,
         rebuild_fn=lambda **kwargs: (
             _nodes_from_histogram(kwargs["H_seed"]),
@@ -1448,8 +1469,8 @@ def test_block_c_repeated_physical_histogram_exports_cycle_proof() -> None:
     assert terminal.plan["reason"] == "phase_resource_infeasible"
     assert proof["reason"] == "physical_histogram_cycle_detected"
     assert proof["phase"] == "external_flex_closure"
-    assert proof["required_counts"] == {"12": 1}
-    assert proof["attempted_conversions"][0]["node_id"] == 0
+    assert proof["required_counts"] == {"22": 1}
+    assert proof["attempted_conversions"][0]["node_id"] == 1
 
 
 def test_block_c_does_not_rebuild_an_attached_empty_histogram_plan() -> None:
@@ -1493,7 +1514,8 @@ def test_block_c_does_not_rebuild_an_attached_empty_histogram_plan() -> None:
 
 def test_block_c_rejects_fresh_rebuild_histogram_drift() -> None:
     node = make_node(7, 12)
-    H = _histogram([node])
+    nodes = [node, make_node(8, 13), make_node(9, 22)]
+    H = _histogram(nodes)
     H_after = H.detach().clone()
     H_after[12] = 0
     H_after[11] = 1
@@ -1527,7 +1549,7 @@ def test_block_c_rejects_fresh_rebuild_histogram_drift() -> None:
     result = run_block_c_resource_adjustment_loop_impl(
         Adjuster(),
         H,
-        [node],
+        nodes,
         E_target=None,
         rebuild_fn=lambda **kwargs: (_nodes_from_histogram(kwargs["H_seed"]), H.detach().clone(), {}, 0.0),
         validate_fn=lambda **kwargs: validation_calls.append(kwargs) or (True, "ok"),
@@ -1541,9 +1563,10 @@ def test_block_c_rejects_fresh_rebuild_histogram_drift() -> None:
 
 def test_block_c_exports_invalid_fresh_rebuild_transactions_as_rolled_back() -> None:
     node = make_node(7, 13)
-    H = _histogram([node])
+    nodes = [node, make_node(8, 13), make_node(9, 22)]
+    H = _histogram(nodes)
     H_after = H.detach().clone()
-    H_after[13] = 0
+    H_after[13] -= 1
     H_after[11] = 1
     histogram_plan = HistogramAdjustmentPlan(
         phase="residual_resource_self_closure",
@@ -1594,7 +1617,7 @@ def test_block_c_exports_invalid_fresh_rebuild_transactions_as_rolled_back() -> 
     result = run_block_c_resource_adjustment_loop_impl(
         adjuster,
         H,
-        [node],
+        nodes,
         E_target=None,
         rebuild_fn=lambda **kwargs: (_nodes_from_histogram(kwargs["H_seed"]), H.detach().clone(), {}, 0.0),
         validate_fn=lambda **kwargs: (True, "ok"),
@@ -1612,7 +1635,7 @@ def test_block_c_exports_invalid_fresh_rebuild_transactions_as_rolled_back() -> 
 
 
 def test_block_c_retries_next_primary_transition_after_validation_rejection() -> None:
-    nodes = [make_node(1, 13), make_node(2, 12)]
+    nodes = [make_node(1, 13), make_node(2, 12), make_node(3, 23)]
     H = _histogram(nodes)
 
     class Adjuster:
@@ -1623,7 +1646,7 @@ def test_block_c_retries_next_primary_transition_after_validation_rejection() ->
         def plan_topology_resource_adjustments(self, **kwargs):
             forbidden = set(kwargs.get("forbidden_resource_conversion_signatures", []) or [])
             self.calls.append(sorted(forbidden))
-            if int(kwargs["H"][11].item()) == 1:
+            if int(kwargs["H"][11].item()) >= 1:
                 return Stage3AdjustmentPlan(
                     ok=True,
                     reason="stage3_complete",
@@ -1714,9 +1737,9 @@ def test_block_c_retries_next_primary_transition_after_validation_rejection() ->
     assert len(adjuster.calls[1]) == 1
     assert adjuster.calls[1][0].endswith("|bundle:13>11")
     assert adjuster.calls[2] == []
-    assert int(result.H[13].item()) == 1
+    assert int(result.H[13].item()) == 0
     assert int(result.H[12].item()) == 0
-    assert int(result.H[11].item()) == 1
+    assert int(result.H[11].item()) == 2
     assert result.cycles[0].diagnostics[
         "rejected_resource_conversion_signature"
     ].endswith("|bundle:13>11")
@@ -1963,9 +1986,10 @@ def test_failed_plan_rolls_back_direct_candidate_but_keeps_assembly_snapshot() -
 
 def test_block_c_replans_fresh_after_fresh_rebuild() -> None:
     node = make_node(7, 13)
-    H = _histogram([node])
+    nodes = [node, make_node(8, 13), make_node(9, 22)]
+    H = _histogram(nodes)
     H_after = H.detach().clone()
-    H_after[13] = 0
+    H_after[13] -= 1
     H_after[11] = 1
     histogram_plan = HistogramAdjustmentPlan(
         phase="residual_resource_self_closure",
@@ -2033,7 +2057,7 @@ def test_block_c_replans_fresh_after_fresh_rebuild() -> None:
     result = run_block_c_resource_adjustment_loop_impl(
         adjuster,
         H,
-        [node],
+        nodes,
         E_target=None,
         rebuild_fn=lambda **kwargs: (
             _nodes_from_histogram(kwargs["H_seed"]),
@@ -2096,7 +2120,8 @@ def test_block_c_outer_cycles_share_nodes_but_not_topology_products() -> None:
 
 def test_block_c_exports_exact_aggregate_preflight_rejection_and_rolls_back() -> None:
     node = make_node(7, 23)
-    H = _histogram([node])
+    nodes = [node, make_node(8, 13), make_node(9, 22)]
+    H = _histogram(nodes)
     H_after = H.detach().clone()
     H_after[23] = 0
     H_after[11] = 1
@@ -2152,7 +2177,7 @@ def test_block_c_exports_exact_aggregate_preflight_rejection_and_rolls_back() ->
     result = run_block_c_resource_adjustment_loop_impl(
         Adjuster(),
         H,
-        [node],
+        nodes,
         E_target=None,
     )
 

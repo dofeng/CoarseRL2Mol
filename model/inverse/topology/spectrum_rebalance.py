@@ -907,7 +907,16 @@ def apply_spectrum_candidate(
         source = int(op.get("from_su", -1))
         target = int(op.get("to_su", -1))
         node = by_id.get(int(node_id))
-        if node_id in seen_ids or node is None or int(getattr(node, "su_type", -1)) != int(source):
+        operation_kind = str(op.get("operation_kind", "") or "")
+        sequential_balance = bool(
+            node_id in seen_ids
+            and operation_kind in {"parity_balance", "port_role_balance"}
+        )
+        if (
+            (node_id in seen_ids and not sequential_balance)
+            or node is None
+            or int(getattr(node, "su_type", -1)) != int(source)
+        ):
             return None, None, {
                 "reason": "spectrum_candidate_real_id_mismatch",
                 "node_id": int(node_id),
