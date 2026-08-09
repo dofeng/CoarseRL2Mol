@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-from collections import Counter
 from typing import Any, Dict, List
 
 import torch
@@ -26,41 +25,6 @@ def _normalize_plan(plan: Any) -> Stage3AdjustmentPlan:
         for key, value in dict(plan_dict.get("resource_surplus", {}) or {}).items()
     }
     return Stage3AdjustmentPlan(**kwargs)
-
-
-def _histogram_counts(nodes: List[_NodeV3], size: int) -> Dict[str, int]:
-    counts = Counter()
-    for node in list(nodes or []):
-        try:
-            su_type = int(getattr(node, "su_type", -1))
-        except Exception:
-            continue
-        if 0 <= su_type < size:
-            counts[str(su_type)] += 1
-    return {str(key): int(value) for key, value in sorted(counts.items())}
-
-
-def _rebuild_histogram_from_nodes(nodes: List[_NodeV3], H_template: torch.Tensor) -> torch.Tensor:
-    H_out = torch.zeros_like(torch.clamp(H_template.detach().clone(), min=0).long())
-    for su_key, count in _histogram_counts(nodes, int(H_out.numel())).items():
-        H_out[int(su_key)] = int(count)
-    return H_out
-
-
-def _conservation_summary(nodes: List[_NodeV3], H: torch.Tensor) -> Dict[str, Any]:
-    node_counts = _histogram_counts(nodes, int(H.numel()))
-    histogram_counts = {
-        str(index): int(H[index].item())
-        for index in range(int(H.numel()))
-        if int(H[index].item()) != 0
-    }
-    return {
-        "node_count": int(len(list(nodes or []))),
-        "histogram_total": int(torch.clamp(H, min=0).long().sum().item()),
-        "node_counts": node_counts,
-        "histogram_counts": histogram_counts,
-        "consistent": node_counts == histogram_counts,
-    }
 
 
 def apply_stage3_node_adjustments(

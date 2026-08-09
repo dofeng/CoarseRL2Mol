@@ -12,14 +12,7 @@ from model.inverse.topology import (
 )
 from model.inverse.topology.stage3_models import Stage3AdjustmentPlan
 from model.inverse.topology.stage3_state_machine import _residual_contracts
-from tests.inverse.topology.helpers import connect, make_node
-
-
-def _histogram(nodes, size=40):
-    out = torch.zeros(size, dtype=torch.long)
-    for node in nodes:
-        out[int(node.su_type)] += 1
-    return out
+from tests.inverse.topology.helpers import connect, histogram as _histogram, make_node
 
 
 def test_fresh_read_only_audit_completes_and_preserves_resource_ids() -> None:

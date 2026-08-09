@@ -15,11 +15,8 @@ from model.inverse.layer4.inverse_layer4 import Layer4Adjuster
 from model.inverse.topology.stage3_models import Stage3WorkflowCycleRecord, Stage3WorkflowResult
 from model.inverse.topology.workflow import plan_stage3_resource_adjustments
 
-from .csv_fixture_loader import load_nodes_from_final_csv
+from .csv_fixture_loader import YM4_FINAL_NODES_CSV, load_nodes_from_final_csv
 from .helpers import make_node
-
-
-CSV_PATH = "/home/dofengqi/Graphnmr/test_results/YM-4 copy/final_outputs/final_nodes_by_global_id.csv"
 
 
 def _build_pipeline_stub() -> InversePipelineV3:
@@ -73,7 +70,7 @@ def test_inverse_pipeline_final_topology_rows_use_public_contract(
 
 
 def test_final_topology_export_forwards_stage3_targets(monkeypatch) -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+    nodes = load_nodes_from_final_csv(YM4_FINAL_NODES_CSV, fixture_infer_fixed_connectors=True)
     pipeline = _build_pipeline_stub()
     spectrum_marker = torch.ones(2, dtype=torch.float32)
     element_marker = torch.ones(6, dtype=torch.float32)
@@ -1078,7 +1075,7 @@ def test_final_topology_allows_adjacent_slots_to_share_a_path_node(monkeypatch) 
 
 
 def test_layer4_allocation_balance_default_payload_is_slim() -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+    nodes = load_nodes_from_final_csv(YM4_FINAL_NODES_CSV, fixture_infer_fixed_connectors=True)
     adjuster = Layer4Adjuster(device=torch.device("cpu"), layer0_estimator=None)
     adjuster.fixed_partition_meta = {}
 

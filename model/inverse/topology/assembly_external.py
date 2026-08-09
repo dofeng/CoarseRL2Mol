@@ -275,10 +275,6 @@ def _is_visible_terminal_token(token: Dict[str, Any]) -> bool:
     return bool(is_visible_terminal_semantic(token))
 
 
-def _is_visible_fixed_connector_token(token: Dict[str, Any]) -> bool:
-    return bool(is_visible_fixed_connector_semantic(token))
-
-
 def _is_like24_family(view: "AssemblyFragmentView") -> bool:
     return str(view.family) in {"like24", "like24_secondary", "like24_bridge"}
 
@@ -4321,24 +4317,6 @@ class ExternalTopologyAssembler:
             return
         self.pending_contracts.append(contract)
 
-    def _branch_from_view(self, view: AssemblyFragmentView) -> BranchClosureResult:
-        render = view.real_render()
-        branch_topology = _strip_open_markers(render.topology_notation)
-        branch_node_ids = _strip_open_markers(render.node_id_notation)
-        return BranchClosureResult(
-            branch_topology=f"-{branch_topology}" if branch_topology else "",
-            branch_node_ids=f"-{branch_node_ids}" if branch_node_ids else "",
-            branch_kind=str(view.class_type),
-            mode=f"fragment:{view.class_type}",
-            anchor_index=int(view.branch_anchor_index),
-            suppressed_support_node_ids=list(render.suppressed_support_node_ids or []),
-            source_fragment_ids=[int(view.fragment_id)],
-            source_node_ids=list(view.source_node_ids or []),
-            pool_node_ids_by_su={},
-            main_labels=[token for token in _strip_open_markers(render.topology_notation).split("-") if token],
-            main_node_ids=[int(token) for token in _strip_open_markers(render.node_id_notation).split("-") if token],
-        )
-
     def _claim_pool_sequence(
         self,
         *,
@@ -5189,18 +5167,6 @@ class ExternalTopologyAssembler:
         if not endpoint.is_open or endpoint.bridge_node_id is None:
             return None
         return str(endpoint.bridge_label or endpoint.label), int(endpoint.bridge_node_id)
-
-    def _open_bridge_token_oriented(
-        self,
-        view: AssemblyFragmentView,
-        side: str,
-        *,
-        reversed_view: bool = False,
-    ) -> Optional[Tuple[str, int]]:
-        if not bool(reversed_view):
-            return self._open_bridge_token(view, side)
-        actual_side = "right" if str(side) == "left" else "left"
-        return self._open_bridge_token(view, actual_side)
 
     def _build_main_closure(
         self,
@@ -10421,29 +10387,6 @@ class ExternalTopologyAssembler:
                 break
         return progress_made
 
-    def _infer_ring_pending_attempt(
-        self,
-        view: AssemblyFragmentView,
-        candidate_views: Sequence[AssemblyFragmentView],
-    ) -> Dict[str, Any]:
-        del candidate_views
-        prior = dict(self.ring_pending_attempts.get(int(view.fragment_id), {}) or {})
-        missing_slots = [
-            str(item)
-            for item in list(prior.get("missing_slots", []) or [])
-            if str(item)
-        ]
-        if missing_slots:
-            return {"missing_slots": sorted(set(missing_slots))}
-        reason_list = [
-            str(item)
-            for item in list(self.ring_pending_reasons.get(int(view.fragment_id), []) or [])
-            if str(item)
-        ]
-        if reason_list:
-            return {"missing_slots": sorted(set(reason_list))}
-        return {"missing_slots": []}
-
     def _assemble_remaining_flex(
         self,
         branch_donors: List[AssemblyFragmentView],
@@ -10473,14 +10416,6 @@ class ExternalTopologyAssembler:
             ) or progress_made
         )
         return progress_made
-
-    def _assemble_remaining_side(
-        self,
-        branch_donors: List[AssemblyFragmentView],
-    ) -> bool:
-        if self._assemble_remaining_external_b_plus_e_side(branch_donors):
-            return True
-        return self._assemble_remaining_external_single_e_closures_for_side(branch_donors)
 
     def _assemble_remaining_su25(
         self,

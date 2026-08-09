@@ -15,7 +15,7 @@ import torch
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -24,13 +24,11 @@ from model.inverse.layer4.inverse_layer4_block_c import run_block_c_resource_adj
 from model.inverse.topology.conversion_solver import apply_stage3_node_adjustments
 from model.inverse.topology.phase_eval import assemble_topology_units
 from model.inverse.topology.workflow import plan_stage3_resource_adjustments
-from tests.inverse.topology.assembly_report import build_external_assembly_audit_report
-from tests.inverse.topology.csv_fixture_loader import load_nodes_from_final_csv
+from tests.inverse.topology.csv_fixture_loader import YM4_FINAL_NODES_CSV, load_nodes_from_final_csv
+from tools.topology_audit.assembly_report import build_external_assembly_audit_report
 
 
-DEFAULT_FIXTURE_CSV = (
-    REPO_ROOT / "test_results" / "YM-4 copy" / "final_outputs" / "final_nodes_by_global_id.csv"
-)
+DEFAULT_FIXTURE_CSV = YM4_FINAL_NODES_CSV
 
 PYTEST_COMMANDS: list[list[str]] = [
     [sys.executable, "-m", "pytest", "tests/inverse/topology/test_classification_like24.py", "-q"],

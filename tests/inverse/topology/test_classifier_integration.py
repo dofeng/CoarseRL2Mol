@@ -2,11 +2,8 @@ from __future__ import annotations
 
 from model.inverse.topology.classification import classify_topology_units
 
-from .csv_fixture_loader import load_nodes_from_final_csv
+from .csv_fixture_loader import YM4_FINAL_NODES_CSV, load_nodes_from_final_csv
 from .helpers import connect, make_node
-
-
-CSV_PATH = "/home/dofengqi/Graphnmr/test_results/YM-4 copy/final_outputs/final_nodes_by_global_id.csv"
 
 
 def _class_types(result: object) -> set[str]:
@@ -172,7 +169,7 @@ def test_terminalized_su24_aromatics_are_not_reintroduced_as_donors() -> None:
 
 
 def test_classifier_csv_regression_key_nodes_print() -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+    nodes = load_nodes_from_final_csv(YM4_FINAL_NODES_CSV, fixture_infer_fixed_connectors=True)
     result = classify_topology_units(nodes)
     fragments_by_center = {}
     for fragment in list(result.fragments or []):

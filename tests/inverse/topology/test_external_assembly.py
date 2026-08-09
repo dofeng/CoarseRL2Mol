@@ -55,12 +55,10 @@ from model.inverse.topology.stage3_state_machine import (
 from model.inverse.topology.workflow import plan_stage3_resource_adjustments
 from model.inverse.inverse_pipeline import InversePipelineV3
 
-from .assembly_report import build_external_assembly_audit_report
-from .csv_fixture_loader import load_nodes_from_final_csv
+from tools.topology_audit.assembly_report import build_external_assembly_audit_report
+
+from .csv_fixture_loader import YM4_FINAL_NODES_CSV, load_nodes_from_final_csv
 from .helpers import connect, make_node
-
-
-CSV_PATH = "/home/dofengqi/Graphnmr/test_results/YM-4 copy/final_outputs/final_nodes_by_global_id.csv"
 
 PRODUCT_KEYS = {
     "product_kind",
@@ -1288,7 +1286,7 @@ def test_ring_product_creation_requires_a_node_bound_contract() -> None:
 
 
 def test_external_assembly_report_does_not_reject_connected_su24_resource() -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+    nodes = load_nodes_from_final_csv(YM4_FINAL_NODES_CSV, fixture_infer_fixed_connectors=True)
     classification = classify_topology_units(nodes)
     assembly = assemble_topology_units(nodes, classification)
 
@@ -2411,7 +2409,7 @@ def test_external_helper_leaves_su24_for_authoritative_state_machine() -> None:
 
 
 def test_external_assembly_csv_regression_contract_and_topologies() -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+    nodes = load_nodes_from_final_csv(YM4_FINAL_NODES_CSV, fixture_infer_fixed_connectors=True)
     classification = classify_topology_units(nodes)
     assembly = assemble_topology_units(nodes, classification).to_dict()
 
@@ -2498,7 +2496,7 @@ def test_external_assembly_csv_regression_contract_and_topologies() -> None:
 
 
 def test_external_assembly_report_is_minimal() -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+    nodes = load_nodes_from_final_csv(YM4_FINAL_NODES_CSV, fixture_infer_fixed_connectors=True)
     classification = classify_topology_units(nodes)
     assembly = assemble_topology_units(nodes, classification)
 
@@ -2512,9 +2510,6 @@ def test_external_assembly_report_is_minimal() -> None:
     assert "consumed_total=" in report
     assert "remaining_total=" in report
     assert "shortage_total=" in report
-    assert "=== Front-Half Phase ===" in report
-    assert "stage3_phase=" in report
-    assert "stage3_phase=external_structural_closure" not in report
     assert "initial_counts=" in report
     assert "consumed_counts=" in report
     assert "remaining_counts=" in report
@@ -2555,7 +2550,7 @@ def test_external_assembly_report_is_minimal() -> None:
 
 
 def test_external_assembly_public_contract_is_minimal() -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+    nodes = load_nodes_from_final_csv(YM4_FINAL_NODES_CSV, fixture_infer_fixed_connectors=True)
     classification = classify_topology_units(nodes)
     assembly = assemble_topology_units(nodes, classification)
 
@@ -2579,7 +2574,7 @@ def test_external_assembly_public_contract_is_minimal() -> None:
 
 
 def test_external_assembly_diagnostics_keep_only_live_keys() -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+    nodes = load_nodes_from_final_csv(YM4_FINAL_NODES_CSV, fixture_infer_fixed_connectors=True)
     classification = classify_topology_units(nodes)
     assembly = assemble_topology_units(nodes, classification).to_dict()
 
@@ -2626,7 +2621,7 @@ def test_external_assembly_diagnostics_keep_only_live_keys() -> None:
 
 
 def test_external_assembly_product_and_pending_exports_have_no_legacy_fields() -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+    nodes = load_nodes_from_final_csv(YM4_FINAL_NODES_CSV, fixture_infer_fixed_connectors=True)
     classification = classify_topology_units(nodes)
     assembly = assemble_topology_units(nodes, classification).to_dict()
 
@@ -4579,7 +4574,7 @@ def test_available_pool_prevents_false_stage3_completion() -> None:
 
 
 def test_fixture_active_products_have_unique_global_id_ownership() -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
+    nodes = load_nodes_from_final_csv(YM4_FINAL_NODES_CSV, fixture_infer_fixed_connectors=True)
     assembly = assemble_topology_units(nodes, classify_topology_units(nodes)).to_dict()
     owner_by_node_id = {}
 

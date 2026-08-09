@@ -10,6 +10,10 @@ import torch
 from model.shared.inverse_common import _NodeV3
 
 
+TOPOLOGY_FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "topology"
+YM4_FINAL_NODES_CSV = TOPOLOGY_FIXTURE_DIR / "ym4_final_nodes_by_global_id.csv"
+
+
 def _parse_int_list(value: str) -> List[int]:
     text = str(value or "").strip()
     if not text:

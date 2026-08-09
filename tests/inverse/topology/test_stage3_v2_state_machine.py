@@ -30,24 +30,12 @@ from model.inverse.topology.stage3_models import (
 )
 from model.inverse.topology.workflow import plan_stage3_resource_adjustments
 from model.inverse.layer4.inverse_layer4_block_c import run_block_c_resource_adjustment_loop_impl
-from tests.inverse.topology.helpers import connect, make_node
-
-
-def _histogram(nodes):
-    H = torch.zeros(40, dtype=torch.long)
-    for node in nodes:
-        H[int(node.su_type)] += 1
-    return H
-
-
-def _nodes_from_histogram(H):
-    nodes = []
-    global_id = 0
-    for su_type, count in enumerate(torch.clamp(H.detach().cpu(), min=0).long().tolist()):
-        for _ in range(int(count)):
-            nodes.append(make_node(global_id, su_type))
-            global_id += 1
-    return nodes
+from tests.inverse.topology.helpers import (
+    connect,
+    histogram as _histogram,
+    make_node,
+    nodes_from_histogram as _nodes_from_histogram,
+)
 
 
 def test_phase_evaluation_is_pure_and_builds_round_ownership() -> None:

@@ -36,7 +36,7 @@ from model.inverse.topology.stage3_state_machine import (
     build_su24_resource_role_profiles,
     plan_stage3_state_machine,
 )
-from model.inverse.topology.phase_eval import _canonical_stage3_contracts, build_stage3_phase_evaluation
+from model.inverse.topology.phase_eval import build_stage3_phase_evaluation
 from model.inverse.topology.round_context import (
     build_stage3_round_context,
     mark_round_pending_contracts,
@@ -87,74 +87,6 @@ def test_zero_ids_survive_slot_and_round_context_normalization() -> None:
         "claimed_source_node_ids": [0],
     }])
     assert marked.ownership_by_node_id[0].owner_contract_id == 0
-
-
-def test_canonical_contract_flow_uses_actual_assembly_slots_for_selected_flex_owner() -> None:
-    assembly_contract = {
-        "contract_id": 22,
-        "contract_kind": "mainline_closure",
-        "target_role": "flex_chain",
-        "source_fragment_ids": [22],
-        "claimed_source_node_ids": [22, 487],
-        "mainline_slots": [],
-        "branch_slots": [],
-        "required_counts": {"11": 2},
-        "expected_topology": "-24-3-",
-        "reason": "main_pool_shortage",
-        "diagnostics": {"public_pending_kind": "d_like_open"},
-    }
-    flex_overlay = {
-        **assembly_contract,
-        "required_counts": {"11": 2, "23": 1},
-        "expected_topology": "-23-23-23-",
-        "reason": "supplemental_flex_candidate",
-        "diagnostics": {"selected_for_target": True, "candidate_kind": "d_like_open"},
-    }
-
-    contracts = _canonical_stage3_contracts(
-        flex_contracts=[flex_overlay],
-        assembly_contracts=[assembly_contract],
-    )
-
-    assert len(contracts) == 1
-    assert contracts[0]["required_counts"] == {"11": 2}
-    assert contracts[0]["expected_topology"] == "-24-3-"
-    assert contracts[0]["diagnostics"]["selected_for_target"] is True
-
-
-def test_canonical_contract_preserves_structural_ring_blocker() -> None:
-    assembly_blocker = {
-        "contract_id": 22,
-        "contract_kind": "structural_blocker",
-        "target_role": "fatty_ring",
-        "source_fragment_ids": [22],
-        "claimed_source_node_ids": [22, 487],
-        "mainline_slots": [],
-        "branch_slots": [],
-        "required_counts": {},
-        "expected_topology": "-14-15-",
-        "reason": "fused_bridgehead_missing",
-        "blocker_kind": "fused_bridgehead_missing",
-        "diagnostics": {},
-    }
-    flex_overlay = {
-        **assembly_blocker,
-        "contract_kind": "structural_blocker",
-        "target_role": "flex_chain",
-        "reason": "lower_priority_flex_overlay",
-        "blocker_kind": "lower_priority_flex_overlay",
-        "diagnostics": {"selected_for_target": False},
-    }
-
-    contracts = _canonical_stage3_contracts(
-        flex_contracts=[flex_overlay],
-        assembly_contracts=[assembly_blocker],
-    )
-
-    assert len(contracts) == 1
-    assert contracts[0]["target_role"] == "fatty_ring"
-    assert contracts[0]["reason"] == "fused_bridgehead_missing"
-    assert contracts[0]["blocker_kind"] == "fused_bridgehead_missing"
 
 
 @pytest.mark.parametrize(

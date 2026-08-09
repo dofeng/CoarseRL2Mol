@@ -191,81 +191,6 @@ class Stage3FlexDecision(Stage3Serializable):
 
 
 @dataclass
-class FlexTargetPlan(Stage3Serializable):
-    flex_lower: int = 0
-    flex_upper: int = 0
-    flex_target: int = 0
-    explicit_flex_count: int = 0
-    minimum_gap: int = 0
-    preferred_gap: int = 0
-    maximum_capacity: int = 0
-    external_candidate_capacity: int = 0
-    external_planned_addition: int = 0
-    external_symbolic_addition: int = 0
-    external_capacity_exhausted: bool = False
-    remaining_minimum_gap: int = 0
-    remaining_preferred_gap: int = 0
-
-
-@dataclass
-class Stage3ResourceDemand(Stage3Serializable):
-    hard_required_counts: Dict[str, int] = field(default_factory=dict)
-    preferred_required_counts: Dict[str, int] = field(default_factory=dict)
-    available_counts: Dict[str, int] = field(default_factory=dict)
-    shortage_counts: Dict[str, int] = field(default_factory=dict)
-    contracts_by_subphase: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-
-
-@dataclass
-class Stage3ResourceInventory(Stage3Serializable):
-    literal_histogram_counts: Dict[str, int] = field(default_factory=dict)
-    classification_total_counts: Dict[str, int] = field(default_factory=dict)
-    referenced_or_reserved_counts: Dict[str, int] = field(default_factory=dict)
-    consumed_counts: Dict[str, int] = field(default_factory=dict)
-    convertible_remaining_counts: Dict[str, int] = field(default_factory=dict)
-    protected_counts: Dict[str, int] = field(default_factory=dict)
-
-
-@dataclass
-class Stage3ResourceRebalanceResult(Stage3Serializable):
-    applied_groups: List[Dict[str, Any]] = field(default_factory=list)
-    inventory_before: Dict[str, int] = field(default_factory=dict)
-    inventory_after: Dict[str, int] = field(default_factory=dict)
-    hard_unresolved_counts: Dict[str, int] = field(default_factory=dict)
-    preferred_unresolved_counts: Dict[str, int] = field(default_factory=dict)
-    blocked_reason: str = ""
-
-
-@dataclass
-class Stage3RingAssemblyContract(Stage3Serializable):
-    contract_id: str = ""
-    ring_kind: str = ""
-    backbone_slots: List[str] = field(default_factory=list)
-    source_fragment_ids: List[int] = field(default_factory=list)
-    source_node_ids: List[int] = field(default_factory=list)
-    anchor_node_ids: List[int] = field(default_factory=list)
-    bridge_node_ids: List[int] = field(default_factory=list)
-    required_resource_counts: Dict[str, int] = field(default_factory=dict)
-    unresolved_resource_counts: Dict[str, int] = field(default_factory=dict)
-    branch_closure_counts: Dict[str, int] = field(default_factory=dict)
-    occupied_node_ids: List[int] = field(default_factory=list)
-    blocked_reason: str = ""
-
-
-@dataclass
-class Stage3ResidualClosureDecision(Stage3Serializable):
-    flex_capacity: int = 0
-    planned_flex_chains: List[Dict[str, Any]] = field(default_factory=list)
-    planned_side_chains: List[Dict[str, Any]] = field(default_factory=list)
-    conversion_ops: List[Dict[str, Any]] = field(default_factory=list)
-    h_adjustment_summary: Dict[str, Any] = field(default_factory=dict)
-    terminalized_node_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
-    terminal_resource_counts: Dict[str, int] = field(default_factory=dict)
-    unresolved_resource_counts: Dict[str, int] = field(default_factory=dict)
-    blocked_reason: str = ""
-
-
-@dataclass
 class TopologyPathRender(Stage3Serializable):
     topology_notation: str = ""
     node_id_notation: str = ""
@@ -663,19 +588,8 @@ class Stage3PhaseEvaluation(Stage3Serializable):
     flex_reconciliation_contracts: List[Dict[str, Any]] = field(default_factory=list)
     canonical_contracts: List[Dict[str, Any]] = field(default_factory=list)
     flex_range_action_class: str = ""
-    external_closure_requirements: Dict[str, Any] = field(default_factory=dict)
-    external_closure_blockers: Dict[str, Any] = field(default_factory=dict)
     active_external_subphase: str = ""
     external_subphase_status: Dict[str, Any] = field(default_factory=dict)
-    external_contracts_by_subphase: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    external_pending_by_subphase: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    external_contracts_by_contract_kind: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    external_blockers_by_kind: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    external_partner_request_summary: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    external_partner_match_requests: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    front_half_requirement_summary: Dict[str, Any] = field(default_factory=dict)
-    front_half_pending_summary: Dict[str, Any] = field(default_factory=dict)
-    front_half_step_trace: List[Dict[str, Any]] = field(default_factory=list)
     dormant_phases: List[str] = field(default_factory=list)
     dormant_phase_reasons: Dict[str, str] = field(default_factory=dict)
     assembly_view: Dict[str, Any] = field(default_factory=dict)
@@ -695,8 +609,6 @@ class Stage3PhaseEvaluation(Stage3Serializable):
     ownership_ledger: Dict[str, Any] = field(default_factory=dict)
     closure_pool_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
     aromatic_donor_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
-    ring_contracts: List[Stage3RingAssemblyContract] = field(default_factory=list)
-    residual_closure_decision: Stage3ResidualClosureDecision = field(default_factory=Stage3ResidualClosureDecision)
 
 
 @dataclass

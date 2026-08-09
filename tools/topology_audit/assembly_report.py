@@ -162,26 +162,6 @@ def _resource_ledger_summary_lines(classification: Dict[str, Any], assembly: Dic
     ]
 
 
-def _front_half_summary_lines(assembly: Dict[str, Any]) -> List[str]:
-    diagnostics = _as_dict(_as_dict(assembly).get("diagnostics"))
-    active_external_subphase = str(diagnostics.get("active_external_subphase", ""))
-    step_trace = [_as_dict(item) for item in _as_list(diagnostics.get("front_half_step_trace"))]
-    stage3_phase = str(diagnostics.get("stage3_phase", ""))
-    if not stage3_phase and not step_trace and not active_external_subphase:
-        return []
-    lines = ["=== Front-Half Phase ==="]
-    if stage3_phase:
-        lines.append(f"stage3_phase={stage3_phase}")
-    if active_external_subphase:
-        lines.append(f"active_external_subphase={active_external_subphase}")
-    if step_trace:
-        for index, item in enumerate(step_trace, start=1):
-            step = str(item.get("step", ""))
-            status = str(item.get("status", ""))
-            lines.append(f"{index}. {step} | status={status}")
-    return lines
-
-
 def _rebalance_summary_lines(assembly: Dict[str, Any]) -> List[str]:
     diagnostics = _as_dict(_as_dict(assembly).get("diagnostics"))
     breakdown = _as_dict(diagnostics.get("resource_request_breakdown"))
@@ -232,13 +212,6 @@ def _rebalance_summary_lines(assembly: Dict[str, Any]) -> List[str]:
             "remaining_external_requirements_by_pending_kind="
             f"{remaining_external_requirements_by_pending_kind}"
         )
-    if any([
-        resource_request_by_closure_tactic,
-        true_deficit_by_closure_tactic,
-        partner_match_requests,
-        remaining_external_requirements_by_pending_kind,
-    ]):
-        lines.append("front_half_structured_summary=enabled")
     return lines
 
 
@@ -277,10 +250,6 @@ def build_external_assembly_audit_report(
     ]
     lines.append("")
     lines.extend(_resource_ledger_summary_lines(classification, assembly))
-    front_half_lines = _front_half_summary_lines(assembly)
-    if front_half_lines:
-        lines.append("")
-        lines.extend(front_half_lines)
     rebalance_lines = _rebalance_summary_lines(assembly)
     if rebalance_lines:
         lines.append("")

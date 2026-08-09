@@ -653,32 +653,3 @@ def rank_conversions(
         for candidate in list(candidates or [])
     ]
     return sorted(impacts, key=lambda item: item.sort_key)
-
-
-def best_conversion_bundle(
-    context: ConversionContext,
-    bundles: Iterable[Sequence[HistogramConversion]],
-    *,
-    h_total_fn: Callable[[torch.Tensor, Optional[Dict[str, Any]]], float],
-    special_degree_meta: Optional[Dict[str, Any]] = None,
-) -> Optional[ConversionBundleScore]:
-    scored = [
-        score_conversion_bundle(
-            context,
-            list(bundle or []),
-            h_total_fn=h_total_fn,
-            special_degree_meta=special_degree_meta,
-        )
-        for bundle in list(bundles or [])
-        if list(bundle or [])
-    ]
-    feasible = [
-        item
-        for item in scored
-        if item.feasible and h_within_context_hard_bounds(
-            context, item.h_after, item.h_before
-        )
-    ]
-    if not feasible:
-        return None
-    return min(feasible, key=lambda item: item.sort_key)

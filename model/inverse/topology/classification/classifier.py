@@ -188,17 +188,6 @@ def _token_by_id(tokens: Sequence[ClassificationToken]) -> Dict[int, Classificat
     return {int(token.node_id): token for token in list(tokens or [])}
 
 
-def _neighbor_by_id(token: ClassificationToken, neighbor_id: int) -> Optional[NeighborToken]:
-    for neighbor in list(token.neighbor_tokens or []):
-        if int(neighbor.node_id) == int(neighbor_id):
-            return neighbor
-    return None
-
-
-def _neighbor_su_set(token: ClassificationToken) -> Set[int]:
-    return {int(neighbor.su_type) for neighbor in list(token.neighbor_tokens or [])}
-
-
 def _dedupe_ints(values: Iterable[int]) -> List[int]:
     seen: Set[int] = set()
     out: List[int] = []
@@ -318,39 +307,6 @@ def _collect_direct_source_ids(token: ClassificationToken) -> List[int]:
         [int(token.node_id)],
         [int(neighbor.node_id) for neighbor in list(token.neighbor_tokens or [])],
     )
-
-
-def _collect_direct_claimed_ids(
-    token: ClassificationToken,
-    *,
-    include_neighbor_ids: Optional[Iterable[int]] = None,
-    exclude_neighbor_ids: Optional[Iterable[int]] = None,
-    include_aromatic: bool = False,
-    include_terminals: bool = False,
-    include_fixed: bool = False,
-    include_explicit_nonabstract: bool = False,
-) -> List[int]:
-    include_set = {int(x) for x in list(include_neighbor_ids or [])}
-    exclude_set = {int(x) for x in list(exclude_neighbor_ids or [])}
-    out: List[int] = [int(token.node_id)]
-    for neighbor in list(token.neighbor_tokens or []):
-        node_id = int(neighbor.node_id)
-        if node_id in exclude_set:
-            continue
-        include = False
-        if node_id in include_set:
-            include = True
-        elif include_fixed and is_visible_fixed_connector_semantic(neighbor):
-            include = True
-        elif include_aromatic and int(neighbor.su_type) in set(AROMATIC_SU_TYPES):
-            include = True
-        elif include_terminals and is_visible_terminal_semantic(neighbor):
-            include = True
-        elif include_explicit_nonabstract and not is_abstract_open_nonfixed_semantic(neighbor):
-            include = True
-        if include:
-            out.append(node_id)
-    return _union_source_ids(out)
 
 
 def _tokens_have_fixed_edge(

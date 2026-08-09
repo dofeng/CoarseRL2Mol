@@ -435,10 +435,6 @@ def assign_contract_slots(
     return working, slots, claimed, {}
 
 
-def restore_ledger(snapshot: Stage3OwnershipLedger) -> Stage3OwnershipLedger:
-    return deepcopy(snapshot)
-
-
 def contract_priority(contract: Dict[str, Any]) -> Tuple[int, int, int]:
     data = dict(contract or {})
     target_role = str(data.get("target_role", "") or "")

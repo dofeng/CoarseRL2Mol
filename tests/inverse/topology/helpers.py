@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from collections import Counter
 
+import torch
+
+
 class DummyNode:
     def __init__(self, global_id: int, su_type: int, **kwargs) -> None:
         self.global_id = int(global_id)
@@ -35,3 +38,21 @@ def connect(left: DummyNode, right: DummyNode, *, fixed: bool = False) -> None:
     if fixed:
         left.fixed_hop1_ids.add(int(right_id))
         right.fixed_hop1_ids.add(int(left_id))
+
+
+def histogram(nodes, *, size: int = 40) -> torch.Tensor:
+    result = torch.zeros(int(size), dtype=torch.long)
+    for node in nodes:
+        result[int(node.su_type)] += 1
+    return result
+
+
+def nodes_from_histogram(H: torch.Tensor) -> list[DummyNode]:
+    nodes = []
+    global_id = 0
+    counts = torch.clamp(H.detach().cpu(), min=0).long().tolist()
+    for su_type, count in enumerate(counts):
+        for _ in range(int(count)):
+            nodes.append(make_node(global_id, su_type))
+            global_id += 1
+    return nodes

@@ -211,8 +211,6 @@ def _evaluate_external_phases(
     working.external_subphase_status = dict(
         diagnostics.get("external_subphase_status", {}) or {}
     )
-    resource_demand = dict(assembly.get("resource_demand", {}) or {})
-    working.external_closure_requirements = resource_demand
     working.flex_range_reconciliation_ok = bool(
         working.active_phase != "flex_range_reconciliation"
     )

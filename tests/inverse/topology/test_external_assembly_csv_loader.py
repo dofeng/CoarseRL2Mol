@@ -3,12 +3,7 @@ from __future__ import annotations
 import ast
 import csv
 from collections import Counter
-from pathlib import Path
-
-from .csv_fixture_loader import load_nodes_from_final_csv
-
-
-CSV_PATH = Path("/home/dofengqi/Graphnmr/test_results/YM-4 copy/final_outputs/final_nodes_by_global_id.csv")
+from .csv_fixture_loader import YM4_FINAL_NODES_CSV, load_nodes_from_final_csv
 
 
 def _parse_list(text: str) -> list[int]:
@@ -17,15 +12,15 @@ def _parse_list(text: str) -> list[int]:
 
 
 def test_csv_loader_restores_all_real_nodes() -> None:
-    nodes = load_nodes_from_final_csv(CSV_PATH)
+    nodes = load_nodes_from_final_csv(YM4_FINAL_NODES_CSV)
     assert len(nodes) == 618
     assert nodes[0].global_id == 0
     assert nodes[-1].global_id == 617
 
 
 def test_csv_loader_restores_hop1_degree_and_multisets() -> None:
-    nodes = {int(node.global_id): node for node in load_nodes_from_final_csv(CSV_PATH)}
-    with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as handle:
+    nodes = {int(node.global_id): node for node in load_nodes_from_final_csv(YM4_FINAL_NODES_CSV)}
+    with YM4_FINAL_NODES_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
             node_id = int(row["global_id"])
