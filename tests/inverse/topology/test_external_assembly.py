@@ -154,7 +154,6 @@ def test_resource_ownership_reconciliation_does_not_inflate_convertible_pool() -
 
     reconciled = assembler._reconcile_resource_ownership(ledger)
 
-    assert reconciled.diagnostic_remaining_ids_by_su["11"] == [1, 2]
     assert reconciled.remaining_ids_by_su["11"] == [1]
     assert reconciled.convertible_ids_by_su["11"] == [1]
     assert reconciled.convertible_counts["11"] == 1
@@ -567,11 +566,9 @@ def test_external_assembly_closes_b_plus_g_without_legacy_fields() -> None:
         nodes=nodes,
         enable_post_external_spectrum=False,
     )
-    phase_snapshot = dict(
-        dict(plan.runtime or {}).get("phase_evaluation_dict", {}) or {}
-    )
-    snapshot_assembly = dict(phase_snapshot.get("assembly_view", {}) or {})
-    snapshot_metrics = dict(phase_snapshot.get("topology_metrics", {}) or {})
+    phase_snapshot = dict(plan.runtime or {})["phase_evaluation"]
+    snapshot_assembly = dict(phase_snapshot.assembly_view or {})
+    snapshot_metrics = dict(phase_snapshot.topology_metrics or {})
     assert snapshot_metrics["product_count"] == len(
         list(snapshot_assembly.get("products", []) or [])
     )
@@ -2596,9 +2593,6 @@ def test_external_assembly_diagnostics_keep_only_live_keys() -> None:
         "remaining_minimum_flex_gap",
         "remaining_preferred_flex_gap",
         "claimable_counts",
-        "allocator_remaining_counts",
-        "diagnostic_remaining_counts",
-        "unusable_counts",
         "ledger_invariant_errors",
         "ownership_ledger",
         "product_ownership_conflicts",
@@ -5222,7 +5216,7 @@ def test_non_h_structure_unit_is_not_translated_to_su23_prefix() -> None:
 
 
 def test_unresolved_branch_profile_is_not_counted_as_strict_explicit_flex() -> None:
-    from model.inverse.topology.phase_eval import _profile_counts_as_strict_explicit_flex
+    from model.inverse.topology.flex_audit import _profile_counts_as_strict_explicit_flex
 
     base = {
         "counts_as_explicit": True,

@@ -19,6 +19,7 @@ from .classification.classification_tokens import (
     is_visible_terminal_semantic,
     normalize_subtype,
 )
+from .flex_audit import _compute_flex_audit
 from .stage3_models import (
     RingTopologyContract,
     Stage3OwnershipState,
@@ -1024,13 +1025,6 @@ class PoolAllocator:
             self.consumed_ids_by_su[su_key].extend(consumed_now)
             self.consumed_ids_by_su[su_key] = sorted(set(self.consumed_ids_by_su[su_key]))
 
-    def set_protected_counts(self, counts: Optional[Dict[Any, Any]] = None) -> None:
-        self.protected_counts_by_su = {
-            _normalize_su_key(key): max(0, int(value))
-            for key, value in dict(counts or {}).items()
-            if int(value) > 0
-        }
-
     def build_ledger(self, shortage_counts: Dict[str, int]) -> TopologyPoolLedger:
         initial_counts = {
             str(key): int(len(list(values or [])))
@@ -1059,13 +1053,6 @@ class PoolAllocator:
             str(key): int(len(list(values or [])))
             for key, values in self.remaining_ids_by_su.items()
         }
-
-    def usable_counts(self) -> Dict[str, int]:
-        return {
-            str(key): max(0, int(len(list(values or []))) - int(self.protected_counts_by_su.get(str(key), 0) or 0))
-            for key, values in self.remaining_ids_by_su.items()
-        }
-
 
 def _main_kind_for_class(class_type: str) -> str:
     if class_type in EXPLICIT_FLEX_CLASSES:
@@ -3008,8 +2995,6 @@ class ExternalTopologyAssembler:
         self.product_ownership_conflicts: List[Dict[str, Any]] = []
         self.flex_audit = dict(flex_audit or {})
         if not self.flex_audit:
-            from .phase_eval import _compute_flex_audit  # local import to avoid module cycle
-
             self.flex_audit = dict(_compute_flex_audit(self.nodes, classification, enforce=True) or {})
         self.selected_flex_candidate_ids = {
             int(value)
@@ -3620,10 +3605,6 @@ class ExternalTopologyAssembler:
         self,
         ledger: TopologyPoolLedger,
     ) -> TopologyPoolLedger:
-        allocator_remaining_ids_by_su = {
-            str(key): sorted(set(int(value) for value in list(values or [])))
-            for key, values in dict(ledger.remaining_ids_by_su or {}).items()
-        }
         resource_types = sorted({10, 11, 12, 13, 22, 23, 24})
         global_ids_by_su: Dict[str, List[int]] = {str(su): [] for su in resource_types}
         for node in list(self.nodes or []):
@@ -3697,7 +3678,7 @@ class ExternalTopologyAssembler:
                 allocation_state_by_node[str(node_id)] = "remaining"
 
         allocator_source_ids_by_su = dict(getattr(ledger, "remaining_ids_by_su", {}) or {})
-        allocator_remaining_ids_by_su = {
+        effective_remaining_ids_by_su = {
             str(key): sorted(
                 set(allocator_source_ids_by_su.get(str(key), []))
                 & set(remaining_ids_by_su.get(str(key), []))
@@ -3711,7 +3692,7 @@ class ExternalTopologyAssembler:
         }
         convertible_ids_by_su = {
             str(key): list(values[:max(0, len(values) - int(protected_counts.get(str(key), 0)))])
-            for key, values in allocator_remaining_ids_by_su.items()
+            for key, values in effective_remaining_ids_by_su.items()
         }
         invariant_errors: List[str] = []
         for key, global_ids in global_ids_by_su.items():
@@ -3728,9 +3709,7 @@ class ExternalTopologyAssembler:
         ledger.global_ids_by_su = global_ids_by_su
         ledger.fixed_ids_by_su = fixed_ids_by_su
         ledger.fragment_owned_ids_by_su = fragment_owned_ids_by_su
-        ledger.diagnostic_remaining_ids_by_su = deepcopy(remaining_ids_by_su)
-        ledger.allocator_remaining_ids_by_su = deepcopy(allocator_remaining_ids_by_su)
-        ledger.remaining_ids_by_su = deepcopy(allocator_remaining_ids_by_su)
+        ledger.remaining_ids_by_su = deepcopy(effective_remaining_ids_by_su)
         ledger.convertible_ids_by_su = deepcopy(convertible_ids_by_su)
         allocator_initial_source = dict(
             getattr(getattr(self, "allocator", None), "initial_ids_by_su", {}) or {}
@@ -3745,25 +3724,22 @@ class ExternalTopologyAssembler:
         ledger.consumed_ids_by_su = {
             str(key): sorted(
                 set(allocator_initial_ids_by_su.get(str(key), []) or [])
-                - set(allocator_remaining_ids_by_su.get(str(key), []) or [])
+                - set(effective_remaining_ids_by_su.get(str(key), []) or [])
             )
             for key in allocator_initial_ids_by_su
         }
         ledger.global_counts = {str(key): int(len(values)) for key, values in global_ids_by_su.items()}
         ledger.fixed_counts_by_su = {str(key): int(len(values)) for key, values in fixed_ids_by_su.items()}
         ledger.fragment_owned_counts_by_su = {str(key): int(len(values)) for key, values in fragment_owned_ids_by_su.items()}
-        ledger.diagnostic_remaining_counts = {str(key): int(len(values)) for key, values in remaining_ids_by_su.items()}
-        ledger.allocator_remaining_counts = {str(key): int(len(values)) for key, values in allocator_remaining_ids_by_su.items()}
-        ledger.remaining_counts = dict(ledger.allocator_remaining_counts)
+        ledger.remaining_counts = {
+            str(key): int(len(values))
+            for key, values in effective_remaining_ids_by_su.items()
+        }
         ledger.convertible_counts = {
             str(key): int(len(values))
             for key, values in ledger.convertible_ids_by_su.items()
         }
         ledger.protected_counts = dict(protected_counts)
-        ledger.unusable_counts = {
-            str(key): max(0, int(ledger.diagnostic_remaining_counts.get(str(key), 0)) - int(ledger.convertible_counts.get(str(key), 0)))
-            for key in global_ids_by_su
-        }
         ledger.invariant_errors = list(invariant_errors)
         ledger.initial_counts = {str(key): int(len(values)) for key, values in ledger.initial_ids_by_su.items()}
         ledger.consumed_counts = {
@@ -10794,7 +10770,7 @@ class ExternalTopologyAssembler:
             for key in set(ledger.initial_counts) | set(ledger.consumed_counts)
         }
         ledger.snapshot_stage = "post_external_final"
-        remaining_pool_counts = dict(ledger.allocator_remaining_counts or ledger.remaining_counts or {})
+        remaining_pool_counts = dict(ledger.remaining_counts or {})
         residual_convertible_total = sum(
             int(remaining_pool_counts.get(str(su_type), 0) or 0)
             for su_type in (11, 22, 23, 24)
@@ -10858,9 +10834,6 @@ class ExternalTopologyAssembler:
             "completed_phases": list(completed_phases),
             "protected_resource_counts": dict(protected_resource_counts),
             "claimable_counts": dict(ledger.convertible_counts or {}),
-            "allocator_remaining_counts": dict(ledger.allocator_remaining_counts or {}),
-            "diagnostic_remaining_counts": dict(ledger.diagnostic_remaining_counts or {}),
-            "unusable_counts": dict(ledger.unusable_counts or {}),
             "ledger_invariant_errors": list(ledger.invariant_errors or []),
             "remaining_minimum_flex_gap": int(flex_target_plan["remaining_minimum_gap"]),
             "remaining_preferred_flex_gap": int(flex_target_plan["remaining_preferred_gap"]),
@@ -10962,14 +10935,12 @@ class ExternalTopologyAssembler:
                 **dict(ownership_view.get("aromatic_donor_ids_by_su", {}) or {}),
             }.items()
         }
-        ledger.allocator_remaining_ids_by_su = deepcopy(ownership_remaining_ids)
         ledger.remaining_ids_by_su = deepcopy(ownership_remaining_ids)
         ledger.convertible_ids_by_su = deepcopy(ownership_remaining_ids)
-        ledger.allocator_remaining_counts = {
+        ledger.remaining_counts = {
             str(key): int(len(values)) for key, values in ownership_remaining_ids.items()
         }
-        ledger.remaining_counts = dict(ledger.allocator_remaining_counts)
-        ledger.convertible_counts = dict(ledger.allocator_remaining_counts)
+        ledger.convertible_counts = dict(ledger.remaining_counts)
         ledger.protected_counts = {
             str(key): max(0, int(protected_resource_counts.get(str(key), 0) or 0))
             for key in ownership_remaining_ids
@@ -11129,8 +11100,6 @@ def assemble_external_topologies(
 ) -> TopologyAssemblyResult:
     resolved_flex_audit = dict(flex_audit or {})
     if not resolved_flex_audit:
-        from .phase_eval import _compute_flex_audit  # local import to avoid module cycle
-
         resolved_flex_audit = dict(_compute_flex_audit(
             list(nodes or []),
             classification,

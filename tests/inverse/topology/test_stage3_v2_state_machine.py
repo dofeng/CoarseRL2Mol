@@ -8,7 +8,8 @@ import torch
 
 from model.inverse.topology.classification.classifier import classify_topology_units
 from model.inverse.topology.conversion_solver import apply_stage3_node_adjustments
-from model.inverse.topology.phase_eval import PHASE_SEQUENCE, _compute_flex_audit, build_stage3_phase_evaluation
+from model.inverse.topology.flex_audit import _compute_flex_audit
+from model.inverse.topology.phase_eval import PHASE_SEQUENCE, build_stage3_phase_evaluation
 from model.inverse.topology.round_context import round_context_invariants
 from model.inverse.topology.spectrum_rebalance import (
     DEFAULT_SPECTRUM_WINDOWS,
@@ -142,7 +143,7 @@ def test_flex_upper_uses_exact_point_eight_formula_without_lower_bound_raise(mon
     nodes = [make_node(index, 10) for index in range(4)]
     classification = classify_topology_units(nodes)
     monkeypatch.setattr(
-        "model.inverse.topology.phase_eval._count_clusters_from_generator",
+        "model.inverse.topology.flex_audit._count_clusters_from_generator",
         lambda *_args, **_kwargs: (10, "test", ""),
     )
 

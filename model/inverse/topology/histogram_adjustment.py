@@ -39,11 +39,6 @@ RESOURCE_TYPES = (11, 23, 22, 24)
 RESIDUAL_CLOSURE_TYPES = (11, 23, 22)
 TARGET_PRIORITY = {23: 0, 11: 1, 22: 2, 24: 3}
 AROMATIC_PATTERN = (12, 13)
-def _counts(H: torch.Tensor, keys: Iterable[int]) -> Dict[int, int]:
-    return {
-        int(key): int(H[int(key)].item()) if 0 <= int(key) < int(H.numel()) else 0
-        for key in keys
-    }
 
 
 def _h_total(H: torch.Tensor, special_degree_meta: Optional[Dict[str, Any]]) -> float:
@@ -150,19 +145,12 @@ def _runtime_flex_audit(plan: Stage3AdjustmentPlan) -> Dict[str, Any]:
     audit: Dict[str, Any] = {}
     if phase_eval is not None:
         audit = dict(getattr(phase_eval, "flex_audit", {}) or {})
-    phase_eval_dict = dict(runtime.get("phase_evaluation_dict", {}) or {})
-    if not audit:
-        audit = dict(phase_eval_dict.get("flex_audit", {}) or {})
     if not audit:
         audit = dict(runtime.get("flex_audit", {}) or {})
     if not audit:
         return {}
 
-    flex_counts = (
-        dict(getattr(phase_eval, "flex_counts", {}) or {})
-        if phase_eval is not None
-        else dict(phase_eval_dict.get("flex_counts", {}) or {})
-    )
+    flex_counts = dict(getattr(phase_eval, "flex_counts", {}) or {})
     if flex_counts:
         audit["effective_flex_count"] = int(
             flex_counts.get(

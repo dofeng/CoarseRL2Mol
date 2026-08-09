@@ -208,9 +208,7 @@ def plan_stage3_resource_adjustments(
         committed_topology_products=committed_topology_products,
     )
     plan.runtime.setdefault("classification_before_adjustment", classification)
-    plan.runtime.setdefault("classification_before_adjustment_dict", classification.to_dict())
     plan.runtime.setdefault("phase_evaluation", phase_eval)
-    plan.runtime.setdefault("phase_evaluation_dict", phase_eval.to_dict())
     if plan.histogram_adjustment_plan is None and list(plan.planned_conversions or []):
         plan.histogram_adjustment_plan = build_histogram_adjustment_plan(
             plan=plan,
@@ -270,21 +268,13 @@ def audit_stage3_topology(
     )
     runtime = dict(getattr(plan, "runtime", {}) or {})
     phase_eval = runtime.get("phase_evaluation")
-    phase_eval_dict = (
-        phase_eval.to_dict()
-        if phase_eval is not None and hasattr(phase_eval, "to_dict")
-        else dict(runtime.get("phase_evaluation_dict", {}) or {})
-    )
+    phase_eval_dict = phase_eval.to_dict() if phase_eval is not None else {}
     classification_obj = runtime.get("classification_before_adjustment")
-    classification = (
-        classification_obj.to_dict()
-        if classification_obj is not None and hasattr(classification_obj, "to_dict")
-        else dict(runtime.get("classification_before_adjustment_dict", {}) or {})
-    )
+    classification = classification_obj.to_dict() if classification_obj is not None else {}
     if not classification:
         classification = dict(phase_eval_dict.get("classification_view", {}) or {})
     assembly_snapshot = dict(
-        runtime.get("assembly_before_adjustment_dict", {})
+        runtime.get("assembly_before_adjustment", {})
         or phase_eval_dict.get("assembly_view", {})
         or {}
     )

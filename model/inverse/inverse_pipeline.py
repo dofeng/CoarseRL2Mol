@@ -1835,9 +1835,10 @@ class InversePipelineV3:
                     terminal_plan = dict(getattr(cycle, 'plan', {}) or {})
                     break
             runtime = dict(terminal_plan.get('runtime', {}) or {})
+            phase_evaluation = dict(runtime.get('phase_evaluation', {}) or {})
             assembly = dict(
-                runtime.get('assembly_before_adjustment_dict', {})
-                or runtime.get('phase_evaluation_dict', {}).get('assembly_view', {})
+                runtime.get('assembly_before_adjustment', {})
+                or phase_evaluation.get('assembly_view', {})
                 or {}
             )
             diagnostics = dict(terminal_plan.get('diagnostics', {}) or {})
@@ -1859,11 +1860,11 @@ class InversePipelineV3:
                     for node in list(getattr(workflow_result, 'nodes', []) or [])
                 }),
                 'classification': dict(
-                    runtime.get('classification_before_adjustment_dict', {}) or {}
+                    runtime.get('classification_before_adjustment', {}) or {}
                 ),
                 'external_assembly': dict(
-                    runtime.get('assembly_before_adjustment_dict', {})
-                    or runtime.get('phase_evaluation_dict', {}).get('assembly_view', {})
+                    runtime.get('assembly_before_adjustment', {})
+                    or phase_evaluation.get('assembly_view', {})
                     or {}
                 ),
                 'resource_ledger': resource_ledger,

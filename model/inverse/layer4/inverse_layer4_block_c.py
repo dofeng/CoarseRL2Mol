@@ -142,28 +142,19 @@ def _stage3_r2(diff: Optional[Dict[str, Any]], fallback: Any = float("nan")) -> 
 def _stage3_metrics_from_plan(plan: Any) -> Dict[str, Any]:
     runtime = dict(getattr(plan, "runtime", {}) or {})
     phase_eval = runtime.get("phase_evaluation")
-    if phase_eval is not None:
-        return dict(getattr(phase_eval, "topology_metrics", {}) or {})
-    phase_eval_dict = dict(runtime.get("phase_evaluation_dict", {}) or {})
-    return dict(phase_eval_dict.get("topology_metrics", {}) or {})
+    return dict(getattr(phase_eval, "topology_metrics", {}) or {})
 
 
 def _stage3_signature_from_plan(plan: Any) -> str:
     runtime = dict(getattr(plan, "runtime", {}) or {})
     phase_eval = runtime.get("phase_evaluation")
-    if phase_eval is not None:
-        return str(getattr(phase_eval, "topology_signature", "") or "")
-    phase_eval_dict = dict(runtime.get("phase_evaluation_dict", {}) or {})
-    return str(phase_eval_dict.get("topology_signature", "") or "")
+    return str(getattr(phase_eval, "topology_signature", "") or "")
 
 
 def _stage3_flex_audit_from_plan(plan: Any) -> Dict[str, Any]:
     runtime = dict(getattr(plan, "runtime", {}) or {})
     phase_eval = runtime.get("phase_evaluation")
-    if phase_eval is not None:
-        return dict(getattr(phase_eval, "flex_audit", {}) or {})
-    phase_eval_dict = dict(runtime.get("phase_evaluation_dict", {}) or {})
-    return dict(phase_eval_dict.get("flex_audit", {}) or {})
+    return dict(getattr(phase_eval, "flex_audit", {}) or {})
 
 
 def _histogram_dict(H: torch.Tensor) -> Dict[str, int]:
@@ -247,15 +238,6 @@ def _committed_products_from_plan(plan: Any) -> List[Dict[str, Any]]:
         getattr(phase_evaluation, "assembly_view", {}) or {}
     ) if phase_evaluation is not None else {}
     assembly_products = list(assembly_view.get("products", []) or [])
-    if not assembly_products:
-        phase_evaluation_dict = dict(
-            runtime.get("phase_evaluation_dict", {}) or {}
-        )
-        assembly_products = list(
-            dict(phase_evaluation_dict.get("assembly_view", {}) or {}).get(
-                "products", []
-            ) or []
-        )
     external_stage_completed = bool(
         diagnostics.get("external_stage_completed", False)
         or str(getattr(plan, "reason", "") or "")
@@ -2232,9 +2214,9 @@ def run_block_c_resource_adjustment_loop_impl(
             H_current,
             cycle_context_before,
         )
-        phase_eval_dict = dict(dict(getattr(plan, "runtime", {}) or {}).get("phase_evaluation_dict", {}) or {})
-        flex_audit = dict(phase_eval_dict.get("flex_audit", {}) or {})
-        assembly_view = dict(phase_eval_dict.get("assembly_view", {}) or {})
+        phase_eval = dict(getattr(plan, "runtime", {}) or {}).get("phase_evaluation")
+        flex_audit = dict(getattr(phase_eval, "flex_audit", {}) or {})
+        assembly_view = dict(getattr(phase_eval, "assembly_view", {}) or {})
         flex_target_plan = dict(assembly_view.get("flex_target_plan", {}) or {})
         protected_counts = dict(assembly_view.get("protected_resource_counts", {}) or {})
         print(
@@ -2242,7 +2224,7 @@ def run_block_c_resource_adjustment_loop_impl(
             f"M={int(flex_audit.get('flex_lower', 0) or 0)} "
             f"N={int(flex_audit.get('flex_upper', 0) or 0)} "
             f"T={int(flex_audit.get('flex_target', flex_audit.get('target_flex_count', 0)) or 0)} "
-            f"current={int(dict(phase_eval_dict.get('flex_counts', {}) or {}).get('final', 0) or 0)} "
+            f"current={int(dict(getattr(phase_eval, 'flex_counts', {}) or {}).get('final', 0) or 0)} "
             f"external_capacity={int(flex_target_plan.get('external_candidate_capacity', 0) or 0)}"
             f" X/Y/Z={int(flex_audit.get('X', 0) or 0)}/{int(flex_audit.get('Y', 0) or 0)}/{int(flex_audit.get('Z', 0) or 0)}"
         )

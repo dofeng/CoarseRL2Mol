@@ -207,8 +207,6 @@ class TopologyPoolLedger(Stage3Serializable):
     fixed_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
     fragment_owned_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
     convertible_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
-    allocator_remaining_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
-    diagnostic_remaining_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
     initial_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
     remaining_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
     consumed_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
@@ -216,10 +214,7 @@ class TopologyPoolLedger(Stage3Serializable):
     fixed_counts_by_su: Dict[str, int] = field(default_factory=dict)
     fragment_owned_counts_by_su: Dict[str, int] = field(default_factory=dict)
     convertible_counts: Dict[str, int] = field(default_factory=dict)
-    allocator_remaining_counts: Dict[str, int] = field(default_factory=dict)
-    diagnostic_remaining_counts: Dict[str, int] = field(default_factory=dict)
     protected_counts: Dict[str, int] = field(default_factory=dict)
-    unusable_counts: Dict[str, int] = field(default_factory=dict)
     invariant_errors: List[str] = field(default_factory=list)
     initial_counts: Dict[str, int] = field(default_factory=dict)
     consumed_counts: Dict[str, int] = field(default_factory=dict)
@@ -590,8 +585,6 @@ class Stage3PhaseEvaluation(Stage3Serializable):
     flex_range_action_class: str = ""
     active_external_subphase: str = ""
     external_subphase_status: Dict[str, Any] = field(default_factory=dict)
-    dormant_phases: List[str] = field(default_factory=list)
-    dormant_phase_reasons: Dict[str, str] = field(default_factory=dict)
     assembly_view: Dict[str, Any] = field(default_factory=dict)
     classification_view: Dict[str, Any] = field(default_factory=dict)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
@@ -768,11 +761,8 @@ class Stage3AdjustmentPlan(Stage3Serializable):
     reason: str = ""
     phase: str = ""
     plan_kind: str = ""
-    pre_assembly_gate: str = ""
     active_subphase: str = ""
-    flex_gap: int = 0
     resource_deficit: Dict[int, int] = field(default_factory=dict)
-    resource_surplus: Dict[int, int] = field(default_factory=dict)
     requirement_contracts: List[Dict[str, Any]] = field(default_factory=list)
     pending_contracts: List[Dict[str, Any]] = field(default_factory=list)
     resource_request_breakdown: Dict[str, Any] = field(default_factory=dict)
@@ -780,29 +770,6 @@ class Stage3AdjustmentPlan(Stage3Serializable):
     hard_required_counts: Dict[str, int] = field(default_factory=dict)
     preferred_required_counts: Dict[str, int] = field(default_factory=dict)
     protected_resource_counts: Dict[str, int] = field(default_factory=dict)
-    contracts_by_contract_kind: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    blockers_by_kind: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    resource_request_by_phase: Dict[str, Dict[str, int]] = field(default_factory=dict)
-    resource_request_by_pending_kind: Dict[str, Dict[str, int]] = field(default_factory=dict)
-    resource_request_by_contract_kind: Dict[str, Dict[str, int]] = field(default_factory=dict)
-    resource_request_by_closure_tactic: Dict[str, Dict[str, int]] = field(default_factory=dict)
-    minimum_resource_request_by_contract_kind: Dict[str, Dict[str, int]] = field(default_factory=dict)
-    minimum_resource_request_by_subphase: Dict[str, Dict[str, int]] = field(default_factory=dict)
-    true_deficit_by_pending_kind: Dict[str, Dict[str, int]] = field(default_factory=dict)
-    true_deficit_by_subphase: Dict[str, Dict[str, int]] = field(default_factory=dict)
-    true_deficit_by_closure_tactic: Dict[str, Dict[str, int]] = field(default_factory=dict)
-    partner_request_summary: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    pending_contracts_by_pending_kind: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    pending_contracts_by_closure_tactic: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    resource_rebalance_by_pending_kind: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    resource_rebalance_by_closure_tactic: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    resource_rebalance_trace_by_subphase: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    partner_match_requests: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    remaining_external_requirements_by_pending_kind: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    post_rebalance_remaining_counts: Dict[str, int] = field(default_factory=dict)
-    resource_rebalance_trace: List[Dict[str, Any]] = field(default_factory=list)
-    inactive_phases: List[str] = field(default_factory=list)
-    dormant_phase_reasons: Dict[str, str] = field(default_factory=dict)
     planned_conversions: List[Stage3AdjustmentOp] = field(default_factory=list)
     adjustment_bundles: List[Stage3AdjustmentBundle] = field(default_factory=list)
     histogram_adjustment_plan: Optional[HistogramAdjustmentPlan] = None

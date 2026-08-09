@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from model.inverse.topology.histogram_adjustment import (
@@ -19,6 +20,18 @@ from model.inverse.topology.stage3_models import (
     HistogramAdjustmentPlan,
     HistogramConversion,
 )
+
+
+def test_stage3_adjustment_entrypoints_reject_legacy_dict_plans() -> None:
+    from model.inverse.layer4.inverse_layer4 import Layer4Adjuster
+
+    H = torch.zeros(33, dtype=torch.long)
+    with pytest.raises(TypeError, match="Stage3AdjustmentPlan"):
+        apply_stage3_node_adjustments([], H, {})
+    with pytest.raises(TypeError, match="Stage3AdjustmentPlan"):
+        Layer4Adjuster(device=torch.device("cpu")).apply_topology_resource_adjustments(
+            [], H, {}
+        )
 
 
 def test_most_surplus_resource_fills_most_deficient_resource() -> None:

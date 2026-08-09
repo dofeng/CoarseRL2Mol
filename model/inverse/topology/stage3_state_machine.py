@@ -974,7 +974,6 @@ def _residual_su24_aromatization_plan(
         reason="residual_su24_aromatization_pending",
         phase="residual_su24_aromatization",
         plan_kind="residual_su24_aromatization",
-        pre_assembly_gate="residual_su24_aromatization",
         active_subphase="residual_su24_aromatization",
         planned_conversions=operations,
         runtime=_runtime_with_pool(phase_eval, pool),
@@ -1191,7 +1190,6 @@ def _flex_excess_reduction_plan(
             blocked_reason=str(proof["reason"]),
             phase="flex_range_reconciliation",
             plan_kind="flex_excess_reduction_infeasible",
-            pre_assembly_gate="flex_range_reconciliation",
             active_subphase="flex_range_reconciliation",
             phase_result=Stage3PhaseResult(
                 active_phase="flex_range_reconciliation",
@@ -1209,7 +1207,6 @@ def _flex_excess_reduction_plan(
         reason="flex_excess_reduction_pending",
         phase="flex_range_reconciliation",
         plan_kind="flex_excess_reduction",
-        pre_assembly_gate="flex_range_reconciliation",
         active_subphase="flex_range_reconciliation",
         planned_conversions=list(operations),
         runtime=_runtime_with_pool(phase_eval, pool),
@@ -1357,9 +1354,7 @@ def _runtime_with_pool(
     assembly["resource_ledger"] = ledger
     return {
         "phase_evaluation": phase_eval,
-        "phase_evaluation_dict": phase_eval.to_dict(),
         "assembly_before_adjustment": assembly,
-        "assembly_before_adjustment_dict": assembly,
     }
 
 
@@ -2134,7 +2129,6 @@ def _finalize_phase_plan(
                 if first_failure_domain == "topology_materialization"
                 else "sequential_phase_infeasible_after_progress"
             ),
-            pre_assembly_gate=str(phase),
             active_subphase=str(phase),
             requirement_contracts=list(requirement_contracts),
             pending_contracts=list(phase_infeasible_contracts),
@@ -2169,7 +2163,6 @@ def _finalize_phase_plan(
         reason="stage3_rebuild_required",
         phase=str(phase),
         plan_kind="sequential_phase_transactions",
-        pre_assembly_gate=str(phase),
         active_subphase=str(phase),
         requirement_contracts=list(requirement_contracts),
         pending_contracts=[],
@@ -2250,7 +2243,6 @@ def _transaction_plan(
         reason="phase_resource_infeasible",
         phase=str(contract.phase),
         plan_kind="single_topology_transaction",
-        pre_assembly_gate=str(contract.phase),
         active_subphase=str(contract.phase),
         requirement_contracts=[contract_dict],
         pending_contracts=[contract_dict],
@@ -2626,7 +2618,6 @@ def plan_stage3_state_machine(
             blocked_reason=flex_block,
             phase="flex_range_reconciliation",
             plan_kind="flex_range_infeasible",
-            pre_assembly_gate="flex_range_reconciliation",
             active_subphase="flex_range_reconciliation",
             requirement_contracts=flex_contracts,
             pending_contracts=flex_contracts,
@@ -2701,7 +2692,6 @@ def plan_stage3_state_machine(
             blocked_reason=str(proof["reason"]),
             phase=EXTERNAL_STAGE,
             plan_kind="external_physical_product_validation_failed",
-            pre_assembly_gate=EXTERNAL_STAGE,
             active_subphase=EXTERNAL_STAGE,
             phase_result=Stage3PhaseResult(
                 active_phase=EXTERNAL_STAGE,
@@ -2794,7 +2784,6 @@ def plan_stage3_state_machine(
             blocked_reason=str(proof["reason"]),
             phase="resource_accounting",
             plan_kind="committed_product_resource_identity_conflict",
-            pre_assembly_gate="resource_accounting",
             active_subphase="resource_accounting",
             phase_result=Stage3PhaseResult(
                 active_phase="resource_accounting",
@@ -3212,7 +3201,6 @@ def plan_stage3_state_machine(
                 reason="stage3_spectrum_candidates_ready",
                 phase="remaining_pool_spectrum_rebalance",
                 plan_kind="remaining_pool_spectrum_candidate_set",
-                pre_assembly_gate="remaining_pool_spectrum_rebalance",
                 active_subphase="remaining_pool_spectrum_rebalance",
                 phase_result=phase_result,
                 spectrum_candidates=list(spectrum_candidates),
@@ -3507,7 +3495,6 @@ def plan_stage3_state_machine(
                 blocked_reason=str(proof["reason"]),
                 phase="resource_su24_ring_closure",
                 plan_kind="pending_su24_ring_candidate_infeasible",
-                pre_assembly_gate="resource_su24_ring_closure",
                 active_subphase="resource_su24_ring_closure",
                 phase_result=Stage3PhaseResult(
                     active_phase="resource_su24_ring_closure",
@@ -3618,7 +3605,6 @@ def plan_stage3_state_machine(
                 blocked_reason=str(proof["reason"]),
                 phase="residual_su24_aromatization",
                 plan_kind="residual_su24_aromatization_infeasible",
-                pre_assembly_gate="residual_su24_aromatization",
                 active_subphase="residual_su24_aromatization",
                 phase_result=Stage3PhaseResult(
                     active_phase="residual_su24_aromatization",
@@ -3758,7 +3744,6 @@ def plan_stage3_state_machine(
                 blocked_reason=str(proof["reason"]),
                 phase="residual_resource_self_closure",
                 plan_kind="pending_residual_product_infeasible",
-                pre_assembly_gate="residual_resource_self_closure",
                 active_subphase="residual_resource_self_closure",
                 phase_result=Stage3PhaseResult(
                     active_phase="residual_resource_self_closure",
@@ -3947,7 +3932,6 @@ def plan_stage3_state_machine(
             blocked_reason=str(proof["reason"]),
             phase="residual_resource_self_closure",
             plan_kind="residual_topology_conversion_infeasible",
-            pre_assembly_gate="residual_resource_self_closure",
             active_subphase="residual_resource_self_closure",
             phase_result=Stage3PhaseResult(
                 active_phase="residual_resource_self_closure",
@@ -4167,7 +4151,6 @@ def plan_stage3_state_machine(
             blocked_reason=str(proof["reason"]),
             phase="complete",
             plan_kind="stage3_completion_infeasible",
-            pre_assembly_gate="complete",
             active_subphase="complete",
             pending_contracts=[dict(item or {}) for item in pending_contracts_final],
             phase_result=Stage3PhaseResult(
@@ -4203,7 +4186,6 @@ def plan_stage3_state_machine(
         reason="stage3_complete",
         phase="complete",
         plan_kind="stage3_state_machine_complete",
-        pre_assembly_gate="complete",
         active_subphase="complete",
         phase_result=phase_result,
         diagnostics={

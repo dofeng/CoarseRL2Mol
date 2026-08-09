@@ -23,6 +23,8 @@ from ..topology import (
     assemble_topology_units,
     classify_topology_units,
     plan_stage3_resource_adjustments,
+    Stage3AdjustmentApplyResult,
+    Stage3AdjustmentPlan,
     Stage3ProgressPhase,
 )
 from .inverse_layer4_block_a import (
@@ -1480,64 +1482,12 @@ class Layer4Adjuster:
     def apply_topology_resource_adjustments(self,
                                             nodes: List[_NodeV3],
                                             H: torch.Tensor,
-                                            plan: Any) -> Tuple[List[_NodeV3], torch.Tensor]:
-        plan_obj = plan
-        if isinstance(plan, dict):
-            from ..topology.stage3_models import Stage3AdjustmentPlan
-            plan_obj = Stage3AdjustmentPlan(
-                ok=bool(dict(plan).get("ok", False)),
-                reason=str(dict(plan).get("reason", "")),
-                phase=str(dict(plan).get("phase", "")),
-                plan_kind=str(dict(plan).get("plan_kind", "")),
-                pre_assembly_gate=str(dict(plan).get("pre_assembly_gate", "")),
-                active_subphase=str(dict(plan).get("active_subphase", "")),
-                flex_gap=int(dict(plan).get("flex_gap", 0) or 0),
-                resource_deficit={
-                    int(k): int(v)
-                    for k, v in dict(dict(plan).get("resource_deficit", {}) or {}).items()
-                },
-                resource_surplus={
-                    int(k): int(v)
-                    for k, v in dict(dict(plan).get("resource_surplus", {}) or {}).items()
-                },
-                requirement_contracts=list(dict(plan).get("requirement_contracts", []) or []),
-                pending_contracts=list(dict(plan).get("pending_contracts", []) or []),
-                resource_request_breakdown=dict(dict(plan).get("resource_request_breakdown", {}) or {}),
-                minimum_resource_request=dict(dict(plan).get("minimum_resource_request", {}) or {}),
-                contracts_by_contract_kind=dict(dict(plan).get("contracts_by_contract_kind", {}) or {}),
-                blockers_by_kind=dict(dict(plan).get("blockers_by_kind", {}) or {}),
-                resource_request_by_phase=dict(dict(plan).get("resource_request_by_phase", {}) or {}),
-                resource_request_by_pending_kind=dict(dict(plan).get("resource_request_by_pending_kind", {}) or {}),
-                resource_request_by_contract_kind=dict(dict(plan).get("resource_request_by_contract_kind", {}) or {}),
-                resource_request_by_closure_tactic=dict(dict(plan).get("resource_request_by_closure_tactic", {}) or {}),
-                minimum_resource_request_by_contract_kind=dict(dict(plan).get("minimum_resource_request_by_contract_kind", {}) or {}),
-                minimum_resource_request_by_subphase=dict(dict(plan).get("minimum_resource_request_by_subphase", {}) or {}),
-                true_deficit_by_pending_kind=dict(dict(plan).get("true_deficit_by_pending_kind", {}) or {}),
-                true_deficit_by_subphase=dict(dict(plan).get("true_deficit_by_subphase", {}) or {}),
-                true_deficit_by_closure_tactic=dict(dict(plan).get("true_deficit_by_closure_tactic", {}) or {}),
-                partner_request_summary=dict(dict(plan).get("partner_request_summary", {}) or {}),
-                pending_contracts_by_pending_kind=dict(dict(plan).get("pending_contracts_by_pending_kind", {}) or {}),
-                pending_contracts_by_closure_tactic=dict(dict(plan).get("pending_contracts_by_closure_tactic", {}) or {}),
-                resource_rebalance_by_pending_kind=dict(dict(plan).get("resource_rebalance_by_pending_kind", {}) or {}),
-                resource_rebalance_by_closure_tactic=dict(dict(plan).get("resource_rebalance_by_closure_tactic", {}) or {}),
-                resource_rebalance_trace_by_subphase=dict(dict(plan).get("resource_rebalance_trace_by_subphase", {}) or {}),
-                partner_match_requests=dict(dict(plan).get("partner_match_requests", {}) or {}),
-                remaining_external_requirements_by_pending_kind=dict(dict(plan).get("remaining_external_requirements_by_pending_kind", {}) or {}),
-                post_rebalance_remaining_counts=dict(dict(plan).get("post_rebalance_remaining_counts", {}) or {}),
-                resource_rebalance_trace=list(dict(plan).get("resource_rebalance_trace", []) or []),
-                inactive_phases=list(dict(plan).get("inactive_phases", []) or []),
-                dormant_phase_reasons=dict(dict(plan).get("dormant_phase_reasons", {}) or {}),
-                planned_conversions=[],
-                adjustment_bundles=list(dict(plan).get("adjustment_bundles", []) or []),
-                diagnostics=dict(dict(plan).get("diagnostics", {}) or {}),
-                runtime=dict(dict(plan).get("runtime", {}) or {}),
-                requested_counts=dict(dict(plan).get("requested_counts", {}) or {}),
-                unresolved_counts=dict(dict(plan).get("unresolved_counts", {}) or {}),
-                blocked_reason=str(dict(plan).get("blocked_reason", "") or ""),
-            )
-        result = apply_stage3_node_adjustments(nodes=nodes, H=H, plan=plan_obj)
+                                            plan: Stage3AdjustmentPlan) -> Stage3AdjustmentApplyResult:
+        if not isinstance(plan, Stage3AdjustmentPlan):
+            raise TypeError("plan must be a Stage3AdjustmentPlan")
+        result = apply_stage3_node_adjustments(nodes=nodes, H=H, plan=plan)
         if bool(getattr(result, "changed", False)) and list(getattr(result, "applied_ops", []) or []):
-            diagnostics = dict(getattr(plan_obj, "diagnostics", {}) or {})
+            diagnostics = dict(plan.diagnostics or {})
             self._stage3_su11_rotation_index = int(
                 diagnostics.get(
                     "su11_rotation_index_after",
