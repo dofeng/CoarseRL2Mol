@@ -251,6 +251,175 @@ def test_final_topology_export_uses_only_fresh_audit_products(monkeypatch) -> No
     assert rows[0]["product_id"] != "historical-product"
 
 
+def test_final_topology_export_uses_authoritative_committed_stage3_snapshot(
+    monkeypatch,
+) -> None:
+    pipeline = _build_pipeline_stub()
+    nodes = [
+        make_node(1, 11),
+        make_node(2, 22),
+        make_node(3, 23),
+        make_node(4, 23),
+        make_node(5, 12),
+    ]
+    product = {
+        "product_id": "committed-residual-product",
+        "generation_id": 9,
+        "product_type": "residual_resource_conversion",
+        "source_fragment_ids": [],
+        "fixed_source_node_ids": [],
+        "claimed_resource_ids_by_su": {"11": [1], "22": [2], "23": [3, 4]},
+        "mainline_slots": [{
+            "slot_id": "residual:1:mainline",
+            "assigned_resource_ids": [1, 3, 4, 2],
+            "state": "FILLED",
+        }],
+        "branch_slots": [],
+        "topology_notation": "11-23-23-22",
+        "node_id_notation": "1-3-4-2",
+        "closed": True,
+    }
+    ownership = {
+        "states": {
+            "fixed_topology_core": [5],
+            "claimed_closure_resource": [1, 2, 3, 4],
+            "remaining_closure_resource": [],
+            "remaining_aromatic_donor": [],
+            "pending_topology": [],
+            "unclassified_or_conflict": [],
+        },
+        "closure_pool_ids_by_su": {"11": [], "22": [], "23": [], "24": []},
+        "aromatic_donor_ids_by_su": {"10": [], "12": [], "13": []},
+        "invariant_errors": [],
+    }
+    pipeline._final_stage3_completion_diagnostics = {
+        "stage3_complete": True,
+        "generation_id": 9,
+        "node_ids": [1, 2, 3, 4, 5],
+        "products": [product],
+        "ownership_ledger": ownership,
+        "resource_ledger": {
+            "initial_counts": {"11": 1, "22": 1, "23": 2, "24": 0},
+            "consumed_counts": {"11": 1, "22": 1, "23": 2, "24": 0},
+            "topology_consumed_counts": {"11": 0, "22": 0, "23": 0, "24": 0},
+            "residual_consumed_counts": {"11": 1, "22": 1, "23": 2, "24": 0},
+            "remaining_counts": {"11": 0, "22": 0, "23": 0, "24": 0},
+            "shortage_counts": {},
+            "snapshot_stage": "stage3_committed",
+        },
+        "resource_accounting": {"ok": True, "errors": []},
+    }
+    pipeline._final_stage3_snapshot_node_ids = [1, 2, 3, 4, 5]
+    pipeline._final_stage3_snapshot_authoritative = True
+
+    monkeypatch.setattr(
+        inverse_pipeline_module,
+        "audit_stage3_topology",
+        lambda **_kwargs: pytest.fail("committed Stage3 snapshot must not be re-audited"),
+    )
+
+    rows, summary = pipeline._final_topology_rows(nodes)
+
+    assert rows == [product]
+    assert summary["ok"] is True
+    assert summary["diagnostics"]["solver_reason"] == "stage3_complete"
+    assert summary["diagnostics"]["fresh_stage3_audit"][
+        "authoritative_stage3_snapshot"
+    ] is True
+    assert summary["diagnostics"]["ownership_ledger"] == ownership
+    assert summary["diagnostics"]["resource_ledger"]["remaining_counts"]["24"] == 0
+    assert summary["coverage_valid"] is True
+
+
+def test_completion_resource_ledger_is_rebuilt_from_products_and_ownership() -> None:
+    products = [
+        {
+            "phase": "resource_su24_ring_closure",
+            "product_type": "aliphatic_ring",
+            "claimed_resource_ids_by_su": {"11": [1], "24": [2, 3]},
+        },
+        {
+            "phase": "residual_resource_self_closure",
+            "product_type": "residual_resource_conversion",
+            "claimed_resource_ids_by_su": {"11": [4], "22": [5], "23": [6, 7]},
+        },
+    ]
+    ownership = {
+        "closure_pool_ids_by_su": {
+            "11": [8], "22": [], "23": [9, 10], "24": [],
+        },
+        "aromatic_donor_ids_by_su": {"10": [11], "12": [], "13": [12]},
+    }
+
+    ledger = InversePipelineV3._stage3_completion_resource_ledger(
+        products,
+        ownership,
+        {"shortage_counts": {"23": 0}},
+    )
+
+    assert ledger["snapshot_stage"] == "stage3_committed"
+    assert ledger["consumed_counts"] == {
+        "10": 0, "11": 2, "12": 0, "13": 0,
+        "22": 1, "23": 2, "24": 2,
+    }
+    assert ledger["topology_consumed_counts"]["24"] == 2
+    assert ledger["residual_consumed_counts"]["23"] == 2
+    assert ledger["remaining_counts"]["23"] == 2
+    assert ledger["initial_counts"]["13"] == 1
+    assert all(
+        ledger["initial_counts"][key]
+        == ledger["consumed_counts"][key] + ledger["remaining_counts"][key]
+        for key in ledger["initial_counts"]
+    )
+
+
+def test_authoritative_snapshot_accepts_fixed_atomic_group_ownership() -> None:
+    pipeline = _build_pipeline_stub()
+    nodes = [make_node(1, 14), make_node(2, 14)]
+    ownership = {
+        "states": {
+            "fixed_topology_core": [1, 2],
+            "completed_topology": [],
+            "claimed_closure_resource": [],
+            "remaining_closure_resource": [],
+            "remaining_aromatic_donor": [],
+            "pending_topology": [],
+            "support_context": [],
+            "unclassified_or_conflict": [],
+        },
+        "closure_pool_ids_by_su": {"11": [], "22": [], "23": [], "24": []},
+        "aromatic_donor_ids_by_su": {"10": [], "12": [], "13": []},
+        "invariant_errors": [],
+    }
+    pipeline._final_stage3_completion_diagnostics = {
+        "stage3_complete": True,
+        "generation_id": 3,
+        "node_ids": [1, 2],
+        "products": [],
+        "ownership_ledger": ownership,
+        "classification": {
+            "summary": {},
+            "classification_rejects": [],
+            "unclassified_nodes": [],
+            "resource_pool": {},
+            "atomic_groups": [{"group_id": 1, "node_ids": [1, 2]}],
+        },
+        "external_assembly": {},
+        "resource_ledger": InversePipelineV3._stage3_completion_resource_ledger(
+            [], ownership
+        ),
+        "resource_accounting": {"ok": True, "errors": []},
+    }
+    pipeline._final_stage3_snapshot_node_ids = [1, 2]
+    pipeline._final_stage3_snapshot_authoritative = True
+
+    rows, summary = pipeline._final_topology_rows(nodes)
+
+    assert rows == []
+    assert summary["ok"] is True
+    assert summary["diagnostics"]["topology_invariant_conflicts"] == []
+
+
 def test_pipeline_captures_complete_generation_products_from_state_machine_ledger() -> None:
     nodes = [make_node(1, 11), make_node(2, 22), make_node(3, 23), make_node(4, 23)]
     histogram = torch.zeros(40, dtype=torch.long)
@@ -301,6 +470,10 @@ def test_pipeline_captures_complete_generation_products_from_state_machine_ledge
     assert completion["products"][0]["product_type"] == "residual_resource_conversion"
     assert completion["products"][0]["topology_notation"] == "11-23-23-22"
     assert completion["products"][0]["node_id_notation"] == "1-3-4-2"
+    committed_ledger = pipeline._final_stage3_completion_diagnostics["resource_ledger"]
+    assert committed_ledger["snapshot_stage"] == "stage3_committed"
+    assert sum(committed_ledger["consumed_counts"].values()) == 4
+    assert sum(committed_ledger["remaining_counts"].values()) == 0
 
 
 def test_stage3_fresh_rebuild_preserves_single_build_runtime_config() -> None:
@@ -497,11 +670,11 @@ def test_final_topology_export_ignores_historical_terminal_infeasibility_proof()
 
     _, summary = pipeline._final_topology_rows(nodes)
 
-    assert summary["ok"] is True
-    assert summary["diagnostics"]["solver_reason"] == "stage3_complete"
+    assert summary["ok"] is False
+    assert summary["diagnostics"]["solver_reason"] == "phase_resource_infeasible"
     assert summary["diagnostics"]["infeasibility_proof"] != proof
     assert summary["diagnostics"]["stage3_generation_id"] == 0
-    assert summary["diagnostics"]["stage3_terminal_snapshot_match"] is False
+    assert summary["diagnostics"]["stage3_terminal_snapshot_match"] is True
 
 
 def test_inverse_pipeline_final_topology_print_is_minimal(

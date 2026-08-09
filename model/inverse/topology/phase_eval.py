@@ -29,6 +29,7 @@ PHASE_SEQUENCE = (
     "external_side_chain_closure",
     "remaining_pool_spectrum_rebalance",
     "resource_su24_ring_closure",
+    "residual_su24_aromatization",
     "residual_resource_self_closure",
     "complete",
 )
@@ -42,8 +43,9 @@ EXTERNAL_SUBPHASE_ORDER = {
     "external_side_chain_closure": 3,
     "remaining_pool_spectrum_rebalance": 4,
     "resource_su24_ring_closure": 5,
-    "residual_resource_self_closure": 6,
-    "complete": 7,
+    "residual_su24_aromatization": 6,
+    "residual_resource_self_closure": 7,
+    "complete": 8,
 }
 
 

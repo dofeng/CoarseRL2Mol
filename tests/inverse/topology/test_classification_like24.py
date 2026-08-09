@@ -595,6 +595,56 @@ def test_classifier_blocks_ring_eligibility_when_0_connector_is_mainline() -> No
     assert list(evidence.get("ring_allowed_skeletons", []) or []) == []
 
 
+def test_classifier_allows_ring_when_0_connector_is_branch_only() -> None:
+    center = make_node(
+        600,
+        20,
+        target_hop1_degree=3,
+        special_anchor_mode="double",
+        target_fixed_anchor_count=2,
+    )
+    main_connector = make_node(627, 27)
+    main_open = make_node(
+        620,
+        20,
+        target_hop1_degree=2,
+        special_anchor_mode="single",
+    )
+    branch_connector = make_node(602, 0)
+    branch_terminal = make_node(622, 22)
+    aromatic_11 = make_node(611, 11)
+    connect(center, main_connector, fixed=True)
+    connect(main_connector, main_open, fixed=True)
+    connect(center, branch_connector, fixed=True)
+    connect(branch_connector, branch_terminal, fixed=True)
+    connect(center, aromatic_11)
+
+    result = classify_topology_units([
+        center,
+        main_connector,
+        main_open,
+        branch_connector,
+        branch_terminal,
+        aromatic_11,
+    ])
+    fragment = _fragment_by_class(result, "24_AB_N")
+    assert fragment is not None
+    evidence = dict(fragment.evidence or {})
+    assert evidence.get("ring_block_reason") == ""
+    assert "side" in set(evidence.get("ring_allowed_skeletons", []) or [])
+    branch_contract = next(
+        item
+        for item in list(evidence.get("fixed_connection_contracts", []) or [])
+        if int(dict(item or {}).get("connector_node_id", -1)) == 602
+    )
+    assert list(branch_contract.get("role_candidates", []) or []) == ["branch_only"]
+    side_contract = dict(
+        dict(evidence.get("ring_contracts", {}) or {}).get("side_ring_plan", {})
+    )
+    assert side_contract.get("eligible") is True
+    assert side_contract.get("fixed_connector_ring_eligible") is True
+
+
 def test_classifier_marks_24_ab_n_24_cd_as_side_path_capable() -> None:
     left = make_node(1000, 20, target_hop1_degree=3, special_anchor_mode="single", target_fixed_anchor_count=1)
     left_11 = make_node(1003, 11)

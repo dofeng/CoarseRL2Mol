@@ -22,7 +22,7 @@ def _complete_payload():
                 "nodes": [{"node_id": 2, "su_type": 13, "local_axial": [0, 0]}],
                 "ports": [
                     {"port_id": "rigid", "node_id": 2, "direction": [-1, 0]},
-                    {"port_id": "flex", "node_id": 2, "direction": [0, 1]},
+                    {"port_id": "flex", "node_id": 2, "direction": [1, 0]},
                 ],
             },
         ],
@@ -33,11 +33,11 @@ def _complete_payload():
                 "source_node_ids": [3, 5],
                 "nodes": [
                     {"node_id": 3, "su_type": 23, "local_axial": [0, 0]},
-                    {"node_id": 5, "su_type": 23, "local_axial": [1, 0]},
+                    {"node_id": 5, "su_type": 23, "local_axial": [1, 1]},
                 ],
                 "edges": [[3, 5]],
                 "ports": [
-                    {"port_id": "left", "node_id": 3, "direction": [0, -1]},
+                    {"port_id": "left", "node_id": 3, "direction": [-1, 0]},
                     {"port_id": "right", "node_id": 5, "direction": [1, 0]},
                 ],
             },
@@ -110,6 +110,7 @@ def test_mcts_places_complete_units_without_substitution():
         _complete_payload(),
         MCTSConfig(iterations=12, flex_iterations=12, side_iterations=12, candidate_k=12, seed=7),
     ).run_all_stages()
+    assert result["ok"] is True
     assert result["status"] == "complete"
     assert result["audit"]["missing_node_ids"] == []
     assert result["audit"]["pending_contract_ids"] == []
@@ -117,4 +118,3 @@ def test_mcts_places_complete_units_without_substitution():
     assert "substitution" not in result
     su_by_id = {int(row["node_id"]): int(row["su_type"]) for row in result["molecule"]["nodes"]}
     assert su_by_id == {1: 13, 2: 13, 3: 23, 4: 22, 5: 23}
-

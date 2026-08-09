@@ -25,6 +25,7 @@ from model.inverse.topology.stage3_state_machine import (
 from model.inverse.topology.stage3_models import (
     Stage3AdjustmentPlan,
     Stage3PhaseResult,
+    Stage3ProgressPhase,
     Stage3SpectrumCandidate,
 )
 from model.inverse.topology.workflow import plan_stage3_resource_adjustments
@@ -76,9 +77,58 @@ def test_phase_sequence_places_spectrum_before_su24_and_residual() -> None:
         "external_side_chain_closure",
         "remaining_pool_spectrum_rebalance",
         "resource_su24_ring_closure",
+        "residual_su24_aromatization",
         "residual_resource_self_closure",
         "complete",
     )
+
+
+def test_stage3_progress_rejects_string_phase_compatibility() -> None:
+    nodes = [make_node(1, 22)]
+    classification = classify_topology_units(nodes)
+    evaluation = build_stage3_phase_evaluation(
+        nodes,
+        classification=classification,
+    )
+
+    with pytest.raises(TypeError, match="Stage3ProgressPhase"):
+        plan_stage3_state_machine(
+            phase_eval=evaluation,
+            H=_histogram(nodes),
+            nodes=nodes,
+            classification=classification,
+            progress_phase="residual_resource_self_closure",
+        )
+
+
+def test_post_external_progress_never_reassembles_completed_external_phases(
+    monkeypatch,
+) -> None:
+    nodes = [make_node(1, 22)]
+    classification = classify_topology_units(nodes)
+    evaluation = build_stage3_phase_evaluation(
+        nodes,
+        classification=classification,
+    )
+    monkeypatch.setattr(
+        "model.inverse.topology.stage3_state_machine._evaluate_external_phases",
+        lambda **_kwargs: pytest.fail("completed external phases were re-executed"),
+    )
+
+    plan = plan_stage3_state_machine(
+        phase_eval=evaluation,
+        H=_histogram(nodes),
+        nodes=nodes,
+        classification=classification,
+        enable_post_external_spectrum=False,
+        progress_phase=Stage3ProgressPhase.RESIDUAL_SELF_CLOSURE,
+    )
+
+    assert plan.reason == "stage3_complete"
+    restored_evaluation = plan.runtime["phase_evaluation"]
+    assert restored_evaluation.diagnostics[
+        "external_stage_restored_from_committed_products"
+    ] is True
 
 
 def test_later_side_contract_is_dormant_while_ring_phase_is_active() -> None:
@@ -391,7 +441,7 @@ def test_above_range_uses_authorized_donor_then_requires_rebuild() -> None:
     } == before_hop1
 
 
-def test_one_remaining_su24_is_tolerated_without_rebuild() -> None:
+def test_one_remaining_su24_is_aromatized_with_rebuild() -> None:
     nodes = [make_node(1, 24)]
     plan = plan_stage3_resource_adjustments(
         _histogram(nodes),
@@ -399,11 +449,12 @@ def test_one_remaining_su24_is_tolerated_without_rebuild() -> None:
         enable_post_external_spectrum=False,
     )
 
-    assert plan.reason == "stage3_complete"
-    assert plan.plan_kind == "stage3_state_machine_complete"
-    assert plan.phase == "complete"
-    assert plan.phase_result.rebuild_required is False
-    assert plan.diagnostics["tolerated_remaining_ids_by_su"] == {"24": [1]}
+    assert plan.reason == "stage3_rebuild_required"
+    assert plan.plan_kind == "residual_su24_aromatization"
+    assert plan.phase == "residual_su24_aromatization"
+    assert plan.phase_result.rebuild_required is True
+    assert plan.histogram_adjustment_plan.H_after[24].item() == 0
+    assert plan.histogram_adjustment_plan.H_after[12].item() == 1
 
 
 def _external_budget_fixture():
@@ -651,7 +702,7 @@ class _SpectrumAdjuster:
         self.candidates = list(candidate) if isinstance(candidate, (list, tuple)) else [candidate]
 
     def plan_topology_resource_adjustments(self, **kwargs):
-        if kwargs.get("post_external_resume_phase") != "remaining_pool_spectrum_rebalance":
+        if kwargs.get("progress_phase") is not Stage3ProgressPhase.SPECTRUM_REBALANCE:
             return Stage3AdjustmentPlan(
                 ok=True,
                 reason="stage3_complete",

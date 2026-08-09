@@ -171,16 +171,16 @@ class Layer0Estimator:
 
         # Metadata-only fallback when no element-directed histogram conversion
         # can fix parity.  It preserves SU counts and fixed-anchor counts.
+        # Thio SU19 is initialized only as single d2/d3; its only valid
+        # degree-parity fallback is single d3 -> single d2.
         transitions = (
             (19, 'ether_single', 'ether', 3, 2),
             (19, 'thio_single', 'thio', 3, 2),
             (20, 'single', None, 3, 2),
             (21, 'single', None, 3, 2),
             (19, 'ether_double', 'ether', 3, 2),
-            (19, 'thio_double', 'thio', 3, 2),
             (20, 'double', None, 3, 2),
             (19, 'ether_single', 'ether', 1, 2),
-            (19, 'thio_single', 'thio', 1, 2),
             (20, 'single', None, 1, 2),
         )
         selected = None
@@ -383,6 +383,11 @@ class Layer0Estimator:
                     int(s_part),
                     S_hint,
                     max_fixed_edges=s_fixed_edges_i,
+                    # Sulfur-bound SU19 must have one sulfur anchor and at
+                    # least one remaining port.  Initial Layer0 allocation
+                    # therefore only permits single d2/d3; ether SU19 keeps
+                    # the full mode pool above.
+                    allowed_modes=('single_d2', 'single_d3'),
                 )
                 mode_s = self._enforce_layer1_mode_pool_caps(H_cpu, 19, mode_s, partition='thio')
                 meta_s = {1: 0, 2: 0, 3: 0}
@@ -724,7 +729,8 @@ class Layer0Estimator:
                                             special_su: int,
                                             aromatic_window: Tuple[float, float],
                                             S_target: Optional[torch.Tensor],
-                                            fallback_special_ratio: float) -> Tuple[int, int, int, Dict[str, Any]]:
+                                            fallback_special_ratio: float,
+                                            allowed_modes: Optional[Tuple[str, ...]] = None) -> Tuple[int, int, int, Dict[str, Any]]:
         edges_i = max(0, int(total_edges))
         if edges_i <= 0:
             return 0, 0, 0, {
@@ -733,7 +739,11 @@ class Layer0Estimator:
                 'special_avg_fixed_edges': 1.0,
             }
         area_arom = self._window_area_from_spectrum(S_target, float(aromatic_window[0]), float(aromatic_window[1]))
-        mode_weights = self._special_mode_node_weights(int(special_su), S_target)
+        mode_weights = self._special_mode_node_weights(
+            int(special_su),
+            S_target,
+            allowed_modes=allowed_modes,
+        )
         area_special = float(sum(float(v) for v in mode_weights.values()))
         if float(area_arom + area_special) <= 1e-8:
             ratio_special = float(fallback_special_ratio)
@@ -742,7 +752,11 @@ class Layer0Estimator:
             ratio_special = float(area_special / float(area_arom + area_special))
             ratio_source = 'spectrum'
         ratio_special = max(0.0, min(0.95, float(ratio_special)))
-        avg_edges = self._average_mode_fixed_edges(int(special_su), S_target)
+        avg_edges = self._average_mode_fixed_edges(
+            int(special_su),
+            S_target,
+            allowed_modes=allowed_modes,
+        )
         denom = float(1.0 + float(ratio_special) * max(0.0, float(avg_edges) - 1.0))
         target_special_nodes = int(round(float(ratio_special) * float(edges_i) / max(1e-8, denom)))
         target_special_nodes = max(0, min(int(edges_i), int(target_special_nodes)))
@@ -753,6 +767,7 @@ class Layer0Estimator:
                 int(target_special_nodes),
                 S_target,
                 max_fixed_edges=int(edges_i),
+                allowed_modes=allowed_modes,
             )
             if int(fixed_edges) <= int(edges_i):
                 aromatic_nodes = int(edges_i - fixed_edges)
@@ -1854,6 +1869,7 @@ class Layer0Estimator:
             aromatic_window=(145.0, 160.0),
             S_target=S_target,
             fallback_special_ratio=0.60,
+            allowed_modes=('single_d2', 'single_d3'),
         )
         
         H_new[7] = m

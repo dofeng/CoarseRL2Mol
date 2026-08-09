@@ -10,6 +10,7 @@ import torch
 from model.inverse.layer4.inverse_layer4 import Layer4Adjuster
 import model.inverse.layer4.inverse_layer4 as inverse_layer4_module
 from model.inverse.layer4.inverse_layer4_block_c import (
+    _committed_products_from_plan,
     _last_resource_step_signature,
     _print_stage3_histogram_adjustments,
     _print_stage3_plan_summary,
@@ -29,6 +30,7 @@ from model.inverse.topology.stage3_models import (
     Stage3AdjustmentBundle,
     Stage3AdjustmentPlan,
     Stage3PhaseResult,
+    Stage3ProgressPhase,
     Stage3SpectrumCandidate,
     TopologyClosureContract,
     TopologyClosureSlot,
@@ -39,7 +41,7 @@ from model.inverse.topology.stage3_state_machine import (
     _iteration_ledger_for_phase_eval,
     _ledger_transaction,
     _plan_next_residual_product,
-    _residual_orphan_terminalization_plan,
+    _residual_su24_aromatization_plan,
     _resource_ids,
     _residual_contracts,
     _transaction_plan,
@@ -47,9 +49,14 @@ from model.inverse.topology.stage3_state_machine import (
     plan_stage3_state_machine,
 )
 from model.inverse.topology.phase_eval import (
+    EXTERNAL_SUBPHASE_ORDER,
     PHASE_SEQUENCE,
     build_stage3_phase_evaluation,
     classify_topology_units,
+)
+from model.inverse.topology.classification import (
+    TopologyClassificationResult,
+    TopologyFragment,
 )
 from model.inverse.topology.workflow import plan_stage3_resource_adjustments
 from model.inverse.topology.resource_profiles import (
@@ -59,6 +66,7 @@ from model.inverse.topology.resource_profiles import (
 from model.inverse.topology.resource_accounting import (
     build_resource_accounting_snapshot,
 )
+from model.inverse.topology.round_context import normalize_stage3_product
 
 from .helpers import connect, make_node
 
@@ -175,6 +183,7 @@ def _next_residual_product(
     remaining_flex_capacity=None,
     max_conversions=10,
     max_h_compensation_ops=8,
+    allow_h_outside_nonworsening=False,
 ):
     nodes = [
         make_node(int(node_id), int(su_type))
@@ -213,6 +222,7 @@ def _next_residual_product(
         max_h_compensation_ops=max_h_compensation_ops,
         contract_id=2_000_000,
         remaining_flex_capacity=remaining_flex_capacity,
+        allow_h_outside_nonworsening=allow_h_outside_nonworsening,
     )
 
 
@@ -224,6 +234,7 @@ def test_stage3_defaults_have_no_global_iteration_or_spectrum_acceptance_budget(
     assert "spectrum_max_accepted_rounds" not in layer4_defaults
     assert layer4_defaults["spectrum_candidate_limit"].default == 2
     assert layer4_defaults["spectrum_max_primary_adjustments"].default == 10
+    assert "resource_max_r2_drop" not in layer4_defaults
 
     for function in (plan_stage3_resource_adjustments, plan_stage3_state_machine):
         defaults = inspect.signature(function).parameters
@@ -260,6 +271,7 @@ def test_layer4_wrapper_forwards_block_c_resource_configuration(monkeypatch) -> 
     assert captured["residual_side_preferred_23"] == 2
     assert captured["residual_side_min_23"] == 1
     assert captured["h_tolerance"] == 0.06
+    assert "resource_max_r2_drop" not in captured
     assert captured["iteration_offset"] == 10
 
 
@@ -326,6 +338,33 @@ def test_layer4_stage_router_forwards_complete_block_c_configuration(monkeypatch
     assert captured["iteration_offset"] == 9
 
 
+def test_layer4_stage_router_rejects_removed_block_c_configuration() -> None:
+    with pytest.raises(
+        ValueError,
+        match="block_c_resource contains unknown keys: resource_max_r2_drop",
+    ):
+        Layer4Adjuster().adjust_by_stage(
+            H=torch.zeros(40, dtype=torch.long),
+            ppm=None,
+            diff=None,
+            E_target=torch.zeros(6),
+            stage="block_c_resource",
+            nodes=[],
+            resource_max_r2_drop=0.02,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="block_c_resource contains unknown keys: resource_max_r2_drop",
+    ):
+        Layer4Adjuster().run_block_c_resource_adjustment_loop(
+            H=torch.zeros(40, dtype=torch.long),
+            nodes=[],
+            E_target=torch.zeros(6),
+            resource_max_r2_drop=0.02,
+        )
+
+
 def test_layer4_does_not_forward_removed_block_b_tail_configuration(monkeypatch) -> None:
     del monkeypatch
     source = inspect.getsource(inverse_layer4_module.adjust_block_b_hetero_anchor_impl)
@@ -340,9 +379,14 @@ def test_stage3_phase_sequence_is_complete_and_ordered() -> None:
         "external_side_chain_closure",
         "remaining_pool_spectrum_rebalance",
         "resource_su24_ring_closure",
+        "residual_su24_aromatization",
         "residual_resource_self_closure",
         "complete",
     )
+    assert [
+        EXTERNAL_SUBPHASE_ORDER[phase]
+        for phase in PHASE_SEQUENCE
+    ] == list(range(len(PHASE_SEQUENCE)))
 
 
 def test_residual_side_contracts_are_not_blocked_by_optional_flex_target() -> None:
@@ -393,22 +437,111 @@ def test_histogram_adjustment_cannot_consume_fixed_global_resource() -> None:
     assert result.rejected_ops[0]["reason"] == "donor_not_in_authorized_stage3_pool"
 
 
-def test_su24_resources_only_convert_the_count_above_residual_tolerance() -> None:
+def test_all_residual_su24_resources_are_aromatized_before_tolerance() -> None:
     nodes = [make_node(7, 24), make_node(3, 24), make_node(9, 24), make_node(11, 24)]
     plan = plan_stage3_resource_adjustments(H=_histogram(nodes), nodes=nodes)
     groups = plan.histogram_adjustment_plan.groups
-    assert len(groups) == 1
+    assert len(groups) == 4
     conversions = [group.primary_op for group in groups]
     assert all(conversion.from_su == 24 for conversion in conversions)
-    assert [conversion.to_su for conversion in conversions] == [12]
-    assert [conversion.via_su for conversion in conversions] == [11]
-    assert [conversion.node_ids[0] for conversion in conversions] == [3]
-    assert plan.histogram_adjustment_plan.inventory_after[24] == 3
-    assert plan.phase_result.primary_adjustment_count == 1
+    assert [conversion.to_su for conversion in conversions] == [12, 13, 13, 12]
+    assert [conversion.via_su for conversion in conversions] == [None] * 4
+    assert [conversion.node_ids[0] for conversion in conversions] == [3, 7, 9, 11]
+    assert plan.histogram_adjustment_plan.inventory_after.get(24, 0) == 0
+    assert plan.phase_result.primary_adjustment_count == 4
+    assert plan.diagnostics["terminal_h_exemption"] is True
     assert plan.phase_result.primary_adjustment_count <= 10
 
 
-def test_optional_residual_conversion_is_allowed_inside_hard_window() -> None:
+def test_terminal_su24_h_exemption_is_preserved_in_workflow_result(
+    monkeypatch,
+) -> None:
+    nodes = [make_node(0, 24)]
+    H = _histogram(nodes)
+    monkeypatch.setattr(
+        "model.inverse.layer4.inverse_layer4_block_c._append_stage3_parity_balance",
+        lambda **_kwargs: (
+            True,
+            {"enforced": False, "reason": "isolated_terminal_h_test"},
+        ),
+    )
+
+    result = Layer4Adjuster().run_block_c_resource_adjustment_loop(
+        H=H,
+        nodes=nodes,
+        E_target=torch.tensor([0.0, 1.0]),
+        enable_post_external_spectrum=False,
+        rebuild_fn=lambda **kwargs: (
+            _nodes_from_histogram(kwargs["H_seed"]),
+            kwargs["H_seed"].detach().clone(),
+            {
+                "r2": -1.0,
+                "source_stage": "layer2",
+                "spectral_contract": "template_center_mu",
+            },
+            -1.0,
+        ),
+        validate_fn=lambda **_kwargs: (True, "ok"),
+    )
+
+    assert result.ok is True
+    assert result.diagnostics["terminal_h_exemption"] is True
+    assert result.diagnostics["terminal_h_exemption_only"] is True
+    assert (
+        result.diagnostics["terminal_h_outside_origin"]
+        == "residual_su24_aromatization"
+    )
+    assert result.diagnostics["terminal_h_final_audit"] == {
+        "target_h": 1.0,
+        "current_h": 0.0,
+        "hard_lower": 0.92,
+        "hard_upper": 1.08,
+        "outside_hard_bounds": True,
+        "pre_terminal_outside_hard_bounds": False,
+        "ordinary_conversions_must_not_worsen": True,
+    }
+    records = result.diagnostics["terminal_h_exemption_records"]
+    assert len(records) == 1
+    assert records[0]["converted_su24_node_ids"] == [0]
+
+
+def test_terminal_h_exemption_rejects_residual_conversion_that_worsens_h() -> None:
+    pool = {
+        11: [],
+        12: [],
+        13: [],
+        22: [1, 2],
+        23: [3, 4],
+        24: [],
+    }
+    H = torch.zeros(40, dtype=torch.long)
+    for su_type, node_ids in pool.items():
+        H[int(su_type)] = len(node_ids)
+    h_before = _h_total(H, None)
+
+    result = _next_residual_product(
+        pool,
+        H,
+        E_target=torch.tensor([0.0, 15.0]),
+        remaining_flex_chains=0,
+        max_conversions=4,
+        max_h_compensation_ops=0,
+        allow_h_outside_nonworsening=True,
+    )
+
+    assert h_before == 10.0
+    assert result["mode"] == "none"
+    assert any(
+        attempt.get("reason")
+        in {
+            "phase_resource_infeasible",
+            "optional_conversion_violates_h_hard_constraint",
+        }
+        for attempt in result["attempts"]
+    )
+
+
+def test_residual_conversion_does_not_use_su24_to_satisfy_h_constraint() -> None:
     pool = {11: [1, 2], 12: [], 13: [], 22: [], 23: [3, 4, 5], 24: [6]}
     H = torch.zeros(40, dtype=torch.long)
     for su_type, node_ids in pool.items():
@@ -424,13 +557,18 @@ def test_optional_residual_conversion_is_allowed_inside_hard_window() -> None:
         max_h_compensation_ops=4,
     )
 
-    assert result["mode"] == "conversion"
-    histogram = result["plan"].histogram_adjustment_plan
-    assert abs(_h_total(histogram.H_after, None) - 7.0) / 7.0 <= 0.08
+    assert result["mode"] == "none"
 
 
-def test_residual_next_product_balances_h_when_filling_su11_gap() -> None:
-    pool = {11: [], 12: [12], 13: [], 22: [22], 23: [23, 24], 24: [240]}
+def test_residual_next_product_never_uses_aromatic_or_su24_donors() -> None:
+    pool = {
+        11: [],
+        12: [12],
+        13: [13],
+        22: [22, 25],
+        23: [23, 24],
+        24: [240],
+    }
     H = torch.zeros(40, dtype=torch.long)
     for su_type, node_ids in pool.items():
         H[int(su_type)] = len(node_ids)
@@ -438,19 +576,42 @@ def test_residual_next_product_balances_h_when_filling_su11_gap() -> None:
     result = _next_residual_product(
         pool,
         H,
-        E_target=torch.tensor([0.0, 8.0]),
+        E_target=None,
         remaining_flex_chains=0,
-        max_conversions=1,
-        max_h_compensation_ops=0,
+        max_conversions=10,
+        max_h_compensation_ops=8,
     )
 
     assert result["mode"] == "conversion"
-    conversions = [
-        group.primary_op
+    operations = [
+        operation
         for group in result["plan"].histogram_adjustment_plan.groups
+        for operation in [group.primary_op, *group.h_compensation_ops]
     ]
-    assert [(item.from_su, item.to_su) for item in conversions] == [(12, 11)]
-    assert result["plan"].diagnostics["su11_rotation_index_after"] == 1
+    assert (operations[0].from_su, operations[0].to_su) == (22, 11)
+    assert all(
+        int(operation.from_su) in {11, 22, 23}
+        and int(operation.to_su) in {11, 22, 23}
+        for operation in operations
+    )
+
+
+def test_residual_su11_gap_is_infeasible_with_only_aromatic_and_su24_donors() -> None:
+    pool = {11: [], 12: [12], 13: [13], 22: [22], 23: [], 24: [240]}
+    H = torch.zeros(40, dtype=torch.long)
+    for su_type, node_ids in pool.items():
+        H[int(su_type)] = len(node_ids)
+
+    result = _next_residual_product(
+        pool,
+        H,
+        E_target=None,
+        remaining_flex_chains=0,
+        max_conversions=10,
+        max_h_compensation_ops=8,
+    )
+
+    assert result["mode"] == "none"
 
 
 def test_residual_template_fit_returns_direct_zero_conversion_candidate() -> None:
@@ -516,6 +677,473 @@ def test_residual_two_node_side_chain_can_convert_one_of_four_su22() -> None:
     ]
 
 
+def test_two_su23_and_two_su22_convert_one_su22_for_side_chain() -> None:
+    pool = {11: [], 12: [], 13: [], 22: [1, 2], 23: [3, 4], 24: []}
+    H = torch.zeros(40, dtype=torch.long)
+    H[22] = 2
+    H[23] = 2
+
+    result = _next_residual_product(
+        pool,
+        H,
+        remaining_flex_chains=0,
+        remaining_flex_capacity=0,
+        max_conversions=10,
+        max_h_compensation_ops=0,
+    )
+
+    assert result["mode"] == "conversion"
+    assert result["product_role"] == "residual_side_chain"
+    assert result["required_counts"] == {11: 1, 22: 1, 23: 2}
+    groups = result["plan"].histogram_adjustment_plan.groups
+    assert [
+        (group.primary_op.from_su, group.primary_op.to_su)
+        for group in groups
+    ] == [(22, 11)]
+    assert groups[0].primary_op.node_ids == [1]
+
+
+def test_residual_loop_persists_multiple_converted_products_across_rebuilds() -> None:
+    nodes = [make_node(node_id, 22) for node_id in range(8)]
+    H = _histogram(nodes)
+
+    def rebuild(**kwargs):
+        rebuilt = [
+            make_node(int(node.global_id), int(node.su_type))
+            for node in kwargs["nodes_seed"]
+        ]
+        return rebuilt, kwargs["H_seed"].detach().clone(), {}, 0.0
+
+    result = Layer4Adjuster().run_block_c_resource_adjustment_loop(
+        H=H,
+        nodes=nodes,
+        E_target=None,
+        enable_post_external_spectrum=False,
+        rebuild_fn=rebuild,
+        validate_fn=lambda **_kwargs: (True, "ok"),
+    )
+
+    assert result.ok is True
+    assert result.stop_reason == "stage3_complete"
+    assert result.accepted_cycles == 3
+    products = result.diagnostics["committed_topology_products"]
+    assert [product["product_id"] for product in products] == [
+        "residual:2000000",
+        "residual:2000001",
+        "residual:2000002",
+    ]
+    claimed_sets = [
+        {
+            int(node_id)
+            for values in product["claimed_resource_ids_by_su"].values()
+            for node_id in values
+        }
+        for product in products
+    ]
+    assert claimed_sets == [{0, 1}, {2, 3}, {4, 5}]
+    assert not any(
+        left & right
+        for index, left in enumerate(claimed_sets)
+        for right in claimed_sets[index + 1:]
+    )
+    terminal_plan = result.cycles[-1].plan
+    assert terminal_plan["diagnostics"]["tolerated_remaining_ids_by_su"] == {
+        "22": [6, 7]
+    }
+    assert result.diagnostics["tolerated_remaining_ids_by_su"] == {
+        "22": [6, 7]
+    }
+    assert result.diagnostics["tolerated_remaining_count"] == 2
+
+
+def test_committed_product_capture_excludes_pending_residual_ledger_product() -> None:
+    external = {
+        "product_id": "external:1",
+        "phase": "external_side_chain_closure",
+        "closed": True,
+        "provisional": False,
+        "fixed_source_node_ids": [1],
+        "claimed_resource_ids_by_su": {"22": [2]},
+    }
+    pending_residual = {
+        "product_id": "residual:2000000",
+        "phase": "residual_resource_self_closure",
+        "closed": True,
+        "provisional": False,
+        "claimed_resource_ids_by_su": {"11": [3], "22": [4]},
+    }
+    committed_residual = {
+        **pending_residual,
+        "product_id": "residual:1999999",
+        "claimed_resource_ids_by_su": {"11": [5], "22": [6]},
+    }
+    plan = Stage3AdjustmentPlan(
+        ok=True,
+        reason="stage3_spectrum_candidates_ready",
+        diagnostics={
+            "external_stage_completed": True,
+            "committed_residual_products": [committed_residual],
+        },
+        runtime={
+            "iteration_topology_ledger": SimpleNamespace(
+                completed_products=[external, pending_residual]
+            )
+        },
+    )
+
+    products = _committed_products_from_plan(plan)
+
+    assert [product["product_id"] for product in products] == [
+        "external:1",
+        "residual:1999999",
+    ]
+
+
+def test_committed_product_capture_includes_phase_evaluation_external_products() -> None:
+    external = {
+        "product_id": "external:assembly:1",
+        "phase": "external_flex_closure",
+        "closed": True,
+        "provisional": False,
+        "source_fragment_ids": [101],
+        "fixed_source_node_ids": [1],
+    }
+    plan = Stage3AdjustmentPlan(
+        ok=True,
+        reason="stage3_spectrum_candidates_ready",
+        diagnostics={"external_stage_completed": True},
+        runtime={
+            "phase_evaluation": SimpleNamespace(
+                assembly_view={"products": [external]}
+            ),
+            "iteration_topology_ledger": SimpleNamespace(
+                completed_products=[]
+            ),
+        },
+    )
+
+    products = _committed_products_from_plan(plan)
+
+    assert [product["product_id"] for product in products] == [
+        "external:assembly:1"
+    ]
+
+
+def test_committed_product_capture_uses_normalized_external_product_phase() -> None:
+    normalized = normalize_stage3_product(
+        {
+            "product_id": "external:normalized:1",
+            "product_type": "flex_chain",
+            "closed": True,
+            "source_fragment_ids": [101],
+            "fixed_source_node_ids": [1],
+        },
+        generation_id=8,
+    ).to_dict()
+    plan = Stage3AdjustmentPlan(
+        ok=True,
+        reason="stage3_spectrum_candidates_ready",
+        diagnostics={"external_stage_completed": True},
+        runtime={
+            "iteration_topology_ledger": SimpleNamespace(
+                completed_products=[normalized]
+            )
+        },
+    )
+
+    products = _committed_products_from_plan(plan)
+
+    assert normalized["phase"] == "external_flex_closure"
+    assert [product["source_fragment_ids"] for product in products] == [[101]]
+
+
+def test_external_fragment_coverage_survives_committed_product_rebuild() -> None:
+    center = make_node(10, 3)
+    left = make_node(11, 9)
+    right = make_node(12, 9)
+    connect(center, left)
+    connect(center, right)
+    nodes = [center, left, right]
+    H = _histogram(nodes)
+
+    external_plan = plan_stage3_resource_adjustments(
+        H=H,
+        nodes=nodes,
+        enable_post_external_spectrum=False,
+    )
+    committed = _committed_products_from_plan(external_plan)
+    rebuilt_plan = plan_stage3_resource_adjustments(
+        H=H,
+        nodes=nodes,
+        enable_post_external_spectrum=False,
+        progress_phase=Stage3ProgressPhase.RESIDUAL_SELF_CLOSURE,
+        committed_topology_products=committed,
+    )
+
+    assert [product["phase"] for product in committed] == [
+        "external_flex_closure"
+    ]
+    assert rebuilt_plan.reason == "stage3_complete"
+    assert rebuilt_plan.diagnostics["fragment_coverage"] == {
+        "classified_fragment_ids": [10],
+        "completed_fragment_ids": [10],
+        "pending_fragment_ids": [],
+        "uncovered_fragment_ids": [],
+        "unknown_completed_fragment_ids": [],
+        "unknown_pending_fragment_ids": [],
+    }
+
+
+def test_post_external_rebuild_fragment_does_not_reopen_external_stage() -> None:
+    nodes = [make_node(10, 3), make_node(20, 3)]
+    classification = TopologyClassificationResult(
+        fragments=[
+            TopologyFragment(
+                fragment_id=10,
+                family="persisted",
+                class_type="closed",
+                topology_template="closed",
+                source_node_ids=[10],
+                claimed_node_ids=[10],
+                evidence={"fixed_source_node_ids": [10]},
+            ),
+            TopologyFragment(
+                fragment_id=20,
+                family="post_external_transient",
+                class_type="temporary",
+                topology_template="temporary",
+                source_node_ids=[20],
+                claimed_node_ids=[20],
+                evidence={"fixed_source_node_ids": [20]},
+            ),
+        ],
+        resource_pool={
+            "remaining_ids_by_su": {"11": [], "22": [], "23": [], "24": []},
+            "su11_donor_ids_by_su": {"10": [], "12": [], "13": []},
+        },
+    )
+    phase_eval = build_stage3_phase_evaluation(
+        nodes,
+        classification=classification,
+    )
+    phase_eval.flex_audit = {"enforced": False}
+    committed = [{
+        "product_id": "external:10",
+        "phase": "external_flex_closure",
+        "closed": True,
+        "provisional": False,
+        "source_fragment_ids": [10],
+        "fixed_source_node_ids": [10],
+    }]
+
+    plan = plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=_histogram(nodes),
+        nodes=nodes,
+        classification=classification,
+        enable_post_external_spectrum=False,
+        progress_phase=Stage3ProgressPhase.RESIDUAL_SELF_CLOSURE,
+        committed_topology_products=committed,
+    )
+
+    assert plan.reason == "stage3_complete"
+    assert plan.diagnostics["fragment_coverage"]["uncovered_fragment_ids"] == []
+    assert plan.diagnostics["post_external_transient_fragment_ids"] == [20]
+
+
+def test_residual_conversion_retries_and_claims_the_same_converted_node() -> None:
+    nodes = [
+        make_node(1, 22),
+        make_node(2, 22),
+        make_node(3, 23),
+        make_node(4, 23),
+    ]
+    classification = classify_topology_units(nodes)
+    phase_eval = build_stage3_phase_evaluation(
+        nodes,
+        classification=classification,
+    )
+    phase_eval.flex_audit = {"enforced": False}
+    first = plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=_histogram(nodes),
+        nodes=nodes,
+        classification=classification,
+        enable_post_external_spectrum=False,
+        progress_phase=Stage3ProgressPhase.RESIDUAL_SELF_CLOSURE,
+        max_h_compensation_ops_per_adjustment=0,
+    )
+
+    pending = first.diagnostics["pending_residual_product_candidate"]
+    assert pending["converted_node_ids"] == [1]
+    rebuilt_nodes = [
+        make_node(1, 11),
+        make_node(2, 22),
+        make_node(3, 23),
+        make_node(4, 23),
+    ]
+    rebuilt_classification = classify_topology_units(rebuilt_nodes)
+    rebuilt_eval = build_stage3_phase_evaluation(
+        rebuilt_nodes,
+        classification=rebuilt_classification,
+    )
+    rebuilt_eval.flex_audit = {"enforced": False}
+    retry = plan_stage3_state_machine(
+        phase_eval=rebuilt_eval,
+        H=first.histogram_adjustment_plan.H_after,
+        nodes=rebuilt_nodes,
+        classification=rebuilt_classification,
+        enable_post_external_spectrum=False,
+        progress_phase=Stage3ProgressPhase.RESIDUAL_SELF_CLOSURE,
+        pending_residual_product_candidate=pending,
+        max_h_compensation_ops_per_adjustment=0,
+    )
+
+    assert retry.reason == "stage3_complete"
+    resolved = retry.diagnostics["resolved_pending_residual_product"]
+    assert resolved["converted_nodes_claimed"] is True
+    assert 1 in {
+        int(value)
+        for values in resolved["claimed_resource_ids"].values()
+        for value in values
+    }
+
+
+def test_residual_retry_prioritizes_converted_node_over_balance_node() -> None:
+    nodes = [
+        make_node(0, 11),
+        make_node(10, 11),
+        make_node(20, 22),
+        make_node(30, 23),
+        make_node(31, 23),
+    ]
+    classification = classify_topology_units(nodes)
+    phase_eval = build_stage3_phase_evaluation(
+        nodes,
+        classification=classification,
+    )
+    phase_eval.flex_audit = {"enforced": False}
+    pending = {
+        "product_role": "residual_side_chain",
+        "chain_23_count": 2,
+        "required_counts": {11: 1, 22: 1, 23: 2},
+        "conversion_count": 1,
+        "converted_node_ids": [10],
+    }
+
+    retry = plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=_histogram(nodes),
+        nodes=nodes,
+        classification=classification,
+        enable_post_external_spectrum=False,
+        progress_phase=Stage3ProgressPhase.RESIDUAL_SELF_CLOSURE,
+        pending_residual_product_candidate=pending,
+        max_h_compensation_ops_per_adjustment=0,
+    )
+
+    assert retry.reason == "stage3_complete"
+    resolved = retry.diagnostics["resolved_pending_residual_product"]
+    assert resolved["converted_nodes_claimed"] is True
+    assert resolved["claimed_resource_ids"]["11"] == [10]
+    assert retry.diagnostics["tolerated_remaining_ids_by_su"] == {"11": [0]}
+
+
+def test_residual_retry_restores_converted_node_taken_by_rebuild_fragment() -> None:
+    nodes = [
+        make_node(1, 11),
+        make_node(2, 22),
+        make_node(3, 23),
+        make_node(4, 23),
+    ]
+    classification = TopologyClassificationResult(
+        fragments=[TopologyFragment(
+            fragment_id=1,
+            family="rebuilt_transient",
+            class_type="fixed_core",
+            topology_template="temporary",
+            source_node_ids=[1],
+            claimed_node_ids=[1],
+            evidence={"fixed_source_node_ids": [1]},
+        )],
+        resource_pool={
+            "remaining_ids_by_su": {
+                "11": [],
+                "22": [2],
+                "23": [3, 4],
+                "24": [],
+            },
+            "su11_donor_ids_by_su": {"10": [], "12": [], "13": []},
+        },
+    )
+    phase_eval = build_stage3_phase_evaluation(
+        nodes,
+        classification=classification,
+    )
+    phase_eval.flex_audit = {"enforced": False}
+    pending = {
+        "product_role": "residual_side_chain",
+        "chain_23_count": 2,
+        "required_counts": {11: 1, 22: 1, 23: 2},
+        "conversion_count": 1,
+        "converted_node_ids": [1],
+    }
+
+    retry = plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=_histogram(nodes),
+        nodes=nodes,
+        classification=classification,
+        enable_post_external_spectrum=False,
+        progress_phase=Stage3ProgressPhase.RESIDUAL_SELF_CLOSURE,
+        pending_residual_product_candidate=pending,
+        max_h_compensation_ops_per_adjustment=0,
+    )
+
+    assert retry.reason == "stage3_complete"
+    resolved = retry.diagnostics["resolved_pending_residual_product"]
+    assert resolved["converted_nodes_claimed"] is True
+    assert resolved["claimed_resource_ids"]["11"] == [1]
+
+
+def test_residual_retry_rejects_a_conversion_node_not_claimed_by_product() -> None:
+    nodes = [
+        make_node(1, 11),
+        make_node(2, 22),
+        make_node(3, 23),
+        make_node(4, 23),
+    ]
+    classification = classify_topology_units(nodes)
+    phase_eval = build_stage3_phase_evaluation(
+        nodes,
+        classification=classification,
+    )
+    phase_eval.flex_audit = {"enforced": False}
+    pending = {
+        "product_role": "residual_side_chain",
+        "chain_23_count": 2,
+        "required_counts": {11: 1, 22: 1, 23: 2},
+        "conversion_count": 1,
+        "converted_node_ids": [999],
+    }
+
+    retry = plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=_histogram(nodes),
+        nodes=nodes,
+        classification=classification,
+        enable_post_external_spectrum=False,
+        progress_phase=Stage3ProgressPhase.RESIDUAL_SELF_CLOSURE,
+        pending_residual_product_candidate=pending,
+    )
+
+    assert retry.reason == "phase_resource_infeasible"
+    proof = retry.phase_result.infeasibility_proof
+    assert proof["reason"] == "pending_residual_product_not_materialized"
+    assert proof["required_converted_node_ids"] == [999]
+    assert proof["converted_nodes_claimed"] is False
+
+
 def test_residual_side_chain_can_fill_two_slots_from_four_su23() -> None:
     pool = {11: [], 12: [], 13: [], 22: [], 23: [1, 2, 3, 4], 24: []}
     H = torch.zeros(40, dtype=torch.long)
@@ -540,8 +1168,8 @@ def test_residual_side_chain_can_fill_two_slots_from_four_su23() -> None:
     ]
 
 
-def test_residual_orphan_terminalization_never_creates_closure_compensation() -> None:
-    nodes = [make_node(node_id, 22) for node_id in range(1, 6)]
+def test_residual_su24_aromatization_never_creates_closure_compensation() -> None:
+    nodes = [make_node(node_id, 24) for node_id in range(1, 6)]
     phase_eval = build_stage3_phase_evaluation(
         nodes,
         classification=classify_topology_units(nodes),
@@ -550,12 +1178,10 @@ def test_residual_orphan_terminalization_never_creates_closure_compensation() ->
     pool = _resource_ids(phase_eval)
     H = _histogram(nodes)
 
-    plan = _residual_orphan_terminalization_plan(
+    plan = _residual_su24_aromatization_plan(
         phase_eval=phase_eval,
         pool=pool,
         H=H,
-        E_target=None,
-        h_tolerance=0.06,
         special_degree_meta=None,
         su11_rotation_index=0,
         max_conversions=2,
@@ -565,7 +1191,95 @@ def test_residual_orphan_terminalization_never_creates_closure_compensation() ->
     groups = plan.histogram_adjustment_plan.groups
     assert len(groups) == 2
     assert all(group.h_compensation_ops == [] for group in groups)
+    assert all(group.primary_op.from_su == 24 for group in groups)
     assert all(group.primary_op.to_su in {12, 13} for group in groups)
+    assert plan.diagnostics["remaining_su24_node_ids"] == [3, 4, 5]
+
+
+def test_terminal_su24_retry_restores_nodes_taken_by_rebuild_fragments() -> None:
+    nodes = [make_node(node_id, 24) for node_id in range(1, 4)]
+    classification = TopologyClassificationResult(
+        fragments=[TopologyFragment(
+            fragment_id=1,
+            family="rebuilt_transient",
+            class_type="fixed_core",
+            topology_template="temporary",
+            source_node_ids=[1, 2, 3],
+            claimed_node_ids=[1, 2, 3],
+            evidence={"fixed_source_node_ids": [1, 2, 3]},
+        )],
+        resource_pool={
+            "remaining_ids_by_su": {
+                "11": [], "22": [], "23": [], "24": []
+            },
+            "su11_donor_ids_by_su": {
+                "10": [], "12": [], "13": []
+            },
+        },
+    )
+    phase_eval = build_stage3_phase_evaluation(
+        nodes,
+        classification=classification,
+    )
+    phase_eval.flex_audit = {"enforced": False}
+
+    plan = plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=_histogram(nodes),
+        nodes=nodes,
+        classification=classification,
+        enable_post_external_spectrum=False,
+        progress_phase=Stage3ProgressPhase.SU24_AROMATIZATION,
+        pending_terminal_su24_node_ids=[1, 2, 3],
+        max_primary_adjustments_per_stage=10,
+    )
+
+    assert plan.reason == "stage3_rebuild_required", plan.to_dict()
+    assert plan.phase == "residual_su24_aromatization"
+    assert plan.histogram_adjustment_plan.H_after[24].item() == 0
+    assert set(plan.diagnostics["converted_su24_node_ids"]) == {1, 2, 3}
+
+
+def test_terminal_phase_restores_all_uncommitted_physical_su24() -> None:
+    nodes = [make_node(node_id, 24) for node_id in range(1, 4)]
+    classification = TopologyClassificationResult(
+        fragments=[TopologyFragment(
+            fragment_id=1,
+            family="rebuilt_transient",
+            class_type="fixed_core",
+            topology_template="temporary",
+            source_node_ids=[1, 2, 3],
+            claimed_node_ids=[1, 2, 3],
+            evidence={"fixed_source_node_ids": [1, 2, 3]},
+        )],
+        resource_pool={
+            "remaining_ids_by_su": {
+                "11": [], "22": [], "23": [], "24": []
+            },
+            "su11_donor_ids_by_su": {
+                "10": [], "12": [], "13": []
+            },
+        },
+    )
+    phase_eval = build_stage3_phase_evaluation(
+        nodes,
+        classification=classification,
+    )
+    phase_eval.flex_audit = {"enforced": False}
+
+    plan = plan_stage3_state_machine(
+        phase_eval=phase_eval,
+        H=_histogram(nodes),
+        nodes=nodes,
+        classification=classification,
+        enable_post_external_spectrum=False,
+        progress_phase=Stage3ProgressPhase.SU24_AROMATIZATION,
+        max_primary_adjustments_per_stage=10,
+    )
+
+    assert plan.reason == "stage3_rebuild_required"
+    assert plan.histogram_adjustment_plan.H_after[24].item() == 0
+    assert set(plan.diagnostics["converted_su24_node_ids"]) == {1, 2, 3}
 
 
 def test_residual_uses_existing_resources_before_terminalizing_single_orphan() -> None:
@@ -983,6 +1697,7 @@ def _run_one_parity_rebuild_plan(
     parity_cursor=0,
     rebuild_fn=None,
     validate_fn=None,
+    difference_spectrum=None,
 ):
     class Adjuster:
         def __init__(self):
@@ -1031,6 +1746,7 @@ def _run_one_parity_rebuild_plan(
             if validate_fn is not None
             else lambda **_kwargs: (True, "ok")
         ),
+        difference_spectrum=difference_spectrum,
     )
     return adjuster, result
 
@@ -1088,6 +1804,124 @@ def test_block_c_balances_odd_degree_with_first_su13_to_su12_rotation() -> None:
     assert [item["reason"] for item in transaction["conversion_path"]] == [
         "test_primary_resource_adjustment"
     ]
+
+
+@pytest.mark.parametrize(
+    "candidate_phase",
+    ["resource_su24_ring_closure", "residual_resource_self_closure"],
+)
+def test_block_c_rolls_failed_topology_retry_back_to_candidate_start(
+    candidate_phase,
+) -> None:
+    nodes = [make_node(1, 23), make_node(2, 13), make_node(3, 23)]
+    H_before = _histogram(nodes)
+    conversion_plan = _parity_rebuild_plan(nodes, primary_node_id=1)
+    conversion_plan.phase = candidate_phase
+    conversion_plan.histogram_adjustment_plan.phase = candidate_phase
+    conversion_plan.phase_result.active_phase = candidate_phase
+    for transaction in conversion_plan.phase_result.transactions:
+        transaction.phase = candidate_phase
+    is_ring = candidate_phase == "resource_su24_ring_closure"
+    candidate = (
+        {
+            "candidate_signature": "fused:test-node-bound-candidate",
+            "selected_su24_ids": [100, 101, 102, 103],
+            "product_kind": "fatty_ring_fused",
+            "skeleton_kind": "fused",
+        }
+        if is_ring
+        else {
+            "product_role": "residual_side_chain",
+            "chain_23_count": 2,
+            "required_counts": {11: 1, 22: 1, 23: 2},
+            "conversion_count": 1,
+            "converted_node_ids": [1],
+        }
+    )
+    diagnostic_key = (
+        "pending_su24_ring_candidate"
+        if is_ring
+        else "pending_residual_product_candidate"
+    )
+    planner_key = diagnostic_key
+    blocked_reason = (
+        "pending_su24_ring_candidate_not_materialized"
+        if is_ring
+        else "pending_residual_product_not_materialized"
+    )
+    conversion_plan.diagnostics.update({
+        "candidate_alternatives_enabled": True,
+        diagnostic_key: candidate,
+    })
+    planner_calls = []
+
+    class Adjuster:
+        def __init__(self):
+            self._stage3_su11_rotation_index = 0
+            self._stage3_parity_balance_cursor = 0
+
+        def plan_topology_resource_adjustments(self, **kwargs):
+            planner_calls.append(kwargs)
+            if len(planner_calls) == 1:
+                return conversion_plan
+            if len(planner_calls) == 2:
+                assert kwargs[planner_key] == candidate
+                return Stage3AdjustmentPlan(
+                    ok=False,
+                    reason="phase_resource_infeasible",
+                    phase=candidate_phase,
+                    plan_kind="pending_topology_candidate_infeasible",
+                    blocked_reason=blocked_reason,
+                    phase_result=Stage3PhaseResult(
+                        active_phase=candidate_phase,
+                        phase_completed=False,
+                        stop_reason="phase_resource_infeasible",
+                        infeasibility_proof={
+                            "phase": candidate_phase,
+                            "reason": blocked_reason,
+                        },
+                    ),
+                )
+            assert kwargs[planner_key] is None
+            assert kwargs["progress_phase"] is Stage3ProgressPhase(candidate_phase)
+            assert kwargs["forbidden_resource_conversion_signatures"]
+            return Stage3AdjustmentPlan(
+                ok=True,
+                reason="stage3_complete",
+                phase="complete",
+                phase_result=Stage3PhaseResult(
+                    active_phase="complete",
+                    phase_completed=True,
+                    stop_reason="stage3_complete",
+                ),
+            )
+
+        def apply_topology_resource_adjustments(self, **kwargs):
+            return apply_stage3_node_adjustments(
+                kwargs["nodes"], kwargs["H"], kwargs["plan"]
+            )
+
+    result = run_block_c_resource_adjustment_loop_impl(
+        Adjuster(),
+        H_before,
+        nodes,
+        E_target=None,
+        rebuild_fn=lambda **kwargs: (
+            _nodes_from_histogram(kwargs["H_seed"]),
+            kwargs["H_seed"],
+            {},
+            0.0,
+        ),
+        validate_fn=lambda **_kwargs: (True, "ok"),
+    )
+
+    assert result.ok is True
+    assert result.accepted_cycles == 0
+    assert torch.equal(result.H, H_before)
+    assert [int(node.global_id) for node in result.nodes] == [1, 2, 3]
+    assert result.cycles[0].stop_reason == "rolled_back_by_pending_topology_failure"
+    assert result.cycles[0].accepted is False
+    assert result.cycles[1].diagnostics["restored_to_candidate_start"] is True
 
 
 def test_block_c_port_balance_uses_second_rotation_direction() -> None:
@@ -1394,10 +2228,10 @@ def test_block_c_accepts_valid_fresh_rebuild_without_cross_round_metric_gate() -
     cycle = result.cycles[0]
     assert cycle.accepted is True
     assert cycle.accepted_state_retained is True
-    assert cycle.acceptance_reason == "valid_histogram_fresh_rebuild"
+    assert cycle.acceptance_reason == "valid_topology_histogram_fresh_rebuild"
 
 
-def test_block_c_repeated_physical_histogram_exports_cycle_proof() -> None:
+def test_block_c_only_stops_after_the_full_physical_state_repeats() -> None:
     node = make_node(7, 22)
     nodes = [node, make_node(8, 22)]
     H = _histogram(nodes)
@@ -1459,18 +2293,46 @@ def test_block_c_repeated_physical_histogram_exports_cycle_proof() -> None:
     )
 
     assert result.ok is False
-    assert result.stop_reason == "phase_resource_infeasible"
-    assert result.accepted_cycles == 1
-    assert len(result.cycles) == 2
+    assert result.stop_reason == "stage3_state_cycle_detected"
+    # The original H recurs in cycle 2, but its rebuilt node IDs differ from
+    # the initial graph. It is therefore accepted. Cycle 3 reconstructs the
+    # exact state already accepted in cycle 1 and is the real loop.
+    assert result.accepted_cycles == 2
+    assert len(result.cycles) == 3
     terminal = result.cycles[-1]
-    proof = terminal.plan["phase_result"]["infeasibility_proof"]
-    assert terminal.applied is False
-    assert terminal.blocked_reason == "physical_histogram_cycle_detected"
-    assert terminal.plan["reason"] == "phase_resource_infeasible"
-    assert proof["reason"] == "physical_histogram_cycle_detected"
-    assert proof["phase"] == "external_flex_closure"
-    assert proof["required_counts"] == {"22": 1}
-    assert proof["attempted_conversions"][0]["node_id"] == 1
+    assert terminal.applied is True
+    assert terminal.rebuild_valid is True
+    assert terminal.blocked_reason == "stage3_state_cycle_detected"
+    assert terminal.diagnostics["histogram_was_previously_seen"] is True
+    assert terminal.diagnostics["candidate_state_signature"] == terminal.state_signature
+
+
+def test_block_c_accepts_valid_topology_despite_large_r2_regression() -> None:
+    nodes = [make_node(1, 23), make_node(2, 13), make_node(3, 23)]
+    plan = _parity_rebuild_plan(nodes, primary_node_id=1)
+
+    adjuster, result = _run_one_parity_rebuild_plan(
+        plan,
+        nodes,
+        rebuild_fn=lambda **kwargs: (
+            _nodes_from_histogram(kwargs["H_seed"]),
+            kwargs["H_seed"],
+            {"r2": 0.70},
+            0.70,
+        ),
+        difference_spectrum={"r2": 0.80},
+    )
+
+    assert adjuster.calls == 2
+    assert result.ok is True
+    assert result.stop_reason == "stage3_complete"
+    assert result.accepted_cycles == 1
+    assert result.diff["r2"] == pytest.approx(0.70)
+    assert "best_checkpoint_r2" not in result.diagnostics
+    accepted = result.cycles[0]
+    assert accepted.accepted is True
+    assert accepted.acceptance_reason == "valid_topology_histogram_fresh_rebuild"
+    assert "r2_drop" not in accepted.diagnostics
 
 
 def test_block_c_does_not_rebuild_an_attached_empty_histogram_plan() -> None:
@@ -2249,7 +3111,7 @@ def test_below_soft_h_window_does_not_synthesize_aromatic_only_topology() -> Non
         nodes=nodes,
         E_target=torch.tensor([0.0, 100.0]),
         enable_post_external_spectrum=False,
-        post_external_resume_phase="resource_su24_ring_closure",
+        progress_phase=Stage3ProgressPhase.SU24_RING_CLOSURE,
         h_tolerance=0.06,
     )
 
@@ -2264,6 +3126,25 @@ def test_below_soft_h_window_does_not_synthesize_aromatic_only_topology() -> Non
 def test_layer1_has_no_soft_consistency_acceptance_path() -> None:
     assigner = Layer1Assigner()
     assert not hasattr(assigner, "assess_consistency_acceptance")
+
+
+def test_layer1_stage3_identity_seed_preserves_global_ids_across_type_changes() -> None:
+    seed_nodes = [
+        make_node(0, 23),
+        make_node(1, 11),
+        make_node(2, 23),
+        make_node(3, 22),
+    ]
+    H = _histogram(seed_nodes)
+
+    rebuilt = Layer1Assigner()._initialize_node_pool(
+        H,
+        identity_seed_nodes=seed_nodes,
+    )
+
+    assert [int(node.global_id) for node in rebuilt] == [0, 1, 2, 3]
+    assert [int(node.su_type) for node in rebuilt] == [23, 11, 23, 22]
+    assert all(rebuilt[index].global_id == index for index in range(len(rebuilt)))
 
 
 def test_stage3_plan_logging_includes_resource_h_and_flex_scores(capsys) -> None:
@@ -2347,7 +3228,7 @@ def test_spectrum_trial_with_orphan_su11_is_rejected_and_labeled(
 
     class Adjuster:
         def plan_topology_resource_adjustments(self, **kwargs):
-            if kwargs["post_external_resume_phase"] == "remaining_pool_spectrum_rebalance":
+            if kwargs["progress_phase"] is Stage3ProgressPhase.SPECTRUM_REBALANCE:
                 return Stage3AdjustmentPlan(
                     ok=True,
                     reason="stage3_spectrum_candidates_ready",

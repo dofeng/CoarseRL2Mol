@@ -63,7 +63,29 @@ def test_fresh_read_only_audit_completes_and_preserves_resource_ids() -> None:
     assert [int(node.su_type) for node in nodes] == node_types_before
 
 
-def test_fresh_read_only_audit_tolerates_one_unassembled_su24() -> None:
+def test_read_only_audit_treats_terminalized_aromatics_as_final_support() -> None:
+    nodes = [make_node(12, 12), make_node(13, 13)]
+
+    audit = audit_stage3_topology(
+        H=_histogram(nodes),
+        nodes=nodes,
+        allow_conversions=False,
+        enable_spectrum_rebalance=False,
+        protected_terminal_aromatic_node_ids=[12, 13],
+    )
+
+    assert audit["ok"] is True
+    assert audit["reason"] == "stage3_complete"
+    pool = audit["classification"]["resource_pool"]
+    assert pool["su11_donor_ids_by_su"] == {"10": [], "12": [], "13": []}
+    assert audit["resource_accounting"]["ok"] is True
+    assert not any(
+        audit["resource_accounting"]["aggregate_ids_before_by_su"].values()
+    )
+    assert audit["pending_contracts"] == []
+
+
+def test_fresh_read_only_audit_requires_residual_su24_aromatization() -> None:
     nodes = [make_node(1, 24)]
 
     audit = audit_stage3_topology(
@@ -73,12 +95,12 @@ def test_fresh_read_only_audit_tolerates_one_unassembled_su24() -> None:
         enable_spectrum_rebalance=False,
     )
 
-    assert audit["ok"] is True
-    assert audit["reason"] == "stage3_complete"
+    assert audit["ok"] is False
+    assert audit["reason"] == "phase_resource_infeasible"
     assert audit["requires_conversion"] is False
     assert audit["products"] == []
     assert audit["resource_accounting"]["final_remaining_ids_by_su"][24] == [1]
-    assert audit["plan"]["diagnostics"]["tolerated_remaining_count"] == 1
+    assert audit["plan"]["phase"] == "residual_su24_aromatization"
 
 
 def test_failed_fresh_audit_preserves_real_pending_and_resource_snapshot() -> None:
@@ -145,9 +167,27 @@ def test_su25_cd_closes_with_real_f2_resources_when_available() -> None:
         center, fixed22, pool23, pool22, pool22_b, pool23_b,
         pool22_c, pool11, pool23_c,
     ]
+    classification = classify_topology_units(nodes)
+    fragment = next(
+        item for item in classification.fragments
+        if int(item.fragment_id) == 250
+    )
+    assert [
+        (slot.kind, slot.anchor_role, slot.required_su_sequence)
+        for slot in fragment.open_mainline_slots
+    ] == [
+        ("F1", "left_mainline", [23, 11]),
+        ("F2", "right_mainline", [23, 22]),
+    ]
+    assert [
+        (slot.kind, slot.required_su_sequence)
+        for slot in fragment.branch_contracts
+        if not slot.is_complete()
+    ] == [("H", [23, 22])]
+
     assembly = assemble_topology_units(
         nodes,
-        classify_topology_units(nodes),
+        classification,
     ).to_dict()
 
     assert not [item for item in assembly.get("pending_units", []) if int(item.get("unit_id", -1)) == 250]
@@ -156,6 +196,43 @@ def test_su25_cd_closes_with_real_f2_resources_when_available() -> None:
     assert {250, 251, 252, 253, 254, 255, 257, 258}.issubset(
         set(product.get("symbolic_node_ids", []) or [])
     )
+
+
+def test_su25_cd_pending_contract_counts_every_open_port() -> None:
+    center = make_node(270, 25, target_hop1_degree=4)
+    fixed22 = make_node(271, 22)
+    pool23_a = make_node(272, 23)
+    pool23_b = make_node(273, 23)
+    pool23_c = make_node(274, 23)
+    pool22_a = make_node(275, 22)
+    pool22_b = make_node(276, 22)
+    connect(center, fixed22)
+    connect(center, pool23_a)
+    connect(center, pool23_b)
+    connect(center, pool23_c)
+
+    nodes = [
+        center, fixed22, pool23_a, pool23_b, pool23_c, pool22_a, pool22_b,
+    ]
+    assembly = assemble_topology_units(
+        nodes,
+        classify_topology_units(nodes),
+    ).to_dict()
+
+    pending = next(
+        item for item in assembly.get("pending_units", [])
+        if int(item.get("unit_id", -1)) == 270
+    )
+    assert pending["reason"] == "main_pool_shortage"
+    assert pending["required_counts"] == {"11": 1, "22": 2, "23": 3}
+    assert [slot["kind"] for slot in pending["open_mainline_slots"]] == [
+        "F1",
+        "F2",
+    ]
+    assert [slot["kind"] for slot in pending["branch_slots"]] == [
+        "H",
+        "CLOSED_TERMINAL",
+    ]
 
 
 def test_su25_requires_pool_fixed22_when_only_22_like_terminal_exists() -> None:
@@ -223,20 +300,21 @@ def test_external_flex_shortfall_is_not_materialized_without_real_fragments() ->
     assert flex_transactions == []
 
 
-def test_isolated_su24_is_left_untouched_within_residual_tolerance() -> None:
+def test_isolated_su24_is_aromatized_before_residual_tolerance() -> None:
     nodes = [make_node(1, 24)]
     H = _histogram(nodes)
     phase_eval = build_stage3_phase_evaluation(nodes, classification=classify_topology_units(nodes))
     assert 1 in list(phase_eval.closure_pool_ids_by_su.get(24, []) or [])
 
     plan = plan_stage3_resource_adjustments(H=H, nodes=nodes)
-    assert str(plan.phase) == "complete"
-    assert plan.reason == "stage3_complete"
+    assert str(plan.phase) == "residual_su24_aromatization"
+    assert plan.reason == "stage3_rebuild_required"
     apply_result = apply_stage3_node_adjustments(nodes, H, plan)
 
-    assert apply_result.changed is False
-    assert int(apply_result.nodes[0].su_type) == 24
-    assert int(apply_result.H[24].item()) == 1
+    assert apply_result.changed is True
+    assert int(apply_result.nodes[0].su_type) == 12
+    assert int(apply_result.H[24].item()) == 0
+    assert int(apply_result.H[12].item()) == 1
     assert int(apply_result.H[23].item()) == 0
     assert int(dict(apply_result.conservation_after or {}).get("su_count", 0)) == 1
 
@@ -257,16 +335,16 @@ def test_isolated_su11_is_left_untouched_within_residual_tolerance() -> None:
 def test_three_mixed_unassemblable_resources_are_left_untouched() -> None:
     nodes = [make_node(1, 24), make_node(2, 22), make_node(3, 22)]
     H = _histogram(nodes)
-    plan = plan_stage3_resource_adjustments(H=H, nodes=nodes)
-    applied = apply_stage3_node_adjustments(nodes, H, plan)
+    aromatic_plan = plan_stage3_resource_adjustments(H=H, nodes=nodes)
+    applied = apply_stage3_node_adjustments(nodes, H, aromatic_plan)
+    plan = plan_stage3_resource_adjustments(H=applied.H, nodes=applied.nodes)
 
     assert plan.reason == "stage3_complete"
-    assert applied.changed is False
-    assert [int(node.su_type) for node in applied.nodes] == [24, 22, 22]
-    assert plan.diagnostics["tolerated_remaining_count"] == 3
+    assert applied.changed is True
+    assert [int(node.su_type) for node in applied.nodes] == [12, 22, 22]
+    assert plan.diagnostics["tolerated_remaining_count"] == 2
     assert plan.diagnostics["tolerated_remaining_ids_by_su"] == {
         "22": [2, 3],
-        "24": [1],
     }
 
 
@@ -297,7 +375,8 @@ def test_direct_residual_side_products_include_11_22_without_rebuild() -> None:
     assert plan.reason == "stage3_complete"
     assert applied.changed is False
     residual_fits = list(plan.diagnostics.get("direct_residual_template_fits", []) or [])
-    assert [item["chain_23_count"] for item in residual_fits] == [1, 0]
+    assert [item["chain_23_count"] for item in residual_fits] == [1]
+    assert plan.diagnostics["tolerated_remaining_count"] == 2
     assert all(int(item["conversion_count"]) == 0 for item in residual_fits)
 
 

@@ -115,3 +115,90 @@ def test_layer0_defers_to_special_degree_fallback_without_hydrogen_residual() ->
     assert result["adjusted"] is False
     assert result["reason"] == "no_hydrogen_directed_histogram_transition"
     assert torch.equal(result_histogram, histogram)
+
+
+def test_layer0_thio_su19_initial_modes_only_use_single_d2_or_d3() -> None:
+    estimator = Layer0Estimator(s2n_model=None, E_SU_tensor=E_SU, device="cpu")
+    histogram = torch.zeros(33, dtype=torch.long)
+    histogram[19] = 6
+
+    estimator._allocate_special_degree_meta(
+        histogram,
+        o_base_19=0,
+        s_reserved_19=6,
+        S_target=None,
+    )
+
+    thio = estimator.special_anchor_mode_meta[19]
+    assert thio["thio_single"][1] == 0
+    assert thio["thio_double"][2] == 0
+    assert thio["thio_double"][3] == 0
+    assert sum(thio["thio_single"].values()) == 6
+    assert thio["thio_single"][2] + thio["thio_single"][3] == 6
+
+
+def test_layer0_thio_su19_parity_adjustment_keeps_single_mode() -> None:
+    estimator = Layer0Estimator(s2n_model=None, E_SU_tensor=E_SU, device="cpu")
+    histogram = torch.zeros(33, dtype=torch.long)
+    histogram[19] = 1
+    degree_meta = {19: {1: 0, 2: 0, 3: 1}}
+    partition_meta = {
+        19: {
+            "ether": {1: 0, 2: 0, 3: 0},
+            "thio": {1: 0, 2: 0, 3: 1},
+        }
+    }
+    anchor_mode_meta = {
+        19: {
+            "ether_single": {1: 0, 2: 0, 3: 0},
+            "ether_double": {2: 0, 3: 0},
+            "thio_single": {1: 0, 2: 0, 3: 1},
+            "thio_double": {2: 0, 3: 0},
+        }
+    }
+
+    result = estimator._enforce_even_target_degree_sum(
+        histogram,
+        degree_meta,
+        partition_meta,
+        anchor_mode_meta,
+    )
+
+    assert result["adjusted"] is True
+    assert result["transition"]["bucket"] == "thio_single"
+    assert degree_meta[19] == {1: 0, 2: 1, 3: 0}
+    assert partition_meta[19]["thio"] == {1: 0, 2: 1, 3: 0}
+    assert anchor_mode_meta[19]["thio_single"] == {1: 0, 2: 1, 3: 0}
+    assert anchor_mode_meta[19]["thio_double"] == {2: 0, 3: 0}
+
+
+def test_layer0_ether_su19_mode_pool_remains_unchanged() -> None:
+    estimator = Layer0Estimator(s2n_model=None, E_SU_tensor=E_SU, device="cpu")
+    histogram = torch.zeros(33, dtype=torch.long)
+    histogram[19] = 6
+
+    estimator._allocate_special_degree_meta(
+        histogram,
+        o_base_19=6,
+        s_reserved_19=0,
+        S_target=torch.ones(2400),
+    )
+
+    ether = estimator.special_anchor_mode_meta[19]
+    assert sum(ether["ether_single"].values()) + sum(ether["ether_double"].values()) == 6
+    assert sum(ether["ether_single"].values()) > 0
+    assert sum(ether["ether_double"].values()) > 0
+
+
+def test_layer0_thio_connection_budget_uses_single_mode_fixed_edges() -> None:
+    estimator = Layer0Estimator(s2n_model=None, E_SU_tensor=E_SU, device="cpu")
+    histogram = torch.zeros(33, dtype=torch.long)
+    histogram[31] = 3
+
+    _histogram_after, thio_meta = estimator._correct_thioether_connection(
+        histogram,
+        o_base_19=0,
+        S_target=None,
+    )
+
+    assert thio_meta["s_reserved_19"] == thio_meta["s_fixed_edges_19"]

@@ -44,6 +44,7 @@ class ConversionContext:
     su11_rotation_index: int = 0
     phase: str = ""
     reason: str = ""
+    allow_h_outside_nonworsening: bool = False
 
 
 @dataclass(frozen=True)
@@ -277,14 +278,27 @@ def _h_penalty(
 def h_within_context_hard_bounds(
     context: ConversionContext,
     current_h: Optional[float],
+    h_before: Optional[float] = None,
 ) -> bool:
     if current_h is None:
         return False
-    return h_within_hard_bounds(
-        float(current_h),
-        _target_h_from_context(context),
-        float(context.h_tolerance),
+    target_h = _target_h_from_context(context)
+    if target_h is None:
+        return True
+    tolerance = float(context.h_tolerance)
+    if not bool(context.allow_h_outside_nonworsening) or h_before is None:
+        return h_within_hard_bounds(float(current_h), target_h, tolerance)
+    before_outside = _outside_distance(
+        _ratio(float(h_before), target_h),
+        tolerance,
     )
+    after_outside = _outside_distance(
+        _ratio(float(current_h), target_h),
+        tolerance,
+    )
+    if float(before_outside) > 0.0:
+        return float(after_outside) <= float(before_outside) + 1e-12
+    return float(after_outside) <= 1e-12
 
 
 def _adjust_bridgehead_info(
@@ -661,7 +675,9 @@ def best_conversion_bundle(
     feasible = [
         item
         for item in scored
-        if item.feasible and h_within_context_hard_bounds(context, item.h_after)
+        if item.feasible and h_within_context_hard_bounds(
+            context, item.h_after, item.h_before
+        )
     ]
     if not feasible:
         return None

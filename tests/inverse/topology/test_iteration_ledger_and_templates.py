@@ -437,8 +437,9 @@ def test_residual_flex_preferred_minimum_and_priority(
 
 
 def test_residual_flex_uses_only_the_deferred_target_gap(monkeypatch) -> None:
+    nodes = [make_node(index, 22) for index in range(1, 5)]
     phase_eval = build_stage3_phase_evaluation(
-        [], classification=classify_topology_units([])
+        nodes, classification=classify_topology_units(nodes)
     )
     phase_eval.flex_bounds = {"min": 2, "max": 5}
     phase_eval.flex_counts = {"final": 2}
@@ -461,10 +462,12 @@ def test_residual_flex_uses_only_the_deferred_target_gap(monkeypatch) -> None:
         lambda **_kwargs: phase_eval,
     )
 
+    H = torch.zeros(40, dtype=torch.long)
+    H[22] = len(nodes)
     plan_stage3_state_machine(
         phase_eval=phase_eval,
-        H=torch.zeros(40, dtype=torch.long),
-        nodes=[],
+        H=H,
+        nodes=nodes,
         enable_post_external_spectrum=False,
     )
 

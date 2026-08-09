@@ -915,7 +915,7 @@ def test_real_node_v3_supports_persistent_stage3_conversion_history() -> None:
     ]
 
 
-def test_low_h_replans_explicit_su22_to_su11_with_su12_donor() -> None:
+def test_low_h_residual_conversion_does_not_use_aromatic_donor() -> None:
     H = torch.zeros(33, dtype=torch.long)
     H[12], H[13], H[22] = 1, 94, 1
     plan = Stage3AdjustmentPlan(
@@ -942,8 +942,17 @@ def test_low_h_replans_explicit_su22_to_su11_with_su12_donor() -> None:
     )
 
     assert result.primary_adjustment_count == 1
-    assert (result.groups[0].primary_op.from_su, result.groups[0].primary_op.to_su) == (12, 11)
-    assert result.groups[0].h_after_final == result.groups[0].h_before
+    operations = [
+        operation
+        for group in result.groups
+        for operation in [group.primary_op, *group.h_compensation_ops]
+    ]
+    assert (operations[0].from_su, operations[0].to_su) == (22, 11)
+    assert all(
+        int(operation.from_su) in {11, 22, 23}
+        and int(operation.to_su) in {11, 22, 23}
+        for operation in operations
+    )
 
 
 def test_low_h_su23_deficit_uses_surplus_su11() -> None:

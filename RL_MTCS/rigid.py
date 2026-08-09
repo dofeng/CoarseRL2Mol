@@ -8,14 +8,16 @@ import math
 import random
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .hex_assembly_state import (
+from .geometry import (
     HEX_DIRECTIONS,
-    HexAssemblyState,
     axial_add,
     axial_distance,
     axial_neg,
+    rotate_axial,
+    transform_direction,
 )
-from .inverse_contract import ExternalContract, TopologyUnit, UnitPort
+from .state import HexAssemblyState
+from .models import ExternalContract, TopologyUnit, UnitPort
 
 
 def _action_key(action: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -51,19 +53,43 @@ def _unit_matches_search_phase(unit: TopologyUnit, phase: str) -> bool:
 class TopologyPlacementStage:
     """Stage adapter consumed by the generic MCTS search."""
 
-    def __init__(self, state: HexAssemblyState, phase: str):
+    def __init__(
+        self,
+        state: HexAssemblyState,
+        phase: str,
+        contract_order: Optional[Sequence[str]] = None,
+    ):
         self.state = state
         self.phase = str(phase)
+        self.contract_order = (
+            tuple(str(value) for value in contract_order)
+            if contract_order is not None
+            else None
+        )
         self.state.stage = str(phase)
 
     def clone(self) -> "TopologyPlacementStage":
-        return TopologyPlacementStage(self.state.clone(), self.phase)
+        return TopologyPlacementStage(
+            self.state.clone(), self.phase, self.contract_order
+        )
 
     def is_done(self) -> bool:
+        if self.contract_order is not None:
+            return all(
+                contract_id in self.state.satisfied_contracts
+                for contract_id in self.contract_order
+            )
         return bool(self.state.phase_done(self.phase))
 
     def _contract_candidates(self) -> List[ExternalContract]:
-        return [contract for contract in self.state.mandatory_contracts(self.phase)]
+        pending = self.state.mandatory_contracts(self.phase)
+        if self.contract_order is None:
+            return list(pending)
+        by_id = {str(contract.contract_id): contract for contract in pending}
+        for contract_id in self.contract_order:
+            if contract_id in by_id:
+                return [by_id[contract_id]]
+        return []
 
     def _candidate_for_pair(
         self,
@@ -84,7 +110,24 @@ class TopologyPlacementStage:
             if source_axial is None or target_axial is None:
                 return []
             if axial_distance(source_axial, target_axial) != 1:
-                return []
+                if target_unit.unit_id in self.state.component_unit_ids(source_unit.unit_id):
+                    return []
+                actions: List[Dict[str, Any]] = []
+                actions.extend(self._component_transform_candidates(
+                    source_unit,
+                    source_port,
+                    target_unit,
+                    target_port,
+                    contract=contract,
+                ))
+                actions.extend(self._component_transform_candidates(
+                    target_unit,
+                    target_port,
+                    source_unit,
+                    source_port,
+                    contract=contract,
+                ))
+                return actions
             return [self._make_action(source_unit, source_port, target_unit, target_port, contract=contract)]
 
         if source_unit.unit_id in self.state.placements:
@@ -102,7 +145,8 @@ class TopologyPlacementStage:
             return []
 
         actions: List[Dict[str, Any]] = []
-        directions = [target_port.direction] if target_port.direction is not None else list(HEX_DIRECTIONS)
+        target_direction = self.state.global_port_direction(target_unit.unit_id, target_port)
+        directions = [target_direction] if target_direction is not None else list(HEX_DIRECTIONS)
         for rotation in range(6):
             source_direction = self.state.global_port_direction(source_unit.unit_id, source_port, rotation=rotation)
             for direction in directions:
@@ -119,7 +163,12 @@ class TopologyPlacementStage:
                     translation=(0, 0),
                 )
                 translation = (source_target[0] - source_local[0], source_target[1] - source_local[1])
-                ok, _reason = self.state.can_place(source_unit.unit_id, rotation, translation)
+                ok, _reason = self.state.can_place(
+                    source_unit.unit_id,
+                    rotation,
+                    translation,
+                    allowed_contact=(int(source_port.node_id), int(target_port.node_id)),
+                )
                 if not ok:
                     continue
                 actions.append(self._make_action(
@@ -131,6 +180,73 @@ class TopologyPlacementStage:
                     source_rotation=rotation,
                     source_translation=translation,
                 ))
+                if len(actions) >= 12:
+                    return actions
+        return actions
+
+    def _component_transform_candidates(
+        self,
+        movable_unit: TopologyUnit,
+        movable_port: UnitPort,
+        stationary_unit: TopologyUnit,
+        stationary_port: UnitPort,
+        *,
+        contract: Optional[ExternalContract],
+    ) -> List[Dict[str, Any]]:
+        movable_axial = self.state.node_axial.get(int(movable_port.node_id))
+        stationary_axial = self.state.node_axial.get(int(stationary_port.node_id))
+        if movable_axial is None or stationary_axial is None:
+            return []
+        stationary_direction = self.state.global_port_direction(
+            stationary_unit.unit_id, stationary_port
+        )
+        movable_direction = self.state.global_port_direction(
+            movable_unit.unit_id, movable_port
+        )
+        directions = [stationary_direction] if stationary_direction is not None else list(HEX_DIRECTIONS)
+        component_nodes = self.state.component_node_ids(movable_unit.unit_id)
+        actions: List[Dict[str, Any]] = []
+        for rotation in range(6):
+            transformed_direction = (
+                transform_direction(movable_direction, rotation)
+                if movable_direction is not None else None
+            )
+            rotated_axial = rotate_axial(movable_axial, rotation)
+            for direction in directions:
+                if direction is None:
+                    continue
+                direction = tuple(int(value) for value in direction)
+                if transformed_direction is not None and transformed_direction != axial_neg(direction):
+                    continue
+                desired = axial_add(stationary_axial, direction)
+                translation = (
+                    desired[0] - rotated_axial[0],
+                    desired[1] - rotated_axial[1],
+                )
+                ok, _reason = self.state.can_transform_component(
+                    movable_unit.unit_id,
+                    rotation,
+                    translation,
+                    allowed_contact=(int(movable_port.node_id), int(stationary_port.node_id)),
+                )
+                if not ok:
+                    continue
+                action = self._make_action(
+                    movable_unit,
+                    movable_port,
+                    stationary_unit,
+                    stationary_port,
+                    contract=contract,
+                )
+                action.update({
+                    "move_component_unit_id": movable_unit.unit_id,
+                    "component_rotation": int(rotation),
+                    "component_translation": [int(translation[0]), int(translation[1])],
+                    "moved_node_count": len(component_nodes),
+                })
+                actions.append(action)
+                if len(actions) >= 12:
+                    return actions
         return actions
 
     @staticmethod
@@ -175,35 +291,9 @@ class TopologyPlacementStage:
             for action in self._candidate_for_pair(source_unit, source_port, target_unit, target_port, contract=contract):
                 key = _action_key(action)
                 if key not in seen:
-                    action["score"] = -100.0
+                    action["score"] = self._placement_score(action) - 100.0
                     candidates.append(action)
                     seen.add(key)
-
-        placed = self.state.placed_units()
-        unplaced = [unit for unit in self.state.unplaced_units() if _unit_matches_search_phase(unit, self.phase)]
-        for source_unit in unplaced:
-            for target_unit in placed:
-                target_ports = [port for port in target_unit.ports if f"{target_unit.unit_id}:{port.port_id}" not in self.state.used_ports]
-                source_ports = [port for port in source_unit.ports if f"{source_unit.unit_id}:{port.port_id}" not in self.state.used_ports]
-                for source_port in source_ports:
-                    for target_port in target_ports:
-                        for action in self._candidate_for_pair(source_unit, source_port, target_unit, target_port):
-                            key = _action_key(action)
-                            if key in seen:
-                                continue
-                            action["score"] = self._placement_score(action)
-                            candidates.append(action)
-                            seen.add(key)
-                            if len(candidates) >= max(int(k) * 8, int(k)):
-                                break
-                        if len(candidates) >= max(int(k) * 8, int(k)):
-                            break
-                    if len(candidates) >= max(int(k) * 8, int(k)):
-                        break
-                if len(candidates) >= max(int(k) * 8, int(k)):
-                    break
-            if len(candidates) >= max(int(k) * 8, int(k)):
-                break
 
         candidates.sort(key=lambda action: (float(action.get("score", 0.0)), _action_key(action)))
         return candidates[: max(1, int(k))]
@@ -212,6 +302,7 @@ class TopologyPlacementStage:
         score = 0.0
         if action.get("contract_id"):
             score -= 80.0
+        score += 0.25 * float(action.get("moved_node_count", 0))
         score += float(self.state.component_count()) * 2.0
         translation = action.get("source_translation", (0, 0))
         score += 0.02 * (abs(int(translation[0])) + abs(int(translation[1])))
@@ -231,7 +322,13 @@ class TopologyPlacementStage:
     def score(self) -> float:
         done_units = sum(1 for unit in self.state.problem.units if self.state.is_placed(unit.unit_id))
         done_contracts = len(self.state.satisfied_contracts)
-        pending = len(self.state.mandatory_contracts(self.phase))
+        if self.contract_order is None:
+            pending = len(self.state.mandatory_contracts(self.phase))
+        else:
+            pending = sum(
+                contract_id not in self.state.satisfied_contracts
+                for contract_id in self.contract_order
+            )
         score = 4.0 * done_units + 8.0 * done_contracts - 20.0 * pending
         score -= 2.0 * max(0, self.state.component_count() - 1)
         if self.is_done():
@@ -239,11 +336,12 @@ class TopologyPlacementStage:
         return score
 
     def get_result(self) -> Dict[str, Any]:
+        phase_unit = "aromatic" if self.phase == "rigid" else self.phase
         return {
             "phase": self.phase,
             "done": bool(self.is_done()),
             "placed_units": len(self.state.placements),
-            "phase_units_total": sum(1 for unit in self.state.problem.units if unit.phase == self.phase),
+            "phase_units_total": sum(1 for unit in self.state.problem.units if unit.phase == phase_unit),
             "contracts_done": sum(1 for contract in self.state.problem.contracts if contract.kind == self.phase and contract.contract_id in self.state.satisfied_contracts),
             "contracts_total": sum(1 for contract in self.state.problem.contracts if contract.kind == self.phase),
             "components": self.state.component_count(),
@@ -365,7 +463,12 @@ class TopologyMCTS:
 
 
 def search_phase(stage: TopologyPlacementStage, *, iterations: int, candidate_k: int, max_steps: int, beam_width: int = 1, c_puct: float = 1.414, seed: Optional[int] = None) -> SearchResult:
-    engine = TopologyMCTS(iterations=iterations, candidate_k=candidate_k, rollout_depth=max(1, max_steps // 3), c_puct=c_puct, seed=seed)
+    # Rollouts are only a value estimate.  Scaling their depth with the full
+    # phase length makes a CSV with hundreds of contracts needlessly clone a
+    # 600-node state tens of thousands of times.  Search itself still honors
+    # ``max_steps`` below.
+    rollout_depth = min(6, max(1, int(max_steps) // 3))
+    engine = TopologyMCTS(iterations=iterations, candidate_k=candidate_k, rollout_depth=rollout_depth, c_puct=c_puct, seed=seed)
     current = stage.clone()
     actions: List[Dict[str, Any]] = []
     for _ in range(max(1, int(max_steps))):

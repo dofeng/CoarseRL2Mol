@@ -12,6 +12,7 @@ from ..iteration_ledger import normalize_slot
 from ..resource_profiles import classify_raw_su24_semantics
 from ..stage3_models import TopologyClosureSlot, TopologySlotKind
 from .classification_rules_basic import (
+    ALIPHATIC_OPEN_NEIGHBORS,
     BASIC_A_AROMATIC_BY_CENTER,
     BASIC_B_SPECIAL_OPEN_BY_CENTER,
     BASIC_C_SPECIAL_TERMINAL_BY_CENTER,
@@ -113,6 +114,15 @@ OPEN_BRIDGE_SUBTYPE_SET = {
     "double20d3",
     "21d2",
     "21d3",
+}
+
+BASIC_CAP_ONLY_BRIDGE_SUBTYPES = {
+    "23",
+    "single19d2",
+    "single20d2",
+    "double19d2",
+    "double20d2",
+    "21d2",
 }
 
 BASIC_RULE_BY_ID = {
@@ -568,33 +578,52 @@ def _finalize_fragment_edge_semantics(
             for boundary in root_boundaries
             if _safe_int(boundary.get("neighbor_su_type"), -1) == 11
         )
-        has_fixed_mainline = any(
-            _safe_int(contract.get("center_node_id"), roots[0] if roots else -1)
-            == int(root_id)
-            and (
-                "mainline_only" in {
-                    str(value)
-                    for value in list(contract.get("role_candidates", []) or [])
-                }
-                or (
-                    _safe_int(contract.get("connector_node_id"), -1)
-                    == int(selected_primary_id)
-                    and "mainline_or_branch" in {
+        fixed_mainline_contract_count = sum(
+            1
+            for contract in fixed_contracts_raw
+            if (
+                _safe_int(
+                    contract.get("center_node_id"),
+                    roots[0] if roots else -1,
+                )
+                == int(root_id)
+                and _safe_int(contract.get("connector_node_id"), -1) >= 0
+                and (
+                    "mainline_only" in {
                         str(value)
-                        for value in list(contract.get("role_candidates", []) or [])
+                        for value in list(
+                            contract.get("role_candidates", []) or []
+                        )
                     }
+                    or (
+                        _safe_int(contract.get("connector_node_id"), -1)
+                        == int(selected_primary_id)
+                        and "mainline_or_branch" in {
+                            str(value)
+                            for value in list(
+                                contract.get("role_candidates", []) or []
+                            )
+                        }
+                    )
                 )
             )
-            for contract in fixed_contracts_raw
+        )
+        # A center has at most two mainline directions. Once fixed contracts
+        # occupy both, any remaining open degree is a branch attachment.
+        mainline_open_capacity = max(
+            0,
+            2 - int(fixed_mainline_contract_count),
+        )
+        open_count = min(
+            int(boundary_count),
+            int(unresolved_degree),
+            int(mainline_open_capacity),
         )
         if nonfixed_su11_count > 0:
             open_count = min(
-                int(boundary_count), int(unresolved_degree), int(nonfixed_su11_count)
+                int(open_count),
+                int(nonfixed_su11_count),
             )
-        elif has_fixed_mainline:
-            open_count = min(int(boundary_count), int(unresolved_degree), 1)
-        else:
-            open_count = min(int(boundary_count), int(unresolved_degree))
 
         missing_branch_count = max(
             0,
@@ -1229,7 +1258,7 @@ def _external_pending_profile(
         pending_kind = "explicit_flex"
     elif class_name in {"25_AB", "25_CD"}:
         pending_kind = "pending_su25"
-        pending_reason = "fixed_connector_unresolved"
+        pending_reason = "su25_closure_not_materialized"
     elif class_name in FLEX_RECONCILE_EXPLICIT_SIDE_CLASSES or class_name in FLEX_RECONCILE_E_LIKE_OPEN_CLASSES:
         pending_kind = "explicit_side" if class_name in FLEX_RECONCILE_EXPLICIT_SIDE_CLASSES else "e_like_open"
         pending_reason = "remaining_external_side_open"
@@ -2376,16 +2405,10 @@ def _like24_branch_closures_in_ring(
     class_type: str,
     required_branch_kinds_by_anchor: Dict[str, List[str]],
 ) -> Dict[str, Dict[str, List[str]]]:
-    class_name = str(class_type)
+    del class_type
     center_branches = [str(value) for value in list(required_branch_kinds_by_anchor.get("center", []) or [])]
     if not center_branches:
         return {"side": {}, "upper_lower": {}, "fused": {}}
-    if class_name in {"24_A", "24_B", "24_AB_N"}:
-        return {
-            "side": {},
-            "upper_lower": {},
-            "fused": {},
-        }
     return {
         "side": {"center": list(center_branches)},
         "upper_lower": {"center": list(center_branches)},
@@ -2470,21 +2493,6 @@ def _bridge_fragment_fixed_connection_contracts(
             partner_spec["resolved_partner_node_ids"] = sorted(base_ids & pair_center_ids)
             contract["partner_spec"] = partner_spec
     return contracts
-
-
-def _like24_branch_suppression_by_skeleton(class_type: str) -> Dict[str, List[str]]:
-    class_name = str(class_type)
-    if class_name in {"24_A", "24_B", "24_AB_N"}:
-        return {
-            "side": ["center"],
-            "upper_lower": ["center"] if class_name == "24_A" else [],
-            "fused": ["center"],
-        }
-    return {
-        "side": [],
-        "upper_lower": [],
-        "fused": [],
-    }
 
 
 def _like24_ring_slot_capabilities(
@@ -2622,9 +2630,6 @@ def _make_ring_contract(
     bridgehead_kind: str = "none",
     fixed_connector_position: str = "none",
     fixed_connector_ring_eligible: bool = True,
-    mainline_fixed_connector_forbidden_for_ring: bool = False,
-    requires_preclosed_branch_before_ring: bool = False,
-    complete_requires_all_slots_filled: bool = True,
     outer_anchor_must_touch_aromatic: bool = False,
     touches_aromatic_anchor: bool = False,
     render_policy: Optional[Dict[str, Any]] = None,
@@ -2653,9 +2658,6 @@ def _make_ring_contract(
         "bridgehead_kind": str(bridgehead_kind or "none"),
         "fixed_connector_position": str(fixed_connector_position or "none"),
         "fixed_connector_ring_eligible": bool(fixed_connector_ring_eligible),
-        "mainline_fixed_connector_forbidden_for_ring": bool(mainline_fixed_connector_forbidden_for_ring),
-        "requires_preclosed_branch_before_ring": bool(requires_preclosed_branch_before_ring),
-        "complete_requires_all_slots_filled": bool(complete_requires_all_slots_filled),
         "outer_anchor_must_touch_aromatic": bool(outer_anchor_must_touch_aromatic),
         "touches_aromatic_anchor": bool(touches_aromatic_anchor),
         "render_policy": dict(render_policy or {}),
@@ -2759,6 +2761,18 @@ def _like24_ring_contracts(
             fixed_connector_position="fixed_anchor",
             touches_aromatic_anchor=True,
             render_policy={"suppress_generic_open": True, "suppress_branch_closure": True},
+        )
+    if class_name == "24_AB_N" and has_11:
+        contracts["side_ring_plan"] = _make_ring_contract(
+            eligible=True,
+            priority=15,
+            slot_roles=["side_anchor"],
+            required_real_like24_slots=["left_anchor", "right_anchor"],
+            optional_pool23_slots=["left_bridge", "right_bridge"],
+            optional_pool24_slots=["left_middle", "right_middle"],
+            fixed_connector_position=fixed_role,
+            touches_aromatic_anchor=True,
+            render_policy={"suppress_generic_open": True},
         )
     if class_name == "24_AB_N" and fixed_role not in {"branch", "dual"}:
         contracts["fused_ring_plan"] = _make_ring_contract(
@@ -3170,7 +3184,6 @@ def _like24_ring_evidence(
         class_type=str(class_type),
         branch_closures_in_ring=branch_closures_in_ring,
     )
-    branch_suppression_by_skeleton = _like24_branch_suppression_by_skeleton(str(class_type))
     ring_slot_capabilities = _like24_ring_slot_capabilities(
         class_type=str(class_type),
         ring_allowed_skeletons=ring_allowed_skeletons,
@@ -3235,15 +3248,10 @@ def _like24_ring_evidence(
         contract_local["required_branch_kinds_by_slot"] = slot_branch_map
         contract_local["required_branch_closure_slots"] = sorted(slot_branch_map.keys())
         contract_local["required_mainline_closure_slots"] = list(required_mainline_closure_modes or [])
-        contract_local["mainline_fixed_connector_forbidden_for_ring"] = bool(
-            primary_connector_su in {0, 2} and bool(primary_forces_mainline)
-        )
         contract_local["fixed_connector_ring_eligible"] = bool(
-            not contract_local["mainline_fixed_connector_forbidden_for_ring"]
+            not bool(primary_connector_su in {0, 2} and bool(primary_forces_mainline))
             and not bool(contract_local.get("blocking_reason", ""))
         )
-        contract_local["requires_preclosed_branch_before_ring"] = bool(slot_branch_map)
-        contract_local["complete_requires_all_slots_filled"] = True
         if str(skeleton_kind) in {"side_ring_plan", "fused_ring_plan"}:
             contract_local["outer_anchor_must_touch_aromatic"] = True
         if str(skeleton_kind) == "upper_lower_ring_plan" and str(class_type) == "24_A":
@@ -3281,7 +3289,6 @@ def _like24_ring_evidence(
         "ring_role_priority": list(ring_role_priority or []),
         "masked_ring_open_sides": sorted({str(x) for x in masked_ring_open_sides}),
         "ring_block_reason": str(ring_block_reason),
-        "branch_suppression_by_skeleton": branch_suppression_by_skeleton,
         "required_mainline_closure_modes": list(required_mainline_closure_modes or []),
         "allowed_pool_fillers_by_slot": allowed_pool_fillers_by_slot,
         "fixed_connection_context": fixed_connection_context,
@@ -3385,7 +3392,6 @@ def _like24_bridge_ring_evidence(
         "ring_role_priority": list(ring_role_priority or []),
         "masked_ring_open_sides": ["left_ring", "right_ring"] if allowed else [],
         "ring_block_reason": "",
-        "branch_suppression_by_skeleton": {"side": [], "upper_lower": [], "fused": []},
         "required_mainline_closure_modes": [],
         "allowed_pool_fillers_by_slot": _like24_allowed_pool_fillers_by_slot(
             class_type=str(class_type),
@@ -3435,7 +3441,6 @@ def _like24_bridge_ring_evidence(
                 optional_pool24_slots=["left_middle", "right_middle"],
                 pool24_requires_11_slots=["left_anchor", "right_anchor"] if class_type == "24_AB_N_24_AB" else [],
                 fixed_connector_position="dual",
-                complete_requires_all_slots_filled=True,
                 outer_anchor_must_touch_aromatic=class_type in {"24_AB_N_24_AB", "24_AB_N_24_CD"},
                 touches_aromatic_anchor=bool(touches_aromatic_anchor),
                 render_policy={"suppress_generic_open": True},
@@ -3451,7 +3456,6 @@ def _like24_bridge_ring_evidence(
                 optional_pool23_slots=["left_bridge", "right_bridge"] if class_type == "24_CD_N_24_CD" else [],
                 optional_pool24_slots=["core_segment"] if class_type == "24_CD_N_24_CD" else [],
                 fixed_connector_position="dual",
-                complete_requires_all_slots_filled=True,
                 render_policy={"suppress_generic_open": True},
             ),
             "fused_ring_plan": _make_ring_contract(
@@ -3488,7 +3492,6 @@ def _like24_bridge_ring_evidence(
                 ),
                 bridgehead_kind=bridgehead_kind,
                 fixed_connector_position="dual",
-                complete_requires_all_slots_filled=True,
                 outer_anchor_must_touch_aromatic=class_type == "24_CD_N_24_CD",
                 render_policy={"suppress_generic_open": True},
             ),
@@ -4186,12 +4189,21 @@ def _basic_fragment(
     rule = dict(BASIC_RULE_BY_ID[str(rule_id)])
     topology_template = str(rule.get("topology_template"))
     direct_source_ids = _collect_direct_source_ids(token)
+    initial_open_slots = {
+        "B": [TopologySlotKind.F1.value],
+        "D": [TopologySlotKind.F1.value, TopologySlotKind.F1.value],
+        "E": [TopologySlotKind.F1.value],
+        "G": [TopologySlotKind.F1.value],
+    }.get(str(rule_id), [])
     return _make_fragment(
         token,
         family=str(rule.get("family")),
         class_type=str(rule.get("class_type")),
         topology_template=topology_template,
-        open_slots=["OPEN"] if not bool(rule.get("closed_main", False)) else [],
+        # These preliminary kinds preserve endpoint cardinality for flex
+        # selection. Their anchors and exact resource sequences are rebuilt
+        # after ownership conflicts have been resolved.
+        open_slots=list(initial_open_slots),
         branch_slots=[],
         evidence={
             "rule_id": str(rule_id),
@@ -4493,6 +4505,130 @@ def _atomic_pair_fallback_fragment(
     )
 
 
+def _basic_open_endpoint_profiles(
+    fragment: TopologyFragment,
+) -> List[Dict[str, Any]]:
+    """Build the owned/context endpoint contract for a basic fragment."""
+    if str(fragment.family) != "basic":
+        return []
+
+    class_type = str(fragment.class_type)
+    if class_type not in {"B", "D", "E", "G"}:
+        return []
+
+    claimed = {
+        int(value)
+        for value in list(fragment.claimed_node_ids or fragment.source_node_ids or [])
+    }
+    context = {
+        int(value) for value in list(fragment.context_node_ids or [])
+    }
+    matched_neighbors = sorted(
+        [
+            dict(item or {})
+            for item in list(dict(fragment.evidence or {}).get("matched_neighbors", []) or [])
+            if dict(item or {}).get("node_id") is not None
+        ],
+        key=lambda item: (
+            _safe_int(item.get("node_id"), 10**9),
+            str(item.get("subtype", "")),
+        ),
+    )
+
+    def _is_open(item: Dict[str, Any]) -> bool:
+        return bool(
+            not is_visible_terminal_semantic(item)
+            and (
+                _safe_int(item.get("su_type"), -1) in ALIPHATIC_OPEN_NEIGHBORS
+                or str(item.get("subtype", "")) in OPEN_BRIDGE_SUBTYPE_SET
+            )
+        )
+
+    open_neighbors = [item for item in matched_neighbors if _is_open(item)]
+    center_su = (
+        int(fragment.main_path[0].su_type)
+        if list(fragment.main_path or []) and fragment.main_path[0].su_type is not None
+        else -1
+    )
+    endpoints: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+    if class_type == "D":
+        if center_su in {15, 17}:
+            pair_su_types = {14, 15, 16} if center_su == 15 else {17, 18}
+            generic = [
+                item for item in open_neighbors
+                if is_abstract_open_nonfixed_semantic(item)
+                and _safe_int(item.get("su_type"), -1) not in pair_su_types
+            ]
+            endpoints = [
+                ("left", generic[0] if generic else None),
+                ("right", None),
+            ]
+        else:
+            endpoints = [
+                ("left", open_neighbors[0] if open_neighbors else None),
+                ("right", open_neighbors[-1] if open_neighbors else None),
+            ]
+    elif class_type in {"B", "E"}:
+        endpoints = [("right", open_neighbors[0] if open_neighbors else None)]
+    elif class_type == "G":
+        endpoints = [("left", open_neighbors[0] if open_neighbors else None)]
+
+    profiles: List[Dict[str, Any]] = []
+    for side, token in endpoints:
+        token_payload = dict(token or {})
+        node_id = _safe_int(token_payload.get("node_id"), -1)
+        label = str(
+            token_payload.get("subtype")
+            or token_payload.get("su_type")
+            or ""
+        )
+        owned_literal = bool(node_id >= 0 and node_id in claimed)
+        profiles.append({
+            "side": str(side),
+            "node_id": None if node_id < 0 else int(node_id),
+            "su_type": _safe_int(token_payload.get("su_type"), -1),
+            "subtype": str(label),
+            "is_fixed": bool(token_payload.get("is_fixed", False)),
+            "owned_literal": bool(owned_literal),
+            "context_only": bool(node_id >= 0 and node_id in context and not owned_literal),
+        })
+    return profiles
+
+
+def _basic_open_endpoint_slots(
+    fragment: TopologyFragment,
+    profiles: Sequence[Dict[str, Any]],
+) -> List[TopologyClosureSlot]:
+    slots: List[TopologyClosureSlot] = []
+    for index, raw_profile in enumerate(list(profiles or [])):
+        profile = dict(raw_profile or {})
+        side = str(profile.get("side", "right") or "right")
+        node_id = _safe_int(profile.get("node_id"), -1)
+        label = str(profile.get("subtype", "") or "")
+        owned_literal = bool(profile.get("owned_literal", False))
+        required = (
+            [11]
+            if owned_literal and label in BASIC_CAP_ONLY_BRIDGE_SUBTYPES
+            else [23, 11]
+        )
+        anchor_node_id = (
+            int(node_id)
+            if owned_literal and node_id >= 0
+            else int(fragment.fragment_id)
+        )
+        slots.append(TopologyClosureSlot(
+            slot_id=(
+                f"fragment:{int(fragment.fragment_id)}:main:"
+                f"{int(index)}:{str(side)}:F1"
+            ),
+            kind=TopologySlotKind.F1.value,
+            anchor_node_id=int(anchor_node_id),
+            anchor_role=f"{str(side)}_mainline",
+            required_su_sequence=list(required),
+        ))
+    return slots
+
+
 def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment:
     original_source = sorted({int(value) for value in list(fragment.source_node_ids or [])})
     claimed = sorted({int(value) for value in list(fragment.claimed_node_ids or original_source)})
@@ -4519,6 +4655,19 @@ def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment
             for ref in list(fragment.main_path or [])
             if ref.node_id is not None
         ]
+    if str(fragment.family) == "basic":
+        endpoint_profiles = _basic_open_endpoint_profiles(fragment)
+        fragment.evidence["basic_open_endpoints"] = [
+            dict(item or {}) for item in endpoint_profiles
+        ]
+        if not fragment.open_mainline_slots:
+            fragment.open_mainline_slots = _basic_open_endpoint_slots(
+                fragment,
+                endpoint_profiles,
+            )
+            fragment.open_slots = [
+                str(slot.kind) for slot in fragment.open_mainline_slots
+            ]
     center_su = int(fragment.main_path[0].su_type) if list(fragment.main_path or []) else -1
     if str(fragment.class_type) in {"25_AB", "25_CD"}:
         matched_neighbors = [
@@ -4542,15 +4691,46 @@ def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment
                 if int(node_id) in set(claimed)
             }
         )
-        main_kind = TopologySlotKind.F2.value if str(fragment.class_type) == "25_CD" else TopologySlotKind.F1.value
-        main_required = [23, 22] if main_kind == TopologySlotKind.F2.value else [23, 11]
-        fragment.open_mainline_slots = [TopologyClosureSlot(
-            slot_id=f"fragment:{fragment.fragment_id}:main:0",
-            kind=main_kind,
-            anchor_node_id=int(fragment.fragment_id),
-            anchor_role="left_mainline",
-            required_su_sequence=main_required,
-        )]
+        # SU25 has four physical ports.  Its public contract must describe
+        # every open mainline closure that `_assemble_remaining_su25()` will
+        # materialize:
+        #
+        #   25_AB: right F2 + H branch
+        #   25_CD: left F1 + right F2 + H branch
+        #
+        # The previous implementation exposed a single slot (and used F1 for
+        # 25_AB), which under-counted resources and made Stage3 reject a
+        # resource-sufficient topology as an invalid materialization.
+        if str(fragment.class_type) == "25_CD":
+            fragment.open_mainline_slots = [
+                TopologyClosureSlot(
+                    slot_id=f"fragment:{fragment.fragment_id}:main:left:F1",
+                    kind=TopologySlotKind.F1.value,
+                    anchor_node_id=int(fragment.fragment_id),
+                    anchor_role="left_mainline",
+                    required_su_sequence=[23, 11],
+                ),
+                TopologyClosureSlot(
+                    slot_id=f"fragment:{fragment.fragment_id}:main:right:F2",
+                    kind=TopologySlotKind.F2.value,
+                    anchor_node_id=int(fragment.fragment_id),
+                    anchor_role="right_mainline",
+                    required_su_sequence=[23, 22],
+                ),
+            ]
+            fragment.open_slots = [
+                TopologySlotKind.F1.value,
+                TopologySlotKind.F2.value,
+            ]
+        else:
+            fragment.open_mainline_slots = [TopologyClosureSlot(
+                slot_id=f"fragment:{fragment.fragment_id}:main:right:F2",
+                kind=TopologySlotKind.F2.value,
+                anchor_node_id=int(fragment.fragment_id),
+                anchor_role="right_mainline",
+                required_su_sequence=[23, 22],
+            )]
+            fragment.open_slots = [TopologySlotKind.F2.value]
         branch_contracts: List[TopologyClosureSlot] = []
         if not fixed_22_ids:
             branch_contracts.append(TopologyClosureSlot(
@@ -4578,7 +4758,6 @@ def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment
             )
             for node_id in fixed_22_ids
         )
-        fragment.open_slots = [main_kind]
         fragment.branch_slots = (
             [TopologySlotKind.H.value]
             if fixed_22_ids
@@ -4625,7 +4804,7 @@ def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment
     fragment.atomic_group_ids = sorted(set(atomic_ids))
     fragment.open_mainline_slots = [normalize_slot(slot) for slot in list(fragment.open_mainline_slots or [])]
     fragment.branch_contracts = [normalize_slot(slot) for slot in list(fragment.branch_contracts or [])]
-    if not fragment.open_mainline_slots:
+    if not fragment.open_mainline_slots and str(fragment.family) != "basic":
         roles = set(str(value) for value in list(dict(fragment.evidence or {}).get("flex_reconcile_roles", []) or []))
         matched_neighbors = [
             dict(item or {})
@@ -4673,8 +4852,13 @@ def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment
 def classify_topology_units(
     nodes: List[_NodeV3],
     fixed_partition_meta: Optional[Dict[str, Any]] = None,
+    protected_terminal_aromatic_node_ids: Optional[Iterable[int]] = None,
 ) -> TopologyClassificationResult:
     tokens = build_node_tokens(list(nodes or []))
+    protected_terminal_ids = {
+        int(node_id)
+        for node_id in list(protected_terminal_aromatic_node_ids or [])
+    }
     partition_meta = dict(fixed_partition_meta or {})
     partition_by_node = {
         int(key): str(value)
@@ -4941,7 +5125,14 @@ def classify_topology_units(
     resource_pool = _build_resource_pool(
         tokens,
         consumed,
-        excluded_ids=referenced_source_ids | invalid_resource_node_ids,
+        excluded_ids=(
+            referenced_source_ids
+            | invalid_resource_node_ids
+            | protected_terminal_ids
+        ),
+    )
+    resource_pool["protected_terminal_aromatic_node_ids"] = sorted(
+        protected_terminal_ids
     )
     rejected_node_ids = {int(item.get("node_id", -1)) for item in list(classification_rejects or [])}
     conflict_node_ids = {int(item.get("node_id", -1)) for item in list(claim_conflicts or [])}

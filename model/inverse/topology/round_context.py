@@ -219,9 +219,28 @@ def normalize_stage3_product(
     generation_id: int,
     index: int = 0,
 ) -> Stage3TopologyProduct:
+    def _product_phase(data: Dict[str, Any], product_type: str) -> str:
+        explicit = str(data.get("phase", "") or "")
+        if explicit:
+            return explicit
+        target_role = str(data.get("target_role", "") or "")
+        if target_role == "flex_chain" or product_type == "flex_chain":
+            return "external_flex_closure"
+        if target_role == "fatty_ring" or product_type.startswith("fatty_ring"):
+            return "external_fatty_ring_closure"
+        if target_role == "side_chain" or product_type == "side_chain":
+            return "external_side_chain_closure"
+        if product_type.startswith("residual_"):
+            return "residual_resource_self_closure"
+        if product_type.startswith("pool_su24_"):
+            return "resource_su24_ring_closure"
+        return ""
+
     if isinstance(raw, Stage3TopologyProduct):
         product = deepcopy(raw)
         product.generation_id = int(generation_id)
+        if not str(product.phase or ""):
+            product.phase = _product_phase({}, str(product.product_type or ""))
         return product
     data = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw or {})
     claimed = {
@@ -291,6 +310,8 @@ def normalize_stage3_product(
         product_id=product_id,
         generation_id=int(generation_id),
         product_type=product_type,
+        phase=_product_phase(data, product_type),
+        provisional=bool(data.get("provisional", False)),
         source_fragment_ids=[
             int(value) for value in list(data.get("source_fragment_ids", []) or [])
         ],

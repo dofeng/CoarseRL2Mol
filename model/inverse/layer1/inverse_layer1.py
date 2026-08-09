@@ -2446,7 +2446,11 @@ class Layer1Assigner:
     # Layer1: 1-hop分配辅助方法
     # ========================================================================
     
-    def _initialize_node_pool(self, H_init: torch.Tensor) -> List[_NodeV3]:
+    def _initialize_node_pool(
+        self,
+        H_init: torch.Tensor,
+        identity_seed_nodes: Optional[List[_NodeV3]] = None,
+    ) -> List[_NodeV3]:
         """初始化全局节点池，为每个SU实例创建节点对象
         """
         nodes = []
@@ -2498,7 +2502,45 @@ class Layer1Assigner:
                 nodes.append(node)
                 global_id += 1
         
-        return nodes
+        if identity_seed_nodes is None:
+            return nodes
+
+        seed_nodes = list(identity_seed_nodes or [])
+        seed_ids = [int(getattr(node, 'global_id', -1)) for node in seed_nodes]
+        if sorted(seed_ids) != list(range(len(seed_nodes))):
+            raise ValueError(
+                'identity_seed_nodes must have unique contiguous global_id values'
+            )
+        seed_ids_by_su: Dict[int, List[int]] = defaultdict(list)
+        for node in seed_nodes:
+            seed_ids_by_su[int(node.su_type)].append(int(node.global_id))
+        for values in seed_ids_by_su.values():
+            values.sort()
+        configured_by_su: Dict[int, List[_NodeV3]] = defaultdict(list)
+        for node in nodes:
+            configured_by_su[int(node.su_type)].append(node)
+        expected_counts = {
+            int(su_type): len(values)
+            for su_type, values in configured_by_su.items()
+            if values
+        }
+        seed_counts = {
+            int(su_type): len(values)
+            for su_type, values in seed_ids_by_su.items()
+            if values
+        }
+        if seed_counts != expected_counts:
+            raise ValueError('identity_seed_nodes histogram does not match H_init')
+        remapped: List[_NodeV3] = []
+        for su_type, configured_nodes in configured_by_su.items():
+            for node, global_id_value in zip(
+                configured_nodes,
+                seed_ids_by_su[int(su_type)],
+            ):
+                node.global_id = int(global_id_value)
+                remapped.append(node)
+        remapped.sort(key=lambda node: int(node.global_id))
+        return remapped
 
     @staticmethod
     def _edge_is_fixed(node1: _NodeV3, node2: _NodeV3) -> bool:
@@ -3636,6 +3678,7 @@ class Layer1Assigner:
         H_init: torch.Tensor,
         E_target: torch.Tensor,
         eval_lib_path: Optional[str] = None,
+        identity_seed_nodes: Optional[List[_NodeV3]] = None,
     ) -> Tuple[List[_NodeV3], Dict[str, Any]]:
         """Build one graph from fixed roles and exact Layer1 shift signatures."""
         H_local = H_init.to(self.device)
@@ -3654,7 +3697,14 @@ class Layer1Assigner:
                 f"non_aromatic_internal={role_audit['non_aromatic_internal_ports']}; "
                 "Layer0/Stage3 must apply pre-Layer1 port-role balance"
             )
-        nodes = self._initialize_node_pool(H_local)
+        nodes = (
+            self._initialize_node_pool(H_local)
+            if identity_seed_nodes is None
+            else self._initialize_node_pool(
+                H_local,
+                identity_seed_nodes=identity_seed_nodes,
+            )
+        )
         self._init_runtime_node_index(nodes)
         initial_open_ports = sum(
             int(node.remaining_hop1_slots()) for node in nodes
@@ -3798,7 +3848,8 @@ class Layer1Assigner:
                       pos_peak_threshold: float = 0.8,
                       max_candidate_trials_per_region: int = 40,
                       max_moves_per_region: int = 4,
-                      prebuilt_nodes: Optional[List[_NodeV3]] = None) -> List[_NodeV3]:
+                      prebuilt_nodes: Optional[List[_NodeV3]] = None,
+                      identity_seed_nodes: Optional[List[_NodeV3]] = None) -> List[_NodeV3]:
         """Build, validate, and regionally adjust one exact Layer1 graph."""
         layer1_t0 = time.perf_counter()
         H_init = H_init.to(self.device)
@@ -3811,6 +3862,7 @@ class Layer1Assigner:
                 H_init=H_init,
                 E_target=E_target,
                 eval_lib_path=eval_lib_path,
+                identity_seed_nodes=identity_seed_nodes,
             )
         else:
             self._configure_exact_hop1_shift_constraints(eval_lib_path)

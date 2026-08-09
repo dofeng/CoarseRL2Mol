@@ -36,6 +36,7 @@ from .resource_accounting import (
 
 
 RESOURCE_TYPES = (11, 23, 22, 24)
+RESIDUAL_CLOSURE_TYPES = (11, 23, 22)
 TARGET_PRIORITY = {23: 0, 11: 1, 22: 2, 24: 3}
 AROMATIC_PATTERN = (12, 13)
 def _counts(H: torch.Tensor, keys: Iterable[int]) -> Dict[int, int]:
@@ -274,6 +275,12 @@ def _scoring_context(
         su11_rotation_index=int(aromatic_cursor),
         phase=str(getattr(plan, "phase", "") or ""),
         reason=str(getattr(plan, "reason", "") or ""),
+        allow_h_outside_nonworsening=bool(
+            dict(getattr(plan, "diagnostics", {}) or {}).get(
+                "allow_h_outside_nonworsening",
+                False,
+            )
+        ),
     )
 
 
@@ -290,10 +297,14 @@ def _direct_gap_candidates(
     target: int,
     inventory: Dict[int, int],
     demand: Dict[int, int],
+    *,
+    residual_closure_only: bool = False,
 ) -> List[HistogramConversion]:
     candidates: List[HistogramConversion] = []
-    donor_types = list(RESOURCE_TYPES)
-    if int(target) == 11:
+    donor_types = list(
+        RESIDUAL_CLOSURE_TYPES if residual_closure_only else RESOURCE_TYPES
+    )
+    if int(target) == 11 and not residual_closure_only:
         donor_types = donor_types + [12, 13]
     for source in donor_types:
         if int(source) == int(target) or _surplus(inventory, demand, int(source)) <= 0:
@@ -447,9 +458,15 @@ def _h_compensation_candidates(
     inventory: Dict[int, int],
     demand: Dict[int, int],
     protected_counts: Optional[Dict[int, int]] = None,
+    *,
+    residual_closure_only: bool = False,
 ) -> List[HistogramConversion]:
     candidates: List[HistogramConversion] = []
-    donor_types = list(RESOURCE_TYPES) + [12, 13]
+    donor_types = (
+        list(RESIDUAL_CLOSURE_TYPES)
+        if residual_closure_only
+        else list(RESOURCE_TYPES) + [12, 13]
+    )
     safe_nondeficit_pairs = {
         (22, 23),
         (23, 22),
@@ -473,7 +490,9 @@ def _h_compensation_candidates(
         source_margin = int(inventory.get(int(source), 0)) - int(source_reserve)
         if int(source_margin) <= 0:
             continue
-        targets = list(RESOURCE_TYPES)
+        targets = list(
+            RESIDUAL_CLOSURE_TYPES if residual_closure_only else RESOURCE_TYPES
+        )
         for target in targets:
             if int(source) == int(target):
                 continue
@@ -641,6 +660,9 @@ def _enumerate_scored_bundles(
                     inventory_after,
                     context.demand,
                     protected_counts=context.protected_resource_counts,
+                    residual_closure_only=(
+                        str(context.phase) == "residual_resource_self_closure"
+                    ),
                 ),
                 h_total_fn=_h_total,
                 special_degree_meta=special_degree_meta,
@@ -716,8 +738,20 @@ def _choose_bundle_from_gap(
     if not targets:
         return [], int(aromatic_cursor), None
     target = sorted(targets, key=lambda su: (-int(gap[su]), TARGET_PRIORITY[int(su)]))[0]
-    candidates = _direct_gap_candidates(int(target), inventory, demand)
-    candidates.extend(_atomic_aromatic_bridge_candidates(int(target), inventory, demand))
+    residual_closure_only = bool(
+        str(getattr(plan, "phase", "") or "")
+        == "residual_resource_self_closure"
+    )
+    candidates = _direct_gap_candidates(
+        int(target),
+        inventory,
+        demand,
+        residual_closure_only=residual_closure_only,
+    )
+    if not residual_closure_only:
+        candidates.extend(
+            _atomic_aromatic_bridge_candidates(int(target), inventory, demand)
+        )
     forbidden = _forbidden_primary_signatures(plan)
     candidates = [
         candidate
@@ -753,7 +787,9 @@ def _choose_bundle_from_gap(
     feasible = [
         score for score in scored_bundles
         if score.feasible
-        and h_within_context_hard_bounds(context, score.h_after)
+        and h_within_context_hard_bounds(
+            context, score.h_after, score.h_before
+        )
         and not _bundle_is_forbidden(H, score.ops, forbidden)
         and _bundle_preserves_primary_effect(score.ops)
         and _gap_total(score.resource_gap_after) < _gap_total(score.resource_gap_before)
@@ -990,7 +1026,9 @@ def build_histogram_adjustment_plan(
                     [
                         item for item in scored
                         if item.feasible
-                        and h_within_context_hard_bounds(context, item.h_after)
+                        and h_within_context_hard_bounds(
+                            context, item.h_after, item.h_before
+                        )
                         and not _bundle_is_forbidden(
                             H_work,
                             item.ops,

@@ -10,6 +10,7 @@ from .classification import (
     classify_topology_units,
     normalize_subtype,
 )
+from .rl_mtcs_export import build_rl_mtcs_payload
 
 __all__ = [
     "TopologyClassificationResult",
@@ -22,6 +23,7 @@ __all__ = [
     "build_node_tokens",
     "normalize_subtype",
     "classify_topology_units",
+    "build_rl_mtcs_payload",
 ]
 
 try:
@@ -34,6 +36,7 @@ try:
         Stage3AdjustmentPlan,
         Stage3FlexDecision,
         Stage3PhaseEvaluation,
+        Stage3ProgressPhase,
         Stage3ResidualClosureDecision,
         Stage3RingAssemblyContract,
         Stage3WorkflowCycleRecord,
@@ -48,6 +51,7 @@ else:
     __all__.extend([
         "TopologyAssemblyResult",
         "Stage3PhaseEvaluation",
+        "Stage3ProgressPhase",
         "Stage3AdjustmentOp",
         "Stage3AdjustmentBundle",
         "Stage3AdjustmentApplyResult",

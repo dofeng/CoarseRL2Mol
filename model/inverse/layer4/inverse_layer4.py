@@ -23,6 +23,7 @@ from ..topology import (
     assemble_topology_units,
     classify_topology_units,
     plan_stage3_resource_adjustments,
+    Stage3ProgressPhase,
 )
 from .inverse_layer4_block_a import (
     adjust_block_a_carbonyl_anchor_impl,
@@ -1421,12 +1422,18 @@ class Layer4Adjuster:
                                            generation_id: int = 0,
                                            difference_spectrum: Optional[Dict[str, Any]] = None,
                                            enable_post_external_spectrum: bool = True,
-                                           post_external_resume_phase: str = "remaining_pool_spectrum_rebalance",
+                                           progress_phase: Stage3ProgressPhase = Stage3ProgressPhase.SPECTRUM_REBALANCE,
                                            spectrum_candidate_limit: int = 2,
                                            spectrum_max_primary_adjustments: int = 10,
                                            rejected_spectrum_histogram_signatures: Optional[Any] = None,
                                            forbidden_spectrum_inverse_signatures: Optional[Any] = None,
-                                           forbidden_resource_conversion_signatures: Optional[Any] = None) -> Any:
+                                           forbidden_resource_conversion_signatures: Optional[Any] = None,
+                                           allow_h_outside_nonworsening: bool = False,
+                                           protected_terminal_aromatic_node_ids: Optional[Any] = None,
+                                           pending_su24_ring_candidate: Optional[Dict[str, Any]] = None,
+                                           pending_residual_product_candidate: Optional[Dict[str, Any]] = None,
+                                           pending_terminal_su24_node_ids: Optional[Any] = None,
+                                           committed_topology_products: Optional[Any] = None) -> Any:
         nodes_local = list(nodes or [])
         plan = plan_stage3_resource_adjustments(
             H=H,
@@ -1443,10 +1450,25 @@ class Layer4Adjuster:
             h_tolerance=h_tolerance,
             special_degree_meta=self._get_special_degree_meta(H.detach().cpu() if hasattr(H, "detach") else None),
             su11_rotation_index=int(getattr(self, "_stage3_su11_rotation_index", 0) or 0),
+            su24_nonfused_cursor=int(
+                getattr(self, "_stage3_su24_nonfused_cursor", 0) or 0
+            ),
+            allow_h_outside_nonworsening=bool(
+                allow_h_outside_nonworsening
+            ),
+            protected_terminal_aromatic_node_ids=(
+                protected_terminal_aromatic_node_ids
+            ),
+            pending_su24_ring_candidate=pending_su24_ring_candidate,
+            pending_residual_product_candidate=(
+                pending_residual_product_candidate
+            ),
+            pending_terminal_su24_node_ids=pending_terminal_su24_node_ids,
+            committed_topology_products=committed_topology_products,
             generation_id=int(generation_id),
             difference_spectrum=difference_spectrum,
             enable_post_external_spectrum=bool(enable_post_external_spectrum),
-            post_external_resume_phase=str(post_external_resume_phase),
+            progress_phase=progress_phase,
             spectrum_candidate_limit=int(spectrum_candidate_limit),
             spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
             rejected_spectrum_histogram_signatures=rejected_spectrum_histogram_signatures,
@@ -1594,6 +1616,36 @@ class Layer4Adjuster:
                 nodes=kwargs.get('nodes'),
             )
         elif stage == 'block_c_resource':
+            supported_block_c_keys = {
+                'nodes',
+                'rebuild_fn',
+                'validate_fn',
+                'output_dir',
+                'max_primary_adjustments_per_stage',
+                'max_h_compensation_ops_per_adjustment',
+                'residual_flex_preferred_23',
+                'residual_flex_min_23',
+                'residual_side_preferred_23',
+                'residual_side_min_23',
+                'h_tolerance',
+                'outer_cycle',
+                'iteration_offset',
+                'context_snapshot_fn',
+                'context_restore_fn',
+                'difference_spectrum',
+                'enable_post_external_spectrum',
+                'spectrum_candidate_limit',
+                'spectrum_max_primary_adjustments',
+                'spectrum_min_r2_gain',
+            }
+            unknown_block_c_keys = set(kwargs) - supported_block_c_keys
+            if unknown_block_c_keys:
+                raise ValueError(
+                    'block_c_resource contains unknown keys: '
+                    + ', '.join(
+                        sorted(str(key) for key in unknown_block_c_keys)
+                    )
+                )
             workflow_result = run_block_c_resource_adjustment_loop_impl(
                 self,
                 H_work,
@@ -1673,7 +1725,13 @@ class Layer4Adjuster:
         spectrum_candidate_limit: int = 2,
         spectrum_max_primary_adjustments: int = 10,
         spectrum_min_r2_gain: float = 0.002,
+        **kwargs: Any,
     ) -> Any:
+        if kwargs:
+            raise ValueError(
+                'block_c_resource contains unknown keys: '
+                + ', '.join(sorted(str(key) for key in kwargs))
+            )
         return run_block_c_resource_adjustment_loop_impl(
             self,
             H=H,

@@ -70,6 +70,15 @@ class Stage3OwnershipState(str, Enum):
 STAGE3_OWNERSHIP_STATES = tuple(state.value for state in Stage3OwnershipState)
 
 
+class Stage3ProgressPhase(str, Enum):
+    """Committed one-way progress after all external topology phases finish."""
+
+    SPECTRUM_REBALANCE = "remaining_pool_spectrum_rebalance"
+    SU24_RING_CLOSURE = "resource_su24_ring_closure"
+    SU24_AROMATIZATION = "residual_su24_aromatization"
+    RESIDUAL_SELF_CLOSURE = "residual_resource_self_closure"
+
+
 @dataclass
 class Stage3NodeOwnership(Stage3Serializable):
     node_id: int = -1
@@ -88,6 +97,8 @@ class Stage3TopologyProduct(Stage3Serializable):
     product_id: str = ""
     generation_id: int = 0
     product_type: str = ""
+    phase: str = ""
+    provisional: bool = False
     source_fragment_ids: List[int] = field(default_factory=list)
     fixed_source_node_ids: List[int] = field(default_factory=list)
     claimed_resource_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
@@ -314,6 +325,39 @@ class TopologyPoolLedger(Stage3Serializable):
 
 
 @dataclass
+class RingTopologyContract(Stage3Serializable):
+    """Internal, node-bound source of truth for one materialized aliphatic ring."""
+
+    contract_id: str = ""
+    candidate_signature: str = ""
+    ring_kind: str = ""
+    cycles: List[List[int]] = field(default_factory=list)
+    node_labels_by_id: Dict[int, str] = field(default_factory=dict)
+    node_su_by_id: Dict[int, int] = field(default_factory=dict)
+    node_profiles_by_id: Dict[int, str] = field(default_factory=dict)
+    role_node_ids: Dict[str, List[int]] = field(default_factory=dict)
+    external_attachments: List[List[int]] = field(default_factory=list)
+    branch_paths: List[Dict[str, Any]] = field(default_factory=list)
+    branch_requirements: List[Dict[str, Any]] = field(default_factory=list)
+    source_fragment_ids: List[int] = field(default_factory=list)
+    fixed_source_node_ids: List[int] = field(default_factory=list)
+    claimed_resource_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
+    required_resource_counts: Dict[str, int] = field(default_factory=dict)
+    protected_node_ids: List[int] = field(default_factory=list)
+    conversion_ops: List[Dict[str, Any]] = field(default_factory=list)
+    topology_notation: str = ""
+    node_id_notation: str = ""
+    like24_node_ids: List[int] = field(default_factory=list)
+    bridgehead_kind: str = ""
+    complete: bool = False
+    audit_reason: str = ""
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+
+    def declared_node_ids(self) -> List[int]:
+        return sorted(int(node_id) for node_id in dict(self.node_su_by_id or {}))
+
+
+@dataclass
 class TopologyAssemblyProduct(Stage3Serializable):
     product_kind: str = ""
     product_type: str = ""
@@ -329,8 +373,18 @@ class TopologyAssemblyProduct(Stage3Serializable):
     claimed_resource_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
     mainline_slots: List[Dict[str, Any]] = field(default_factory=list)
     branch_slots: List[Dict[str, Any]] = field(default_factory=list)
+    ring_contract: Optional[RingTopologyContract] = None
     closed: bool = True
     reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        # RingTopologyContract is an internal transaction/audit object.  The
+        # persisted assembly schema intentionally stays unchanged.
+        return {
+            str(key): _serialize_value(getattr(self, key))
+            for key in getattr(self, "__dataclass_fields__", {}).keys()
+            if str(key) != "ring_contract"
+        }
 
     def to_public_dict(self) -> Dict[str, Any]:
         claimed_ids = {
@@ -340,12 +394,16 @@ class TopologyAssemblyProduct(Stage3Serializable):
         }
         fixed_ids = {int(value) for value in list(self.fixed_source_node_ids or [])}
         owned_ids = fixed_ids | claimed_ids
-        node_id_notation = re.sub(
+        is_ring = bool(
+            str(self.product_kind or "").startswith("fatty_ring_")
+            or str(self.product_type or "") == "aliphatic_ring"
+        )
+        node_id_notation = str(self.actual_topology_gid or "") if is_ring else re.sub(
             r"\d+",
             lambda match: match.group(0) if int(match.group(0)) in owned_ids else "OPEN",
             str(self.actual_topology_gid or ""),
         )
-        return {
+        payload = {
             "product_type": str(self.product_type or self.product_kind or ""),
             "source_fragment_ids": [int(x) for x in list(self.source_fragment_ids or [])],
             "fixed_source_node_ids": sorted(fixed_ids),
@@ -354,12 +412,22 @@ class TopologyAssemblyProduct(Stage3Serializable):
                 for key, values in dict(self.claimed_resource_ids_by_su or {}).items()
                 if list(values or [])
             },
-            "mainline_slots": [dict(item or {}) for item in list(self.mainline_slots or [])],
-            "branch_slots": [dict(item or {}) for item in list(self.branch_slots or [])],
             "topology_notation": str(self.actual_topology_su or ""),
             "node_id_notation": str(node_id_notation),
             "closed": bool(self.closed),
         }
+        if is_ring:
+            payload["node_ids"] = sorted({
+                int(value) for value in list(self.source_node_ids or [])
+            })
+        else:
+            payload["mainline_slots"] = [
+                dict(item or {}) for item in list(self.mainline_slots or [])
+            ]
+            payload["branch_slots"] = [
+                dict(item or {}) for item in list(self.branch_slots or [])
+            ]
+        return payload
 
 
 @dataclass

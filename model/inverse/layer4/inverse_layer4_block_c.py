@@ -4,6 +4,7 @@ Detailed topology rules live under ``model.inverse.topology``.
 """
 
 from copy import deepcopy
+import hashlib
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -32,6 +33,7 @@ from ..topology.stage3_models import (
     AtomicAdjustmentGroup,
     HistogramAdjustmentPlan,
     HistogramConversion,
+    Stage3ProgressPhase,
 )
 from ..topology.spectrum_rebalance import (
     apply_spectrum_candidate,
@@ -44,6 +46,97 @@ from ..layer1.port_role_balance import (
     audit_layer1_port_roles,
     select_layer1_port_balance,
 )
+
+
+def _freeze_stage3_signature_value(value: Any) -> Any:
+    """Convert Stage3 context values into a deterministic hashable payload."""
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().cpu()
+        return (
+            "tensor",
+            str(tensor.dtype),
+            tuple(int(item) for item in tensor.shape),
+            tuple(tensor.reshape(-1).tolist()),
+        )
+    if isinstance(value, np.ndarray):
+        array = np.asarray(value)
+        return (
+            "array",
+            str(array.dtype),
+            tuple(int(item) for item in array.shape),
+            tuple(array.reshape(-1).tolist()),
+        )
+    if isinstance(value, dict):
+        return tuple(
+            sorted(
+                (
+                    str(key),
+                    _freeze_stage3_signature_value(item),
+                )
+                for key, item in value.items()
+            )
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_stage3_signature_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        frozen = [_freeze_stage3_signature_value(item) for item in value]
+        return tuple(sorted(frozen, key=repr))
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if hasattr(value, "to_dict"):
+        return _freeze_stage3_signature_value(value.to_dict())
+    return repr(value)
+
+
+def _stage3_physical_state_signature(
+    nodes: List[Any],
+    H: torch.Tensor,
+    context: Any = None,
+) -> str:
+    """Hash the graph and fixed-partition state used by Stage3 planning."""
+    histogram = tuple(
+        int(value)
+        for value in torch.clamp(H.detach().cpu(), min=0).long().tolist()
+    )
+    node_rows = []
+    for node in sorted(
+        list(nodes or []),
+        key=lambda item: int(getattr(item, "global_id", -1)),
+    ):
+        node_rows.append((
+            int(getattr(node, "global_id", -1)),
+            int(getattr(node, "su_type", -1)),
+            tuple(sorted(int(value) for value in list(getattr(node, "hop1_ids", []) or []))),
+            tuple(sorted(int(value) for value in list(getattr(node, "hop2_ids", []) or []))),
+            tuple(sorted(int(value) for value in list(getattr(node, "fixed_hop1_ids", []) or []))),
+            getattr(node, "target_hop1_degree", None),
+            getattr(node, "target_fixed_anchor_count", None),
+            str(getattr(node, "special_anchor_mode", "") or ""),
+            str(getattr(node, "special_anchor_partition", "") or ""),
+            getattr(node, "stage3_topology_owner_id", None),
+            str(getattr(node, "stage3_topology_role", "") or ""),
+            tuple(sorted(
+                int(value)
+                for value in list(getattr(node, "stage3_locked_neighbor_ids", []) or [])
+            )),
+            bool(getattr(node, "stage3_resource_claimed", False)),
+        ))
+    payload = (
+        histogram,
+        tuple(node_rows),
+        _freeze_stage3_signature_value(context),
+    )
+    return hashlib.sha1(repr(payload).encode("utf-8")).hexdigest()
+
+
+def _stage3_r2(diff: Optional[Dict[str, Any]], fallback: Any = float("nan")) -> float:
+    try:
+        value = float(dict(diff or {}).get("r2", fallback))
+    except Exception:
+        return float("nan")
+    return value if np.isfinite(value) else float("nan")
 
 
 def _stage3_metrics_from_plan(plan: Any) -> Dict[str, Any]:
@@ -99,12 +192,163 @@ def _mapping_payload(value: Any, *, field_name: str) -> Dict[str, Any]:
     raise TypeError(f"{field_name} must be a mapping, got {type(value).__name__}")
 
 
+def _stage3_product_identity(product: Dict[str, Any]) -> str:
+    payload = dict(product or {})
+    product_id = str(payload.get("product_id", "") or "")
+    node_ids = sorted({
+        int(value)
+        for value in list(payload.get("fixed_source_node_ids", []) or [])
+        + [
+            int(value)
+            for values in dict(
+                payload.get("claimed_resource_ids_by_su", {}) or {}
+            ).values()
+            for value in list(values or [])
+        ]
+    })
+    if product_id:
+        return (
+            f"id:{product_id}|nodes:"
+            f"{','.join(str(value) for value in node_ids)}"
+        )
+    return (
+        f"phase:{str(payload.get('phase', '') or '')}|"
+        f"contract:{int(payload.get('contract_id', -1) or -1)}|"
+        f"nodes:{','.join(str(value) for value in node_ids)}"
+    )
+
+
+def _merge_stage3_committed_products(
+    current: List[Dict[str, Any]],
+    *collections: Any,
+) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {
+        _stage3_product_identity(dict(product or {})): dict(product or {})
+        for product in list(current or [])
+        if dict(product or {})
+    }
+    for collection in collections:
+        for product in list(collection or []):
+            payload = dict(product or {})
+            if payload:
+                merged[_stage3_product_identity(payload)] = payload
+    return [merged[key] for key in sorted(merged)]
+
+
+def _committed_products_from_plan(plan: Any) -> List[Dict[str, Any]]:
+    diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
+    runtime = dict(getattr(plan, "runtime", {}) or {})
+    ledger = runtime.get("iteration_topology_ledger")
+    ledger_products = list(
+        _ledger_value(ledger, "completed_products") or []
+    )
+    phase_evaluation = runtime.get("phase_evaluation")
+    assembly_view = dict(
+        getattr(phase_evaluation, "assembly_view", {}) or {}
+    ) if phase_evaluation is not None else {}
+    assembly_products = list(assembly_view.get("products", []) or [])
+    if not assembly_products:
+        phase_evaluation_dict = dict(
+            runtime.get("phase_evaluation_dict", {}) or {}
+        )
+        assembly_products = list(
+            dict(phase_evaluation_dict.get("assembly_view", {}) or {}).get(
+                "products", []
+            ) or []
+        )
+    external_stage_completed = bool(
+        diagnostics.get("external_stage_completed", False)
+        or str(getattr(plan, "reason", "") or "")
+        in {"stage3_spectrum_candidates_ready", "stage3_complete"}
+    )
+    external_phases = {
+        "external_flex_closure",
+        "external_fatty_ring_closure",
+        "external_side_chain_closure",
+    }
+    committed_external_products = [
+        dict(product or {})
+        for product in list(ledger_products) + list(assembly_products)
+        if bool(dict(product or {}).get("closed", False))
+        and not bool(dict(product or {}).get("provisional", False))
+        and external_stage_completed
+        and str(dict(product or {}).get("phase", "") or "")
+        in external_phases
+    ]
+    return _merge_stage3_committed_products(
+        [],
+        committed_external_products,
+        diagnostics.get("committed_su24_products", []),
+        diagnostics.get("committed_residual_products", []),
+    )
+
+
 def _target_h(E_target: Optional[torch.Tensor]) -> Optional[float]:
     try:
         value = float(E_target.detach().cpu().float()[1].item())
     except Exception:
         return None
     return value if value > 0.0 else None
+
+
+def _terminal_h_exemption_diagnostics(
+    *,
+    H: torch.Tensor,
+    E_target: Optional[torch.Tensor],
+    h_tolerance: float,
+    special_degree_meta: Optional[Dict[str, Any]],
+    records: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    terminal_records = [dict(record or {}) for record in list(records or [])]
+    target_h = _target_h(E_target)
+    current_h = float(_h_total(H, special_degree_meta))
+    lower, upper = h_hard_bounds(target_h, h_tolerance)
+    final_outside = bool(
+        lower is not None
+        and upper is not None
+        and not float(lower) <= float(current_h) <= float(upper)
+    )
+    first_h_before = (
+        float(terminal_records[0].get("h_before"))
+        if terminal_records
+        and terminal_records[0].get("h_before") is not None
+        else None
+    )
+    pre_terminal_outside = bool(
+        first_h_before is not None
+        and lower is not None
+        and upper is not None
+        and not float(lower) <= float(first_h_before) <= float(upper)
+    )
+    exemption_only = bool(
+        terminal_records and final_outside and not pre_terminal_outside
+    )
+    outside_origin = (
+        "residual_su24_aromatization"
+        if exemption_only
+        else "preexisting_and_residual_su24_aromatization"
+        if terminal_records and final_outside
+        else ""
+    )
+    return {
+        "terminal_h_exemption": bool(terminal_records),
+        "terminal_h_exemption_records": terminal_records,
+        "terminal_h_exemption_only": bool(exemption_only),
+        "terminal_h_outside_origin": str(outside_origin),
+        "terminal_h_final_audit": {
+            "target_h": float(target_h) if target_h is not None else None,
+            "current_h": float(current_h),
+            "hard_lower": float(lower) if lower is not None else None,
+            "hard_upper": float(upper) if upper is not None else None,
+            "outside_hard_bounds": bool(final_outside),
+            "pre_terminal_outside_hard_bounds": bool(
+                pre_terminal_outside
+            ),
+            "ordinary_conversions_must_not_worsen": bool(
+                terminal_records
+            ),
+        },
+    }
 
 
 def _selected_histogram_counts(H: Optional[torch.Tensor]) -> str:
@@ -209,6 +453,16 @@ def _print_stage3_plan_summary(
         f"  [Stage3 Histogram] after:  {_selected_histogram_counts(H_after)}",
         flush=True,
     )
+    if str(getattr(plan, "plan_kind", "") or "") == "stage3_completion_infeasible":
+        proof = dict(plan_diagnostics.get("infeasibility_proof", {}) or {})
+        print(
+            "  [Stage3 Completion Invariants] "
+            f"failed={dict(proof.get('failed_invariants', {}) or {})} "
+            f"remaining_su24={list(proof.get('remaining_su24_node_ids', []) or [])} "
+            f"flex_final={proof.get('flex_final')} flex_bounds={dict(proof.get('flex_bounds', {}) or {})} "
+            f"fragment_coverage={dict(proof.get('fragment_coverage', {}) or {})}",
+            flush=True,
+        )
 
 
 def _print_stage3_histogram_adjustments(cycle_number: int, histogram_plan: Any) -> None:
@@ -1268,17 +1522,41 @@ def run_block_c_resource_adjustment_loop_impl(
     spectrum_min_r2_gain = float(kwargs.pop("spectrum_min_r2_gain", 0.002))
     context_snapshot_fn = kwargs.pop("context_snapshot_fn", None)
     context_restore_fn = kwargs.pop("context_restore_fn", None)
+    if kwargs:
+        raise ValueError(
+            "unsupported block_c_resource options: "
+            + ", ".join(sorted(str(key) for key in kwargs))
+        )
     nodes_current = list(nodes or [])
     H_current = torch.clamp(H.detach().clone(), min=0).long()
     diff_current: Dict[str, Any] = dict(difference_spectrum or {})
     cycles: List[Stage3WorkflowCycleRecord] = []
     accepted_cycles = 0
     stop_reason = "stage3_not_completed"
+    progress_phase = Stage3ProgressPhase.SPECTRUM_REBALANCE
+    terminal_h_exemption_active = False
+    terminal_h_exemption_records: List[Dict[str, Any]] = []
+    protected_terminal_aromatic_node_ids: set[int] = set()
+    pending_terminal_su24_node_ids: set[int] = set()
+    committed_topology_products: List[Dict[str, Any]] = []
+    pending_ring_transaction: Optional[Dict[str, Any]] = None
+    pending_residual_transaction: Optional[Dict[str, Any]] = None
     accepted_spectrum_histogram_signatures: set[str] = set()
     rejected_spectrum_histogram_signatures: set[str] = set()
     forbidden_spectrum_inverse_signatures: set[str] = set()
     rejected_resource_conversion_signatures: set[str] = set()
-    visited_histograms = {
+    initial_context = (
+        deepcopy(context_snapshot_fn())
+        if callable(context_snapshot_fn)
+        else None
+    )
+    initial_state_signature = _stage3_physical_state_signature(
+        nodes_current,
+        H_current,
+        initial_context,
+    )
+    visited_state_signatures = {initial_state_signature}
+    visited_histogram_signatures = {
         tuple(int(value) for value in H_current.detach().cpu().long().tolist())
     }
 
@@ -1322,7 +1600,7 @@ def run_block_c_resource_adjustment_loop_impl(
             generation_id=int(generation_id),
             difference_spectrum=dict(diff_current or {}),
             enable_post_external_spectrum=bool(enable_post_external_spectrum),
-            post_external_resume_phase="remaining_pool_spectrum_rebalance",
+            progress_phase=progress_phase,
             spectrum_candidate_limit=int(spectrum_candidate_limit),
             spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
             rejected_spectrum_histogram_signatures=sorted(
@@ -1332,6 +1610,26 @@ def run_block_c_resource_adjustment_loop_impl(
             forbidden_resource_conversion_signatures=sorted(
                 rejected_resource_conversion_signatures
             ),
+            allow_h_outside_nonworsening=bool(
+                terminal_h_exemption_active
+            ),
+            protected_terminal_aromatic_node_ids=sorted(
+                protected_terminal_aromatic_node_ids
+            ),
+            pending_su24_ring_candidate=(
+                dict(pending_ring_transaction.get("candidate", {}) or {})
+                if pending_ring_transaction is not None
+                else None
+            ),
+            pending_residual_product_candidate=(
+                dict(pending_residual_transaction.get("candidate", {}) or {})
+                if pending_residual_transaction is not None
+                else None
+            ),
+            pending_terminal_su24_node_ids=sorted(
+                pending_terminal_su24_node_ids
+            ),
+            committed_topology_products=list(committed_topology_products),
         )
         _print_stage3_plan_summary(
             cycle_number,
@@ -1341,6 +1639,10 @@ def run_block_c_resource_adjustment_loop_impl(
             special_degree_meta=special_degree_meta,
         )
         if str(getattr(plan, "reason", "") or "") == "stage3_spectrum_candidates_ready":
+            committed_topology_products = _merge_stage3_committed_products(
+                committed_topology_products,
+                _committed_products_from_plan(plan),
+            )
             spectrum_plan_dict = plan.to_dict() if hasattr(plan, "to_dict") else dict(plan or {})
             spectrum_H_before = H_current.detach().clone()
             spectrum_nodes_before = deepcopy(nodes_current)
@@ -1379,7 +1681,20 @@ def run_block_c_resource_adjustment_loop_impl(
             )
             evaluated_candidates: List[Dict[str, Any]] = []
             accepted_options: List[
-                Tuple[float, float, float, str, Any, Any, Any, float, Any, Any, Dict[str, Any]]
+                Tuple[
+                    float,
+                    float,
+                    float,
+                    str,
+                    Any,
+                    Any,
+                    Any,
+                    float,
+                    Any,
+                    Any,
+                    Dict[str, Any],
+                    str,
+                ]
             ] = []
             for candidate in list(getattr(plan, "spectrum_candidates", []) or []):
                 if callable(context_restore_fn):
@@ -1466,11 +1781,13 @@ def run_block_c_resource_adjustment_loop_impl(
                         flush=True,
                     )
                     continue
+                candidate_context = None
                 try:
                     cand_nodes, cand_H, cand_diff, cand_r2 = rebuild_fn(
                         H_seed=candidate_H,
                         phase="remaining_pool_spectrum_rebalance",
                         cycle_idx=cycle_number - 1,
+                        nodes_seed=candidate_nodes,
                     )
                     valid, valid_reason = validate_fn(
                         nodes=cand_nodes,
@@ -1487,6 +1804,11 @@ def run_block_c_resource_adjustment_loop_impl(
                     elif candidate_contract != "template_center_mu":
                         valid = False
                         valid_reason = "spectrum_candidate_contract_mismatch"
+                    candidate_context = (
+                        deepcopy(context_snapshot_fn())
+                        if callable(context_snapshot_fn)
+                        else None
+                    )
                 except Exception as exc:
                     valid = False
                     valid_reason = f"spectrum_candidate_rebuild_failed:{exc}"
@@ -1502,7 +1824,21 @@ def run_block_c_resource_adjustment_loop_impl(
                     if cand_H is not None else ()
                 )
                 repeated_histogram = bool(
-                    candidate_histogram and candidate_histogram in visited_histograms
+                    candidate_histogram
+                    and candidate_histogram in visited_histogram_signatures
+                )
+                candidate_state_signature = (
+                    _stage3_physical_state_signature(
+                        list(cand_nodes or []),
+                        cand_H,
+                        candidate_context,
+                    )
+                    if isinstance(cand_H, torch.Tensor)
+                    else ""
+                )
+                repeated_state = bool(
+                    candidate_state_signature
+                    and candidate_state_signature in visited_state_signatures
                 )
                 balance = (
                     spectrum_candidate_balance_penalty(
@@ -1525,7 +1861,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 required_r2_gain = float(spectrum_min_r2_gain)
                 significant = bool(
                     valid
-                    and not repeated_histogram
+                    and not repeated_state
                     and float(r2_gain) >= float(required_r2_gain)
                     and float(r2_gain) > 0.0
                 )
@@ -1543,6 +1879,8 @@ def run_block_c_resource_adjustment_loop_impl(
                     "required_r2_gain": float(required_r2_gain),
                     "balance_diagnostics": dict(balance),
                     "repeated_histogram": bool(repeated_histogram),
+                    "repeated_state": bool(repeated_state),
+                    "state_signature": str(candidate_state_signature),
                     "significant": bool(significant),
                 })
                 print(
@@ -1557,11 +1895,6 @@ def run_block_c_resource_adjustment_loop_impl(
                     flush=True,
                 )
                 if significant:
-                    candidate_context = (
-                        context_snapshot_fn()
-                        if callable(context_snapshot_fn)
-                        else None
-                    )
                     accepted_options.append((
                         float(r2_gain),
                         float(window_gain),
@@ -1574,6 +1907,7 @@ def run_block_c_resource_adjustment_loop_impl(
                         candidate,
                         candidate_context,
                         dict(balance),
+                        str(candidate_state_signature),
                     ))
                 else:
                     rejected_spectrum_histogram_signatures.add(str(getattr(candidate, "histogram_signature", "") or ""))
@@ -1595,6 +1929,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     candidate,
                     candidate_context,
                     selected_balance,
+                    selected_state_signature,
                 ) = selected
                 selected_balance_penalty = max(
                     0.0,
@@ -1618,9 +1953,14 @@ def run_block_c_resource_adjustment_loop_impl(
                 nodes_current = list(cand_nodes or [])
                 H_current = torch.clamp(cand_H.detach().clone(), min=0).long()
                 diff_current = dict(cand_diff or {})
+                progress_phase = Stage3ProgressPhase.SU24_RING_CLOSURE
                 accepted_cycles += 1
-                visited_histograms.add(
-                    tuple(int(value) for value in H_current.detach().cpu().long().tolist())
+                visited_state_signatures.add(str(selected_state_signature))
+                visited_histogram_signatures.add(
+                    tuple(
+                        int(value)
+                        for value in H_current.detach().cpu().long().tolist()
+                    )
                 )
                 accepted_spectrum_histogram_signatures.add(
                     str(getattr(candidate, "histogram_signature", "") or "")
@@ -1690,7 +2030,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 generation_id=int(generation_id),
                 difference_spectrum=dict(diff_current or {}),
                 enable_post_external_spectrum=bool(enable_post_external_spectrum),
-                post_external_resume_phase="resource_su24_ring_closure",
+                progress_phase=Stage3ProgressPhase.SU24_RING_CLOSURE,
                 spectrum_candidate_limit=int(spectrum_candidate_limit),
                 spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
                 rejected_spectrum_histogram_signatures=sorted(
@@ -1699,6 +2039,18 @@ def run_block_c_resource_adjustment_loop_impl(
                 forbidden_spectrum_inverse_signatures=sorted(forbidden_spectrum_inverse_signatures),
                 forbidden_resource_conversion_signatures=sorted(
                     rejected_resource_conversion_signatures
+                ),
+                allow_h_outside_nonworsening=bool(
+                    terminal_h_exemption_active
+                ),
+                protected_terminal_aromatic_node_ids=sorted(
+                    protected_terminal_aromatic_node_ids
+                ),
+                pending_terminal_su24_node_ids=sorted(
+                    pending_terminal_su24_node_ids
+                ),
+                committed_topology_products=list(
+                    committed_topology_products
                 ),
             )
             plan.diagnostics["rejected_spectrum_candidates"] = evaluated_candidates
@@ -1749,6 +2101,30 @@ def run_block_c_resource_adjustment_loop_impl(
                 "reason": "no_histogram_adjustment_plan",
             }
         plan_diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
+        committed_products_after_plan = _merge_stage3_committed_products(
+            committed_topology_products,
+            _committed_products_from_plan(plan),
+        )
+        if (
+            pending_ring_transaction is not None
+            and dict(
+                plan_diagnostics.get(
+                    "resolved_pending_su24_ring_candidate", {}
+                )
+                or {}
+            )
+        ):
+            pending_ring_transaction = None
+        if (
+            pending_residual_transaction is not None
+            and dict(
+                plan_diagnostics.get(
+                    "resolved_pending_residual_product", {}
+                )
+                or {}
+            )
+        ):
+            pending_residual_transaction = None
         plan_diagnostics["pre_rebuild_port_feasibility"] = dict(parity_diagnostics)
         plan.diagnostics = plan_diagnostics
         if bool(parity_diagnostics.get("enforced", False)):
@@ -1851,14 +2227,11 @@ def run_block_c_resource_adjustment_loop_impl(
         histogram_before = _histogram_dict(H_current)
         planned_conversions = list(plan_dict.get('planned_conversions', []) or [])
         adjustment_bundles = list(plan_dict.get('adjustment_bundles', []) or [])
-        state_signature = repr((
-            tuple(int(value) for value in H_current.detach().cpu().long().tolist()),
-            phase,
-            str(getattr(plan, "active_subphase", "") or ""),
-            before_signature,
-            tuple(sorted((int(key), int(value)) for key, value in phase_demand.items())),
-            tuple(sorted((int(key), int(value)) for key, value in phase_inventory.items())),
-        ))
+        state_signature = _stage3_physical_state_signature(
+            nodes_current,
+            H_current,
+            cycle_context_before,
+        )
         phase_eval_dict = dict(dict(getattr(plan, "runtime", {}) or {}).get("phase_evaluation_dict", {}) or {})
         flex_audit = dict(phase_eval_dict.get("flex_audit", {}) or {})
         assembly_view = dict(phase_eval_dict.get("assembly_view", {}) or {})
@@ -1920,6 +2293,40 @@ def run_block_c_resource_adjustment_loop_impl(
                 f"preferred_gap={int(flex_target_plan.get('remaining_preferred_gap', 0) or 0)}"
             )
         if str(getattr(plan, "reason", "")) == "stage3_complete":
+            committed_topology_products = list(
+                committed_products_after_plan
+            )
+            complete_diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
+            resolved_pending_ring = dict(
+                complete_diagnostics.get(
+                    "resolved_pending_su24_ring_candidate", {}
+                )
+                or {}
+            )
+            if pending_ring_transaction is not None and resolved_pending_ring:
+                pending_ring_transaction = None
+            resolved_pending_residual = dict(
+                complete_diagnostics.get(
+                    "resolved_pending_residual_product", {}
+                )
+                or {}
+            )
+            if (
+                pending_residual_transaction is not None
+                and resolved_pending_residual
+            ):
+                pending_residual_transaction = None
+            if (
+                pending_ring_transaction is not None
+                or pending_residual_transaction is not None
+            ):
+                raise RuntimeError(
+                    "stage3 completed with an unfinished candidate transaction"
+                )
+            if "su24_nonfused_cursor_after" in complete_diagnostics:
+                adjuster._stage3_su24_nonfused_cursor = int(
+                    complete_diagnostics["su24_nonfused_cursor_after"]
+                )
             stop_reason = "stage3_complete"
             cycles.append(Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
@@ -1943,7 +2350,37 @@ def run_block_c_resource_adjustment_loop_impl(
                 stop_reason=stop_reason,
                 accepted_cycles=accepted_cycles,
                 cycles=cycles,
-                diagnostics={"stage": "topology_resource_adjustment"},
+                diagnostics={
+                    "stage": "topology_resource_adjustment",
+                    "terminal_state_signature": str(state_signature),
+                    "visited_state_count": len(visited_state_signatures),
+                    "protected_terminal_aromatic_node_ids": sorted(
+                        protected_terminal_aromatic_node_ids
+                    ),
+                    "unfinished_candidate_transaction": False,
+                    "committed_topology_products": list(
+                        committed_topology_products
+                    ),
+                    "tolerated_remaining_ids_by_su": dict(
+                        complete_diagnostics.get(
+                            "tolerated_remaining_ids_by_su", {}
+                        )
+                        or {}
+                    ),
+                    "tolerated_remaining_count": int(
+                        complete_diagnostics.get(
+                            "tolerated_remaining_count", 0
+                        )
+                        or 0
+                    ),
+                    **_terminal_h_exemption_diagnostics(
+                        H=H_current,
+                        E_target=E_target,
+                        h_tolerance=h_tolerance,
+                        special_degree_meta=special_degree_meta,
+                        records=terminal_h_exemption_records,
+                    ),
+                },
             )
         _print_stage3_histogram_adjustments(cycle_number, histogram_plan)
         apply_started = time.perf_counter()
@@ -1968,6 +2405,138 @@ def run_block_c_resource_adjustment_loop_impl(
             torch.clamp(H_current.detach().cpu(), min=0).long(),
         )
         if not bool(getattr(apply_result, "changed", False)):
+            failed_pending_transaction = (
+                pending_ring_transaction
+                if phase == "resource_su24_ring_closure"
+                else pending_residual_transaction
+                if phase == "residual_resource_self_closure"
+                else None
+            )
+            if (
+                failed_pending_transaction is not None
+                and str(getattr(plan, "reason", "") or "")
+                == "phase_resource_infeasible"
+            ):
+                rollback = failed_pending_transaction
+                rejection_signature = str(
+                    rollback.get("conversion_signature", "") or ""
+                )
+                rejected_resource_conversion_signatures = set(
+                    rollback.get("rejected_resource_signatures_before", set())
+                    or set()
+                )
+                if rejection_signature:
+                    rejected_resource_conversion_signatures.add(
+                        rejection_signature
+                    )
+                nodes_current = deepcopy(rollback["nodes_before"])
+                H_current = rollback["H_before"].detach().clone()
+                diff_current = dict(rollback["diff_before"] or {})
+                progress_phase = rollback["progress_phase_before"]
+                terminal_h_exemption_active = bool(
+                    rollback["terminal_h_exemption_before"]
+                )
+                terminal_h_exemption_records = [
+                    dict(record or {})
+                    for record in list(
+                        rollback.get(
+                            "terminal_h_exemption_records_before", []
+                        )
+                        or []
+                    )
+                ]
+                protected_terminal_aromatic_node_ids = set(
+                    rollback["protected_terminal_ids_before"]
+                )
+                committed_topology_products = [
+                    dict(product or {})
+                    for product in list(
+                        rollback.get("committed_products_before", [])
+                        or []
+                    )
+                ]
+                _restore_stage3_rotation_cursor(
+                    adjuster,
+                    rollback.get("rotation_cursor_before"),
+                )
+                _restore_stage3_parity_cursor(
+                    adjuster,
+                    int(rollback.get("parity_cursor_before", 0) or 0),
+                )
+                if callable(context_restore_fn):
+                    context_restore_fn(
+                        deepcopy(rollback.get("context_before"))
+                    )
+                for previous_cycle in reversed(cycles):
+                    if (
+                        bool(getattr(previous_cycle, "accepted", False))
+                        and str(getattr(previous_cycle, "phase", ""))
+                        == phase
+                    ):
+                        previous_cycle.accepted = False
+                        previous_cycle.accepted_state_retained = False
+                        previous_cycle.stop_reason = (
+                            "rolled_back_by_pending_topology_failure"
+                        )
+                        previous_cycle.acceptance_reason = (
+                            "topology_materialization_failed_after_rebuild"
+                        )
+                        previous_diagnostics = dict(
+                            getattr(previous_cycle, "diagnostics", {}) or {}
+                        )
+                        previous_diagnostics.update({
+                            "rolled_back_by_cycle": int(cycle_number),
+                            "restored_to_candidate_start": True,
+                        })
+                        previous_cycle.diagnostics = previous_diagnostics
+                        accepted_cycles = max(0, int(accepted_cycles) - 1)
+                        break
+                terminal_proof = _stage3_terminal_infeasibility_proof(plan)
+                plan_dict, rolled_back_contract_ids = (
+                    _rollback_stage3_plan_transactions(
+                        plan,
+                        "pending_topology_transaction_rolled_back",
+                    )
+                )
+                cycles.append(Stage3WorkflowCycleRecord(
+                    cycle=cycle_number,
+                    phase=phase,
+                    applied=False,
+                    stop_reason="pending_topology_transaction_rolled_back",
+                    accepted_state_retained=True,
+                    plan=plan_dict,
+                    before_metrics=before_metrics,
+                    after_metrics=before_metrics,
+                    topology_signature=before_signature,
+                    accepted=False,
+                    acceptance_reason="topology_materialization_failed_after_rebuild",
+                    blocked_reason=str(
+                        terminal_proof.get(
+                            "reason",
+                            "pending_topology_candidate_not_materialized",
+                        )
+                    ),
+                    histogram_before=histogram_before,
+                    histogram_after=_histogram_dict(H_current),
+                    state_signature=state_signature,
+                    diagnostics={
+                        "candidate": dict(rollback.get("candidate", {}) or {}),
+                        "rejected_resource_conversion_signature": rejection_signature,
+                        "rolled_back_contract_ids": list(rolled_back_contract_ids),
+                        "restored_to_candidate_start": True,
+                        "infeasibility_proof": terminal_proof,
+                    },
+                ))
+                if phase == "resource_su24_ring_closure":
+                    pending_ring_transaction = None
+                else:
+                    pending_residual_transaction = None
+                print(
+                    f"[Block C:resource #{cycle_number}] topology transaction "
+                    f"rolled back to candidate start; rejected={rejection_signature}",
+                    flush=True,
+                )
+                continue
             rejection_reason = str(
                 dict(rejected_ops[0] or {}).get("reason", "")
                 if rejected_ops
@@ -2074,40 +2643,6 @@ def run_block_c_resource_adjustment_loop_impl(
                 getattr(apply_result, "H").detach().cpu(), min=0
             ).long().tolist()
         )
-        if next_histogram_signature in visited_histograms:
-            cycle_reason = "physical_histogram_cycle_detected"
-            proof = _stage3_terminal_infeasibility_proof(
-                plan,
-                default_reason=cycle_reason,
-            )
-            proof["reason"] = cycle_reason
-            plan_dict = _stage3_infeasible_plan_dict(plan, proof, plan_dict=plan_dict)
-            stop_reason = "phase_resource_infeasible"
-            _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
-            _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
-            if callable(context_restore_fn):
-                context_restore_fn(deepcopy(cycle_context_before))
-            cycles.append(Stage3WorkflowCycleRecord(
-                cycle=cycle_number,
-                phase=phase,
-                applied=False,
-                stop_reason=stop_reason,
-                accepted_state_retained=True,
-                plan=plan_dict,
-                before_metrics=before_metrics,
-                after_metrics=before_metrics,
-                topology_signature=before_signature,
-                accepted=False,
-                acceptance_reason=cycle_reason,
-                blocked_reason=cycle_reason,
-                state_signature=state_signature,
-                diagnostics={
-                    "repeated_histogram": list(next_histogram_signature),
-                    "next_pass": "fresh_stage3",
-                    "infeasibility_proof": dict(proof),
-                },
-            ))
-            break
 
         if rebuild_fn is None or validate_fn is None:
             stop_reason = "layer12_rebuild_invalid"
@@ -2139,6 +2674,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 H_seed=getattr(apply_result, "H"),
                 phase=phase,
                 cycle_idx=cycle_number - 1,
+                nodes_seed=list(getattr(apply_result, "nodes", []) or []),
             )
             print(
                 f"[Block C:resource #{cycle_number}] fresh Layer1/2 rebuild done "
@@ -2310,14 +2846,219 @@ def run_block_c_resource_adjustment_loop_impl(
             stop_reason = "all_histogram_adjustment_variants_invalid"
             break
 
+        candidate_context = (
+            deepcopy(context_snapshot_fn())
+            if callable(context_snapshot_fn)
+            else None
+        )
+        candidate_state_signature = _stage3_physical_state_signature(
+            list(cand_nodes or []),
+            cand_H,
+            candidate_context,
+        )
+        if candidate_state_signature in visited_state_signatures:
+            cycle_reason = "stage3_state_cycle_detected"
+            retry_signature = _register_rejected_resource_candidate(
+                plan,
+                histogram_plan,
+                rejected_resource_conversion_signatures,
+            )
+            plan_dict, rolled_back_contract_ids = _rollback_stage3_plan_transactions(
+                plan,
+                cycle_reason,
+            )
+            _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
+            _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
+            if callable(context_restore_fn):
+                context_restore_fn(deepcopy(cycle_context_before))
+            print(
+                f"[Block C:resource #{cycle_number}] full-state cycle rejected "
+                f"state={candidate_state_signature} "
+                f"histogram_repeated={next_histogram_signature in visited_histogram_signatures}",
+                flush=True,
+            )
+            cycles.append(Stage3WorkflowCycleRecord(
+                cycle=cycle_number,
+                phase=phase,
+                applied=True,
+                stop_reason=cycle_reason,
+                accepted_state_retained=True,
+                rebuild_valid=True,
+                plan=plan_dict,
+                before_metrics=before_metrics,
+                after_metrics=before_metrics,
+                layer2_r2=float(cand_r2),
+                topology_signature=before_signature,
+                requested_counts=requested_counts,
+                unresolved_counts=unresolved_counts,
+                accepted=False,
+                acceptance_reason=cycle_reason,
+                blocked_reason=cycle_reason,
+                state_signature=candidate_state_signature,
+                fresh_rebuild=True,
+                diagnostics={
+                    "candidate_state_signature": candidate_state_signature,
+                    "repeated_histogram": list(next_histogram_signature),
+                    "histogram_was_previously_seen": bool(
+                        next_histogram_signature in visited_histogram_signatures
+                    ),
+                    "visited_state_count": len(visited_state_signatures),
+                    "rolled_back_contract_ids": list(rolled_back_contract_ids),
+                    "rejected_resource_conversion_signature": str(retry_signature),
+                },
+            ))
+            if retry_signature:
+                print(
+                    f"[Block C:resource #{cycle_number}] retry next conversion variant "
+                    f"after full-state cycle: rejected={retry_signature}",
+                    flush=True,
+                )
+                continue
+            stop_reason = cycle_reason
+            break
+
         after_inventory = dict(getattr(histogram_plan, 'inventory_after', {}) or {})
         after_demand = dict(getattr(histogram_plan, 'demand_after', {}) or {})
-        acceptance_reason = "valid_histogram_fresh_rebuild"
+        acceptance_reason = "valid_topology_histogram_fresh_rebuild"
+        accepted_plan_diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
+
+        pending_candidate_after = dict(
+            accepted_plan_diagnostics.get(
+                "pending_su24_ring_candidate", {}
+            )
+            or {}
+        )
+        resolved_pending_candidate = dict(
+            accepted_plan_diagnostics.get(
+                "resolved_pending_su24_ring_candidate", {}
+            )
+            or {}
+        )
+        if pending_ring_transaction is not None and resolved_pending_candidate:
+            pending_ring_transaction = None
+        if phase == "resource_su24_ring_closure" and pending_candidate_after:
+            pending_ring_transaction = {
+                "candidate": dict(pending_candidate_after),
+                "conversion_signature": _last_resource_step_signature(
+                    histogram_plan
+                ),
+                "nodes_before": deepcopy(nodes_current),
+                "H_before": H_current.detach().clone(),
+                "diff_before": dict(diff_current or {}),
+                "context_before": deepcopy(cycle_context_before),
+                "rotation_cursor_before": rotation_cursor_before,
+                "parity_cursor_before": parity_cursor_before,
+                "progress_phase_before": Stage3ProgressPhase.SU24_RING_CLOSURE,
+                "terminal_h_exemption_before": terminal_h_exemption_active,
+                "protected_terminal_ids_before": set(
+                    protected_terminal_aromatic_node_ids
+                ),
+                "rejected_resource_signatures_before": set(
+                    rejected_resource_conversion_signatures
+                ),
+                "committed_products_before": list(
+                    committed_products_after_plan
+                ),
+                "terminal_h_exemption_records_before": list(
+                    terminal_h_exemption_records
+                ),
+            }
+        pending_residual_candidate_after = dict(
+            accepted_plan_diagnostics.get(
+                "pending_residual_product_candidate", {}
+            )
+            or {}
+        )
+        if (
+            phase == "residual_resource_self_closure"
+            and pending_residual_candidate_after
+        ):
+            pending_residual_transaction = {
+                "candidate": dict(pending_residual_candidate_after),
+                "conversion_signature": _last_resource_step_signature(
+                    histogram_plan
+                ),
+                "nodes_before": deepcopy(nodes_current),
+                "H_before": H_current.detach().clone(),
+                "diff_before": dict(diff_current or {}),
+                "context_before": deepcopy(cycle_context_before),
+                "rotation_cursor_before": rotation_cursor_before,
+                "parity_cursor_before": parity_cursor_before,
+                "progress_phase_before": Stage3ProgressPhase.RESIDUAL_SELF_CLOSURE,
+                "terminal_h_exemption_before": terminal_h_exemption_active,
+                "protected_terminal_ids_before": set(
+                    protected_terminal_aromatic_node_ids
+                ),
+                "rejected_resource_signatures_before": set(
+                    rejected_resource_conversion_signatures
+                ),
+                "committed_products_before": list(
+                    committed_products_after_plan
+                ),
+                "terminal_h_exemption_records_before": list(
+                    terminal_h_exemption_records
+                ),
+            }
 
         nodes_current = list(cand_nodes or [])
         H_current = torch.clamp(cand_H.detach().clone(), min=0).long()
         diff_current = dict(cand_diff or {})
-        visited_histograms.add(next_histogram_signature)
+        committed_topology_products = list(committed_products_after_plan)
+        if "su24_nonfused_cursor_after" in accepted_plan_diagnostics:
+            adjuster._stage3_su24_nonfused_cursor = int(
+                accepted_plan_diagnostics["su24_nonfused_cursor_after"]
+            )
+        if phase == "remaining_pool_spectrum_rebalance":
+            progress_phase = Stage3ProgressPhase.SU24_RING_CLOSURE
+        elif phase == "resource_su24_ring_closure":
+            progress_phase = Stage3ProgressPhase.SU24_RING_CLOSURE
+        elif phase == "residual_su24_aromatization":
+            progress_phase = Stage3ProgressPhase.SU24_AROMATIZATION
+            terminal_h_exemption_active = True
+            terminal_h_exemption_records.append({
+                "phase": "residual_su24_aromatization",
+                "terminal_h_exemption": True,
+                "converted_su24_node_ids": [
+                    int(value)
+                    for value in list(
+                        accepted_plan_diagnostics.get(
+                            "converted_su24_node_ids", []
+                        )
+                        or []
+                    )
+                ],
+                "h_before": accepted_plan_diagnostics.get("h_before"),
+                "h_after": accepted_plan_diagnostics.get("h_after"),
+                "h_delta": accepted_plan_diagnostics.get("h_delta"),
+                "remaining_su24_count": int(
+                    accepted_plan_diagnostics.get(
+                        "remaining_su24_count", 0
+                    )
+                    or 0
+                ),
+            })
+            protected_terminal_aromatic_node_ids.update(
+                int(value)
+                for value in list(
+                    accepted_plan_diagnostics.get(
+                        "converted_su24_node_ids", []
+                    )
+                    or []
+                )
+            )
+            pending_terminal_su24_node_ids = {
+                int(value)
+                for value in list(
+                    accepted_plan_diagnostics.get(
+                        "remaining_su24_node_ids", []
+                    )
+                    or []
+                )
+            }
+        elif phase == "residual_resource_self_closure":
+            progress_phase = Stage3ProgressPhase.RESIDUAL_SELF_CLOSURE
+        visited_state_signatures.add(candidate_state_signature)
+        visited_histogram_signatures.add(next_histogram_signature)
         cleared_resource_rejections = sorted(
             rejected_resource_conversion_signatures
         )
@@ -2369,12 +3110,28 @@ def run_block_c_resource_adjustment_loop_impl(
                 "flex_target_plan": dict(flex_target_plan),
                 "protected_resource_counts": dict(protected_counts),
                 "fresh_replan_deferred_to_next_cycle": True,
+                "candidate_state_signature": candidate_state_signature,
                 "cleared_resource_conversion_rejections": (
                     cleared_resource_rejections
                 ),
             },
         ))
 
+    terminal_context = (
+        deepcopy(context_snapshot_fn())
+        if callable(context_snapshot_fn)
+        else None
+    )
+    terminal_state_signature = _stage3_physical_state_signature(
+        nodes_current,
+        H_current,
+        terminal_context,
+    )
+    terminal_special_degree_meta = (
+        adjuster._get_special_degree_meta(H_current)
+        if callable(getattr(adjuster, "_get_special_degree_meta", None))
+        else None
+    )
     return Stage3WorkflowResult(
         nodes=nodes_current,
         H=H_current,
@@ -2386,5 +3143,24 @@ def run_block_c_resource_adjustment_loop_impl(
         diagnostics={
             "stage": "topology_resource_adjustment",
             "output_dir": output_dir,
+            "terminal_state_signature": str(terminal_state_signature),
+            "visited_state_count": len(visited_state_signatures),
+            "protected_terminal_aromatic_node_ids": sorted(
+                protected_terminal_aromatic_node_ids
+            ),
+            "unfinished_candidate_transaction": bool(
+                pending_ring_transaction is not None
+                or pending_residual_transaction is not None
+            ),
+            "committed_topology_products": list(
+                committed_topology_products
+            ),
+            **_terminal_h_exemption_diagnostics(
+                H=H_current,
+                E_target=E_target,
+                h_tolerance=h_tolerance,
+                special_degree_meta=terminal_special_degree_meta,
+                records=terminal_h_exemption_records,
+            ),
         },
     )

@@ -34,6 +34,7 @@ from .layer3.inverse_layer3 import Layer3Estimator
 from .layer4.inverse_layer4 import Layer4Adjuster
 from .topology import audit_stage3_topology
 from .topology.round_context import normalize_stage3_product
+from .topology.rl_mtcs_export import build_rl_mtcs_payload
 # ============================================================================
 # 主推理类
 # ============================================================================
@@ -108,6 +109,12 @@ class InversePipelineV3:
              device=torch.device(device),
              layer0_estimator=self.layer0_estimator,
          )
+        # The final topology report must describe the last committed Stage3
+        # transaction, even after Layer3 updates latent/template values.
+        self._final_stage3_completion_diagnostics: Dict[str, Any] = {}
+        self._final_stage3_terminal_diagnostics: Dict[str, Any] = {}
+        self._final_stage3_snapshot_node_ids: List[int] = []
+        self._final_stage3_snapshot_authoritative: bool = False
 
     @staticmethod
     def _merge_stage_config(defaults: Dict[str, Any],
@@ -465,6 +472,7 @@ class InversePipelineV3:
         eval_nmr: bool = False,
         eval_output_dir: Optional[str] = None,
         layer2_output_dir: Optional[str] = None,
+        identity_seed_nodes: Optional[List[_NodeV3]] = None,
     ) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], float]:
         if not eval_lib_path:
             raise ValueError('Layer1 requires eval_lib_path for exact shift lookup')
@@ -482,6 +490,11 @@ class InversePipelineV3:
             eval_nmr=bool(eval_nmr),
             eval_output_dir=eval_output_dir,
             eval_lib_path=str(eval_lib_path),
+            identity_seed_nodes=(
+                copy.deepcopy(identity_seed_nodes)
+                if identity_seed_nodes is not None
+                else None
+            ),
             **dict(layer1_runtime_cfg),
         )
         valid, errors = self.layer1_assigner.validate_graph_consistency(
@@ -721,21 +734,147 @@ class InversePipelineV3:
             ],
         }
 
+    @staticmethod
+    def _stage3_completion_resource_ledger(
+        products: Sequence[Dict[str, Any]],
+        ownership: Dict[str, Any],
+        base_ledger: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build the terminal ledger from committed products and final ownership."""
+        consumed: Dict[int, set[int]] = {}
+        topology_consumed: Dict[int, set[int]] = {}
+        residual_consumed: Dict[int, set[int]] = {}
+        for raw_product in list(products or []):
+            product = dict(raw_product or {})
+            phase = str(product.get('phase', '') or '')
+            product_type = str(product.get('product_type', '') or '')
+            target = (
+                residual_consumed
+                if phase == 'residual_resource_self_closure'
+                or product_type.startswith('residual_')
+                else topology_consumed
+            )
+            for raw_su, raw_ids in dict(
+                product.get('claimed_resource_ids_by_su', {}) or {}
+            ).items():
+                if not str(raw_su).lstrip('-').isdigit():
+                    continue
+                su_type = int(raw_su)
+                node_ids = {int(value) for value in list(raw_ids or [])}
+                consumed.setdefault(su_type, set()).update(node_ids)
+                target.setdefault(su_type, set()).update(node_ids)
+
+        remaining: Dict[int, set[int]] = {}
+        for pool_key in ('closure_pool_ids_by_su', 'aromatic_donor_ids_by_su'):
+            for raw_su, raw_ids in dict(ownership.get(pool_key, {}) or {}).items():
+                if not str(raw_su).lstrip('-').isdigit():
+                    continue
+                remaining.setdefault(int(raw_su), set()).update(
+                    int(value) for value in list(raw_ids or [])
+                )
+
+        su_types = {
+            10, 11, 12, 13, 22, 23, 24,
+            *consumed.keys(),
+            *remaining.keys(),
+        }
+        initial = {
+            int(su_type): set(consumed.get(int(su_type), set()))
+            | set(remaining.get(int(su_type), set()))
+            for su_type in su_types
+        }
+        base = dict(base_ledger or {})
+        return {
+            'initial_counts': {
+                str(su_type): len(initial.get(int(su_type), set()))
+                for su_type in sorted(su_types)
+            },
+            'consumed_counts': {
+                str(su_type): len(consumed.get(int(su_type), set()))
+                for su_type in sorted(su_types)
+            },
+            'topology_consumed_counts': {
+                str(su_type): len(topology_consumed.get(int(su_type), set()))
+                for su_type in sorted(su_types)
+            },
+            'residual_consumed_counts': {
+                str(su_type): len(residual_consumed.get(int(su_type), set()))
+                for su_type in sorted(su_types)
+            },
+            'remaining_counts': {
+                str(su_type): len(remaining.get(int(su_type), set()))
+                for su_type in sorted(su_types)
+            },
+            'shortage_counts': {
+                str(key): int(value)
+                for key, value in dict(base.get('shortage_counts', {}) or {}).items()
+                if int(value) > 0
+            },
+            'snapshot_stage': 'stage3_committed',
+        }
+
     def _final_topology_rows(
         self,
         nodes: List[_NodeV3],
         S_target: Optional[torch.Tensor] = None,
         E_target: Optional[torch.Tensor] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        fresh_audit = audit_stage3_topology(
-            H=self._histogram_from_nodes(list(nodes or [])).detach().cpu().long(),
-            nodes=list(nodes or []),
-            fixed_partition_meta=getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {},
-            S_target=S_target,
-            E_target=E_target,
-            allow_conversions=False,
-            enable_spectrum_rebalance=False,
+        current_node_ids = sorted({
+            int(getattr(node, 'global_id', -1)) for node in list(nodes or [])
+        })
+        snapshot = dict(
+            getattr(self, '_final_stage3_completion_diagnostics', {}) or {}
         )
+        snapshot_ids = sorted({
+            int(value) for value in list(
+                snapshot.get('node_ids', [])
+                or getattr(self, '_final_stage3_snapshot_node_ids', [])
+                or []
+            )
+        })
+        use_snapshot = bool(
+            getattr(self, '_final_stage3_snapshot_authoritative', False)
+            and snapshot.get('stage3_complete', False)
+            and snapshot_ids
+            and snapshot_ids == current_node_ids
+        )
+        if use_snapshot:
+            # This is intentionally a read-only projection of the committed
+            # Stage3 ledger.  It prevents post-Layer3 reclassification from
+            # reopening already completed phases or losing SU24 ownership.
+            fresh_audit = {
+                'ok': True,
+                'reason': 'stage3_complete',
+                'requires_conversion': False,
+                'products': [dict(item or {}) for item in list(snapshot.get('products', []) or [])],
+                'pending_contracts': [],
+                'classification': dict(snapshot.get('classification', {}) or {}),
+                'external_assembly': dict(snapshot.get('external_assembly', {}) or {}),
+                'ownership_ledger': dict(snapshot.get('ownership_ledger', {}) or {}),
+                'resource_ledger': dict(snapshot.get('resource_ledger', {}) or {}),
+                'resource_accounting': dict(snapshot.get('resource_accounting', {}) or {'ok': True, 'errors': []}),
+                'infeasibility_proof': {},
+                'plan': {'phase': 'complete', 'reason': 'stage3_complete'},
+                'authoritative_stage3_snapshot': True,
+            }
+        else:
+            fresh_audit = audit_stage3_topology(
+                H=self._histogram_from_nodes(list(nodes or [])).detach().cpu().long(),
+                nodes=list(nodes or []),
+                fixed_partition_meta=getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {},
+                S_target=S_target,
+                E_target=E_target,
+                allow_conversions=False,
+                enable_spectrum_rebalance=False,
+                protected_terminal_aromatic_node_ids=list(
+                    getattr(
+                        self,
+                        '_stage3_terminal_aromatic_node_ids',
+                        [],
+                    )
+                    or []
+                ),
+            )
         classification_dict = dict(fresh_audit.get('classification', {}) or {})
         assembly_dict = dict(fresh_audit.get('external_assembly', {}) or {})
         public_rows = [
@@ -828,6 +967,14 @@ class InversePipelineV3:
                 for state in ('remaining_closure_resource', 'remaining_aromatic_donor')
                 for value in list(states.get(state, []) or [])
             }
+            fixed_ids_for_coverage = {
+                int(value)
+                for value in list(states.get('fixed_topology_core', []) or [])
+            }
+            support_ids_for_coverage = {
+                int(value)
+                for value in list(states.get('support_context', []) or [])
+            }
             conflict_ids_for_coverage = {
                 int(value)
                 for value in list(states.get('unclassified_or_conflict', []) or [])
@@ -845,8 +992,9 @@ class InversePipelineV3:
                     - completed_ids_for_coverage
                     - pending_ids_for_coverage
                     - resource_ids_for_coverage
+                    - fixed_ids_for_coverage
+                    - support_ids_for_coverage
                     - conflict_ids_for_coverage
-                    - {int(value) for value in list(states.get('support_context', []) or [])}
                 ),
             }
         terminal_residual_complete = bool(completion_matches)
@@ -925,6 +1073,9 @@ class InversePipelineV3:
                 'fresh_stage3_audit': {
                     'ok': bool(fresh_audit.get('ok', False)),
                     'reason': str(fresh_audit.get('reason', '') or ''),
+                    'authoritative_stage3_snapshot': bool(
+                        fresh_audit.get('authoritative_stage3_snapshot', False)
+                    ),
                     'requires_conversion': bool(
                         fresh_audit.get('requires_conversion', False)
                     ),
@@ -993,6 +1144,20 @@ class InversePipelineV3:
             int(node_id)
             for state in ('remaining_closure_resource', 'remaining_aromatic_donor')
             for node_id in list(ownership_states.get(state, []) or [])
+        }
+        fixed_topology_ids = {
+            int(node_id)
+            for node_id in list(ownership_states.get('fixed_topology_core', []) or [])
+        }
+        support_context_ids = {
+            int(node_id)
+            for node_id in list(ownership_states.get('support_context', []) or [])
+        }
+        ownership_conflict_ids = {
+            int(node_id)
+            for node_id in list(
+                ownership_states.get('unclassified_or_conflict', []) or []
+            )
         }
         invariant_conflicts: List[Dict[str, Any]] = []
         for left_name, left_ids, right_name, right_ids in (
@@ -1083,11 +1248,17 @@ class InversePipelineV3:
             **{int(value): 'completed_topology' for value in completed_ids},
             **{int(value): 'pending_topology' for value in pending_ids},
             **{int(value): 'available_resource' for value in resource_ids},
+            **{int(value): 'fixed_topology_core' for value in fixed_topology_ids},
+            **{int(value): 'support_context' for value in support_context_ids},
+            **{
+                int(value): 'unclassified_or_conflict'
+                for value in ownership_conflict_ids
+            },
         }
         for group in list(classification_dict.get('atomic_groups', []) or []):
             group_ids = [int(value) for value in list(dict(group or {}).get('node_ids', []) or [])]
             states = {identity_by_node.get(int(value), 'other') for value in group_ids}
-            if 'other' in states:
+            if 'other' in states or 'unclassified_or_conflict' in states:
                 invariant_conflicts.append({
                     'reason': 'atomic_pair_unowned',
                     'group_id': int(dict(group or {}).get('group_id', -1) or -1),
@@ -1509,7 +1680,8 @@ class InversePipelineV3:
 
         def rebuild_fn(H_seed: torch.Tensor,
                        phase: str,
-                       cycle_idx: int) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, Any], float]:
+                       cycle_idx: int,
+                       nodes_seed: Optional[List[_NodeV3]] = None) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, Any], float]:
             layer1_stage3_cfg = dict(layer1_runtime_cfg)
             cand_nodes, cand_H, cand_diff, cand_r2 = self._run_layer12_cycle(
                 H_seed=H_seed.detach().clone(),
@@ -1518,6 +1690,7 @@ class InversePipelineV3:
                 eval_lib_path=eval_lib_path,
                 layer1_runtime_cfg=layer1_stage3_cfg,
                 eval_nmr=False,
+                identity_seed_nodes=nodes_seed,
             )
             cand_H = self._histogram_from_nodes(cand_nodes).detach().clone()
             cand_diff = dict(cand_diff or {})
@@ -1572,6 +1745,16 @@ class InversePipelineV3:
             spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
             spectrum_min_r2_gain=float(spectrum_min_r2_gain),
         )
+
+        self._stage3_terminal_aromatic_node_ids = sorted({
+            int(value)
+            for value in list(
+                dict(getattr(workflow_result, 'diagnostics', {}) or {}).get(
+                    'protected_terminal_aromatic_node_ids', []
+                )
+                or []
+            )
+        })
 
         meta = workflow_result.to_dict()
         meta['stage'] = 'topology_resource_adjustment'
@@ -1641,6 +1824,62 @@ class InversePipelineV3:
                 'phase_result': dict(plan_dict.get('phase_result', {}) or {}),
             }
             break
+        completion = dict(meta.get('completion_diagnostics', {}) or {})
+        if bool(completion.get('stage3_complete', False)):
+            # Persist the exact committed Stage3 ledger for the final report.
+            # Layer3 may change latent/template fields, but it must not cause
+            # topology products or SU24 ownership to be re-solved.
+            terminal_plan = {}
+            for cycle in reversed(workflow_cycles):
+                if str(getattr(cycle, 'stop_reason', '') or '') == 'stage3_complete':
+                    terminal_plan = dict(getattr(cycle, 'plan', {}) or {})
+                    break
+            runtime = dict(terminal_plan.get('runtime', {}) or {})
+            assembly = dict(
+                runtime.get('assembly_before_adjustment_dict', {})
+                or runtime.get('phase_evaluation_dict', {}).get('assembly_view', {})
+                or {}
+            )
+            diagnostics = dict(terminal_plan.get('diagnostics', {}) or {})
+            resource_ledger = dict(
+                diagnostics.get('resource_ledger', {})
+                or assembly.get('resource_ledger', {})
+                or {}
+            )
+            completion_ownership = dict(completion.get('ownership_ledger', {}) or {})
+            resource_ledger = self._stage3_completion_resource_ledger(
+                list(completion.get('products', []) or []),
+                completion_ownership,
+                resource_ledger,
+            )
+            completion_snapshot = {
+                **completion,
+                'node_ids': sorted({
+                    int(getattr(node, 'global_id', -1))
+                    for node in list(getattr(workflow_result, 'nodes', []) or [])
+                }),
+                'classification': dict(
+                    runtime.get('classification_before_adjustment_dict', {}) or {}
+                ),
+                'external_assembly': dict(
+                    runtime.get('assembly_before_adjustment_dict', {})
+                    or runtime.get('phase_evaluation_dict', {}).get('assembly_view', {})
+                    or {}
+                ),
+                'resource_ledger': resource_ledger,
+                'resource_accounting': dict(
+                    diagnostics.get('resource_accounting', {}) or {}
+                ),
+            }
+            self._final_stage3_completion_diagnostics = completion_snapshot
+            self._final_stage3_snapshot_node_ids = list(completion_snapshot['node_ids'])
+            self._final_stage3_snapshot_authoritative = True
+            self._final_stage3_terminal_diagnostics = {}
+        else:
+            self._final_stage3_completion_diagnostics = {}
+            self._final_stage3_snapshot_node_ids = []
+            self._final_stage3_snapshot_authoritative = False
+            self._final_stage3_terminal_diagnostics = dict(meta.get('terminal_diagnostics', {}) or {})
         return (
             list(getattr(workflow_result, 'nodes', []) or []),
             torch.clamp(getattr(workflow_result, 'H', H).detach().clone(), min=0).long(),
@@ -2135,6 +2374,11 @@ class InversePipelineV3:
         print("=" * 80)
         print("InversePipelineV3: 开始逆向推理")
         print("=" * 80)
+        self._stage3_terminal_aromatic_node_ids = []
+        self._final_stage3_completion_diagnostics = {}
+        self._final_stage3_terminal_diagnostics = {}
+        self._final_stage3_snapshot_node_ids = []
+        self._final_stage3_snapshot_authoritative = False
 
         layer1_runtime_cfg, layer3_runtime_cfg = self._build_layer_runtime_configs(
             layer1_config=layer1_config,
@@ -2761,6 +3005,20 @@ class InversePipelineV3:
             )
         except Exception as e:
             print(f"[Final Stage3 Resource Summary] 保存失败: {e}")
+        try:
+            rl_mtcs_payload = self.build_rl_mtcs_input(
+                nodes=nodes,
+                S_target=S_target,
+                E_target=E_target,
+            )
+            self._save_rl_mtcs_input(
+                rl_mtcs_payload,
+                output_dir=str(Path(output_dir) / 'final_outputs'),
+            )
+        except Exception as e:
+            # The inverse result remains usable for diagnostics even when a
+            # final placement contract cannot be exported.
+            print(f"[RL_MTCS Input Export] 保存失败: {e}")
 
         print("\n" + "=" * 80)
         print("最终结果汇总")
@@ -3113,6 +3371,38 @@ class InversePipelineV3:
                 )
             except Exception as e:
                 print(f"[Final Result Summary] 保存失败: {e}")
+
+    def build_rl_mtcs_input(
+        self,
+        nodes: List[_NodeV3],
+        S_target: Optional[torch.Tensor] = None,
+        E_target: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """Return the immutable inverse contract consumed by ``RL_MTCS``.
+
+        The audit is deliberately rerun from the final accepted graph so the
+        exported node ownership and products cannot refer to an earlier outer
+        cycle.  No resource allocation or substitution is performed here.
+        """
+        node_list = list(nodes or [])
+        H = self._histogram_from_nodes(node_list).detach().clone()
+        audit = audit_stage3_topology(
+            H=H,
+            nodes=node_list,
+            fixed_partition_meta=getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {},
+            S_target=S_target,
+            E_target=E_target,
+            allow_conversions=False,
+            enable_spectrum_rebalance=False,
+        )
+        return build_rl_mtcs_payload(node_list, audit)
+
+    @staticmethod
+    def _save_rl_mtcs_input(payload: Dict[str, Any], output_dir: str) -> None:
+        target_dir = Path(output_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        with open(target_dir / 'rl_mtcs_input.json', 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, default=str)
 
     def _build_final_node_rows(self, nodes: List[_NodeV3]) -> List[Dict[str, Any]]:
         su_names = [name for name, _ in SU_DEFS]

@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 from .histogram_adjustment import build_histogram_adjustment_plan
 from .phase_eval import build_stage3_phase_evaluation, classify_topology_units
 from .resource_accounting import build_resource_accounting_snapshot
-from .stage3_models import Stage3AdjustmentPlan
+from .stage3_models import Stage3AdjustmentPlan, Stage3ProgressPhase
 from .stage3_state_machine import plan_stage3_state_machine
 
 
@@ -139,10 +139,17 @@ def plan_stage3_resource_adjustments(
     residual_side_min_23: int = 1,
     special_degree_meta: Optional[Dict[str, Any]] = None,
     su11_rotation_index: int = 0,
+    su24_nonfused_cursor: int = 0,
+    allow_h_outside_nonworsening: bool = False,
+    protected_terminal_aromatic_node_ids: Optional[Any] = None,
+    pending_su24_ring_candidate: Optional[Dict[str, Any]] = None,
+    pending_residual_product_candidate: Optional[Dict[str, Any]] = None,
+    pending_terminal_su24_node_ids: Optional[Any] = None,
+    committed_topology_products: Optional[Any] = None,
     generation_id: int = 0,
     difference_spectrum: Optional[Dict[str, Any]] = None,
     enable_post_external_spectrum: bool = True,
-    post_external_resume_phase: str = "remaining_pool_spectrum_rebalance",
+    progress_phase: Stage3ProgressPhase = Stage3ProgressPhase.SPECTRUM_REBALANCE,
     spectrum_candidate_limit: int = 2,
     spectrum_max_primary_adjustments: int = 10,
     rejected_spectrum_histogram_signatures: Optional[Any] = None,
@@ -152,6 +159,9 @@ def plan_stage3_resource_adjustments(
     classification = classify_topology_units(
         list(nodes or []),
         fixed_partition_meta=fixed_partition_meta,
+        protected_terminal_aromatic_node_ids=(
+            protected_terminal_aromatic_node_ids
+        ),
     )
     phase_eval = build_stage3_phase_evaluation(
         nodes=list(nodes or []),
@@ -170,7 +180,7 @@ def plan_stage3_resource_adjustments(
         E_target=E_target,
         difference_spectrum=difference_spectrum,
         enable_post_external_spectrum=enable_post_external_spectrum,
-        post_external_resume_phase=str(post_external_resume_phase),
+        progress_phase=progress_phase,
         spectrum_candidate_limit=spectrum_candidate_limit,
         spectrum_max_primary_adjustments=spectrum_max_primary_adjustments,
         rejected_spectrum_histogram_signatures=rejected_spectrum_histogram_signatures,
@@ -185,6 +195,17 @@ def plan_stage3_resource_adjustments(
         residual_side_min_23=residual_side_min_23,
         special_degree_meta=special_degree_meta,
         su11_rotation_index=su11_rotation_index,
+        su24_nonfused_cursor=su24_nonfused_cursor,
+        allow_h_outside_nonworsening=allow_h_outside_nonworsening,
+        protected_terminal_aromatic_node_ids=(
+            protected_terminal_aromatic_node_ids
+        ),
+        pending_su24_ring_candidate=pending_su24_ring_candidate,
+        pending_residual_product_candidate=(
+            pending_residual_product_candidate
+        ),
+        pending_terminal_su24_node_ids=pending_terminal_su24_node_ids,
+        committed_topology_products=committed_topology_products,
     )
     plan.runtime.setdefault("classification_before_adjustment", classification)
     plan.runtime.setdefault("classification_before_adjustment_dict", classification.to_dict())
@@ -223,6 +244,7 @@ def audit_stage3_topology(
     residual_flex_min_23: int = 2,
     residual_side_preferred_23: int = 2,
     residual_side_min_23: int = 1,
+    protected_terminal_aromatic_node_ids: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Run one read-only Stage3 pass from the supplied current graph state."""
     max_primary = 10 if bool(allow_conversions) else 0
@@ -241,7 +263,10 @@ def audit_stage3_topology(
         residual_side_min_23=residual_side_min_23,
         generation_id=int(generation_id),
         enable_post_external_spectrum=bool(enable_spectrum_rebalance),
-        post_external_resume_phase="remaining_pool_spectrum_rebalance",
+        progress_phase=Stage3ProgressPhase.SPECTRUM_REBALANCE,
+        protected_terminal_aromatic_node_ids=(
+            protected_terminal_aromatic_node_ids
+        ),
     )
     runtime = dict(getattr(plan, "runtime", {}) or {})
     phase_eval = runtime.get("phase_evaluation")
@@ -353,10 +378,10 @@ def audit_stage3_topology(
         committed_claimed_ids_by_su=claimed_ids,
         groups=groups,
     ) if (aggregate_ids or remaining_ids or claimed_ids) else {
-        "ok": False,
+        "ok": True,
         "errors": [],
         "skipped": True,
-        "reason": "fresh_audit_resource_snapshot_unavailable",
+        "reason": "no_stage3_resource_nodes",
     }
     phase_result = getattr(plan, "phase_result", None)
     proof = dict(

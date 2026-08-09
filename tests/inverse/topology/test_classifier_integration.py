@@ -157,6 +157,20 @@ def test_resource_pool_separates_general_resources_from_su11_donors() -> None:
     assert pool["su11_donor_ids_by_su"] == {"10": [10], "12": [12], "13": [13]}
 
 
+def test_terminalized_su24_aromatics_are_not_reintroduced_as_donors() -> None:
+    nodes = [make_node(12, 12), make_node(13, 13), make_node(23, 23)]
+
+    result = classify_topology_units(
+        nodes,
+        protected_terminal_aromatic_node_ids=[12, 13],
+    )
+    pool = dict(result.resource_pool or {})
+
+    assert pool["su11_donor_ids_by_su"] == {"10": [], "12": [], "13": []}
+    assert pool["remaining_ids_by_su"]["23"] == [23]
+    assert pool["protected_terminal_aromatic_node_ids"] == [12, 13]
+
+
 def test_classifier_csv_regression_key_nodes_print() -> None:
     nodes = load_nodes_from_final_csv(CSV_PATH, fixture_infer_fixed_connectors=True)
     result = classify_topology_units(nodes)
