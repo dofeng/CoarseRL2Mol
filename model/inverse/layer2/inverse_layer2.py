@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import pandas as pd
 from collections import Counter, defaultdict
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Set
 from pathlib import Path
 
 from ...paths import Z_LIBRARY_DIR
@@ -20,19 +20,19 @@ from ...shared.inverse_common import (
 class Layer2Estimator:
     """
     Layer2: 2-hop 推导和模板检索
-    
+
     功能：
     1. 从1-hop邻居推导2-hop邻居
     2. 模板精确匹配和近似匹配
     3. z向量初始化
     4. mu/pi重建和NMR评估
     """
-    
+
     def __init__(self, device: torch.device = None,
                  lib_path: Optional[str] = None):
         """
         初始化 Layer2 估计器
-        
+
         Args:
             device: 计算设备
             lib_path: 子图库路径
@@ -44,16 +44,16 @@ class Layer2Estimator:
             for i in range(NUM_SU_TYPES)
             if float(E_SU[int(i), 0].detach().cpu().item()) > 0.0
         }
-        
+
         # 路径配置
         base_dir = Z_LIBRARY_DIR
         self.lib_path = lib_path or str(base_dir / 'subgraph_library.pt')
-        
-        
+
+
         # 缓存
         self._template_cache = None
         self._layer1_mu_prior_cache = None
-        
+
         # 统计
         self.stats = {
             'exact_match': 0,
@@ -88,6 +88,11 @@ class Layer2Estimator:
             score_components['layer2_sample_idx'] = None
             score_components['layer2_spectral_source'] = 'unassigned'
             score_components['spectral_source'] = 'unassigned'
+            score_components['layer2_candidate_count'] = 0
+            score_components['layer2_residual_sse_before'] = None
+            score_components['layer2_residual_sse_after'] = None
+            score_components['layer2_residual_sse_gain'] = None
+            score_components['layer2_negative_overshoot'] = None
 
     def _valid_mu(self, mu: Optional[float]) -> bool:
         try:
@@ -171,50 +176,61 @@ class Layer2Estimator:
         except Exception:
             pass
         return self._get_layer1_mu_prior(center_su, hop1_ms, lib)
-    
+
     # ========================================================================
     # 主方法
     # ========================================================================
-    
+
     def layer2_assign(self, nodes: List[_NodeV3],
                       S_target: torch.Tensor,
                       E_target: torch.Tensor,
-                      output_dir: Optional[str] = None) -> List[_NodeV3]:
+                      output_dir: Optional[str] = None,
+                      verbose: bool = False,
+                      emit_summary: bool = True) -> List[_NodeV3]:
         """
         Layer2: 为每个节点分配2-hop邻居和z向量
-        
+
         Args:
             nodes: Layer1分配后的节点列表
             S_target: 目标谱图
             E_target: 目标元素组成
             output_dir: 输出目录
-        
+
         Returns:
             nodes: 更新后的节点列表
         """
         device = self.device
         S_target = S_target.to(device).flatten()
         E_target = E_target.to(device).flatten()
-        
-        print("\n" + "=" * 60)
-        print("Layer2: 2-hop推导 & 模板匹配")
-        print("=" * 60)
+
+        if verbose:
+            print("\n" + "=" * 60)
+            print("Layer2: 2-hop推导 & 模板匹配")
+            print("=" * 60)
 
         self.stats = {
             'exact_match': 0,
             'approx_match': 0,
             'missing': 0,
+            'forced_approx': 0,
+            'ambiguous_approx': 0,
+            'approx_residual_fill': 0,
+            'approx_least_damage': 0,
+            'inventory_filtered_candidates': 0,
         }
-        
+
         # 2-hop推导
         self._derive_hop2(nodes)
-        
+
         # 加载模板库
         lib = self._get_template_library()
         if lib is None:
             raise RuntimeError(f"Layer2 template library unavailable: {self.lib_path}")
-        templates = lib.get('templates', {})
         coverage_errors: List[str] = []
+        fixed_assignments: List[Dict[str, object]] = []
+        ambiguous_assignments: List[Dict[str, object]] = []
+        available_su_types = {int(node.su_type) for node in nodes}
+        inventory_filtered_su_types = Counter()
 
         for n in nodes:
             center_su = int(n.su_type)
@@ -243,72 +259,174 @@ class Layer2Estimator:
             except Exception as e:
                 import logging
                 logging.debug(f"Failed to get mu_prior for node {n.global_id}: {e}")
-            
-            # 查找最佳模板
-            tpl_key, mode, match_meta = self._select_template_key(
+
+            inventory_filter_diag: Dict[str, object] = {}
+            mode, candidates = self._minimum_hop2_distance_candidates(
                 center_su,
                 hop1_ms,
                 hop2_ms,
                 mu_prior_val,
                 lib,
+                available_su_types=available_su_types,
+                filter_diagnostics=inventory_filter_diag,
             )
-            tpl = templates.get(tpl_key, None) if tpl_key else None
-            if tpl_key is not None and not isinstance(tpl, dict):
-                tpl_key = None
-                mode = 'missing'
-            self._reset_node_template_state(
-                n,
-                device=device,
-                template_key=tpl_key,
-                match_mode=mode,
-                mu_prior=mu_prior_val,
+            self.stats['inventory_filtered_candidates'] += int(
+                inventory_filter_diag.get('filtered_candidates', 0)
             )
-
+            inventory_filtered_su_types.update(
+                inventory_filter_diag.get('filtered_su_types', {})
+            )
             if mode == 'exact':
                 self.stats['exact_match'] += 1
-            elif mode.startswith('approx'):
+                fixed_assignments.append({
+                    'node': n,
+                    'candidate': candidates[0],
+                    'mode': 'exact',
+                    'mu_prior': mu_prior_val,
+                    'candidate_count': 1,
+                })
+            elif candidates:
                 self.stats['approx_match'] += 1
+                assignment = {
+                    'node': n,
+                    'candidates': candidates,
+                    'mu_prior': mu_prior_val,
+                    'candidate_count': len(candidates),
+                }
+                if len(candidates) == 1:
+                    self.stats['forced_approx'] += 1
+                    fixed_assignments.append({
+                        'node': n,
+                        'candidate': candidates[0],
+                        'mode': 'forced_approx',
+                        'mu_prior': mu_prior_val,
+                        'candidate_count': 1,
+                    })
+                else:
+                    self.stats['ambiguous_approx'] += 1
+                    ambiguous_assignments.append(assignment)
+                    self._reset_node_template_state(
+                        n,
+                        device=device,
+                        template_key=None,
+                        match_mode='approx_pending',
+                        mu_prior=mu_prior_val,
+                    )
+                    n.score_components['layer2_candidate_count'] = len(candidates)
             else:
                 self.stats['missing'] += 1
-                coverage_errors.append(
-                    f"node={int(n.global_id)} SU{center_su} has no template with exact "
-                    f"hop1={list(hop1_ms)} for derived hop2={list(hop2_ms)}"
+                self._reset_node_template_state(
+                    n,
+                    device=device,
+                    template_key=None,
+                    match_mode='missing',
+                    mu_prior=mu_prior_val,
                 )
-                continue
-            
-            try:
-                if isinstance(getattr(n, 'score_components', None), dict) and isinstance(tpl, dict):
-                    n.score_components['layer2_template_mu'] = float(tpl.get('center_mu')) if tpl.get('center_mu') is not None else None
-                    n.score_components['layer2_template_sample_count'] = int(tpl.get('sample_count', 0))
-                    n.score_components['layer2_hop2_diff_nodes'] = match_meta.get('hop2_diff_nodes')
-                    n.score_components['layer2_hop2_match_tier'] = match_meta.get('hop2_match_tier')
-                    n.score_components['layer2_mu_diff'] = match_meta.get('mu_diff')
-            except Exception as e:
-                import logging
-                logging.debug(f"Failed to save template info for node {n.global_id}: {e}")
+                if mode == 'missing_inventory':
+                    coverage_errors.append(
+                        f"node={int(n.global_id)} SU{center_su} has no inventory-compatible "
+                        f"approximate template; absent_su_types="
+                        f"{sorted(int(value) for value in inventory_filter_diag.get('filtered_su_types', {}))}"
+                    )
+                else:
+                    coverage_errors.append(
+                        f"node={int(n.global_id)} SU{center_su} has no template with exact "
+                        f"hop1={list(hop1_ms)} for derived hop2={list(hop2_ms)}"
+                    )
 
-            center_z = tpl.get('center_z') if isinstance(tpl, dict) else None
-            if not torch.is_tensor(center_z) or int(center_z.numel()) <= 0:
+        self.stats['inventory_filtered_su_types'] = dict(
+            sorted((int(key), int(value)) for key, value in inventory_filtered_su_types.items())
+        )
+
+        for assignment in fixed_assignments:
+            error = self._assign_template_candidate(
+                node=assignment['node'],
+                candidate=assignment['candidate'],
+                match_mode=str(assignment['mode']),
+                mu_prior=assignment['mu_prior'],
+                candidate_count=int(assignment['candidate_count']),
+            )
+            if error:
+                coverage_errors.append(error)
+
+        fixed_recon = self.reconstruct_spectrum(nodes).to(device=device, dtype=torch.float64)
+        target_eval = S_target.to(device=device, dtype=torch.float64).flatten()
+        eval_size = min(int(target_eval.numel()), int(fixed_recon.numel()))
+        target_eval = target_eval[:eval_size]
+        current_recon = fixed_recon
+        current_residual = target_eval - current_recon[:eval_size]
+        self.stats['fixed_reconstruction_sse'] = float(
+            torch.sum(current_residual * current_residual).item()
+        )
+
+        ambiguous_assignments.sort(key=lambda item: (
+            int(item['candidates'][0]['hop2_match_tier']),
+            int(item['candidate_count']),
+            int(item['node'].global_id),
+        ))
+        ppm_axis = PPM_AXIS.to(device=device, dtype=torch.float64).flatten()
+        for assignment in ambiguous_assignments:
+            node = assignment['node']
+            mu_prior_val = assignment['mu_prior']
+            candidates = assignment['candidates']
+            current_sse = float(torch.sum(current_residual * current_residual).item())
+            scored_candidates: List[Tuple[Tuple[object, ...], Dict[str, object], torch.Tensor, float, float]] = []
+
+            for candidate in candidates:
+                validation_error = self._validate_template_candidate(node, candidate)
+                if validation_error:
+                    continue
+                template_mu = float(candidate['template_mu'])
+                peak = self._unit_peak(template_mu, ppm_axis)
+                candidate_residual = current_residual - peak[:eval_size]
+                candidate_sse = float(torch.sum(candidate_residual * candidate_residual).item())
+                negative_overshoot = float(
+                    torch.clamp(-candidate_residual, min=0.0).max().item()
+                ) if eval_size > 0 else 0.0
+                rank = (
+                    candidate_sse,
+                    negative_overshoot,
+                    *self._candidate_prior_rank(candidate, mu_prior_val),
+                )
+                scored_candidates.append((
+                    rank,
+                    candidate,
+                    peak,
+                    candidate_sse,
+                    negative_overshoot,
+                ))
+
+            if not scored_candidates:
                 coverage_errors.append(
-                    f"node={int(n.global_id)} template={tpl_key} has no center_z"
+                    f"node={int(node.global_id)} has no valid template in minimum "
+                    f"hop2-distance tier"
                 )
                 continue
-            n.z_vec = center_z.detach().clone().to(device)
-            template_mu = tpl.get('center_mu') if isinstance(tpl, dict) else None
-            if not self._valid_mu(template_mu):
-                coverage_errors.append(
-                    f"node={int(n.global_id)} template={tpl_key} has invalid center_mu={template_mu}"
-                )
+
+            _, chosen, chosen_peak, chosen_sse, negative_overshoot = min(
+                scored_candidates,
+                key=lambda item: item[0],
+            )
+            improves_residual = bool(chosen_sse < current_sse - 1e-12)
+            match_mode = 'approx_residual_fill' if improves_residual else 'approx_least_damage'
+            self.stats[match_mode] += 1
+            error = self._assign_template_candidate(
+                node=node,
+                candidate=chosen,
+                match_mode=match_mode,
+                mu_prior=mu_prior_val,
+                candidate_count=int(assignment['candidate_count']),
+                residual_meta={
+                    'sse_before': current_sse,
+                    'sse_after': chosen_sse,
+                    'negative_overshoot': negative_overshoot,
+                },
+            )
+            if error:
+                coverage_errors.append(error)
                 continue
-            n.mu = float(template_mu)
-            n.pi = 1.0
-            score_components = getattr(n, 'score_components', None)
-            if isinstance(score_components, dict):
-                score_components['layer2_library_mu'] = float(template_mu)
-                score_components['layer2_library_source'] = 'template_center_mu'
-                score_components['layer2_sample_idx'] = int(tpl.get('center_sample_idx', -1))
-                score_components['layer2_spectral_source'] = 'layer2_template_center_mu'
-                score_components['spectral_source'] = 'layer2_template_center_mu'
+            current_recon = current_recon + chosen_peak
+            current_residual = target_eval - current_recon[:eval_size]
 
         if coverage_errors:
             preview = " | ".join(coverage_errors[:8])
@@ -318,9 +436,7 @@ class Layer2Estimator:
 
         self.stats['selected_spectral_source'] = 'template'
         self.stats['spectral_contract'] = 'template_center_mu'
-        
-        print(f"  匹配: 精确={self.stats['exact_match']}, 近似={self.stats['approx_match']}, 未匹配={self.stats['missing']}")
-        
+
         # NMR评估
         S_recon = self.reconstruct_spectrum(nodes)
         eval_info = evaluate_spectrum_reconstruction(
@@ -329,8 +445,27 @@ class Layer2Estimator:
             ppm_axis=PPM_AXIS.to(device),
         )
         r2 = float(eval_info.get('r2', 0.0))
-        print(f"  R²={r2:.4f}")
-        
+        if verbose:
+            print(f"  匹配: 精确={self.stats['exact_match']}, 近似={self.stats['approx_match']}, 未匹配={self.stats['missing']}")
+            print(
+                f"  近似选择: 唯一={self.stats['forced_approx']}, "
+                f"补差谱={self.stats['approx_residual_fill']}, "
+                f"最小损伤={self.stats['approx_least_damage']}, "
+                f"库存过滤={self.stats['inventory_filtered_candidates']}"
+            )
+            print(f"  R²={r2:.4f}")
+        elif emit_summary:
+            print(
+                f"[Layer2] exact={self.stats['exact_match']} "
+                f"approx={self.stats['approx_match']} "
+                f"(forced={self.stats['forced_approx']} "
+                f"fill={self.stats['approx_residual_fill']} "
+                f"damage={self.stats['approx_least_damage']}) "
+                f"filtered={self.stats['inventory_filtered_candidates']} "
+                f"missing={self.stats['missing']} r2={r2:.4f}",
+                flush=True,
+            )
+
         # 保存结果
         if output_dir:
             self._save_results(nodes, S_target, S_recon, r2, output_dir)
@@ -340,15 +475,16 @@ class Layer2Estimator:
                 pd.DataFrame(match_detail_rows).to_csv(str(Path(output_dir) / 'layer2_template_match_detail.csv'), index=False)
             except Exception as e:
                 print(f"  [Layer2] 保存模板匹配明细失败: {e}")
-        
-        print("Layer2 完成\n")
-        
+
+        if verbose:
+            print("Layer2 完成\n")
+
         return nodes
-    
+
     # ========================================================================
     # 2-hop 推导
     # ========================================================================
-    
+
     def _derive_hop2(self, nodes: List[_NodeV3]):
         """从1-hop邻居推导2-hop邻居"""
         node_map: Dict[int, _NodeV3] = {}
@@ -363,7 +499,7 @@ class Layer2Estimator:
             c_id = int(n.global_id)
             hop2 = Counter()
             hop2_ids = set()
-            
+
             for nb_id in n.hop1_ids:
                 try:
                     nb = node_map.get(int(nb_id), None)
@@ -376,14 +512,14 @@ class Layer2Estimator:
                         continue
                 except Exception:
                     continue
-                
+
                 for nb2_id in nb.hop1_ids:
                     nb2_id_i = int(nb2_id)
                     if nb2_id_i == c_id:
                         continue
                     if nb2_id_i in hop2_ids:
                         continue
-                    
+
                     try:
                         nb2 = node_map.get(nb2_id_i, None)
                         if nb2 is None:
@@ -395,26 +531,26 @@ class Layer2Estimator:
                         su2 = int(nb2.su_type)
                     except:
                         continue
-                    
+
                     hop2[su2] += 1
                     hop2_ids.add(nb2_id_i)
-            
+
             n.hop2_su = hop2
             n.hop2_ids = sorted(int(node_id) for node_id in hop2_ids)
-    
+
     # ========================================================================
     # 模板检索
     # ========================================================================
-    
+
     def _get_template_library(self) -> Optional[Dict]:
         """获取模板库（带缓存）"""
         if self._template_cache is not None:
             return self._template_cache
-        
+
         lib_path = self.lib_path
         if not Path(lib_path).exists():
             return None
-        
+
         try:
             import warnings
             with warnings.catch_warnings():
@@ -448,7 +584,7 @@ class Layer2Estimator:
                     mu_tpl = None
                 item = (kt, h1_t, h2_t, int(sample_count), mu_tpl)
                 center_hop1_index[(int(center_su), tuple(h1_t))].append(item)
-            
+
             self._template_cache = {
                 'templates': templates,
                 'center_index': center_index,
@@ -458,101 +594,263 @@ class Layer2Estimator:
         except Exception as e:
             print(f"  加载模板库失败: {e}")
             return None
-    
+
     def _select_template_key(self, center_su: int,
                               hop1_ms: Tuple[int, ...],
                               hop2_ms: Tuple[int, ...],
                               mu_prior: Optional[float],
                               lib: Dict) -> Tuple[Optional[Tuple], str, Dict[str, object]]:
-        """选择最佳模板键"""
+        """Backward-compatible single-template lookup used by diagnostics/tests."""
+        mode, candidates = self._minimum_hop2_distance_candidates(
+            center_su,
+            hop1_ms,
+            hop2_ms,
+            mu_prior,
+            lib,
+        )
+        if not candidates:
+            return None, 'missing', self._missing_match_meta()
+        if mode == 'exact':
+            chosen = candidates[0]
+            return chosen['key'], 'exact', self._candidate_match_meta(chosen)
+
+        chosen = min(
+            candidates,
+            key=lambda candidate: self._candidate_prior_rank(candidate, mu_prior),
+        )
+        return chosen['key'], 'approx_h2', self._candidate_match_meta(chosen)
+
+    @staticmethod
+    def _missing_match_meta() -> Dict[str, object]:
+        return {
+            'chosen_hop1': (),
+            'chosen_hop2': (),
+            'hop2_diff_nodes': '',
+            'hop2_match_tier': '',
+            'template_mu': '',
+            'mu_diff': '',
+        }
+
+    @staticmethod
+    def _template_key_rank(key: Tuple) -> Tuple[int, Tuple[int, ...], Tuple[int, ...]]:
+        return (
+            int(key[0]),
+            tuple(int(value) for value in tuple(key[1])),
+            tuple(int(value) for value in tuple(key[2])),
+        )
+
+    def _candidate_prior_rank(self,
+                              candidate: Dict[str, object],
+                              mu_prior: Optional[float]) -> Tuple[object, ...]:
+        template_mu = candidate.get('template_mu')
+        has_mu_prior = bool(mu_prior is not None and self._valid_mu(template_mu))
+        mu_diff = (
+            abs(float(template_mu) - float(mu_prior))
+            if has_mu_prior
+            else float('inf')
+        )
+        return (
+            int(not has_mu_prior),
+            float(mu_diff),
+            -int(candidate.get('sample_count', 0)),
+            self._template_key_rank(candidate['key']),
+        )
+
+    @staticmethod
+    def _candidate_match_meta(candidate: Dict[str, object]) -> Dict[str, object]:
+        return {
+            'chosen_hop1': tuple(candidate.get('chosen_hop1', ())),
+            'chosen_hop2': tuple(candidate.get('chosen_hop2', ())),
+            'hop2_diff_nodes': int(candidate.get('hop2_diff_nodes', 0)),
+            'hop2_match_tier': int(candidate.get('hop2_match_tier', 0)),
+            'template_mu': candidate.get('template_mu', ''),
+            'mu_diff': candidate.get('mu_diff', ''),
+        }
+
+    def _minimum_hop2_distance_candidates(
+            self,
+            center_su: int,
+            hop1_ms: Tuple[int, ...],
+            hop2_ms: Tuple[int, ...],
+            mu_prior: Optional[float],
+            lib: Dict,
+            available_su_types: Optional[Set[int]] = None,
+            filter_diagnostics: Optional[Dict[str, object]] = None,
+    ) -> Tuple[str, List[Dict[str, object]]]:
+        """Return all templates in the minimum 2-hop-distance tier."""
         templates = lib.get('templates', {})
-        
-        # 精确匹配
         key_exact = (int(center_su), tuple(hop1_ms), tuple(hop2_ms))
         if key_exact in templates:
             tpl = templates.get(key_exact, {})
-            return key_exact, 'exact', {
+            template_mu = tpl.get('center_mu') if isinstance(tpl, dict) else None
+            return 'exact', [{
+                'key': key_exact,
+                'template': tpl,
                 'chosen_hop1': tuple(hop1_ms),
                 'chosen_hop2': tuple(hop2_ms),
                 'hop2_diff_nodes': 0,
                 'hop2_match_tier': 0,
-                'template_mu': float(tpl.get('center_mu')) if isinstance(tpl, dict) and tpl.get('center_mu') is not None else None,
+                'template_mu': float(template_mu) if self._valid_mu(template_mu) else template_mu,
                 'mu_diff': 0.0,
-            }
-        
-        # 近似匹配
-        center_hop1_index = lib.get('center_hop1_index', {})
-        # 1-hop is fixed by Layer1 and must remain exact. Approximation is
-        # allowed only for the derived 2-hop multiset.
-        same_h1 = list(center_hop1_index.get((int(center_su), tuple(hop1_ms)), []) or [])
-        if not same_h1:
-            return None, 'missing', {
-                'chosen_hop1': (),
-                'chosen_hop2': (),
-                'hop2_diff_nodes': '',
-                'template_mu': '',
-                'mu_diff': '',
-            }
-        
-        best = None
-        best_meta: Dict[str, object] = {}
-        for kt, h1_t, h2_t, sc, mu_tpl in same_h1:
-            hop2_diff = multiset_diff_nodes(tuple(hop2_ms), tuple(h2_t))
+                'sample_count': int(tpl.get('sample_count', 0)) if isinstance(tpl, dict) else 0,
+            }]
 
-            mu_diff = abs(float(mu_tpl) - float(mu_prior)) if mu_prior is not None and mu_tpl is not None else float('inf')
-            mu_missing = int(not (mu_prior is not None and mu_tpl is not None))
-
-            cand = (
-                int(hop2_diff),
-                int(mu_missing),
-                float(mu_diff),
-                -int(sc),
-                kt,
+        same_h1 = list(
+            lib.get('center_hop1_index', {}).get(
+                (int(center_su), tuple(hop1_ms)),
+                [],
+            ) or []
+        )
+        candidates: List[Dict[str, object]] = []
+        seen_keys = set()
+        filtered_candidates = 0
+        filtered_su_types = Counter()
+        for kt, h1_t, h2_t, sample_count, indexed_mu in same_h1:
+            if kt in seen_keys:
+                continue
+            seen_keys.add(kt)
+            tpl = templates.get(kt)
+            if not isinstance(tpl, dict):
+                continue
+            candidate_hop2 = tuple(int(value) for value in tuple(h2_t))
+            if available_su_types is not None:
+                absent_su_types = sorted(
+                    set(candidate_hop2) - set(available_su_types)
+                )
+                if absent_su_types:
+                    filtered_candidates += 1
+                    filtered_su_types.update(absent_su_types)
+                    continue
+            template_mu = tpl.get('center_mu', indexed_mu)
+            hop2_diff = int(multiset_diff_nodes(tuple(hop2_ms), candidate_hop2))
+            mu_diff = (
+                abs(float(template_mu) - float(mu_prior))
+                if mu_prior is not None and self._valid_mu(template_mu)
+                else float('inf')
             )
-            if best is None or cand < best:
-                best = cand
-                best_meta = {
-                    'chosen_hop1': tuple(h1_t),
-                    'chosen_hop2': tuple(h2_t),
-                    'hop2_diff_nodes': int(hop2_diff),
-                    'hop2_match_tier': int(hop2_diff),
-                    'template_mu': float(mu_tpl) if mu_tpl is not None else '',
-                    'mu_diff': float(mu_diff) if np.isfinite(float(mu_diff)) else '',
-                }
+            candidates.append({
+                'key': kt,
+                'template': tpl,
+                'chosen_hop1': tuple(h1_t),
+                'chosen_hop2': candidate_hop2,
+                'hop2_diff_nodes': hop2_diff,
+                'hop2_match_tier': hop2_diff,
+                'template_mu': float(template_mu) if self._valid_mu(template_mu) else template_mu,
+                'mu_diff': float(mu_diff) if np.isfinite(mu_diff) else '',
+                'sample_count': int(tpl.get('sample_count', sample_count)),
+            })
 
-        if best is None:
-            return None, 'missing', {
-                'chosen_hop1': (),
-                'chosen_hop2': (),
-                'hop2_diff_nodes': '',
-                'template_mu': '',
-                'mu_diff': '',
-            }
-        return best[-1], 'approx_h2', best_meta
-    
+        if filter_diagnostics is not None:
+            filter_diagnostics['filtered_candidates'] = int(filtered_candidates)
+            filter_diagnostics['filtered_su_types'] = dict(filtered_su_types)
+        if not candidates:
+            return ('missing_inventory' if filtered_candidates else 'missing'), []
+        minimum_tier = min(int(candidate['hop2_match_tier']) for candidate in candidates)
+        minimum_candidates = [
+            candidate
+            for candidate in candidates
+            if int(candidate['hop2_match_tier']) == minimum_tier
+        ]
+        minimum_candidates.sort(
+            key=lambda candidate: self._candidate_prior_rank(candidate, mu_prior)
+        )
+        return 'approx_h2_tier', minimum_candidates
+
+    def _validate_template_candidate(self,
+                                     node: _NodeV3,
+                                     candidate: Dict[str, object]) -> Optional[str]:
+        template_key = candidate.get('key')
+        tpl = candidate.get('template')
+        if not isinstance(tpl, dict):
+            return f"node={int(node.global_id)} template={template_key} is invalid"
+        center_z = tpl.get('center_z')
+        if not torch.is_tensor(center_z) or int(center_z.numel()) <= 0:
+            return f"node={int(node.global_id)} template={template_key} has no center_z"
+        template_mu = tpl.get('center_mu')
+        if not self._valid_mu(template_mu):
+            return (
+                f"node={int(node.global_id)} template={template_key} "
+                f"has invalid center_mu={template_mu}"
+            )
+        return None
+
+    def _assign_template_candidate(
+            self,
+            node: _NodeV3,
+            candidate: Dict[str, object],
+            match_mode: str,
+            mu_prior: Optional[float],
+            candidate_count: int,
+            residual_meta: Optional[Dict[str, float]] = None) -> Optional[str]:
+        validation_error = self._validate_template_candidate(node, candidate)
+        if validation_error:
+            return validation_error
+
+        template_key = candidate['key']
+        tpl = candidate['template']
+        self._reset_node_template_state(
+            node,
+            device=self.device,
+            template_key=template_key,
+            match_mode=match_mode,
+            mu_prior=mu_prior,
+        )
+        template_mu = float(tpl['center_mu'])
+        node.z_vec = tpl['center_z'].detach().clone().to(self.device)
+        node.mu = template_mu
+        node.pi = 1.0
+
+        score_components = node.score_components
+        score_components['layer2_template_mu'] = template_mu
+        score_components['layer2_template_sample_count'] = int(tpl.get('sample_count', 0))
+        score_components['layer2_hop2_diff_nodes'] = int(candidate['hop2_diff_nodes'])
+        score_components['layer2_hop2_match_tier'] = int(candidate['hop2_match_tier'])
+        score_components['layer2_mu_diff'] = candidate.get('mu_diff', '')
+        score_components['layer2_candidate_count'] = int(candidate_count)
+        score_components['layer2_library_mu'] = template_mu
+        score_components['layer2_library_source'] = 'template_center_mu'
+        score_components['layer2_sample_idx'] = int(tpl.get('center_sample_idx', -1))
+        score_components['layer2_spectral_source'] = 'layer2_template_center_mu'
+        score_components['spectral_source'] = 'layer2_template_center_mu'
+        if residual_meta is not None:
+            sse_before = float(residual_meta['sse_before'])
+            sse_after = float(residual_meta['sse_after'])
+            score_components['layer2_residual_sse_before'] = sse_before
+            score_components['layer2_residual_sse_after'] = sse_after
+            score_components['layer2_residual_sse_gain'] = sse_before - sse_after
+            score_components['layer2_negative_overshoot'] = float(
+                residual_meta['negative_overshoot']
+            )
+        return None
+
+    @staticmethod
+    def _unit_peak(mu: float, ppm_axis: torch.Tensor, hwhm: float = 1.0) -> torch.Tensor:
+        hwhm_sq = float(hwhm) ** 2
+        return hwhm_sq / ((ppm_axis - float(mu)) ** 2 + hwhm_sq)
+
     # ========================================================================
     # 谱图重建
     # ========================================================================
-    
+
     def reconstruct_spectrum(self, nodes: List[_NodeV3]) -> torch.Tensor:
         """从节点重建NMR谱图"""
         device = self.device
         ppm_axis = PPM_AXIS.to(device)
-        
+
         mus = []
         pis = []
-        
+
         for n in nodes:
             # 只处理含碳的SU
             if int(n.su_type) not in self._carbon_su_set:
                 continue
-            
+
             mu = float(getattr(n, 'mu', 0.0))
             if mu == 0.0:
                 continue
             mus.append(mu)
             pis.append(1.0)
-        
+
         return reconstruct_from_mu_pi(
             mus=mus,
             pis=pis,
@@ -597,6 +895,11 @@ class Layer2Estimator:
                 'template_mu': sc.get('layer2_template_mu', ''),
                 'mu_diff': sc.get('layer2_mu_diff', ''),
                 'match_mode': sc.get('layer2_match_mode', ''),
+                'candidate_count': sc.get('layer2_candidate_count', ''),
+                'residual_sse_before': sc.get('layer2_residual_sse_before', ''),
+                'residual_sse_after': sc.get('layer2_residual_sse_after', ''),
+                'residual_sse_gain': sc.get('layer2_residual_sse_gain', ''),
+                'negative_overshoot': sc.get('layer2_negative_overshoot', ''),
                 'selected_z_source': 'template_z' if tpl_key is not None else '',
                 'selected_spectral_source': sc.get('layer2_spectral_source', ''),
                 'final_mu': float(getattr(n, 'mu', 0.0) or 0.0),
@@ -605,11 +908,11 @@ class Layer2Estimator:
                 'template_key': str(tpl_key) if tpl_key is not None else '',
             })
         return rows
-    
+
     # ========================================================================
     # 结果保存
     # ========================================================================
-    
+
     def _save_results(self, nodes: List[_NodeV3],
                       S_target: torch.Tensor,
                       S_recon: torch.Tensor,
@@ -619,9 +922,9 @@ class Layer2Estimator:
         try:
             out_dir = Path(output_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
-            
+
             ppm_axis = PPM_AXIS.cpu().numpy()
-            
+
             # 保存谱图对比
             df = pd.DataFrame({
                 'ppm': ppm_axis,
@@ -662,6 +965,16 @@ class Layer2Estimator:
                     'exact_match': int(self.stats.get('exact_match', 0)),
                     'approx_match': int(self.stats.get('approx_match', 0)),
                     'missing': int(self.stats.get('missing', 0)),
+                    'forced_approx': int(self.stats.get('forced_approx', 0)),
+                    'ambiguous_approx': int(self.stats.get('ambiguous_approx', 0)),
+                    'approx_residual_fill': int(self.stats.get('approx_residual_fill', 0)),
+                    'approx_least_damage': int(self.stats.get('approx_least_damage', 0)),
+                    'inventory_filtered_candidates': int(
+                        self.stats.get('inventory_filtered_candidates', 0)
+                    ),
+                    'inventory_filtered_su_types': str(
+                        self.stats.get('inventory_filtered_su_types', {})
+                    ),
                     'matched_ratio': float(
                         (int(self.stats.get('exact_match', 0)) + int(self.stats.get('approx_match', 0))) /
                         max(1, int(carbon_count))
@@ -673,7 +986,7 @@ class Layer2Estimator:
                 pd.DataFrame([metrics]).to_csv(str(out_dir / 'layer2_eval_metrics.csv'), index=False)
             except Exception:
                 pass
-            
+
             # 保存节点详情
             su_names = [name for name, _ in SU_DEFS]
             lib = self._get_template_library()
@@ -734,6 +1047,8 @@ class Layer2Estimator:
                     'mu_prior': (getattr(n, 'score_components', {}) or {}).get('layer2_mu_prior', None),
                     'mu_tpl': (getattr(n, 'score_components', {}) or {}).get('layer2_template_mu', None),
                     'match_mode': (getattr(n, 'score_components', {}) or {}).get('layer2_match_mode', None),
+                    'candidate_count': (getattr(n, 'score_components', {}) or {}).get('layer2_candidate_count', None),
+                    'residual_sse_gain': (getattr(n, 'score_components', {}) or {}).get('layer2_residual_sse_gain', None),
                     'spectral_source': (getattr(n, 'score_components', {}) or {}).get('layer2_spectral_source', None),
                     'sample_count': sample_count,
                     'z_norm': z_norm,
@@ -750,6 +1065,8 @@ class Layer2Estimator:
                     'matched': bool(matched),
                     'approx_used': bool(approx_used),
                     'match_mode': (getattr(n, 'score_components', {}) or {}).get('layer2_match_mode', None),
+                    'candidate_count': (getattr(n, 'score_components', {}) or {}).get('layer2_candidate_count', None),
+                    'residual_sse_gain': (getattr(n, 'score_components', {}) or {}).get('layer2_residual_sse_gain', None),
                     'chosen_template_key': str(tpl_key),
                     'chosen_hop1_ms': str(list(tpl_h1)) if tpl_h1 is not None else '',
                     'chosen_hop2_ms': str(list(tpl_h2)) if tpl_h2 is not None else '',
@@ -765,10 +1082,10 @@ class Layer2Estimator:
                     'mu': float(getattr(n, 'mu', 0.0)),
                     'pi': float(getattr(n, 'pi', 0.0)),
                 })
-            
+
             pd.DataFrame(node_data).to_csv(str(out_dir / 'layer2_nodes_detail.csv'), index=False)
             pd.DataFrame(peaks_data).to_csv(str(out_dir / 'layer2_node_peaks.csv'), index=False)
-            
+
             print(f"  结果已保存至 {output_dir}")
         except Exception as e:
             print(f"  保存失败: {e}")
@@ -786,7 +1103,7 @@ def run_layer2_estimation(nodes: List[_NodeV3],
                           output_dir: Optional[str] = None) -> List[_NodeV3]:
     """
     独立运行 Layer2 估计
-    
+
     Args:
         nodes: Layer1分配后的节点列表
         S_target: 目标谱图
@@ -794,7 +1111,7 @@ def run_layer2_estimation(nodes: List[_NodeV3],
         lib_path: 模板库路径
         device: 计算设备
         output_dir: 输出目录
-    
+
     Returns:
         nodes: 更新后的节点列表
     """

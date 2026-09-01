@@ -142,6 +142,9 @@ DOUBLE_D2_SIDE_RULES: Dict[str, Dict[int, Dict[str, Dict[str, Any]]]] = {
             "P": {"exact_su_types": {22}},
         },
         28: {
+            # Open neighbours belong to the Like24 ring context; only an
+            # actually isolated SU28 is the closed P-side terminus.
+            "N": {"allow_generic_open": True},
             "P": {"exact_neighbor_count": 0},
         },
         29: {
@@ -189,6 +192,10 @@ LIKE24_FIXED_SIDE_RULES: Dict[int, Dict[int, Dict[str, Dict[str, Any]]]] = {
             "P": {"exact_su_types": {22}},
         },
         28: {
+            # SU28 is a branch terminus when isolated, but an open 23/24
+            # boundary on the Like24 centre makes the fixed edge an N-side
+            # ring context.  The classifier supplies that centre context.
+            "N": {"allow_generic_open": True},
             "P": {"exact_neighbor_count": 0},
         },
         29: {

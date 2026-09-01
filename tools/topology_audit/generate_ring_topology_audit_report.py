@@ -5,18 +5,18 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from model.inverse.topology.assembly_external import ExternalTopologyAssembler
+from model.inverse.topology.assembly.external import ExternalTopologyAssembler
 from model.inverse.topology.classification.classifier import classify_topology_units
-from model.inverse.topology.ring_topology import audit_ring_topology_contract, cycle_edges
+from model.inverse.topology.assembly.ring.topology import audit_ring_topology_contract, cycle_edges
 from model.inverse.topology.stage3_models import RingTopologyContract
-from tests.inverse.topology.helpers import connect, make_node
+from tools.topology_audit.helpers import connect, make_node
 
 def _raw_su24_ring_fixture(
     *,
@@ -132,9 +132,9 @@ def _assemble_case(
         classification,
         flex_audit={"enforced": False, "scenario": "in_range"},
     )
-    result = assembler.assemble_pool_su24_rings(
-        preferred_nonfused=preferred_nonfused,
-    )
+    # All ring kinds now go through the ordinary external phase coordinator;
+    # there is no post-external SU24-only assembler.
+    result = assembler.assemble().to_dict()
     if len(assembler.products) != 1:
         raise RuntimeError(f"{name}: expected one product, got {len(assembler.products)}")
     product = assembler.products[0]
@@ -145,7 +145,7 @@ def _assemble_case(
     audit_reason = audit_ring_topology_contract(
         contract,
         nodes=nodes,
-        owned_node_ids=product.source_node_ids,
+        owned_node_ids=product.owned_node_ids(),
     )
     hop1_after = {
         int(node.global_id): [int(value) for value in list(node.hop1_ids or [])]
@@ -173,7 +173,7 @@ def _assemble_case(
         "contract_complete": bool(contract.complete),
         "closed_only_after_audit": bool(product.closed and contract.complete and audit_reason is None),
         "declared_ids_equal_owned_ids": contract.declared_node_ids()
-        == sorted(int(value) for value in product.source_node_ids),
+        == product.owned_node_ids(),
         "all_declared_ids_are_real": set(contract.declared_node_ids()) <= set(node_lookup),
         "declared_su_matches_real_nodes": all(
             int(row["actual_su"]) == int(row["contract_su"])
@@ -206,8 +206,13 @@ def _assemble_case(
         "branch_requirements": contract.branch_requirements,
         "required_resource_counts": contract.required_resource_counts,
         "claimed_resource_ids_by_su": product.claimed_resource_ids_by_su,
-        "owned_node_ids": sorted(int(value) for value in product.source_node_ids),
-        "remaining_ids_by_su": result["remaining_ids_by_su"],
+        "owned_node_ids": product.owned_node_ids(),
+        "remaining_ids_by_su": {
+            str(key): [int(value) for value in list(values or [])]
+            for key, values in dict(
+                getattr(assembler.allocator, "remaining_ids_by_su", {}) or {}
+            ).items()
+        },
         "audit_reason": audit_reason,
         "checks": checks,
     }
@@ -345,9 +350,8 @@ def _markdown(report: Dict[str, Any]) -> str:
             "",
             "## Scope Limitation",
             "",
-            "These successful materializations exercise the residual-SU24 ring assembler. "
-            "The external-fragment ring path has classification, scheduling and rejection tests, "
-            "but still needs successful side/upper/fused materialization fixtures with the same report.",
+            "These successful materializations exercise the ordinary external ring coordinator "
+            "for side, upper/lower and fused topologies, including pure-resource SU24 rings.",
             "",
         ]
     )

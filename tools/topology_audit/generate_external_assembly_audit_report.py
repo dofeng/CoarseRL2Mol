@@ -21,20 +21,20 @@ if str(REPO_ROOT) not in sys.path:
 
 from model.inverse.topology.classification.classifier import classify_topology_units
 from model.inverse.layer4.inverse_layer4_block_c import run_block_c_resource_adjustment_loop_impl
-from model.inverse.topology.conversion_solver import apply_stage3_node_adjustments
-from model.inverse.topology.phase_eval import assemble_topology_units
-from model.inverse.topology.workflow import plan_stage3_resource_adjustments
-from tests.inverse.topology.csv_fixture_loader import YM4_FINAL_NODES_CSV, load_nodes_from_final_csv
+from model.inverse.topology.resources.conversion_solver import apply_stage3_node_adjustments
+from model.inverse.topology.stage3.phase_eval import assemble_topology_units
+from model.inverse.topology.stage3.workflow import plan_stage3_resource_adjustments
+from tools.topology_audit.csv_fixture_loader import (
+    YM4_FINAL_NODES_CSV,
+    load_nodes_from_final_csv,
+)
 from tools.topology_audit.assembly_report import build_external_assembly_audit_report
 
 
 DEFAULT_FIXTURE_CSV = YM4_FINAL_NODES_CSV
 
 PYTEST_COMMANDS: list[list[str]] = [
-    [sys.executable, "-m", "pytest", "tests/inverse/topology/test_classification_like24.py", "-q"],
-    [sys.executable, "-m", "pytest", "tests/inverse/topology/test_external_assembly.py", "-q"],
-    [sys.executable, "-m", "pytest", "tests/inverse/topology/test_inverse_pipeline_topology_output.py", "-q"],
-    [sys.executable, "-m", "pytest", "tests/inverse/topology", "-q"],
+    [sys.executable, "-m", "pytest", "tests/inverse/topology/test_stage3_core.py", "-q"],
 ]
 
 
@@ -151,9 +151,16 @@ def _build_audit_section(fixture_csv: Path) -> str:
         H,
         nodes,
         E_target=None,
-        rebuild_fn=lambda **kwargs: (nodes, kwargs["H_seed"], {}, 0.0),
+        rebuild_fn=lambda **kwargs: (
+            kwargs["nodes_seed"],
+            kwargs["H_seed"],
+            {},
+            0.0,
+        ),
         validate_fn=lambda **kwargs: (True, "ok"),
-        max_primary_adjustments_per_stage=10,
+        flex_max_primary_adjustments=10,
+        external_max_primary_adjustments=10,
+        internal_max_primary_adjustments=30,
     )
     workflow_lines = [
         "=== Block-C Resource Loop Audit ===",

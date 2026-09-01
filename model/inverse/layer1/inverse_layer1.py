@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import time
 import numpy as np
 import pandas as pd
@@ -48,12 +49,16 @@ class Layer1GreedyCompleter:
         assigner: Any,
         nodes: List[_NodeV3],
         phase: str = 'all',
+        verbose: bool = False,
+        forced_decision: Optional[Dict[str, Any]] = None,
     ) -> None:
         if str(phase) not in {'all', 'non_aromatic', 'aromatic'}:
             raise ValueError(f"unsupported Layer1 completion phase: {phase}")
         self.assigner = assigner
         self.nodes = nodes
         self.phase = str(phase)
+        self.verbose = bool(verbose)
+        self.forced_decision = dict(forced_decision or {})
         self.started_at = time.perf_counter()
         self.decisions = 0
         self.repair_attempts = 0
@@ -62,6 +67,10 @@ class Layer1GreedyCompleter:
         self._exact_options_cache: Dict[
             Tuple[int, int, Tuple[int, ...], Optional[int]],
             Tuple[Tuple[int, ...], ...],
+        ] = {}
+        self._soft_motif_contribution_cache: Dict[
+            Tuple[int, int, Tuple[int, ...], Optional[int]],
+            Optional[Dict[Tuple[int, int, Tuple[int, ...]], float]],
         ] = {}
         self._decision_stack: List[Dict[str, Any]] = []
         self._failed_edge_states: Set[Tuple[Tuple[int, int], ...]] = set()
@@ -323,32 +332,109 @@ class Layer1GreedyCompleter:
         )
         return center, ordered
 
-    def _complete_motif_usage(self) -> Counter:
-        usage: Counter = Counter()
-        for node in self.nodes:
-            if int(node.su_type) not in self.assigner._carbon_su_set:
-                continue
-            if int(node.remaining_hop1_slots()) != 0:
-                continue
-            motif = tuple(sorted(int(x) for x in Counter(node.hop1_su).elements()))
-            usage[(int(node.su_type), motif)] += 1
-        return usage
-
-    def _projected_usage(
+    def _node_soft_motif_contribution(
         self,
         node: _NodeV3,
-        proposed_su: int,
-        usage: Counter,
-    ) -> int:
-        if int(node.su_type) not in self.assigner._carbon_su_set:
-            return 0
-        options = self._exact_options(node, int(proposed_su))
-        if not options:
-            return 10**9
-        return min(
-            int(usage.get((int(node.su_type), tuple(option)), 0))
-            for option in options
+        proposed_su: Optional[int] = None,
+    ) -> Optional[Dict[Tuple[int, int, Tuple[int, ...]], float]]:
+        """Distribute one node over every exact template it can still reach."""
+        if not bool(self.assigner._exact_hop1_shift_constraints_enabled):
+            return {}
+        center_su = int(node.su_type)
+        if center_su not in self.assigner._carbon_su_set:
+            return {}
+        degree = self.assigner._node_target_degree(node)
+        if degree is None:
+            return {}
+        cache_key = (
+            int(center_su),
+            int(degree),
+            tuple(sorted(int(x) for x in Counter(node.hop1_su).elements())),
+            None if proposed_su is None else int(proposed_su),
         )
+        cache = getattr(self, "_soft_motif_contribution_cache", None)
+        if cache is None:
+            cache = {}
+            self._soft_motif_contribution_cache = cache
+        if cache_key in cache:
+            return cache[cache_key]
+        options = self._exact_options(node, proposed_su)
+        if not options:
+            cache[cache_key] = None
+            return None
+        weight = 1.0 / float(len(options))
+        contribution: Dict[Tuple[int, int, Tuple[int, ...]], float] = {}
+        for option in options:
+            key = (
+                int(center_su),
+                int(degree),
+                tuple(int(value) for value in option),
+            )
+            contribution[key] = float(contribution.get(key, 0.0)) + float(weight)
+        cache[cache_key] = contribution
+        return contribution
+
+    def _soft_motif_usage(
+        self,
+    ) -> Tuple[
+        Counter,
+        Dict[int, Dict[Tuple[int, int, Tuple[int, ...]], float]],
+    ]:
+        usage: Counter = Counter()
+        contributions: Dict[
+            int,
+            Dict[Tuple[int, int, Tuple[int, ...]], float],
+        ] = {}
+        for node in self.nodes:
+            contribution = self._node_soft_motif_contribution(node)
+            if contribution is None:
+                continue
+            contributions[int(node.global_id)] = dict(contribution)
+            for key, value in contribution.items():
+                usage[key] += float(value)
+        return usage, contributions
+
+    def _candidate_template_concentration_costs(
+        self,
+        center: _NodeV3,
+        partner_ids: List[int],
+    ) -> Dict[int, float]:
+        """Return the concentration increase for every exact-template edge."""
+        usage, contributions = self._soft_motif_usage()
+        center_before = contributions.get(int(center.global_id), {})
+        costs: Dict[int, float] = {}
+        for partner_id in (int(value) for value in partner_ids):
+            partner = self.nodes[int(partner_id)]
+            center_after = self._node_soft_motif_contribution(
+                center,
+                int(partner.su_type),
+            )
+            partner_after = self._node_soft_motif_contribution(
+                partner,
+                int(center.su_type),
+            )
+            if center_after is None or partner_after is None:
+                continue
+            partner_before = contributions.get(int(partner_id), {})
+            affected_keys = (
+                set(center_before)
+                | set(partner_before)
+                | set(center_after)
+                | set(partner_after)
+            )
+            delta = 0.0
+            for key in affected_keys:
+                before = float(usage.get(key, 0.0))
+                after = (
+                    before
+                    - float(center_before.get(key, 0.0))
+                    - float(partner_before.get(key, 0.0))
+                    + float(center_after.get(key, 0.0))
+                    + float(partner_after.get(key, 0.0))
+                )
+                delta += float(after * after - before * before)
+            costs[int(partner_id)] = round(float(delta), 12)
+        return costs
 
     def _component(self, start_id: int) -> Set[int]:
         visited: Set[int] = set()
@@ -365,37 +451,111 @@ class Layer1GreedyCompleter:
             )
         return visited
 
-    def _order_partners(self, center: _NodeV3, partner_ids: List[int]) -> List[int]:
-        usage = self._complete_motif_usage()
-        component = self._component(int(center.global_id))
-        projected_cache: Dict[Tuple[int, int, Tuple[int, ...], int], int] = {}
+    def _joint_primary_scores(
+        self,
+        center: _NodeV3,
+        partner_ids: List[int],
+    ) -> Dict[int, float]:
+        partner_ids = [int(value) for value in partner_ids]
+        if not partner_ids:
+            return {}
 
-        def _projected(node: _NodeV3, proposed_su: int) -> int:
-            key = (
-                int(node.su_type),
-                int(self.assigner._node_target_degree(node) or -1),
-                tuple(sorted(int(x) for x in node.hop1_su.elements())),
-                int(proposed_su),
+        template_costs = self._candidate_template_concentration_costs(
+            center,
+            partner_ids,
+        )
+        partner_ids = [
+            int(partner_id)
+            for partner_id in partner_ids
+            if int(partner_id) in template_costs
+        ]
+        if not partner_ids:
+            return {}
+
+        local_su_usage = {
+            partner_id: int(Counter(center.hop1_su).get(
+                int(self.nodes[partner_id].su_type),
+                0,
+            ))
+            for partner_id in partner_ids
+        }
+        remaining_ports = {
+            partner_id: int(self.nodes[partner_id].remaining_hop1_slots())
+            for partner_id in partner_ids
+        }
+
+        def _normalized_dense_ranks(
+            values: Dict[int, Any],
+            *,
+            reverse: bool,
+        ) -> Dict[int, float]:
+            levels = sorted(set(values.values()), reverse=bool(reverse))
+            denominator = max(1, len(levels) - 1)
+            rank_by_value = {
+                value: float(rank) / float(denominator)
+                for rank, value in enumerate(levels)
+            }
+            return {
+                int(partner_id): float(rank_by_value[value])
+                for partner_id, value in values.items()
+            }
+
+        # Template concentration is one half of the sole primary score; the
+        # two resource heuristics share the other half.
+        su_diversity_rank = _normalized_dense_ranks(
+            local_su_usage,
+            reverse=False,
+        )
+        port_capacity_rank = _normalized_dense_ranks(
+            remaining_ports,
+            reverse=True,
+        )
+        template_diversity_rank = _normalized_dense_ranks(
+            {
+                int(partner_id): float(template_costs[int(partner_id)])
+                for partner_id in partner_ids
+            },
+            reverse=False,
+        )
+        return {
+            int(partner_id): (
+                0.50 * float(template_diversity_rank[partner_id])
+                + 0.25 * float(su_diversity_rank[partner_id])
+                + 0.25 * float(port_capacity_rank[partner_id])
             )
-            if key not in projected_cache:
-                projected_cache[key] = self._projected_usage(
-                    node,
-                    int(proposed_su),
-                    usage,
-                )
-            return int(projected_cache[key])
+            for partner_id in partner_ids
+        }
+
+    def _joint_primary_frontier(
+        self,
+        center: _NodeV3,
+        partner_ids: List[int],
+    ) -> List[int]:
+        scores = self._joint_primary_scores(center, partner_ids)
+        if not scores:
+            return []
+        best = min(float(value) for value in scores.values())
+        return [
+            int(partner_id)
+            for partner_id in partner_ids
+            if int(partner_id) in scores
+            if abs(float(scores[int(partner_id)]) - float(best)) <= 1e-12
+        ]
+
+    def _order_partners(self, center: _NodeV3, partner_ids: List[int]) -> List[int]:
+        component = self._component(int(center.global_id))
+        partner_ids = [int(value) for value in partner_ids]
+        primary_scores = self._joint_primary_scores(center, partner_ids)
+        partner_ids = [
+            int(partner_id)
+            for partner_id in partner_ids
+            if int(partner_id) in primary_scores
+        ]
+
         return sorted(
-            (int(x) for x in partner_ids),
+            partner_ids,
             key=lambda partner_id: (
-                _projected(
-                    center,
-                    int(self.nodes[partner_id].su_type),
-                )
-                + _projected(
-                    self.nodes[partner_id],
-                    int(center.su_type),
-                ),
-                -int(self.nodes[partner_id].remaining_hop1_slots()),
+                float(primary_scores[partner_id]),
                 int(partner_id in component),
                 int(self.nodes[partner_id].su_type),
                 int(partner_id),
@@ -599,6 +759,9 @@ class Layer1GreedyCompleter:
                     'alternatives': ordered,
                     'next_index': int(alternative_index) + 1,
                     'decision_kind': frame_kind,
+                    'stack_index': int(len(self._decision_stack)),
+                    'primary_frontier': [int(partner_id)],
+                    'forced_decision': False,
                 })
                 return True
 
@@ -614,7 +777,53 @@ class Layer1GreedyCompleter:
         if not ordered:
             return False
         center_id = int(center.global_id)
-        for candidate_index, chosen_id in enumerate(ordered):
+        stack_index = int(len(self._decision_stack))
+        prefix_edge_signature = self._edge_state_signature()
+        primary_frontier = (
+            self._joint_primary_frontier(center, ordered)
+            if str(decision_kind) == 'ordinary'
+            else []
+        )
+        trial_order = [int(value) for value in ordered]
+        forced = dict(self.forced_decision or {})
+        forced_here = bool(
+            forced
+            and str(forced.get('phase', '')) == str(self.phase)
+            and int(forced.get('stack_index', -1)) == int(stack_index)
+        )
+        if forced_here:
+            forced_center = int(forced.get('center_id', -1))
+            forced_partner = int(forced.get('chosen_partner_id', -1))
+            if forced_center != int(center_id):
+                raise RuntimeError(
+                    'layer1_multistart_replay_center_mismatch: '
+                    f"phase={self.phase} stack_index={stack_index} "
+                    f"expected={forced_center} actual={center_id}"
+                )
+            if forced_partner not in set(primary_frontier):
+                raise RuntimeError(
+                    'layer1_multistart_replay_partner_not_in_primary_frontier: '
+                    f"phase={self.phase} stack_index={stack_index} "
+                    f"partner={forced_partner} frontier={primary_frontier}"
+                )
+            expected_prefix = tuple(
+                (int(edge[0]), int(edge[1]))
+                for edge in list(forced.get('prefix_edge_signature', []) or [])
+            )
+            if (
+                'prefix_edge_signature' in forced
+                and expected_prefix != prefix_edge_signature
+            ):
+                raise RuntimeError(
+                    'layer1_multistart_replay_prefix_mismatch: '
+                    f"phase={self.phase} stack_index={stack_index}"
+                )
+            trial_order = [forced_partner] + [
+                int(value) for value in trial_order
+                if int(value) != int(forced_partner)
+            ]
+
+        for candidate_index, chosen_id in enumerate(trial_order):
             chosen_id = int(chosen_id)
             if not self._add_edge(center_id, chosen_id):
                 continue
@@ -622,9 +831,15 @@ class Layer1GreedyCompleter:
             self._decision_stack.append({
                 'center_id': center_id,
                 'chosen_id': chosen_id,
-                'alternatives': [int(x) for x in ordered],
+                'alternatives': [int(x) for x in trial_order],
                 'next_index': int(candidate_index) + 1,
                 'decision_kind': str(decision_kind),
+                'stack_index': int(stack_index),
+                'prefix_edge_signature': tuple(prefix_edge_signature),
+                'primary_frontier': [int(x) for x in primary_frontier],
+                'forced_decision': bool(forced_here and chosen_id == int(
+                    forced.get('chosen_partner_id', -1)
+                )),
             })
             return True
         return False
@@ -742,6 +957,32 @@ class Layer1GreedyCompleter:
             ],
         }
 
+    def _branch_points(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                'phase': str(self.phase),
+                'stack_index': int(row.get('stack_index', index)),
+                'decision_kind': str(row.get('decision_kind', 'ordinary')),
+                'center_id': int(row.get('center_id', -1)),
+                'chosen_partner_id': int(row.get('chosen_id', -1)),
+                'prefix_edge_signature': [
+                    (int(edge[0]), int(edge[1]))
+                    for edge in list(row.get('prefix_edge_signature', []) or [])
+                ],
+                'primary_frontier': [
+                    int(value)
+                    for value in list(row.get('primary_frontier', []) or [])
+                ],
+                'alternative_partner_ids': [
+                    int(value)
+                    for value in list(row.get('primary_frontier', []) or [])
+                    if int(value) != int(row.get('chosen_id', -1))
+                ],
+            }
+            for index, row in enumerate(self._decision_stack)
+            if len(list(row.get('primary_frontier', []) or [])) > 1
+        ]
+
     def solve(self) -> Dict[str, Any]:
         initial_open_ports = int(self._phase_open_ports())
 
@@ -769,7 +1010,7 @@ class Layer1GreedyCompleter:
                 decision_kind='ordinary',
             ):
                 continue
-            if self.decisions % 50 == 0:
+            if self.verbose and self.decisions % 50 == 0:
                 open_ports = sum(
                     int(node.remaining_hop1_slots()) for node in self.nodes
                 )
@@ -788,6 +1029,12 @@ class Layer1GreedyCompleter:
             'decisions': int(self.decisions),
             'backtracks': int(self.repair_rewinds),
             'repair_attempts': int(self.repair_attempts),
+            'branch_points': self._branch_points(),
+            'forced_decision_requested': dict(self.forced_decision or {}),
+            'forced_decision_applied': any(
+                bool(row.get('forced_decision', False))
+                for row in self._decision_stack
+            ),
             'elapsed_s': float(time.perf_counter() - self.started_at),
             'stop_reason': 'rule_valid_graph_found',
         }
@@ -992,7 +1239,7 @@ class Layer1Assigner:
             return ordered
         random.shuffle(ordered)
         return ordered
-    
+
     def _histogram_from_nodes(self, nodes: List[_NodeV3]) -> torch.Tensor:
         """从节点列表构建SU直方图"""
         H = torch.zeros(NUM_SU_TYPES, dtype=torch.float, device=self.device)
@@ -2432,8 +2679,8 @@ class Layer1Assigner:
         if len(errors) > len(shown):
             print(f"    [{prefix}] ... 其余 {len(errors) - len(shown)} 条省略")
 
-    def validate_graph_consistency(self, nodes: List[_NodeV3], 
-                                    H: torch.Tensor, 
+    def validate_graph_consistency(self, nodes: List[_NodeV3],
+                                    H: torch.Tensor,
                                     E_target: Optional[torch.Tensor] = None,
                                     verbose: bool = False) -> Tuple[bool, List[str]]:
         """Compatibility wrapper for the pure Layer1 graph validator."""
@@ -2445,7 +2692,7 @@ class Layer1Assigner:
         )
     # Layer1: 1-hop分配辅助方法
     # ========================================================================
-    
+
     def _initialize_node_pool(
         self,
         H_init: torch.Tensor,
@@ -2458,7 +2705,7 @@ class Layer1Assigner:
         special_degree_meta = self._get_special_degree_meta(H_init)
         special_partition_meta = self._get_special_partition_meta(H_init)
         special_anchor_mode_meta = self._get_special_anchor_mode_meta(H_init)
-        
+
         for su_type in range(NUM_SU_TYPES):
             count = int(H_init[su_type].item())
             degree_sequence = self._build_special_degree_sequence(int(su_type), int(count), special_degree_meta)
@@ -2501,7 +2748,7 @@ class Layer1Assigner:
                 )
                 nodes.append(node)
                 global_id += 1
-        
+
         if identity_seed_nodes is None:
             return nodes
 
@@ -2558,10 +2805,10 @@ class Layer1Assigner:
         """
         node1 = nodes[id1]
         node2 = nodes[id2]
-        
+
         if id1 == id2:
             return False
-        
+
         if id2 in node1.hop1_ids or id1 in node2.hop1_ids:
             return False
         if not self._can_add_hop1_connection(nodes, node1, node2):
@@ -2583,7 +2830,7 @@ class Layer1Assigner:
         # 添加互为1-hop（SU类型计数）
         node1.hop1_su[node2.su_type] += 1
         node2.hop1_su[node1.su_type] += 1
-        
+
         # 记录全局ID（用于追踪具体连接）
         node1.hop1_ids.append(id2)
         node2.hop1_ids.append(id1)
@@ -2695,7 +2942,7 @@ class Layer1Assigner:
 
     def _can_add_hop1_connection_uncached(self, nodes: List[_NodeV3], node1: _NodeV3, node2: _NodeV3) -> bool:
         """检查在 node1 和 node2 之间添加1-hop连接是否满足双向 per-port 规则
-        
+
         对两侧分别检查：将新邻居加入当前邻居列表后，是否仍可分配到端口中。
         """
         if node1.global_id == node2.global_id:
@@ -2792,7 +3039,7 @@ class Layer1Assigner:
             ids = list(self._node_ids_by_su.get(int(su_type), []))
             return [nodes[int(i)] for i in ids]
         return [n for n in nodes if n.su_type == su_type]
-    
+
     def _choose_weighted_candidate(self,
                                    center: _NodeV3,
                                    candidates: List[_NodeV3],
@@ -2863,11 +3110,11 @@ class Layer1Assigner:
             choose_pos = int(center.global_id) % len(window)
             return filtered[int(window[int(choose_pos)])]
         return random.choices(filtered, weights=weights, k=1)[0]
-    
+
     # ========================================================================
     # Layer1: 固定连接分配方法（a-f）
     # ========================================================================
-    
+
     def _assign_fixed_halogen_X(self, nodes: List[_NodeV3]):
         """a) 32号X -> 8号/21号"""
         owner_ids, target_ids_all, edge_pairs = self._build_exact_halogen_fixed_edges(nodes)
@@ -3138,7 +3385,7 @@ class Layer1Assigner:
             check_amine=False,
             check_halogen=False,
         )
-    
+
     def _assign_fixed_amine_N(self, nodes: List[_NodeV3]):
         """c) 0号氨基端、27号 -> 6号/20号"""
         work_nodes = copy.deepcopy(nodes)
@@ -3230,7 +3477,7 @@ class Layer1Assigner:
             check_amine=True,
             check_halogen=False,
         )
-    
+
     def _assign_fixed_ether_O(self, nodes: List[_NodeV3]):
         """d) 2号醚端、28号、29号 -> 5号/19号
         """
@@ -3246,10 +3493,10 @@ class Layer1Assigner:
             check_amine=False,
             check_halogen=False,
         )
-    
+
     def _assign_fixed_carbonyl(self, nodes: List[_NodeV3]):
         """e) Assign only the mandatory carbonyl neighbor of every SU9.
-        
+
         核心规则：每个SU9的port3={0,1,2,3}，必须恰好有一个羰基邻居。
         普通羰基端口由全局补全求解器统一处理，不能在固定阶段提前
         消耗 SU23/24/25 等资源。
@@ -3259,7 +3506,7 @@ class Layer1Assigner:
         su2_nodes = self._get_nodes_by_su_type(nodes, 2)
         su3_nodes = self._get_nodes_by_su_type(nodes, 3)
         su9_nodes = [n for n in self._get_nodes_by_su_type(nodes, 9) if n.remaining_hop1_slots() > 0]
-        
+
         # ---- 阶段1：先给每个0/1/2/3尽量分一个9号 ----
         first_round = self._canonical_node_order(
             list(su0_nodes) + list(su1_nodes) + list(su2_nodes) + list(su3_nodes),
@@ -3468,7 +3715,7 @@ class Layer1Assigner:
         su14_nodes = self._get_nodes_by_su_type(nodes, 14)
         su15_nodes = self._get_nodes_by_su_type(nodes, 15)
         su16_nodes = self._get_nodes_by_su_type(nodes, 16)
-        
+
         # SU16 是只能和 SU15 配对的端基，不能参与 SU16-SU16。
         # 先完成这类强约束配对，再处理其余双键节点，避免普通贪心
         # 先消耗掉 SU15 后遗留孤立 SU16。
@@ -3524,11 +3771,11 @@ class Layer1Assigner:
             self._add_bidirectional_hop1(
                 nodes, node1.global_id, partner.global_id, lock=True
             )
-        
+
         # 三键配对 (17, 18) - 17的不饱和端连接度=1，18的连接度=1
         su17_nodes = self._get_nodes_by_su_type(nodes, 17)
         su18_nodes = list(self._get_nodes_by_su_type(nodes, 18))
-        
+
         # 先17-18配对
         for n17 in su17_nodes:
             if su18_nodes and n17.remaining_hop1_slots() > 0:
@@ -3542,13 +3789,13 @@ class Layer1Assigner:
                     self._add_bidirectional_hop1(
                         nodes, n17.global_id, n18.global_id, lock=True
                     )
-        
+
         # 如果还有剩余的17且port2未填充（即没有17/18邻居），才做17-17配对
         # SU17端口规则: [{芳香}, {17, 18}]，port2只能放17或18
         # 已有SU18邻居的SU17的port2已满，剩余槽位是port1(芳香)，不能再放17
         remaining_17_no_triple = [
-            n for n in su17_nodes 
-            if n.remaining_hop1_slots() > 0 
+            n for n in su17_nodes
+            if n.remaining_hop1_slots() > 0
             and 18 not in n.hop1_su and 17 not in n.hop1_su
         ]
         while len(remaining_17_no_triple) >= 2:
@@ -3583,7 +3830,7 @@ class Layer1Assigner:
                 "[Unsaturated Fixed Assign] fixed-role matching incomplete: "
                 + str(invalid_unsaturated[:8])
             )
-    
+
     def _assign_fixed_su10_external_roles(self, nodes: List[_NodeV3]) -> None:
         """Assign the strict one-to-one SU10 self-pair role."""
         self_nodes = self._canonical_node_order(
@@ -3679,6 +3926,8 @@ class Layer1Assigner:
         E_target: torch.Tensor,
         eval_lib_path: Optional[str] = None,
         identity_seed_nodes: Optional[List[_NodeV3]] = None,
+        verbose: bool = False,
+        forced_decision: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[_NodeV3], Dict[str, Any]]:
         """Build one graph from fixed roles and exact Layer1 shift signatures."""
         H_local = H_init.to(self.device)
@@ -3715,9 +3964,10 @@ class Layer1Assigner:
                 f'({initial_open_ports}); Layer0/Stage3 must apply one 12/13 balance '
                 'before Layer1'
             )
-        print("\n" + "=" * 60)
-        print(f"Layer1: 单次端口规则构图 ({len(nodes)}个节点)")
-        print("=" * 60)
+        if verbose:
+            print("\n" + "=" * 60)
+            print(f"Layer1: 单次端口规则构图 ({len(nodes)}个节点)")
+            print("=" * 60)
         build_t0 = time.perf_counter()
         fixed_timings: Dict[str, float] = {}
 
@@ -3728,7 +3978,7 @@ class Layer1Assigner:
                 self._init_runtime_node_index(nodes)
             elapsed = time.perf_counter() - step_t0
             fixed_timings[str(label)] = float(elapsed)
-            if float(elapsed) >= 0.05:
+            if verbose and float(elapsed) >= 0.05:
                 print(f"  [Layer1 Timing] {label}: {elapsed:.2f}s")
 
         _timed_step("a fixed_halogen_X", lambda: self._assign_fixed_halogen_X(nodes))
@@ -3749,23 +3999,31 @@ class Layer1Assigner:
         self._init_runtime_node_index(nodes)
         fixed_edge_count = sum(len(node.hop1_ids) for node in nodes) // 2
         fixed_open_ports = sum(int(node.remaining_hop1_slots()) for node in nodes)
-        print(
-            "  [Layer1 Fixed Phase] "
-            f"edges={fixed_edge_count}, open_ports={fixed_open_ports}"
-        )
+        if verbose:
+            print(
+                "  [Layer1 Fixed Phase] "
+                f"edges={fixed_edge_count}, open_ports={fixed_open_ports}"
+            )
 
         phase_ports = self._raise_if_layer1_phase_ports_infeasible(nodes)
-        print(
-            "  [Layer1 Phase Ports] "
-            f"SU11_external={int(phase_ports['su11_external_demands'])}, "
-            f"non_aromatic={int(phase_ports['non_aromatic_open_ports'])}"
-            f"->{int(phase_ports['projected_non_aromatic_internal_ports'])}, "
-            f"aromatic={int(phase_ports['aromatic_open_ports_including_su11_external'])}"
-            f"->{int(phase_ports['projected_aromatic_ring_ports'])}"
-        )
+        if verbose:
+            print(
+                "  [Layer1 Phase Ports] "
+                f"SU11_external={int(phase_ports['su11_external_demands'])}, "
+                f"non_aromatic={int(phase_ports['non_aromatic_open_ports'])}"
+                f"->{int(phase_ports['projected_non_aromatic_internal_ports'])}, "
+                f"aromatic={int(phase_ports['aromatic_open_ports_including_su11_external'])}"
+                f"->{int(phase_ports['projected_aromatic_ring_ports'])}"
+            )
 
         non_aromatic_completion = dict(
-            Layer1GreedyCompleter(self, nodes, phase='non_aromatic').solve()
+            Layer1GreedyCompleter(
+                self,
+                nodes,
+                phase='non_aromatic',
+                verbose=verbose,
+                forced_decision=forced_decision,
+            ).solve()
         )
         non_aromatic_errors = self._non_aromatic_completion_errors(nodes)
         if non_aromatic_errors:
@@ -3774,12 +4032,13 @@ class Layer1Assigner:
                 + " | ".join(non_aromatic_errors[:8])
             )
         self._init_runtime_node_index(nodes)
-        print(
-            "  [Layer1 Non-Aromatic Completion] "
-            f"decisions={int(non_aromatic_completion.get('decisions', 0))}, "
-            f"backtracks={int(non_aromatic_completion.get('backtracks', 0))}, "
-            f"elapsed={float(non_aromatic_completion.get('elapsed_s', 0.0)):.2f}s"
-        )
+        if verbose:
+            print(
+                "  [Layer1 Non-Aromatic Completion] "
+                f"decisions={int(non_aromatic_completion.get('decisions', 0))}, "
+                f"backtracks={int(non_aromatic_completion.get('backtracks', 0))}, "
+                f"elapsed={float(non_aromatic_completion.get('elapsed_s', 0.0)):.2f}s"
+            )
 
         aromatic_open_ports = int(sum(
             int(node.remaining_hop1_slots())
@@ -3792,14 +4051,21 @@ class Layer1Assigner:
                 f"open_ports={aromatic_open_ports}"
             )
         aromatic_completion = dict(
-            Layer1GreedyCompleter(self, nodes, phase='aromatic').solve()
+            Layer1GreedyCompleter(
+                self,
+                nodes,
+                phase='aromatic',
+                verbose=verbose,
+                forced_decision=forced_decision,
+            ).solve()
         )
-        print(
-            "  [Layer1 Aromatic Completion] "
-            f"decisions={int(aromatic_completion.get('decisions', 0))}, "
-            f"backtracks={int(aromatic_completion.get('backtracks', 0))}, "
-            f"elapsed={float(aromatic_completion.get('elapsed_s', 0.0)):.2f}s"
-        )
+        if verbose:
+            print(
+                "  [Layer1 Aromatic Completion] "
+                f"decisions={int(aromatic_completion.get('decisions', 0))}, "
+                f"backtracks={int(aromatic_completion.get('backtracks', 0))}, "
+                f"elapsed={float(aromatic_completion.get('elapsed_s', 0.0)):.2f}s"
+            )
 
         completion = {
             'solver': 'two_phase_diversity_first_greedy_bounded_repair',
@@ -3818,7 +4084,20 @@ class Layer1Assigner:
             'fixed_open_ports': int(fixed_open_ports),
             'fixed_timings_s': fixed_timings,
             'build_elapsed_s': float(time.perf_counter() - build_t0),
+            'branch_points': list(
+                non_aromatic_completion.get('branch_points', []) or []
+            ) + list(aromatic_completion.get('branch_points', []) or []),
+            'forced_decision_requested': dict(forced_decision or {}),
+            'forced_decision_applied': bool(
+                non_aromatic_completion.get('forced_decision_applied', False)
+                or aromatic_completion.get('forced_decision_applied', False)
+            ),
         }
+        if forced_decision and not bool(completion['forced_decision_applied']):
+            raise RuntimeError(
+                'layer1_multistart_replay_decision_not_applied: '
+                f"decision={dict(forced_decision)}"
+            )
         valid, errors = self.validate_graph_consistency(
             nodes=nodes,
             H=H_local,
@@ -3831,13 +4110,172 @@ class Layer1Assigner:
                 + " | ".join(str(error) for error in list(errors or [])[:8])
             )
         self._last_completion_diagnostics = dict(completion)
-        print(
-            "  [Layer1 Rule Completion] "
-            f"decisions={int(completion.get('decisions', 0))}, "
-            f"backtracks={int(completion.get('backtracks', 0))}, "
-            f"elapsed={float(completion.get('elapsed_s', 0.0)):.2f}s"
-        )
+        if verbose:
+            print(
+                "  [Layer1 Rule Completion] "
+                f"decisions={int(completion.get('decisions', 0))}, "
+                f"backtracks={int(completion.get('backtracks', 0))}, "
+                f"elapsed={float(completion.get('elapsed_s', 0.0)):.2f}s"
+            )
         return nodes, completion
+
+    @staticmethod
+    def _graph_signature(nodes: List[_NodeV3]) -> str:
+        payload = tuple(
+            (
+                int(node.global_id),
+                int(node.su_type),
+                tuple(sorted(int(value) for value in list(node.hop1_ids or []))),
+            )
+            for node in sorted(nodes, key=lambda item: int(item.global_id))
+        )
+        return hashlib.sha1(repr(payload).encode('utf-8')).hexdigest()
+
+    def build_rule_valid_graph_variants(
+        self,
+        H_init: torch.Tensor,
+        E_target: torch.Tensor,
+        eval_lib_path: str,
+        identity_seed_nodes: Optional[List[_NodeV3]] = None,
+        candidate_count: int = 6,
+        branch_limit: int = 12,
+        verbose: bool = False,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Build deterministic one-fork variants within the best primary tier."""
+        requested_count = max(1, int(candidate_count))
+        baseline_nodes, baseline_completion = self.build_rule_valid_graph(
+            H_init=H_init,
+            E_target=E_target,
+            eval_lib_path=eval_lib_path,
+            identity_seed_nodes=copy.deepcopy(identity_seed_nodes),
+            verbose=verbose,
+        )
+        baseline_signature = self._graph_signature(baseline_nodes)
+        variants: List[Dict[str, Any]] = [{
+            'variant_id': 'layer1:baseline',
+            'nodes': baseline_nodes,
+            'construction': baseline_completion,
+            'branch': None,
+            'graph_signature': baseline_signature,
+        }]
+        seen_signatures = {str(baseline_signature)}
+        failures: List[Dict[str, Any]] = []
+        all_branch_points = list(
+            baseline_completion.get('branch_points', []) or []
+        )
+        branch_point_limit = max(0, int(branch_limit))
+        branch_points_by_phase: Dict[str, List[Dict[str, Any]]] = {}
+        phase_order: List[str] = []
+        for point in all_branch_points:
+            phase = str(point.get('phase', '') or 'unknown')
+            if phase not in branch_points_by_phase:
+                branch_points_by_phase[phase] = []
+                phase_order.append(phase)
+            branch_points_by_phase[phase].append(point)
+        branch_points: List[Dict[str, Any]] = []
+        phase_offsets = {str(phase): 0 for phase in phase_order}
+        while len(branch_points) < int(branch_point_limit):
+            added = False
+            for phase in phase_order:
+                offset = int(phase_offsets[str(phase)])
+                group = branch_points_by_phase[str(phase)]
+                if offset >= len(group):
+                    continue
+                branch_points.append(group[offset])
+                phase_offsets[str(phase)] = int(offset) + 1
+                added = True
+                if len(branch_points) >= int(branch_point_limit):
+                    break
+            if not added:
+                break
+        directives: List[Dict[str, Any]] = []
+        max_alternatives = max(
+            [
+                len(list(point.get('alternative_partner_ids', []) or []))
+                for point in branch_points
+            ]
+            or [0]
+        )
+        # First visit distinct decisions across both phases. Only after every
+        # selected decision has contributed one fork do we use its next peer.
+        for alternative_index in range(int(max_alternatives)):
+            for point in branch_points:
+                alternatives = list(
+                    point.get('alternative_partner_ids', []) or []
+                )
+                if int(alternative_index) >= len(alternatives):
+                    continue
+                partner_id = int(alternatives[int(alternative_index)])
+                directives.append({
+                    'phase': str(point.get('phase', '')),
+                    'stack_index': int(point.get('stack_index', -1)),
+                    'center_id': int(point.get('center_id', -1)),
+                    'baseline_partner_id': int(
+                        point.get('chosen_partner_id', -1)
+                    ),
+                    'chosen_partner_id': int(partner_id),
+                    'prefix_edge_signature': [
+                        (int(edge[0]), int(edge[1]))
+                        for edge in list(
+                            point.get('prefix_edge_signature', []) or []
+                        )
+                    ],
+                    'primary_frontier': [
+                        int(value)
+                        for value in list(point.get('primary_frontier', []) or [])
+                    ],
+                })
+
+        for directive in directives:
+            if len(variants) >= int(requested_count):
+                break
+            try:
+                nodes, completion = self.build_rule_valid_graph(
+                    H_init=H_init,
+                    E_target=E_target,
+                    eval_lib_path=eval_lib_path,
+                    identity_seed_nodes=copy.deepcopy(identity_seed_nodes),
+                    verbose=verbose,
+                    forced_decision=directive,
+                )
+            except Exception as exc:
+                failures.append({
+                    'branch': dict(directive),
+                    'reason': str(exc),
+                })
+                continue
+            graph_signature = self._graph_signature(nodes)
+            if str(graph_signature) in seen_signatures:
+                continue
+            seen_signatures.add(str(graph_signature))
+            variants.append({
+                'variant_id': f"layer1:fork:{len(variants)}",
+                'nodes': nodes,
+                'construction': completion,
+                'branch': dict(directive),
+                'graph_signature': str(graph_signature),
+            })
+
+        return variants, {
+            'requested_candidate_count': int(requested_count),
+            'generated_candidate_count': int(len(variants)),
+            'branch_limit': int(max(0, int(branch_limit))),
+            'baseline_branch_point_count': int(len(
+                baseline_completion.get('branch_points', []) or []
+            )),
+            'considered_branch_point_count': int(len(branch_points)),
+            'baseline_branch_point_count_by_phase': {
+                str(phase): int(len(points))
+                for phase, points in branch_points_by_phase.items()
+            },
+            'considered_branch_point_count_by_phase': dict(Counter(
+                str(point.get('phase', '') or 'unknown')
+                for point in branch_points
+            )),
+            'directive_count': int(len(directives)),
+            'failed_branch_count': int(len(failures)),
+            'failures': failures,
+        }
 
     def layer1_assign(self, H_init: torch.Tensor, S_target: torch.Tensor,
                       E_target: torch.Tensor,
@@ -3847,9 +4285,12 @@ class Layer1Assigner:
                       neg_peak_threshold: float = -0.8,
                       pos_peak_threshold: float = 0.8,
                       max_candidate_trials_per_region: int = 40,
-                      max_moves_per_region: int = 4,
+                      max_moves_per_region: int = 6,
+                      region_adjustment_cycles: int = 2,
                       prebuilt_nodes: Optional[List[_NodeV3]] = None,
-                      identity_seed_nodes: Optional[List[_NodeV3]] = None) -> List[_NodeV3]:
+                      identity_seed_nodes: Optional[List[_NodeV3]] = None,
+                      verbose: bool = False,
+                      emit_summary: bool = True) -> List[_NodeV3]:
         """Build, validate, and regionally adjust one exact Layer1 graph."""
         layer1_t0 = time.perf_counter()
         H_init = H_init.to(self.device)
@@ -3863,24 +4304,26 @@ class Layer1Assigner:
                 E_target=E_target,
                 eval_lib_path=eval_lib_path,
                 identity_seed_nodes=identity_seed_nodes,
+                verbose=verbose,
             )
         else:
             self._configure_exact_hop1_shift_constraints(eval_lib_path)
             nodes = copy.deepcopy(prebuilt_nodes)
             self._init_runtime_node_index(nodes)
-            print("\n" + "=" * 60)
-            print(f"Layer1: 单图精炼 ({len(nodes)}个节点)")
-            print("=" * 60)
-    
+            if verbose:
+                print("\n" + "=" * 60)
+                print(f"Layer1: 单图精炼 ({len(nodes)}个节点)")
+                print("=" * 60)
+
         check_t0 = time.perf_counter()
         is_valid, errors = self.validate_graph_consistency(
-            nodes=nodes, 
-            H=H_init, 
+            nodes=nodes,
+            H=H_init,
             E_target=E_target,
             verbose=False
         )
         check_elapsed = time.perf_counter() - check_t0
-        if float(check_elapsed) >= 0.05:
+        if verbose and float(check_elapsed) >= 0.05:
             print(f"  [Layer1 Timing] consistency_check: {check_elapsed:.2f}s")
         if not is_valid:
             print(f"  ⚠ 图结构存在{len(errors)}个不一致")
@@ -3920,6 +4363,7 @@ class Layer1Assigner:
                 pos_peak_threshold=float(pos_peak_threshold),
                 max_candidate_trials_per_region=int(max_candidate_trials_per_region),
                 max_moves_per_region=int(max_moves_per_region),
+                region_adjustment_cycles=int(region_adjustment_cycles),
             )
             self._last_hop1_adjust_diagnostics = dict(adjust_summary)
         except Exception as exc:
@@ -3970,12 +4414,29 @@ class Layer1Assigner:
                 S_target=S_target,
                 output_dir=eval_output_dir,
             )
-        print(
-            "  [Layer1 fixed-scale] "
-            f"raw_r2={raw_r2:.4f}, final_r2={final_r2:.4f}, "
-            f"moves={int(self._last_hop1_adjust_diagnostics.get('total_adjustments', 0))}"
-        )
-        print(f"Layer1 完成 ({time.perf_counter() - layer1_t0:.2f}s)\n")
+        if verbose:
+            print(
+                "  [Layer1 fixed-scale] "
+                f"raw_r2={raw_r2:.4f}, final_r2={final_r2:.4f}, "
+                f"moves={int(self._last_hop1_adjust_diagnostics.get('total_adjustments', 0))}, "
+                f"cycles={int(self._last_hop1_adjust_diagnostics.get('completed_cycles', 0))}/"
+                f"{int(self._last_hop1_adjust_diagnostics.get('configured_cycles', region_adjustment_cycles))}"
+            )
+            print(f"Layer1 完成 ({time.perf_counter() - layer1_t0:.2f}s)\n")
+        elif emit_summary:
+            completion = dict(
+                getattr(self, "_last_completion_diagnostics", {}) or {}
+            )
+            print(
+                f"[Layer1] nodes={len(nodes)} "
+                f"decisions={int(completion.get('decisions', 0) or 0)} "
+                f"r2={raw_r2:.4f}->{final_r2:.4f} "
+                f"moves={int(self._last_hop1_adjust_diagnostics.get('total_adjustments', 0) or 0)} "
+                f"cycles={int(self._last_hop1_adjust_diagnostics.get('completed_cycles', 0) or 0)}/"
+                f"{int(self._last_hop1_adjust_diagnostics.get('configured_cycles', region_adjustment_cycles) or region_adjustment_cycles)} "
+                f"elapsed={time.perf_counter() - layer1_t0:.2f}s",
+                flush=True,
+            )
         return nodes
     def precheck_fixed_assignment_feasibility(self,
                                               H_init: torch.Tensor,

@@ -178,26 +178,24 @@ def adjust_block_a_carbonyl_anchor_impl(
         }
         if enforce_fixed_elements and fixed_mismatch:
             return False, {'reason': 'fixed_elements_not_conserved', 'fixed_element_delta': fixed_mismatch}
+        diagnostics = {
+            'reason': 'ok',
+            'h_before': float(before_elements[1].item()) if int(before_elements.numel()) > 1 else 0.0,
+            'h_after': float(after_elements[1].item()) if int(after_elements.numel()) > 1 else 0.0,
+            'h_constraint_mode': 'soft',
+            'h_topology_gate': False,
+        }
         E_target = getattr(adjuster, 'E_target', None)
         if E_target is not None and int(after_elements.numel()) > 1:
             target = E_target.detach().cpu().float() if hasattr(E_target, 'detach') else torch.tensor(E_target, dtype=torch.float)
             target_h = float(target[1].item()) if int(target.numel()) > 1 else 0.0
             h_after = float(after_elements[1].item())
-            h_rel = abs(h_after - target_h) / max(abs(target_h), 1.0)
-            h_tol = float(getattr(adjuster, '_h_tolerance', 0.08))
-            if float(h_rel) > float(h_tol):
-                return False, {
-                    'reason': 'block_a_h_out_of_tolerance',
-                    'h_after': h_after,
-                    'target_h': target_h,
-                    'h_rel': float(h_rel),
-                    'h_tolerance': float(h_tol),
-                }
-        return True, {
-            'reason': 'ok',
-            'h_before': float(before_elements[1].item()) if int(before_elements.numel()) > 1 else 0.0,
-            'h_after': float(after_elements[1].item()) if int(after_elements.numel()) > 1 else 0.0,
-        }
+            diagnostics.update({
+                'target_h': float(target_h),
+                'h_rel': float(abs(h_after - target_h) / max(abs(target_h), 1.0)),
+                'h_tolerance': float(getattr(adjuster, '_h_tolerance', 0.08)),
+            })
+        return True, diagnostics
 
     def _rebalance_oxygen_related(reason: str) -> None:
         nonlocal H_work, all_moves, meta

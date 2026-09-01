@@ -89,16 +89,23 @@ def _group_products(products: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, 
 
 
 def _product_summary_lines(item: Dict[str, Any], index: int) -> List[str]:
+    fixed_ids = _as_list(item.get("fixed_source_node_ids"))
+    claimed_ids = [
+        value
+        for values in dict(item.get("claimed_resource_ids_by_su", {}) or {}).values()
+        for value in _as_list(values)
+    ]
     return [
         f"{index}. [{str(item.get('product_kind', ''))}]",
         f"   actual_su={str(item.get('actual_su', item.get('actual_topology_su', '')))}",
         f"   gid={str(item.get('gid', item.get('actual_topology_gid', '')))}",
         (
-            "   source_fragment_ids=%s | source_fragment_classes=%s | source_node_ids=%s"
+            "   source_fragment_ids=%s | source_fragment_classes=%s | fixed_source_node_ids=%s | claimed_resource_node_ids=%s"
             % (
                 _format_ids(_as_list(item.get("source_fragment_ids"))),
                 _format_text_list(_as_list(item.get("source_fragment_classes"))),
-                _format_ids(_as_list(item.get("source_node_ids"))),
+                _format_ids(fixed_ids),
+                _format_ids(claimed_ids),
             )
         ),
     ]
@@ -228,7 +235,8 @@ def build_external_assembly_audit_report(
     products = [_as_dict(item) for item in _as_list(assembly.get("products"))]
     pending_units = [_as_dict(item) for item in _as_list(assembly.get("pending_units"))]
     diagnostics = _as_dict(assembly.get("diagnostics"))
-    bad_topologies = [_as_dict(item) for item in _as_list(diagnostics.get("bad_topologies"))]
+    last_bad_topology = _as_dict(diagnostics.get("last_invalid_topology"))
+    invalid_topology_count = int(diagnostics.get("invalid_topology_count", 0) or 0)
     classification_rejects = [_as_dict(item) for item in _as_list(classification.get("classification_rejects"))]
     unclassified_non_resource = [
         _as_dict(item)
@@ -281,10 +289,11 @@ def build_external_assembly_audit_report(
         for index, item in enumerate(unrecognized_topologies, start=1):
             lines.extend(_unrecognized_summary_lines(item, index))
 
-    if bad_topologies:
+    if last_bad_topology:
         lines.append("")
-        lines.append("=== Bad Topologies ===")
-        for index, item in enumerate(bad_topologies, start=1):
-            lines.extend(_bad_topology_summary_lines(item, index))
+        lines.append(
+            f"=== Last Bad Topology ({invalid_topology_count} attempts) ==="
+        )
+        lines.extend(_bad_topology_summary_lines(last_bad_topology, 1))
 
     return "\n".join(lines)

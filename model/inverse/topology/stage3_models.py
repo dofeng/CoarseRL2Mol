@@ -5,16 +5,7 @@ from enum import Enum
 import re
 from typing import Any, Dict, List, Optional
 
-try:
-    import torch
-except ModuleNotFoundError:
-    class _TorchTensorStub:  # pragma: no cover - fallback for lightweight test envs
-        pass
-
-    class _TorchStub:  # pragma: no cover - fallback for lightweight test envs
-        Tensor = _TorchTensorStub
-
-    torch = _TorchStub()  # type: ignore[assignment]
+import torch
 
 
 def _serialize_value(value: Any) -> Any:
@@ -62,6 +53,8 @@ class Stage3OwnershipState(str, Enum):
     COMPLETED_TOPOLOGY = "completed_topology"
     CLAIMED_CLOSURE_RESOURCE = "claimed_closure_resource"
     REMAINING_CLOSURE_RESOURCE = "remaining_closure_resource"
+    CLAIMED_SU24_RING_RESOURCE = "claimed_su24_ring_resource"
+    REMAINING_SU24_RING_RESOURCE = "remaining_su24_ring_resource"
     REMAINING_AROMATIC_DONOR = "remaining_aromatic_donor"
     SUPPORT_CONTEXT = "support_context"
     UNCLASSIFIED_OR_CONFLICT = "unclassified_or_conflict"
@@ -71,12 +64,13 @@ STAGE3_OWNERSHIP_STATES = tuple(state.value for state in Stage3OwnershipState)
 
 
 class Stage3ProgressPhase(str, Enum):
-    """Committed one-way progress after all external topology phases finish."""
+    """Generation-local Stage3 progress over one Layer1/2 graph."""
 
+    FLEX_RECONCILIATION = "flex_range_reconciliation"
+    EXTERNAL_TOPOLOGY = "external_topology"
     SPECTRUM_REBALANCE = "remaining_pool_spectrum_rebalance"
-    SU24_RING_CLOSURE = "resource_su24_ring_closure"
-    SU24_AROMATIZATION = "residual_su24_aromatization"
-    RESIDUAL_SELF_CLOSURE = "residual_resource_self_closure"
+    INTERNAL_TOPOLOGY = "internal_topology"
+    COMPLETE = "complete"
 
 
 @dataclass
@@ -102,10 +96,12 @@ class Stage3TopologyProduct(Stage3Serializable):
     source_fragment_ids: List[int] = field(default_factory=list)
     fixed_source_node_ids: List[int] = field(default_factory=list)
     claimed_resource_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
+    expected_su_type_by_node_id: Dict[int, int] = field(default_factory=dict)
     mainline_slots: List[Dict[str, Any]] = field(default_factory=list)
     branch_slots: List[Dict[str, Any]] = field(default_factory=list)
     topology_notation: str = ""
     node_id_notation: str = ""
+    ring_audit: Dict[str, Any] = field(default_factory=dict)
     closed: bool = False
     reason: str = ""
 
@@ -127,7 +123,10 @@ class Stage3RoundContext(Stage3Serializable):
     generation_id: int = 0
     classification: Dict[str, Any] = field(default_factory=dict)
     ownership_by_node_id: Dict[int, Stage3NodeOwnership] = field(default_factory=dict)
-    closure_pool_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
+    generic_closure_pool_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
+    su24_ring_resource_ids: List[int] = field(default_factory=list)
+    # SU24 IDs reclassified to ordinary SU23 resources after ring recovery.
+    recycled_su24_to_23_ids: List[int] = field(default_factory=list)
     aromatic_donor_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
     flex_audit: Dict[str, Any] = field(default_factory=dict)
     products: List[Stage3TopologyProduct] = field(default_factory=list)
@@ -227,6 +226,10 @@ class TopologyPoolLedger(Stage3Serializable):
     fragment_owned_node_ids: List[int] = field(default_factory=list)
     fixed_by_product: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     allocation_state_by_node: Dict[str, str] = field(default_factory=dict)
+    released_su24_ids: List[int] = field(default_factory=list)
+    released_resource_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
+    recycled_su24_to_23_ids: List[int] = field(default_factory=list)
+    recycled_resource_conversion_ops: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_public_dict(self) -> Dict[str, Any]:
         return {
@@ -240,6 +243,21 @@ class TopologyPoolLedger(Stage3Serializable):
             },
             "remaining_counts": {str(k): int(v) for k, v in dict(self.remaining_counts or {}).items()},
             "shortage_counts": {str(k): int(v) for k, v in dict(self.shortage_counts or {}).items()},
+            "released_su24_ids": [int(value) for value in list(self.released_su24_ids or [])],
+            "released_resource_ids_by_su": {
+                str(key): [int(value) for value in list(values or [])]
+                for key, values in sorted(
+                    dict(self.released_resource_ids_by_su or {}).items(),
+                    key=lambda item: str(item[0]),
+                )
+            },
+            "recycled_su24_to_23_ids": [
+                int(value) for value in list(self.recycled_su24_to_23_ids or [])
+            ],
+            "recycled_resource_conversion_ops": [
+                dict(item or {})
+                for item in list(self.recycled_resource_conversion_ops or [])
+            ],
             "snapshot_stage": str(self.snapshot_stage or "assembly_input"),
         }
 
@@ -262,6 +280,15 @@ class RingTopologyContract(Stage3Serializable):
     source_fragment_ids: List[int] = field(default_factory=list)
     fixed_source_node_ids: List[int] = field(default_factory=list)
     claimed_resource_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
+    # Fixed support nodes which are physically part of the materialized ring
+    # but are intentionally omitted from its rendered backbone/branch text.
+    # They remain part of ownership and are released when a pure resource ring
+    # is dismantled.
+    support_node_ids: List[int] = field(default_factory=list)
+    # Complete physical resource ownership of a ring.  This deliberately
+    # includes fixed classifier nodes (for example the 11 cap of a 24
+    # fragment), because a pure 11/22/23/24 ring can be dismantled as a unit.
+    recyclable_resource_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
     required_resource_counts: Dict[str, int] = field(default_factory=dict)
     protected_node_ids: List[int] = field(default_factory=list)
     conversion_ops: List[Dict[str, Any]] = field(default_factory=list)
@@ -274,7 +301,69 @@ class RingTopologyContract(Stage3Serializable):
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     def declared_node_ids(self) -> List[int]:
-        return sorted(int(node_id) for node_id in dict(self.node_su_by_id or {}))
+        return sorted(
+            {
+                int(node_id)
+                for node_id in dict(self.node_su_by_id or {})
+            }
+            | {
+                int(node_id)
+                for node_id in list(self.support_node_ids or [])
+            }
+        )
+
+    def recyclable_node_ids(self) -> List[int]:
+        return sorted({
+            int(value)
+            for values in dict(self.recyclable_resource_ids_by_su or {}).values()
+            for value in list(values or [])
+        })
+
+    def to_audit_dict(self) -> Dict[str, Any]:
+        """Return the read-only ring graph needed by final diagnostics."""
+        generation_id = int(
+            dict(self.diagnostics or {}).get("generation_id", 0) or 0
+        )
+        return {
+            "generation_id": generation_id,
+            "ring_kind": str(self.ring_kind),
+            "candidate_signature": str(self.candidate_signature),
+            "cycles": [
+                [int(value) for value in list(cycle or [])]
+                for cycle in list(self.cycles or [])
+            ],
+            "like24_node_ids": [
+                int(value) for value in list(self.like24_node_ids or [])
+            ],
+            "node_profiles_by_id": {
+                str(key): str(value)
+                for key, value in dict(self.node_profiles_by_id or {}).items()
+            },
+            "external_attachments": [
+                [int(value) for value in list(edge or [])]
+                for edge in list(self.external_attachments or [])
+            ],
+            "branch_paths": [
+                dict(path or {}) for path in list(self.branch_paths or [])
+            ],
+            "claimed_resource_ids_by_su": {
+                str(key): [int(value) for value in list(values or [])]
+                for key, values in dict(
+                    self.claimed_resource_ids_by_su or {}
+                ).items()
+            },
+            "support_node_ids": [
+                int(value) for value in list(self.support_node_ids or [])
+            ],
+            "recyclable_resource_ids_by_su": {
+                str(key): [int(value) for value in list(values or [])]
+                for key, values in dict(
+                    self.recyclable_resource_ids_by_su or {}
+                ).items()
+            },
+            "complete": bool(self.complete),
+            "audit_reason": str(self.audit_reason or ""),
+        }
 
 
 @dataclass
@@ -285,26 +374,51 @@ class TopologyAssemblyProduct(Stage3Serializable):
     actual_topology_gid: str = ""
     source_fragment_ids: List[int] = field(default_factory=list)
     source_fragment_classes: List[str] = field(default_factory=list)
-    source_node_ids: List[int] = field(default_factory=list)
     fixed_source_node_ids: List[int] = field(default_factory=list)
-    symbolic_node_ids: List[int] = field(default_factory=list)
     mainline_node_ids: List[int] = field(default_factory=list)
-    branch_node_ids: List[int] = field(default_factory=list)
+    branch_paths: List[Dict[str, Any]] = field(default_factory=list)
     claimed_resource_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
+    expected_su_type_by_node_id: Dict[int, int] = field(default_factory=dict)
     mainline_slots: List[Dict[str, Any]] = field(default_factory=list)
     branch_slots: List[Dict[str, Any]] = field(default_factory=list)
     ring_contract: Optional[RingTopologyContract] = None
     closed: bool = True
     reason: str = ""
 
+    def rendered_node_ids(self) -> List[int]:
+        return sorted({
+            int(value)
+            for value in list(self.mainline_node_ids or [])
+        } | {
+            int(value)
+            for path in list(self.branch_paths or [])
+            for value in list(dict(path or {}).get("node_ids", []) or [])
+        })
+
+    def claimed_resource_node_ids(self) -> List[int]:
+        return sorted({
+            int(value)
+            for values in dict(self.claimed_resource_ids_by_su or {}).values()
+            for value in list(values or [])
+        })
+
+    def owned_node_ids(self) -> List[int]:
+        return sorted(
+            set(int(value) for value in list(self.fixed_source_node_ids or []))
+            | set(self.claimed_resource_node_ids())
+        )
+
     def to_dict(self) -> Dict[str, Any]:
-        # RingTopologyContract is an internal transaction/audit object.  The
-        # persisted assembly schema intentionally stays unchanged.
-        return {
+        # The mutable contract remains internal; only its read-only graph audit
+        # crosses the assembly boundary for final diagnostics.
+        payload = {
             str(key): _serialize_value(getattr(self, key))
             for key in getattr(self, "__dataclass_fields__", {}).keys()
             if str(key) != "ring_contract"
         }
+        if self.ring_contract is not None:
+            payload["ring_audit"] = self.ring_contract.to_audit_dict()
+        return payload
 
     def to_public_dict(self) -> Dict[str, Any]:
         claimed_ids = {
@@ -332,14 +446,18 @@ class TopologyAssemblyProduct(Stage3Serializable):
                 for key, values in dict(self.claimed_resource_ids_by_su or {}).items()
                 if list(values or [])
             },
+            "expected_su_type_by_node_id": {
+                str(node_id): int(su_type)
+                for node_id, su_type in sorted(
+                    dict(self.expected_su_type_by_node_id or {}).items()
+                )
+            },
             "topology_notation": str(self.actual_topology_su or ""),
             "node_id_notation": str(node_id_notation),
             "closed": bool(self.closed),
         }
         if is_ring:
-            payload["node_ids"] = sorted({
-                int(value) for value in list(self.source_node_ids or [])
-            })
+            payload["node_ids"] = self.rendered_node_ids()
         else:
             payload["mainline_slots"] = [
                 dict(item or {}) for item in list(self.mainline_slots or [])
@@ -360,13 +478,17 @@ class TopologyPendingUnit(Stage3Serializable):
     real_node_partial: str = ""
     source_fragment_ids: List[int] = field(default_factory=list)
     source_fragment_classes: List[str] = field(default_factory=list)
-    source_node_ids: List[int] = field(default_factory=list)
-    core_node_ids: List[int] = field(default_factory=list)
+    claimed_source_node_ids: List[int] = field(default_factory=list)
     claimed_resource_ids_by_su: Dict[str, List[int]] = field(default_factory=dict)
     phase: str = ""
     subphase: str = ""
     required_counts: Dict[str, int] = field(default_factory=dict)
     available_counts: Dict[str, int] = field(default_factory=dict)
+    raw_available_counts: Dict[str, int] = field(default_factory=dict)
+    claimable_available_counts: Dict[str, int] = field(default_factory=dict)
+    protected_counts: Dict[str, int] = field(default_factory=dict)
+    excluded_node_ids: List[int] = field(default_factory=list)
+    claim_trace: List[Dict[str, Any]] = field(default_factory=list)
     reason: str = ""
     context_node_ids: List[int] = field(default_factory=list)
     open_mainline_slots: List[Dict[str, Any]] = field(default_factory=list)
@@ -385,11 +507,18 @@ class TopologyPendingUnit(Stage3Serializable):
             "real_node_partial": str(self.real_node_partial or ""),
             "source_fragment_ids": [int(value) for value in list(self.source_fragment_ids or [])],
             "source_fragment_classes": [str(value) for value in list(self.source_fragment_classes or [])],
-            "source_node_ids": [int(value) for value in list(self.source_node_ids or [])],
+            "claimed_source_node_ids": [
+                int(value) for value in list(self.claimed_source_node_ids or [])
+            ],
             "phase": str(self.phase or ""),
             "subphase": str(self.subphase or ""),
             "required_counts": {str(key): int(value) for key, value in dict(self.required_counts or {}).items()},
             "available_counts": {str(key): int(value) for key, value in dict(self.available_counts or {}).items()},
+            "raw_available_counts": {str(key): int(value) for key, value in dict(self.raw_available_counts or {}).items()},
+            "claimable_available_counts": {str(key): int(value) for key, value in dict(self.claimable_available_counts or {}).items()},
+            "protected_counts": {str(key): int(value) for key, value in dict(self.protected_counts or {}).items()},
+            "excluded_node_ids": [int(value) for value in list(self.excluded_node_ids or [])],
+            "claim_trace": [dict(item or {}) for item in list(self.claim_trace or [])],
             "reason": str(self.reason or ""),
             "context_node_ids": [int(value) for value in list(self.context_node_ids or [])],
             "open_mainline_slots": [dict(item or {}) for item in list(self.open_mainline_slots or [])],
@@ -401,7 +530,6 @@ class TopologyPendingUnit(Stage3Serializable):
 
     def to_ownership_dict(self) -> Dict[str, Any]:
         data = self.to_dict()
-        data["core_node_ids"] = [int(value) for value in list(self.core_node_ids or [])]
         data["claimed_resource_ids_by_su"] = {
             str(key): [int(value) for value in list(values or [])]
             for key, values in dict(self.claimed_resource_ids_by_su or {}).items()
@@ -418,9 +546,9 @@ class TopologyPendingUnit(Stage3Serializable):
             "subphase": str(self.subphase or ""),
             "source_fragment_ids": [int(value) for value in list(self.source_fragment_ids or [])],
             "source_fragment_classes": [str(value) for value in list(self.source_fragment_classes or [])],
-            "source_node_ids": [int(value) for value in list(self.source_node_ids or [])],
-            "claimed_source_node_ids": [int(value) for value in list(self.core_node_ids or self.source_node_ids or [])],
-            "core_node_ids": [int(value) for value in list(self.core_node_ids or [])],
+            "claimed_source_node_ids": [
+                int(value) for value in list(self.claimed_source_node_ids or [])
+            ],
             "required_counts": {str(k): int(v) for k, v in dict(self.required_counts or {}).items()},
             "available_counts": {str(k): int(v) for k, v in dict(self.available_counts or {}).items()},
             "reason": str(self.reason or ""),
@@ -473,7 +601,7 @@ class TopologyAssemblyResult(Stage3Serializable):
                 claimed = {
                     str(key): [int(value) for value in list(values or [])]
                     for key, values in dict(
-                        product.get("claimed_resource_ids_by_su", product.get("claimed_resource_ids", {})) or {}
+                        product.get("claimed_resource_ids_by_su", {}) or {}
                     ).items()
                 }
                 claimed_ids = {
@@ -481,17 +609,19 @@ class TopologyAssemblyResult(Stage3Serializable):
                 }
                 source_ids = {
                     int(value)
-                    for value in list(
-                        product.get("fixed_source_node_ids", [])
-                        or product.get("source_node_ids", [])
-                        or []
-                    )
+                    for value in list(product.get("fixed_source_node_ids", []) or [])
                 }
                 out.append({
                     "product_type": str(product.get("product_type", product.get("product_kind", "")) or ""),
                     "source_fragment_ids": [int(x) for x in list(product.get("source_fragment_ids", []) or [])],
                     "fixed_source_node_ids": sorted(source_ids - claimed_ids),
                     "claimed_resource_ids_by_su": claimed,
+                    "expected_su_type_by_node_id": {
+                        str(node_id): int(su_type)
+                        for node_id, su_type in dict(
+                            product.get("expected_su_type_by_node_id", {}) or {}
+                        ).items()
+                    },
                     "mainline_slots": [dict(value or {}) for value in list(product.get("mainline_slots", []) or [])],
                     "branch_slots": [dict(value or {}) for value in list(product.get("branch_slots", []) or [])],
                     "topology_notation": str(product.get("topology_notation", product.get("actual_topology_su", "")) or ""),
@@ -514,7 +644,12 @@ class TopologyAssemblyResult(Stage3Serializable):
                     "phase": str(pending.get("phase", "")),
                     "subphase": str(pending.get("subphase", "")),
                     "source_fragment_ids": [int(value) for value in list(pending.get("source_fragment_ids", []) or [])],
-                    "source_node_ids": [int(value) for value in list(pending.get("source_node_ids", []) or [])],
+                    "claimed_source_node_ids": [
+                        int(value)
+                        for value in list(
+                            pending.get("claimed_source_node_ids", []) or []
+                        )
+                    ],
                     "required_counts": {str(k): int(v) for k, v in dict(pending.get("required_counts", {}) or {}).items()},
                     "available_counts": {str(k): int(v) for k, v in dict(pending.get("available_counts", {}) or {}).items()},
                     "reason": str(pending.get("reason", "")),
@@ -529,6 +664,25 @@ class TopologyAssemblyResult(Stage3Serializable):
             "consumed_counts": {str(k): int(v) for k, v in dict(ledger.get("consumed_counts", {}) or {}).items()},
             "remaining_counts": {str(k): int(v) for k, v in dict(ledger.get("remaining_counts", {}) or {}).items()},
             "shortage_counts": {str(k): int(v) for k, v in dict(ledger.get("shortage_counts", {}) or {}).items()},
+            "released_su24_ids": [
+                int(value) for value in list(ledger.get("released_su24_ids", []) or [])
+            ],
+            "released_resource_ids_by_su": {
+                str(key): [int(value) for value in list(values or [])]
+                for key, values in dict(
+                    ledger.get("released_resource_ids_by_su", {}) or {}
+                ).items()
+            },
+            "recycled_su24_to_23_ids": [
+                int(value)
+                for value in list(ledger.get("recycled_su24_to_23_ids", []) or [])
+            ],
+            "recycled_resource_conversion_ops": [
+                dict(item or {})
+                for item in list(
+                    ledger.get("recycled_resource_conversion_ops", []) or []
+                )
+            ],
         }
 
     def to_public_dict(self) -> Dict[str, Any]:
@@ -581,6 +735,7 @@ class Stage3PhaseEvaluation(Stage3Serializable):
     supplemental_flex_candidate_ids: List[int] = field(default_factory=list)
     supplemental_flex_candidate_profiles: List[Dict[str, Any]] = field(default_factory=list)
     flex_reconciliation_contracts: List[Dict[str, Any]] = field(default_factory=list)
+    flex_reconciliation_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
     canonical_contracts: List[Dict[str, Any]] = field(default_factory=list)
     flex_range_action_class: str = ""
     active_external_subphase: str = ""
@@ -599,8 +754,10 @@ class Stage3PhaseEvaluation(Stage3Serializable):
     phase_metrics: Dict[str, Any] = field(default_factory=dict)
     phase_signature: str = ""
     round_context: Stage3RoundContext = field(default_factory=Stage3RoundContext)
+    ownership_initialized: bool = False
     ownership_ledger: Dict[str, Any] = field(default_factory=dict)
-    closure_pool_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
+    generic_closure_pool_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
+    su24_ring_resource_ids: List[int] = field(default_factory=list)
     aromatic_donor_ids_by_su: Dict[int, List[int]] = field(default_factory=dict)
 
 
@@ -633,7 +790,6 @@ class TopologyClosureContract(Stage3Serializable):
     target_role: str = ""
     source_fragment_ids: List[int] = field(default_factory=list)
     source_fragment_classes: List[str] = field(default_factory=list)
-    source_node_ids: List[int] = field(default_factory=list)
     claimed_source_node_ids: List[int] = field(default_factory=list)
     context_node_ids: List[int] = field(default_factory=list)
     mainline_slots: List[TopologyClosureSlot] = field(default_factory=list)
@@ -781,6 +937,14 @@ class Stage3AdjustmentPlan(Stage3Serializable):
     phase_result: Stage3PhaseResult = field(default_factory=Stage3PhaseResult)
     spectrum_candidates: List[Stage3SpectrumCandidate] = field(default_factory=list)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the durable plan contract, never its live graph runtime."""
+        return {
+            str(key): _serialize_value(getattr(self, key))
+            for key in getattr(self, "__dataclass_fields__", {}).keys()
+            if str(key) != "runtime"
+        }
+
 
 @dataclass
 class Stage3AdjustmentApplyResult(Stage3Serializable):
@@ -799,19 +963,13 @@ class Stage3AdjustmentApplyResult(Stage3Serializable):
 @dataclass
 class Stage3WorkflowCycleRecord(Stage3Serializable):
     cycle: int = 0
+    attempt: int = 0
     phase: str = ""
     applied: bool = False
     stop_reason: str = ""
     accepted_state_retained: bool = True
     rebuild_valid: bool = False
-    plan: Dict[str, Any] = field(default_factory=dict)
-    before_metrics: Dict[str, Any] = field(default_factory=dict)
-    after_metrics: Dict[str, Any] = field(default_factory=dict)
     layer2_r2: Optional[float] = None
-    diagnostics: Dict[str, Any] = field(default_factory=dict)
-    topology_signature: str = ""
-    requested_counts: Dict[str, int] = field(default_factory=dict)
-    unresolved_counts: Dict[str, int] = field(default_factory=dict)
     blocked_reason: str = ""
     accepted: bool = False
     acceptance_reason: str = ""
@@ -819,15 +977,7 @@ class Stage3WorkflowCycleRecord(Stage3Serializable):
     physical_conversion_count: int = 0
     h_compensation_count: int = 0
     parity_balance_count: int = 0
-    histogram_before: Dict[str, int] = field(default_factory=dict)
-    histogram_after: Dict[str, int] = field(default_factory=dict)
-    phase_inventory: Dict[str, int] = field(default_factory=dict)
-    phase_demand: Dict[str, int] = field(default_factory=dict)
-    gap_before: Dict[str, int] = field(default_factory=dict)
-    gap_after: Dict[str, int] = field(default_factory=dict)
-    state_signature: str = ""
     fresh_rebuild: bool = False
-    structural_blockers: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -840,6 +990,23 @@ class Stage3WorkflowResult(Stage3Serializable):
     accepted_cycles: int = 0
     cycles: List[Stage3WorkflowCycleRecord] = field(default_factory=list)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        # Nodes, H and difference spectra are returned through the inference
+        # interface.  Re-serializing them into metadata retained a second copy
+        # of every rebuilt graph across outer cycles.
+        diagnostics = {
+            str(key): value
+            for key, value in dict(self.diagnostics or {}).items()
+            if str(key) not in {"completion_snapshot", "terminal_snapshot"}
+        }
+        return {
+            "ok": bool(self.ok),
+            "stop_reason": str(self.stop_reason),
+            "accepted_cycles": int(self.accepted_cycles),
+            "cycles": [_serialize_value(item) for item in list(self.cycles or [])],
+            "diagnostics": _serialize_value(diagnostics),
+        }
 def stage3_contract_owner_key(contract: Dict[str, Any]) -> tuple:
     item = dict(contract or {})
     required_fields = {"contract_id", "contract_kind", "target_role", "claimed_source_node_ids"}

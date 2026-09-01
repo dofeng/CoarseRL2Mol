@@ -16,16 +16,6 @@ class TopologyRef(Stage3Serializable):
 
 
 @dataclass
-class PoolClaim(Stage3Serializable):
-    source: str
-    su_type: int
-    count: int = 1
-    node_ids: List[int] = field(default_factory=list)
-    reason: str = ""
-    meta: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class TopologyFragment(Stage3Serializable):
     fragment_id: int
     family: str
@@ -36,7 +26,6 @@ class TopologyFragment(Stage3Serializable):
     claimed_node_ids: List[int] = field(default_factory=list)
     open_slots: List[str] = field(default_factory=list)
     branch_slots: List[str] = field(default_factory=list)
-    pool_claims: List[PoolClaim] = field(default_factory=list)
     mainline_node_ids: List[int] = field(default_factory=list)
     mainline_labels: List[str] = field(default_factory=list)
     open_mainline_slots: List[TopologyClosureSlot] = field(default_factory=list)
@@ -51,6 +40,13 @@ class TopologyFragment(Stage3Serializable):
 class TopologyClassificationResult(Stage3Serializable):
     fragments: List[TopologyFragment] = field(default_factory=list)
     atomic_groups: List[Dict[str, Any]] = field(default_factory=list)
+    # The classification pass is the sole authority for fixed physical node
+    # ownership.  Assembly may consume open resources, but it must never
+    # infer a second owner from a projected view.
+    fixed_node_owner_by_id: Dict[int, int] = field(default_factory=dict)
+    # Concrete support ownership discovered from raw SU24 hop1 semantics.
+    # These are exact graph neighbours, not generic SU11/SU22 reservations.
+    su24_support_bindings: List[Dict[str, Any]] = field(default_factory=list)
     resource_pool: Dict[str, Any] = field(default_factory=dict)
     consumed_node_ids: List[int] = field(default_factory=list)
     unclassified_nodes: List[Dict[str, Any]] = field(default_factory=list)

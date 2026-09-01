@@ -1,7 +1,9 @@
 import math
+import io
 import numpy as np
 import pandas as pd
 import torch
+from contextlib import redirect_stdout
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
@@ -1723,8 +1725,10 @@ def adjust_block_b_hetero_anchor_impl(
     peak_rel_threshold: float = 0.01,
     substage: Optional[str] = None,
     nodes: Optional[List[Any]] = None,
+    verbose: bool = False,
 ) -> Tuple[torch.Tensor, List[Dict[str, Any]], Dict[str, Any]]:
-    print("\n[Block B] 异原子锚点联合调整")
+    if verbose:
+        print("\n[Block B] 异原子锚点联合调整")
     H_work = torch.clamp(H, min=0).long().clone()
     all_moves: List[Dict[str, Any]] = []
     meta: Dict[str, Any] = {}
@@ -1815,19 +1819,23 @@ def adjust_block_b_hetero_anchor_impl(
         partition_meta = dict(getattr(adjuster, 'fixed_partition_meta', {}) or {})
         H_before_substage = H_work.detach().clone()
         before_balance = _summarize_block_b_balance(H_work, fixed_partition_meta=partition_meta)
-        _print_anchor_mode_snapshot(
-            H_work,
-            fixed_partition_meta=partition_meta,
-            header=f"[Block B/{name}] 模式快照(调整前)",
-            indent="  ",
-        )
-        H_work, moves, submeta = fn(
-            adjuster,
-            H_work,
-            ppm,
-            diff,
-            **kwargs,
-        )
+        if verbose:
+            _print_anchor_mode_snapshot(
+                H_work,
+                fixed_partition_meta=partition_meta,
+                header=f"[Block B/{name}] 模式快照(调整前)",
+                indent="  ",
+            )
+            H_work, moves, submeta = fn(
+                adjuster, H_work, ppm, diff, **kwargs
+            )
+        else:
+            # Helper-level window scores and intermediate counts remain
+            # available in submeta without flooding normal pipeline output.
+            with redirect_stdout(io.StringIO()):
+                H_work, moves, submeta = fn(
+                    adjuster, H_work, ppm, diff, **kwargs
+                )
         # Substage helpers may already have synchronized derived metadata
         # (especially special_anchor_mode_meta / special_partition_meta) onto
         # the adjuster. Start from that fresh state instead of the pre-call
@@ -1909,14 +1917,19 @@ def adjust_block_b_hetero_anchor_impl(
                 adjuster.fixed_partition_meta = dict(partition_meta)
                 if getattr(adjuster, 'layer0_estimator', None) is not None:
                     adjuster.layer0_estimator.fixed_partition_meta = dict(partition_meta)
-                print(f"  [Block B/{name}] 固定连接可行性预检拒绝并回滚: {precheck_reason}")
+                if verbose:
+                    print(
+                        f"  [Block B/{name}] 固定连接可行性预检拒绝并回滚: "
+                        f"{precheck_reason}"
+                    )
         after_balance = _summarize_block_b_balance(H_work, fixed_partition_meta=after_partition_meta)
-        _print_anchor_mode_snapshot(
-            H_work,
-            fixed_partition_meta=after_partition_meta,
-            header=f"[Block B/{name}] 模式快照(调整后)",
-            indent="  ",
-        )
+        if verbose:
+            _print_anchor_mode_snapshot(
+                H_work,
+                fixed_partition_meta=after_partition_meta,
+                header=f"[Block B/{name}] 模式快照(调整后)",
+                indent="  ",
+            )
         meta[name] = submeta
         if isinstance(meta[name], dict):
             meta[name]["balance_before"] = dict(before_balance)
@@ -2823,6 +2836,26 @@ def adjust_amine_620_by_difference_impl(
         violation = _special_mode_fixed_anchor_pool_violation(H_try, mode_try, 20, 'single', 1)
         if violation is not None:
             break
+        precheck = getattr(adjuster, 'fixed_assignment_precheck', None)
+        if callable(precheck):
+            _sync_adjuster_mode_meta(
+                adjuster,
+                H_try,
+                degree_try,
+                anchor_mode_meta=mode_try,
+            )
+            try:
+                precheck_ok, _ = precheck(H_try)
+            except Exception:
+                precheck_ok = False
+            if not bool(precheck_ok):
+                _sync_adjuster_mode_meta(
+                    adjuster,
+                    H_new,
+                    special_meta,
+                    anchor_mode_meta=anchor_mode_meta,
+                )
+                break
         H_new = H_try
         special_meta = degree_try
         anchor_mode_meta = mode_try

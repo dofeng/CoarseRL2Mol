@@ -1,0 +1,295 @@
+"""Authoritative external topology assembly phase ordering."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+from ..closure import chain as chain_materializer_module
+from ..state import ownership as ownership_module
+from ..ring import planner as ring_planner_module
+from ..state.pending import consolidate_pending_owners
+
+
+@dataclass(frozen=True)
+class ExternalAssemblyPhaseState:
+    external_subphases: List[str] = field(default_factory=list)
+    deferred_flex_shortfall: bool = False
+    flex_violation_reason: Optional[str] = None
+    ring_resource_blockers: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    ring_materialization_blockers: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+
+
+def run_external_assembly_phases(assembler: Any) -> ExternalAssemblyPhaseState:
+    """Run or continue flex, ring, and side phases in their only order.
+
+    A generation keeps one mutable assembler.  Once a phase has completed, a
+    later conversion/recovery retry starts at the first pending phase instead
+    of rebuilding products from the classifier snapshot.
+    """
+
+    branch_donors = chain_materializer_module.available_branch_donors(assembler)
+    completed = set(getattr(assembler, "completed_phases", set()) or set())
+    external_subphases: List[str] = []
+
+    explicit_pending = chain_materializer_module.has_pending_contracts_for_subphase(
+        assembler, "explicit_branch_closure"
+    )
+    if "explicit_branch_closure" not in completed or explicit_pending:
+        external_subphases.append("explicit_branch_closure")
+        chain_materializer_module.retry_ready_pending_contracts(
+            assembler,
+            branch_donors,
+            subphase="explicit_branch_closure",
+        )
+        chain_materializer_module.close_explicit_flex_branches_if_needed(
+            assembler, branch_donors
+        )
+    explicit_branch_stage_ok = not chain_materializer_module.has_pending_contracts_for_subphase(
+        assembler, "explicit_branch_closure"
+    )
+    if explicit_branch_stage_ok:
+        completed.add("explicit_branch_closure")
+
+    flex_scenario = str(dict(assembler.flex_audit or {}).get("scenario", "") or "")
+    flex_enforced = bool(dict(assembler.flex_audit or {}).get("enforced", False))
+    flex_phase_name = (
+        "supplemental_flex_closure"
+        if flex_scenario == "below_range"
+        else "unbounded_external_flex_closure"
+    )
+    flex_pending = any(
+        str(dict(contract or {}).get("target_role", "") or "") == "flex_chain"
+        for contract in list(assembler.pending_contracts or [])
+    )
+    flex_needed = (
+        flex_pending
+        or "external_flex_closure" not in completed
+        or flex_phase_name not in completed
+    )
+    if explicit_branch_stage_ok and flex_pending:
+        # A resource conversion can satisfy a flex contract after the static
+        # flex audit has moved to ``in_range``.  The live pending contract is
+        # still authoritative and must be retried regardless of that scenario.
+        chain_materializer_module.retry_ready_pending_contracts(
+            assembler,
+            branch_donors,
+            target_role="flex_chain",
+        )
+        flex_pending = any(
+            str(dict(contract or {}).get("target_role", "") or "")
+            == "flex_chain"
+            for contract in list(assembler.pending_contracts or [])
+        )
+    if flex_scenario == "below_range" and explicit_branch_stage_ok and flex_needed:
+        external_subphases.append("supplemental_flex_closure")
+        chain_materializer_module.retry_ready_pending_contracts(
+            assembler,
+            branch_donors,
+            target_role="flex_chain",
+        )
+        chain_materializer_module.assemble_selected_supplemental_flex(
+            assembler, branch_donors
+        )
+        chain_materializer_module.release_satisfied_flex_selection(assembler)
+    elif explicit_branch_stage_ok and flex_needed and (
+        flex_scenario == "not_applicable" or not flex_enforced
+    ):
+        external_subphases.append("unbounded_external_flex_closure")
+        chain_materializer_module.retry_ready_pending_contracts(
+            assembler,
+            branch_donors,
+            target_role="flex_chain",
+        )
+        chain_materializer_module.assemble_remaining_flex(
+            assembler, branch_donors
+        )
+
+    pending_flex_contracts = bool(
+        flex_enforced
+        and flex_scenario == "below_range"
+        and any(
+            str(dict(contract or {}).get("target_role", "") or "") == "flex_chain"
+            and (
+                str(dict(contract or {}).get("failure_domain", "") or "")
+                == "topology_materialization"
+                or any(
+                    int(value) > 0
+                    for value in dict(
+                        dict(contract or {}).get("required_counts", {}) or {}
+                    ).values()
+                )
+            )
+            for contract in list(assembler.pending_contracts or [])
+        )
+    )
+    flex_stage_ok = bool(explicit_branch_stage_ok and not pending_flex_contracts)
+    if flex_stage_ok:
+        completed.add("external_flex_closure")
+        completed.add(flex_phase_name)
+    raw_flex_violation_reason = chain_materializer_module.flex_range_violation_reason(
+        assembler
+    )
+    deferred_flex_shortfall = bool(
+        raw_flex_violation_reason == "flex_range_below_minimum"
+        and flex_stage_ok
+    )
+    flex_violation_reason = (
+        None if deferred_flex_shortfall else raw_flex_violation_reason
+    )
+
+    ring_stage_attempted = False
+    recovery_applied = False
+    ring_pending = bool(
+        ring_planner_module.ring_resource_blockers(assembler)
+        or ring_planner_module.ring_materialization_blockers(assembler)
+        or chain_materializer_module.has_pending_contracts_for_subphase(
+            assembler, "real_like24_ring_assembly"
+        )
+    )
+    if flex_stage_ok and flex_violation_reason is None and (
+        ring_pending or "real_like24_ring_assembly" not in completed
+    ):
+        external_subphases.append("real_like24_ring_assembly")
+        ring_stage_attempted = True
+        ring_planner_module.assemble_priority_rings(assembler, branch_donors)
+        # Recovery is a controlled second attempt for both fatty/SU24 rings
+        # and side chains.  It is only requested by Stage3 after the ordinary
+        # conversion planner has proved the resource path infeasible.
+        ring_resource_blockers = {
+            int(fragment_id): dict(blocker or {})
+            for fragment_id, blocker in ring_planner_module.ring_resource_blockers(assembler).items()
+            if not bool(next(
+                (
+                    getattr(view, "can_side", False)
+                    for view in list(getattr(assembler, "views", []) or [])
+                    if int(getattr(view, "fragment_id", -1)) == int(fragment_id)
+                ),
+                False,
+            ))
+        }
+        if (
+            ring_resource_blockers
+            and bool(getattr(assembler, "allow_ring_recovery", False))
+        ):
+            # Stage3 has already supplied the capacity proof. Execute that
+            # authorization exactly once; the assembler must not infer a
+            # second recovery from an approximate inventory test.
+            recovery_applied = bool(
+                chain_materializer_module.recover_one_pure_resource_ring(assembler)
+            )
+            if recovery_applied:
+                ring_planner_module.assemble_priority_rings(
+                    assembler, branch_donors
+                )
+    ring_resource_blockers = {
+        int(fragment_id): dict(blocker or {})
+        for fragment_id, blocker in ring_planner_module.ring_resource_blockers(assembler).items()
+        if not bool(next(
+            (
+                getattr(view, "can_side", False)
+                for view in list(getattr(assembler, "views", []) or [])
+                if int(getattr(view, "fragment_id", -1)) == int(fragment_id)
+            ),
+            False,
+        ))
+    }
+    ring_materialization_blockers = (
+        ring_planner_module.ring_materialization_blockers(assembler)
+    )
+    blocking_ring_contracts = [
+        dict(contract or {})
+        for contract in list(assembler.pending_contracts or [])
+        if str(dict(contract or {}).get("subphase", "") or "")
+        == "real_like24_ring_assembly"
+        and any(
+            int(value) > 0
+            for value in dict(
+                dict(contract or {}).get("required_counts", {}) or {}
+            ).values()
+        )
+        and any(
+            not bool(getattr(view, "can_side", False))
+            for view in list(getattr(assembler, "views", []) or [])
+            if int(getattr(view, "fragment_id", -1))
+            in {
+                int(value)
+                for value in list(dict(contract or {}).get("source_fragment_ids", []) or [])
+            }
+        )
+    ]
+    # A continuation may legitimately skip the ring planner because this
+    # generation already completed the ring phase.  The old ``attempted``
+    # guard made such a continuation report ``ring_stage_ok=False`` and,
+    # consequently, never reach the pending side-chain contract.  Treat an
+    # already-completed ring phase as successful as long as no blocker is
+    # currently present; a fresh generation still enters the planner because
+    # the phase is absent from ``completed`` above.
+    ring_stage_ok = bool(
+        (ring_stage_attempted or "real_like24_ring_assembly" in completed)
+        and not blocking_ring_contracts
+        and not ring_resource_blockers
+        and not ring_materialization_blockers
+    )
+    if ring_stage_ok:
+        completed.add("real_like24_ring_assembly")
+    if flex_stage_ok and ring_stage_ok:
+        side_pending = bool(
+            chain_materializer_module.has_pending_contracts_for_subphase(
+                assembler, "remaining_external_halfclosed_closure"
+            )
+            or chain_materializer_module.available_remaining_side_views(
+                assembler, require_generic_join=False
+            )
+        )
+        if side_pending or "remaining_external_halfclosed_closure" not in completed:
+            external_subphases.append("remaining_external_halfclosed_closure")
+            chain_materializer_module.retry_ready_pending_contracts(
+                assembler,
+                branch_donors,
+                target_role="side_chain",
+            )
+            if (
+                not recovery_applied
+                and side_pending
+                and bool(
+                    getattr(assembler, "allow_ring_recovery", False)
+                )
+            ):
+                recovery_applied = bool(
+                    chain_materializer_module.recover_one_pure_resource_ring(
+                        assembler
+                    )
+                )
+            chain_materializer_module.assemble_remaining_side_products(
+                assembler,
+                branch_donors,
+            )
+        if not chain_materializer_module.has_pending_contracts_for_subphase(
+            assembler, "remaining_external_halfclosed_closure"
+        ):
+            completed.add("remaining_external_halfclosed_closure")
+
+    if ownership_module.available_views(assembler, lambda item: True):
+        chain_materializer_module.record_remaining_external_pending(assembler)
+    consolidate_pending_owners(assembler)
+    assembler.completed_phases = completed
+    if assembler.pending_contracts:
+        assembler.current_phase = str(
+            dict(assembler.pending_contracts[0] or {}).get(
+                "subphase", "external_topology"
+            )
+            or "external_topology"
+        )
+    else:
+        assembler.current_phase = "complete"
+    return ExternalAssemblyPhaseState(
+        external_subphases=external_subphases,
+        deferred_flex_shortfall=deferred_flex_shortfall,
+        flex_violation_reason=flex_violation_reason,
+        ring_resource_blockers=ring_resource_blockers,
+        ring_materialization_blockers=ring_materialization_blockers,
+    )
+
+
+__all__ = ["ExternalAssemblyPhaseState", "run_external_assembly_phases"]

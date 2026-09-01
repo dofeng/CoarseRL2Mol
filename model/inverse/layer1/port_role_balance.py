@@ -16,7 +16,9 @@ LAYER1_AROMATIC_RING_TYPES = frozenset(
 )
 AROMATIC_EXTERNAL_ROLE_TYPES = (5, 6, 7, 8, 9, 10, 11)
 NON_AROMATIC_EXTERNAL_PARTNER_TYPES = (5, 6, 7, 8, 9, 11)
-PORT_ROLE_BALANCE_DIRECTIONS = ((12, 11), (11, 12))
+# Role balancing does not require a chemically preferred direction. Start by
+# preserving bridgeheads (11->12), then alternate on subsequent rebuilds.
+PORT_ROLE_BALANCE_DIRECTIONS = ((11, 12), (12, 11))
 
 
 def _histogram(H: torch.Tensor) -> torch.Tensor:
