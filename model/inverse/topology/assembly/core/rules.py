@@ -10,14 +10,19 @@ EXPLICIT_FLEX_CLASSES = {
 }
 EXPLICIT_SIDE_CLASSES = {"C", "C+", "F", "24_AB_P"}
 B_LIKE_OPEN_CLASSES = {
-    "B", "B+", "24_AB_N", "24_CD_M", "24_AB_N_24_CD", "25_AB",
+    "B", "B+", "24_A", "24_B", "24_AB_N", "24_CD_M",
+    "24_AB_N_24_CD", "25_AB",
 }
-D_LIKE_OPEN_CLASSES = {"D", "D+", "24_CD_N", "24_CD_N_24_CD", "25_CD"}
+D_LIKE_OPEN_CLASSES = {
+    "D", "D+", "24_C", "24_D", "24_CD_N", "24_CD_N_24_CD", "25_CD",
+}
 E_LIKE_OPEN_CLASSES = {"E", "E+", "G", "24_CD_P"}
+RING_ONLY_LIKE24_CLASSES = set()
 CHAIN_MATERIALIZABLE_LIKE24_CLASSES = {"24_AB_M", "24_AB_P", "24_CD_M_FULL"}
 CHAIN_MATERIALIZABLE_OPEN_CLASSES = {
     "B", "B+", "C", "C+", "D", "D+", "E", "E+", "F", "G",
-    "24_AB_N", "24_CD_M", "24_CD_P",
+    "24_A", "24_B", "24_C", "24_D", "24_AB_N", "24_CD_M",
+    "24_CD_N", "24_CD_P", "24_AB_N_24_CD", "24_CD_N_24_CD",
 }
 
 TERMINAL_ENDPOINT_LABELS = {
@@ -80,9 +85,6 @@ def main_kind_for_class(class_type: str) -> str:
         return "d_like_open"
     if class_type in E_LIKE_OPEN_CLASSES:
         return "e_like_open"
-    if class_type in {"24_A", "24_B", "24_C", "24_D"}:
-        # The base Like24 form is a ring candidate, not a ring-required
-        # product.  Keep this as an ordering/pending kind only; capabilities
-        # are read from the projected view.
-        return "like24_ring_candidate"
+    if class_type in RING_ONLY_LIKE24_CLASSES:
+        return "ring_only_like24"
     return "other"

@@ -20,6 +20,7 @@ from .limits import (
     MAX_FUSED_COMBINATION_EVALUATIONS as _MAX_FUSED_COMBINATION_EVALUATIONS,
     MAX_RING_ROLE_CANDIDATES as _MAX_RING_ROLE_CANDIDATES,
 )
+from .policy import view_requires_ring
 from .segments import RingCandidatePlan
 
 
@@ -127,7 +128,7 @@ def ring_candidate_specific_claims_available(
         bound_support_ids = {
             int(node_id)
             for node_id in list(values or [])
-            if ownership_module.is_bound_su24_support(assembler,
+            if ownership_module.is_bound_su24_support(assembler, 
                 pool_node_id,
                 int(support_su),
                 int(node_id),
@@ -184,7 +185,7 @@ def bound_ring_role_candidates(
             if dict(item or {})
             and (
                 bool(include_unavailable)
-                or ring_candidate_specific_claims_available(assembler,
+                or ring_candidate_specific_claims_available(assembler, 
                     dict(item or {})
                 )
             )
@@ -309,80 +310,6 @@ def build_side_ring_template_candidates(
     left_anchors: List[Dict[str, Any]] = []
     right_anchors: List[Dict[str, Any]] = []
     middle_segments: List[Dict[str, Any]] = []
-
-    def _with_pool_aromatic_endpoint(
-        base: Dict[str, Any],
-        *,
-        role: str,
-        reverse: bool,
-    ) -> Optional[Dict[str, Any]]:
-        """Attach a claimable SU11 endpoint to an open Like24 view.
-
-        Like24 A/B (and paired A/B+ C/D) fragments often expose their
-        aromatic endpoint as an unresolved centre edge.  That edge is a
-        ring resource slot, not a reason to discard the fragment.  Compose a
-        pool-group candidate so the SU11 claim and the view claim remain one
-        transaction.
-        """
-        if not base or base.get("view") is None:
-            return None
-        view = base.get("view")
-        if str(getattr(view, "family", "")) not in {
-            "like24", "like24_secondary", "like24_bridge"
-        }:
-            return None
-        endpoint = ring_segments_module.build_pool_ring_endpoint_segment(
-            assembler,
-            skeleton_kind="side",
-            role=str(role),
-            su_sequence=(11,),
-            priority=(3, 11, int(getattr(view, "fragment_id", -1))),
-        )
-        endpoint_children = [
-            dict(child or {})
-            for child in list(endpoint.get("group_segments", []) or [])
-            if dict(child or {})
-        ]
-        if not endpoint_children:
-            return None
-        ordered_children = (
-            endpoint_children + [dict(base)]
-            if str(role) == "left_anchor"
-            else [dict(base)] + endpoint_children
-        )
-        return {
-            "kind": "pool_group",
-            "role": str(role),
-            "candidate_id": (
-                f"view:side:{str(role)}:with_pool_11:"
-                f"{int(view.fragment_id)}:{1 if reverse else 0}"
-            ),
-            "fragment_id": int(view.fragment_id),
-            "view": view,
-            "reverse": bool(reverse),
-            "pool_su": None,
-            "pool_node_id": None,
-            "group_segments": ordered_children,
-            "backbone_span": int(sum(
-                int(child.get("backbone_span", 0) or 0)
-                for child in ordered_children
-            )),
-            "backbone_labels": [
-                str(label)
-                for child in ordered_children
-                for label in list(child.get("backbone_labels", []) or [])
-            ],
-            "backbone_node_ids": [
-                node_id
-                for child in ordered_children
-                for node_id in list(child.get("backbone_node_ids", []) or [])
-            ],
-            "like24_units": int(base.get("like24_units", 0) or 0),
-            "priority": tuple(base.get("priority", (99,)))[:1] + (3, 11) + tuple(
-                base.get("priority", (99,))
-            ),
-        }
-
     for view in list(views or []):
         capabilities = set(ring_segments_module.view_ring_path_capabilities(assembler, view, "side"))
         if not capabilities:
@@ -396,59 +323,39 @@ def build_side_ring_template_candidates(
             )
             terminal_rank = {"terminal_core_pair": 0, "terminal_pair": 1, "terminal_single": 2}.get(str(terminal_role), 9)
             for reverse in reverse_modes:
-                backbone_labels = ring_segments_module.view_ring_backbone_labels(assembler,
+                backbone_labels = ring_segments_module.view_ring_backbone_labels(assembler, 
                     view,
                     skeleton_kind="side",
                     reverse=bool(reverse),
                 )
                 if not backbone_labels:
                     continue
-                base_candidate = ring_segments_module.build_ring_template_segment(assembler,
-                    skeleton_kind="side",
-                    role=str("left_anchor" if _is_aromatic_label(str(backbone_labels[0])) else "right_anchor"),
-                    candidate_id=f"view:side:anchor_base:{int(view.fragment_id)}:{1 if reverse else 0}",
-                    view=view,
-                    reverse=bool(reverse),
-                    priority=(int(terminal_rank), *ring_segments_module.side_span_priority(assembler, view), 0 if not reverse else 1),
-                )
-                if base_candidate is None:
-                    continue
                 if _is_aromatic_label(str(backbone_labels[0])):
-                    candidate = dict(base_candidate)
-                    candidate["role"] = "left_anchor"
-                    candidate["candidate_id"] = f"view:side:left:{int(view.fragment_id)}:{1 if reverse else 0}"
-                    if candidate is not None:
-                        left_anchors.append(candidate)
-                elif str(getattr(view, "class_type", "")) in {
-                    "24_AB_N", "24_CD_M", "24_AB_N_24_CD", "24_CD_N_24_CD"
-                }:
-                    candidate = _with_pool_aromatic_endpoint(
-                        base_candidate,
+                    candidate = ring_segments_module.build_ring_template_segment(assembler, 
+                        skeleton_kind="side",
                         role="left_anchor",
+                        candidate_id=f"view:side:left:{int(view.fragment_id)}:{1 if reverse else 0}",
+                        view=view,
                         reverse=bool(reverse),
+                        priority=(int(terminal_rank), *ring_segments_module.side_span_priority(assembler, view), 0 if not reverse else 1),
                     )
                     if candidate is not None:
                         left_anchors.append(candidate)
                 if _is_aromatic_label(str(backbone_labels[-1])):
-                    candidate = dict(base_candidate)
-                    candidate["role"] = "right_anchor"
-                    candidate["candidate_id"] = f"view:side:right:{int(view.fragment_id)}:{1 if reverse else 0}"
-                    if candidate is not None:
-                        right_anchors.append(candidate)
-                elif str(getattr(view, "class_type", "")) in {
-                    "24_AB_N", "24_CD_M", "24_AB_N_24_CD", "24_CD_N_24_CD"
-                }:
-                    candidate = _with_pool_aromatic_endpoint(
-                        base_candidate,
+                    candidate = ring_segments_module.build_ring_template_segment(assembler, 
+                        skeleton_kind="side",
                         role="right_anchor",
+                        candidate_id=f"view:side:right:{int(view.fragment_id)}:{1 if reverse else 0}",
+                        view=view,
                         reverse=bool(reverse),
+                        priority=(int(terminal_rank), *ring_segments_module.side_span_priority(assembler, view), 0 if not reverse else 1),
                     )
                     if candidate is not None:
                         right_anchors.append(candidate)
         if capabilities & {"inner_single", "inner_pair"}:
             inner_role = "inner_pair" if "inner_pair" in capabilities else "inner_single"
             inner_rank = 0 if inner_role == "inner_pair" else 1
-            candidate = ring_segments_module.build_ring_template_segment(assembler,
+            candidate = ring_segments_module.build_ring_template_segment(assembler, 
                 skeleton_kind="side",
                 role="middle",
                 candidate_id=f"view:side:middle:{int(view.fragment_id)}",
@@ -459,7 +366,7 @@ def build_side_ring_template_candidates(
             if candidate is not None:
                 middle_segments.append(candidate)
     left_anchors.extend(
-        ring_segments_module.build_pool_ring_template_segments(assembler,
+        ring_segments_module.build_pool_ring_template_segments(assembler, 
             skeleton_kind="side",
             role="left_anchor",
             allowed_su=[24],
@@ -468,7 +375,7 @@ def build_side_ring_template_candidates(
         )
     )
     right_anchors.extend(
-        ring_segments_module.build_pool_ring_template_segments(assembler,
+        ring_segments_module.build_pool_ring_template_segments(assembler, 
             skeleton_kind="side",
             role="right_anchor",
             allowed_su=[24],
@@ -480,7 +387,7 @@ def build_side_ring_template_candidates(
     # external ring templates. Keep ordinary 11-23 endpoints available in
     # every mode.
     left_anchors.append(
-        ring_segments_module.build_pool_ring_endpoint_segment(assembler,
+        ring_segments_module.build_pool_ring_endpoint_segment(assembler, 
             skeleton_kind="side",
             role="left_anchor",
             su_sequence=(11, 23),
@@ -488,7 +395,7 @@ def build_side_ring_template_candidates(
         )
     )
     right_anchors.append(
-        ring_segments_module.build_pool_ring_endpoint_segment(assembler,
+        ring_segments_module.build_pool_ring_endpoint_segment(assembler, 
             skeleton_kind="side",
             role="right_anchor",
             su_sequence=(23, 11),
@@ -500,7 +407,7 @@ def build_side_ring_template_candidates(
     # endpoint and one direct aromatic endpoint; requiring F1 on both
     # sides would produce a seven-node path and can never pass ring audit.
     left_anchors.append(
-        ring_segments_module.build_pool_ring_endpoint_segment(assembler,
+        ring_segments_module.build_pool_ring_endpoint_segment(assembler, 
             skeleton_kind="side",
             role="left_anchor",
             su_sequence=(11,),
@@ -508,7 +415,7 @@ def build_side_ring_template_candidates(
         )
     )
     right_anchors.append(
-        ring_segments_module.build_pool_ring_endpoint_segment(assembler,
+        ring_segments_module.build_pool_ring_endpoint_segment(assembler, 
             skeleton_kind="side",
             role="right_anchor",
             su_sequence=(11,),
@@ -516,7 +423,7 @@ def build_side_ring_template_candidates(
         )
     )
     middle_segments.extend(
-        ring_segments_module.build_pool_ring_template_segments(assembler,
+        ring_segments_module.build_pool_ring_template_segments(assembler, 
             skeleton_kind="side",
             role="middle",
             allowed_su=[23, 24],
@@ -526,21 +433,21 @@ def build_side_ring_template_candidates(
     )
     return (
         sorted(
-            bound_ring_role_candidates(assembler,
+            bound_ring_role_candidates(assembler, 
                 left_anchors,
                 include_unavailable=bool(include_unavailable),
             ),
             key=lambda item: tuple(item.get("priority", (99, 99, 99))),
         ),
         sorted(
-            bound_ring_role_candidates(assembler,
+            bound_ring_role_candidates(assembler, 
                 right_anchors,
                 include_unavailable=bool(include_unavailable),
             ),
             key=lambda item: tuple(item.get("priority", (99, 99, 99))),
         ),
         sorted(
-            bound_ring_role_candidates(assembler,
+            bound_ring_role_candidates(assembler, 
                 middle_segments,
                 include_unavailable=bool(include_unavailable),
             ),
@@ -558,7 +465,7 @@ def build_upper_ring_template_candidates(
     for view in list(views or []):
         capabilities = set(ring_segments_module.view_ring_path_capabilities(assembler, view, "upper_lower"))
         if ring_segments_module.view_is_upper_fixed_anchor(assembler, view):
-            candidate = ring_segments_module.build_ring_template_segment(assembler,
+            candidate = ring_segments_module.build_ring_template_segment(assembler, 
                 skeleton_kind="upper_lower",
                 role="fixed_anchor",
                 candidate_id=f"view:upper:anchor:{int(view.fragment_id)}",
@@ -571,7 +478,7 @@ def build_upper_ring_template_candidates(
         if capabilities & {"path_single", "path_pair"}:
             path_role = "path_pair" if "path_pair" in capabilities else "path_single"
             path_rank = 0 if path_role == "path_pair" else 1
-            candidate = ring_segments_module.build_ring_template_segment(assembler,
+            candidate = ring_segments_module.build_ring_template_segment(assembler, 
                 skeleton_kind="upper_lower",
                 role="path",
                 candidate_id=f"view:upper:path:{int(view.fragment_id)}",
@@ -582,7 +489,7 @@ def build_upper_ring_template_candidates(
             if candidate is not None:
                 path_segments.append(candidate)
     anchors.extend(
-        ring_segments_module.build_pool_ring_template_segments(assembler,
+        ring_segments_module.build_pool_ring_template_segments(assembler, 
             skeleton_kind="upper_lower",
             role="fixed_anchor",
             allowed_su=[24],
@@ -590,7 +497,7 @@ def build_upper_ring_template_candidates(
         )
     )
     path_segments.extend(
-        ring_segments_module.build_pool_ring_template_segments(assembler,
+        ring_segments_module.build_pool_ring_template_segments(assembler, 
             skeleton_kind="upper_lower",
             role="path",
             allowed_su=[23, 24],
@@ -638,7 +545,7 @@ def plan_side_ring_templates(
                 remaining_span = 6 - int(left_anchor.get("backbone_span", 0) or 0) - int(right_anchor.get("backbone_span", 0) or 0)
                 if remaining_span < 0:
                     continue
-                middle = ring_search_module.search_ring_middle_segments(assembler,
+                middle = ring_search_module.search_ring_middle_segments(assembler, 
                     middle_segments,
                     remaining_span=int(remaining_span),
                     claimed_fragment_ids={
@@ -705,7 +612,7 @@ def plan_upper_ring_templates(
             remaining_span = 6 - int(anchor.get("backbone_span", 0) or 0)
             if remaining_span < 0:
                 continue
-            path = ring_search_module.search_ring_middle_segments(assembler,
+            path = ring_search_module.search_ring_middle_segments(assembler, 
                 path_segments,
                 remaining_span=int(remaining_span),
                 claimed_fragment_ids={
@@ -732,7 +639,7 @@ def plan_upper_ring_templates(
             ordered_segments = candidate_segments
             if isinstance(anchor_view, AssemblyFragmentView):
                 closure_target_fragment_id = int(anchor_view.fragment_id)
-                anchor_node_ids = ring_segments_module.view_ring_backbone_node_ids(assembler,
+                anchor_node_ids = ring_segments_module.view_ring_backbone_node_ids(assembler, 
                     anchor_view,
                     skeleton_kind="upper_lower",
                     reverse=False,
@@ -816,7 +723,7 @@ def plan_fused_ring_templates(
         int(item.fragment_id),
     ))
     inner_cores.sort(
-        key=lambda item: ring_search_module.fused_inner_priority(assembler,
+        key=lambda item: ring_search_module.fused_inner_priority(assembler, 
             item,
             pair_bridgehead_mode=False,
         )
@@ -845,7 +752,7 @@ def plan_fused_ring_templates(
             item
             for item in inner_cores
             if int(item.fragment_id) not in disallowed_fragment_ids
-            and ring_search_module.fused_inner_pool23_distribution(assembler,
+            and ring_search_module.fused_inner_pool23_distribution(assembler, 
                 ring_segments_module.view_ring_backbone_span(assembler, item, skeleton_kind="fused")
             ) is not None
         ),
@@ -861,7 +768,7 @@ def plan_fused_ring_templates(
         missing_slots.append("inner_ring_slot_unfilled")
     ordered_segments: List[Dict[str, Any]] = []
     if left_anchor is not None and bridge is not None and core is not None and right_bridge is not None and right_anchor is not None:
-        left_anchor_spec = ring_segments_module.build_ring_template_segment(assembler,
+        left_anchor_spec = ring_segments_module.build_ring_template_segment(assembler, 
             skeleton_kind="fused",
             role="left_outer_anchor",
             candidate_id=f"view:fused:left_anchor:{int(left_anchor.fragment_id)}",
@@ -869,7 +776,7 @@ def plan_fused_ring_templates(
             reverse=False,
             priority=(ring_segments_module.view_ring_contract_priority(assembler, left_anchor, "fused_ring_plan"), int(left_anchor.fragment_id)),
         )
-        left_bridge_spec = ring_segments_module.build_ring_template_segment(assembler,
+        left_bridge_spec = ring_segments_module.build_ring_template_segment(assembler, 
             skeleton_kind="fused",
             role="left_bridgehead",
             candidate_id=f"view:fused:left_bridge:{int(bridge.fragment_id)}",
@@ -877,7 +784,7 @@ def plan_fused_ring_templates(
             reverse=False,
             priority=(ring_segments_module.view_ring_contract_priority(assembler, bridge, "fused_ring_plan"), int(bridge.fragment_id)),
         )
-        inner_spec = ring_segments_module.build_ring_template_segment(assembler,
+        inner_spec = ring_segments_module.build_ring_template_segment(assembler, 
             skeleton_kind="fused",
             role="inner_core",
             candidate_id=f"view:fused:inner:{int(core.fragment_id)}",
@@ -885,7 +792,7 @@ def plan_fused_ring_templates(
             reverse=False,
             priority=ring_search_module.fused_inner_priority(assembler, core, pair_bridgehead_mode=False),
         )
-        right_bridge_spec = ring_segments_module.build_ring_template_segment(assembler,
+        right_bridge_spec = ring_segments_module.build_ring_template_segment(assembler, 
             skeleton_kind="fused",
             role="right_bridgehead",
             candidate_id=f"view:fused:right_bridge:{int(right_bridge.fragment_id)}",
@@ -893,7 +800,7 @@ def plan_fused_ring_templates(
             reverse=False,
             priority=(ring_segments_module.view_ring_contract_priority(assembler, right_bridge, "fused_ring_plan"), int(right_bridge.fragment_id)),
         )
-        right_anchor_spec = ring_segments_module.build_ring_template_segment(assembler,
+        right_anchor_spec = ring_segments_module.build_ring_template_segment(assembler, 
             skeleton_kind="fused",
             role="right_outer_anchor",
             candidate_id=f"view:fused:right_anchor:{int(right_anchor.fragment_id)}",
@@ -911,7 +818,7 @@ def plan_fused_ring_templates(
             ]
     if not ordered_segments:
         left_anchor_specs = [
-            ring_segments_module.build_ring_template_segment(assembler,
+            ring_segments_module.build_ring_template_segment(assembler, 
                 skeleton_kind="fused",
                 role="left_outer_anchor",
                 candidate_id=f"view:fused:left_anchor:{int(view.fragment_id)}",
@@ -922,7 +829,7 @@ def plan_fused_ring_templates(
             for view in anchors
         ]
         right_anchor_specs = [
-            ring_segments_module.build_ring_template_segment(assembler,
+            ring_segments_module.build_ring_template_segment(assembler, 
                 skeleton_kind="fused",
                 role="right_outer_anchor",
                 candidate_id=f"view:fused:right_anchor:{int(view.fragment_id)}",
@@ -934,20 +841,20 @@ def plan_fused_ring_templates(
         ]
         left_anchor_specs = [item for item in left_anchor_specs if item is not None]
         right_anchor_specs = [item for item in right_anchor_specs if item is not None]
-        left_anchor_specs.extend(ring_segments_module.build_pool_ring_template_segments(assembler,
+        left_anchor_specs.extend(ring_segments_module.build_pool_ring_template_segments(assembler, 
             skeleton_kind="fused",
             role="left_outer_anchor",
             allowed_su=[24],
             priority_by_su={24: 30},
         ))
-        right_anchor_specs.extend(ring_segments_module.build_pool_ring_template_segments(assembler,
+        right_anchor_specs.extend(ring_segments_module.build_pool_ring_template_segments(assembler, 
             skeleton_kind="fused",
             role="right_outer_anchor",
             allowed_su=[24],
             priority_by_su={24: 30},
         ))
         left_anchor_specs.append(
-            ring_segments_module.build_pool_ring_endpoint_segment(assembler,
+            ring_segments_module.build_pool_ring_endpoint_segment(assembler, 
                 skeleton_kind="fused",
                 role="left_outer_anchor",
                 su_sequence=(11, 23),
@@ -955,7 +862,7 @@ def plan_fused_ring_templates(
             )
         )
         right_anchor_specs.append(
-            ring_segments_module.build_pool_ring_endpoint_segment(assembler,
+            ring_segments_module.build_pool_ring_endpoint_segment(assembler, 
                 skeleton_kind="fused",
                 role="right_outer_anchor",
                 su_sequence=(23, 11),
@@ -965,7 +872,7 @@ def plan_fused_ring_templates(
 
         bridge_pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
         for left_view in bridgeheads:
-            left_spec = ring_segments_module.build_ring_template_segment(assembler,
+            left_spec = ring_segments_module.build_ring_template_segment(assembler, 
                 skeleton_kind="fused",
                 role="left_bridgehead",
                 candidate_id=f"view:fused:left_bridge:{int(left_view.fragment_id)}",
@@ -978,7 +885,7 @@ def plan_fused_ring_templates(
             for right_view in bridgeheads:
                 if int(right_view.fragment_id) == int(left_view.fragment_id):
                     continue
-                right_spec = ring_segments_module.build_ring_template_segment(assembler,
+                right_spec = ring_segments_module.build_ring_template_segment(assembler, 
                     skeleton_kind="fused",
                     role="right_bridgehead",
                     candidate_id=f"view:fused:right_bridge:{int(right_view.fragment_id)}",
@@ -988,13 +895,13 @@ def plan_fused_ring_templates(
                 )
                 if right_spec is not None:
                     bridge_pairs.append((left_spec, right_spec))
-        pool_left_bridges = ring_segments_module.build_pool_ring_template_segments(assembler,
+        pool_left_bridges = ring_segments_module.build_pool_ring_template_segments(assembler, 
             skeleton_kind="fused",
             role="left_bridgehead",
             allowed_su=[24],
             priority_by_su={24: 30},
         )
-        pool_right_bridges = ring_segments_module.build_pool_ring_template_segments(assembler,
+        pool_right_bridges = ring_segments_module.build_pool_ring_template_segments(assembler, 
             skeleton_kind="fused",
             role="right_bridgehead",
             allowed_su=[24],
@@ -1007,7 +914,7 @@ def plan_fused_ring_templates(
                 bridge_pairs.append((left_spec, right_spec))
 
         inner_specs = [
-            ring_segments_module.build_ring_template_segment(assembler,
+            ring_segments_module.build_ring_template_segment(assembler, 
                 skeleton_kind="fused",
                 role="inner_core",
                 candidate_id=f"view:fused:inner:{int(view.fragment_id)}",
@@ -1018,7 +925,7 @@ def plan_fused_ring_templates(
             for view in inner_cores
         ]
         inner_specs = [item for item in inner_specs if item is not None]
-        inner_specs.extend(ring_segments_module.build_pool_ring_template_segments(assembler,
+        inner_specs.extend(ring_segments_module.build_pool_ring_template_segments(assembler, 
             skeleton_kind="fused",
             role="inner_core",
             allowed_su=[23, 24],
@@ -1026,7 +933,7 @@ def plan_fused_ring_templates(
         ))
         left_anchor_specs = bound_ring_role_candidates(assembler, left_anchor_specs)
         right_anchor_specs = bound_ring_role_candidates(assembler, right_anchor_specs)
-        inner_specs = bound_ring_role_candidates(assembler,
+        inner_specs = bound_ring_role_candidates(assembler, 
             inner_specs,
             max_total=_MAX_RING_ROLE_CANDIDATES,
         )
@@ -1161,7 +1068,7 @@ def pool_ring_spec_requirements(
             # this exact ID to the selected SU24 center.  Do not infer
             # ownership merely because an ID happens to be absent from
             # the allocator; that hid genuine ownership conflicts.
-            if ownership_module.is_bound_su24_support(assembler,
+            if ownership_module.is_bound_su24_support(assembler, 
                 pool_node_id,
                 int(su_type),
                 int(node_id),
@@ -1220,7 +1127,7 @@ def pool_ring_attempt(
             ),
             {},
         )
-        filler = ring_search_module.fused_inner_pool23_distribution(assembler,
+        filler = ring_search_module.fused_inner_pool23_distribution(assembler, 
             int(inner_spec.get("backbone_span", 0) or 0)
         )
         if filler is not None:
@@ -1404,8 +1311,10 @@ def view_ring_allowed_skeletons(assembler, view: AssemblyFragmentView) -> Set[st
         for skeleton_kind, contract in contracts.items():
             if bool(contract.get("eligible", False)):
                 out.add(_skeleton_allowed_name(str(skeleton_kind)))
-        if out:
-            return out
+        # Explicit contract data is authoritative, including an all-ineligible
+        # set.  Falling back to a legacy flat field would resurrect a forbidden
+        # ring skeleton.
+        return out
     allowed = {
         str(item)
         for item in list(dict(view.evidence or {}).get("ring_allowed_skeletons", []) or [])
@@ -1425,8 +1334,7 @@ def view_ring_eligibility(assembler, view: AssemblyFragmentView) -> Set[str]:
         for skeleton_kind, contract in contracts.items():
             if bool(contract.get("eligible", False)):
                 out.add(_skeleton_allowed_name(str(skeleton_kind)))
-        if out:
-            return out
+        return out
     return {
         str(item)
         for item in list(dict(view.evidence or {}).get("ring_eligibility", []) or [])
@@ -1437,6 +1345,7 @@ def is_like24_ring_fill_view(assembler, view: AssemblyFragmentView) -> bool:
     return bool(
         bool(getattr(view, "can_ring", False))
         and str(getattr(view, "family", "")) in {"like24", "like24_secondary", "like24_bridge"}
+        and str(getattr(view, "preferred_product_type", "")) == "ring_candidate"
     )
 
 
@@ -1462,21 +1371,21 @@ def view_has_slot_profile(assembler, view: AssemblyFragmentView, *profiles: str)
 
 
 def ring_resource_blockers(assembler) -> Dict[int, Dict[str, Any]]:
-    raw_available = {
+    available = {
         str(key): int(value)
         for key, value in dict(
             assembler.allocator.available_counts() or {}
         ).items()
     }
-    claimable_fn = getattr(assembler.allocator, "claimable_counts", None)
-    claimable = {
-        str(key): int(value)
-        for key, value in dict(
-            claimable_fn() if callable(claimable_fn) else raw_available
-        ).items()
-    }
     blockers: Dict[int, Dict[str, Any]] = {}
     for fragment_id, raw_contract in dict(assembler.ring_infeasible_contracts or {}).items():
+        view = getattr(assembler, "view_by_id", {}).get(int(fragment_id))
+        # A ring-capable view that can legally fall back to a side/flex
+        # product must not hold the whole external phase behind a ring
+        # resource conversion.  Resource blockers are reserved for views
+        # whose classification contract makes the ring mandatory.
+        if view is not None and not view_requires_ring(view):
+            continue
         raw_required = dict(dict(raw_contract or {}).get("required_counts", {}) or {})
         required = {
             str(key): int(value)
@@ -1484,16 +1393,15 @@ def ring_resource_blockers(assembler) -> Dict[int, Dict[str, Any]]:
             if int(value) > 0
         }
         missing = {
-            str(key): max(0, int(value) - int(claimable.get(str(key), 0)))
+            str(key): max(0, int(value) - int(available.get(str(key), 0)))
             for key, value in required.items()
-            if int(value) > int(claimable.get(str(key), 0))
+            if int(value) > int(available.get(str(key), 0))
         }
         if not missing:
             continue
         blockers[int(fragment_id)] = {
             "required_counts": required,
-            "available_counts": dict(raw_available),
-            "claimable_available_counts": dict(claimable),
+            "available_counts": dict(available),
             "missing_counts": missing,
             "reasons": [
                 str(assembler.ring_pending_reasons.get(int(fragment_id), ""))
@@ -1505,10 +1413,10 @@ def ring_resource_blockers(assembler) -> Dict[int, Dict[str, Any]]:
 
 def ring_materialization_blockers(assembler) -> Dict[int, Dict[str, Any]]:
     blockers: Dict[int, Dict[str, Any]] = {}
-    for view in ownership_module.available_views(assembler,
+    for view in ownership_module.available_views(assembler, 
         lambda item: (
             bool(getattr(item, "can_ring", False))
-            and not bool(getattr(item, "can_side", False))
+            and view_requires_ring(item)
         )
     ):
         failure = dict(
@@ -1536,14 +1444,14 @@ def assemble_priority_rings(
     if not ring_views and not has_pool_su24_pair:
         return False
     like24_fill_views = ownership_module.available_views(assembler, lambda item: is_like24_ring_fill_view(assembler, item))
-    progress_made = assemble_all_rings(assembler,
+    progress_made = assemble_all_rings(assembler, 
         branch_donors,
         ring_views=ring_views,
         like24_fill_views=like24_fill_views,
         candidate_predicate=lambda item: bool(getattr(item, "can_ring", False)),
     )
     pool_only_blocked = False
-    for view in ownership_module.available_views(assembler,
+    for view in ownership_module.available_views(assembler, 
         lambda item: bool(getattr(item, "can_ring", False))
     ):
         fragment_id = int(view.fragment_id)
@@ -1554,7 +1462,7 @@ def assemble_priority_rings(
             dict(resource_contract.get("required_counts", {}) or {})
             and dict(resource_contract.get("missing_counts", {}) or {})
         )
-        if has_resource_deficit and not bool(getattr(view, "can_side", False)):
+        if has_resource_deficit and view_requires_ring(view):
             pool_only_blocked = True
             continue
         assembler.ring_exhausted_fragment_ids.add(fragment_id)
@@ -1579,6 +1487,7 @@ def assemble_priority_rings(
                 like24_fill_views=[],
                 candidate_predicate=lambda _item: False,
                 ring_order=[
+                    "fatty_ring_fused",
                     "fatty_ring_side",
                     "fatty_ring_upper_lower",
                 ],
@@ -1625,7 +1534,7 @@ def assemble_all_rings(
             if not candidate_ring_views and not has_pool_su24_pair:
                 continue
             product_count_before = len(assembler.products)
-            created = ring_materializer_module.assemble_ring(assembler,
+            created = ring_materializer_module.assemble_ring(assembler, 
                 product_kind=str(product_kind),
                 preferred_views=candidate_ring_views,
                 branch_donors=branch_donors,

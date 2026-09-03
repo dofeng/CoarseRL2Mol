@@ -1458,7 +1458,7 @@ def _flex_range_evidence(
         candidate_kind = "explicit_side"
     elif class_name in {"24_A", "24_B", "24_C", "24_D"}:
         count_role = "ring_candidate"
-        candidate_kind = "like24_ring_candidate"
+        candidate_kind = "ring_only_like24"
 
     return {
         "flex_range_count_role": str(count_role),
@@ -1941,31 +1941,6 @@ def _profile_remaining_neighbors(
     ]
 
 
-def _terminal_connector_context_open_neighbors(
-    center_token: ClassificationToken,
-    connector_token: ClassificationToken,
-) -> List[NeighborToken]:
-    """Return centre-side open context for an otherwise isolated SU28.
-
-    SU28 is a terminal fixed branch, so its own token normally has no
-    downstream neighbours.  For Like24, an open 23/24 edge attached to the
-    centre is nevertheless the ring-facing boundary of ``...(-28)-``.  Keep
-    this context separate from the connector path: it informs M/N/P
-    classification but must not be claimed as part of the fixed SU28 route.
-    """
-    if int(getattr(connector_token, "su_type", -1)) != 28:
-        return []
-    if _profile_remaining_neighbors(center_token, connector_token):
-        return []
-    return [
-        neighbor
-        for neighbor in list(center_token.neighbor_tokens or [])
-        if int(neighbor.node_id) != int(connector_token.node_id)
-        and not bool(neighbor.is_fixed)
-        and is_open_boundary_semantic(neighbor)
-    ]
-
-
 VALID_FIXED_SIDE_CLASSES = frozenset({"M", "N", "P"})
 VALID_OPEN_FIXED_TAIL_KINDS = frozenset({
     "H1",
@@ -1988,13 +1963,12 @@ def _fixed_side_matches(
     center_su: Optional[int] = None,
 ) -> List[str]:
     remaining_neighbors = list(remaining or [])
-    if "N" in dict(side_rules or {}) and remaining_neighbors and all(
-        is_open_boundary_semantic(neighbor)
-        for neighbor in remaining_neighbors
+    if (
+        len(remaining_neighbors) == 1
+        and is_open_boundary_semantic(remaining_neighbors[0])
     ):
-        # Non-fixed connector-side edges are unresolved boundaries. Their
-        # labels cannot turn a branch context into a concrete M/P path. This
-        # applies to one or several open 23/24 neighbours.
+        # A non-fixed connector-side edge is an unresolved boundary. Its SU
+        # label cannot turn the edge into a concrete M/P path.
         return ["N"]
     return [
         str(side_class)
@@ -2034,10 +2008,7 @@ def classify_double_d2_side(
             "reject_reason": "unsupported_connector_side_rule",
         }
     remaining = _profile_remaining_neighbors(center_token, connector_token)
-    matching_remaining = remaining or _terminal_connector_context_open_neighbors(
-        center_token, connector_token
-    )
-    matches = _fixed_side_matches(matching_remaining, side_rules)
+    matches = _fixed_side_matches(remaining, side_rules)
     if len(matches) != 1:
         return {
             "connector_node_id": int(connector_neighbor.node_id),
@@ -2071,10 +2042,25 @@ def classify_like24_fixed_side(
             "reject_reason": "missing_connector_token",
         }
     remaining = _profile_remaining_neighbors(center_token, connector_token)
-    contextual_open = _terminal_connector_context_open_neighbors(
-        center_token, connector_token
-    )
-    matching_remaining = remaining or contextual_open
+    # A terminal SU28 attached to single19d3 is the fixed branch of the
+    # 24_B+N ring form (11-24(?)-), not a P-type mainline terminus.  Keeping
+    # this distinction here prevents the downstream secondary-rule resolver
+    # from turning a ring-priority fragment into 24_AB_P/side_chain.
+    if (
+        str(center_token.subtype) == "single19d3"
+        and int(connector_neighbor.su_type) == 28
+        and not remaining
+    ):
+        return {
+            "connector_node_id": int(connector_neighbor.node_id),
+            "connector_su_type": int(connector_neighbor.su_type),
+            "side_class": "N",
+            "connector_token_subtype": str(connector_token.subtype),
+            "remaining_node_ids": [],
+            "remaining_neighbors": [],
+            "fixed_terminal_branch": True,
+            "reject_reason": "",
+        }
     center_su = 19 if "19" in str(center_token.subtype) else 20
     family_rules = dict(LIKE24_FIXED_SIDE_RULES.get(int(center_su), {}) or {})
     side_rules = dict(family_rules.get(int(connector_neighbor.su_type), {}) or {})
@@ -2086,7 +2072,7 @@ def classify_like24_fixed_side(
             "reject_reason": "unsupported_connector_side_rule",
         }
     matches = _fixed_side_matches(
-        matching_remaining,
+        remaining,
         side_rules,
         center_su=int(center_su),
     )
@@ -2097,9 +2083,6 @@ def classify_like24_fixed_side(
             "side_class": None,
             "reject_reason": "connector_side_ambiguous" if matches else "connector_side_unmatched",
             "remaining_neighbors": [neighbor.to_dict() for neighbor in remaining],
-            "contextual_open_neighbor_ids": [
-                int(neighbor.node_id) for neighbor in contextual_open
-            ],
         }
     return {
         "connector_node_id": int(connector_neighbor.node_id),
@@ -2108,9 +2091,6 @@ def classify_like24_fixed_side(
         "connector_token_subtype": str(connector_token.subtype),
         "remaining_node_ids": [int(neighbor.node_id) for neighbor in remaining],
         "remaining_neighbors": [neighbor.to_dict() for neighbor in remaining],
-        "contextual_open_neighbor_ids": [
-            int(neighbor.node_id) for neighbor in contextual_open
-        ],
         "reject_reason": "",
     }
 
@@ -2243,7 +2223,6 @@ def _like24_fixed_role_candidates_for_contract(
     *,
     class_type: str,
     connector_node_id: int,
-    connector_su_type: int,
     side_class: str,
     primary_connector_id: int,
 ) -> List[str]:
@@ -2257,13 +2236,6 @@ def _like24_fixed_role_candidates_for_contract(
             return ["branch_only"]
         return ["mainline_only"]
     if class_name in LIKE24_FIXED_MAINLINE_OR_BRANCH_CLASSES:
-        # N-side SU28/29/31 connectors are terminal branch routes.  Their
-        # open centre context is ring-facing; they must not be promoted to a
-        # mainline merely because they are the primary (and only) connector.
-        if str(side_class) == "N" and int(
-            connector_su_type
-        ) in {28, 29, 31}:
-            return ["branch_only"]
         if primary_id >= 0 and connector_id >= 0 and connector_id != primary_id:
             return ["branch_only"]
         return ["mainline_or_branch"]
@@ -2318,7 +2290,6 @@ def _build_fixed_connection_contract(
         "role_candidates": _like24_fixed_role_candidates_for_contract(
             class_type=str(class_type),
             connector_node_id=int(connector_node_id),
-            connector_su_type=int(connector_su_type),
             side_class=str(side_class),
             primary_connector_id=int(primary_connector_id),
         ),
@@ -3558,29 +3529,30 @@ def _like24_ring_evidence(
             contract_local.setdefault("pool24_requires_11_slots", [])
         contract_local["bridgehead_kind"] = str(bridgehead_kind)
         ring_contracts[str(skeleton_kind)] = contract_local
-    # Persist the assembly contract as data.  Projection must consume these
-    # facts directly; ``preferred_product_type`` remains an ordering hint.
+    # Keep assembly capabilities as explicit facts.  preferred_fixed_role and
+    # preferred_product_type are ordering hints; they must not erase a valid
+    # side/flex fallback for a Like24 fragment.
     ring_roles_by_skeleton = {
-        str(_skeleton): {
-            "allowed": bool(dict(_contract or {}).get("eligible", False)),
+        str(skeleton): {
+            "allowed": bool(dict(contract or {}).get("eligible", False)),
             "roles": [
                 str(role)
-                for role in list(dict(_contract or {}).get("slot_roles", []) or [])
+                for role in list(dict(contract or {}).get("slot_roles", []) or [])
                 if str(role)
             ],
             "slot_coverage": [
                 str(slot)
-                for slot in list(dict(_contract or {}).get("slot_coverage", []) or [])
+                for slot in list(dict(contract or {}).get("slot_coverage", []) or [])
                 if str(slot)
             ],
         }
-        for _skeleton, _contract in dict(ring_contracts or {}).items()
+        for skeleton, contract in dict(ring_contracts or {}).items()
     }
     segment_span = 2 if str(class_type) in PAIRED_LIKE24_CLASS_TYPES else 1
     ring_priority = {
-        str(_skeleton): int(dict(_contract or {}).get("priority", 99))
-        for _skeleton, _contract in dict(ring_contracts or {}).items()
-        if bool(dict(_contract or {}).get("eligible", False))
+        str(skeleton): int(dict(contract or {}).get("priority", 99))
+        for skeleton, contract in dict(ring_contracts or {}).items()
+        if bool(dict(contract or {}).get("eligible", False))
     }
     flex_allowed = bool(
         str(class_type) in {"24_AB_M", "24_CD_M", "24_CD_M_FULL", "24_AB_N_24_AB"}
@@ -3592,7 +3564,7 @@ def _like24_ring_evidence(
     side_allowed = bool(
         str(class_type) in {
             "24_A", "24_B", "24_C", "24_D",
-            "24_AB_N", "24_AB_P", "24_CD_M", "24_CD_N", "24_CD_P",
+            "24_AB_M", "24_AB_N", "24_AB_P", "24_CD_M", "24_CD_N", "24_CD_P",
             "24_AB_N_24_CD", "24_CD_N_24_CD",
         }
     )
@@ -3611,12 +3583,6 @@ def _like24_ring_evidence(
         )
     return {
         "fixed_connection_contracts": [dict(item or {}) for item in list(fixed_connection_contracts or [])],
-        "branch_contracts": [dict(item or {}) for item in list(fixed_connection_contracts or [])],
-        "fixed_connection_types": [
-            str(dict(item or {}).get("side_class", ""))
-            for item in list(fixed_connection_contracts or [])
-            if str(dict(item or {}).get("side_class", ""))
-        ],
         "required_branch_kinds_by_anchor": required_branch_kinds_by_anchor,
         "required_branch_closures_by_anchor_in_ring": branch_closures_in_ring,
         "ring_eligibility": sorted({str(x) for x in ring_eligibility}),
@@ -3647,8 +3613,6 @@ def _like24_ring_evidence(
         "fixed_connection_context": fixed_connection_context,
         "bridgehead_policy": bridgehead_policy,
         "ring_contracts": ring_contracts,
-        # Capabilities are explicit facts consumed by projection and closure.
-        # They are intentionally independent of preferred_product_type.
         "ring_allowed": bool(any(
             bool(dict(contract or {}).get("eligible", False))
             for contract in dict(ring_contracts or {}).values()
@@ -3700,9 +3664,8 @@ def _like24_bridge_ring_evidence(
         or "11" in str(getattr(right_fragment, "topology_template", ""))
     )
     if class_type == "24_AB_N_24_AB":
-        # 11-24-23-24-11 is a complete flexible chain (A+), not a ring
-        # segment.  Keep the bridge evidence for flexible assembly only.
-        pass
+        # This paired form is an explicit flexible chain, not a ring segment.
+        allowed = []
     elif class_type == "24_AB_N_24_CD":
         allowed.append("side")
         slots.extend(["side_anchor_core_pair"])
@@ -3745,46 +3708,8 @@ def _like24_bridge_ring_evidence(
         "fused_ring_plan": {},
     }
     bridgehead_kind = "substitute_14_pair" if bridgehead_role == "fused_bridgehead_substitute_pair" else "none"
-    pair_ring_roles = {
-        "side": {
-            "allowed": bool("side" in allowed),
-            "roles": [str(item) for item in slots if "side" in str(item)],
-        },
-        "upper_lower": {
-            "allowed": bool("upper_lower" in allowed),
-            "roles": [str(item) for item in slots if "upper" in str(item)],
-        },
-        "fused": {
-            "allowed": bool("fused" in allowed),
-            "roles": [str(item) for item in slots if "fused" in str(item) or "bridgehead" in str(item)],
-        },
-    }
-    pair_ring_priority = {
-        str(kind): int(dict(contract or {}).get("priority", 99))
-        for kind, contract in {
-            "side": {
-                "priority": 12 if class_type == "24_AB_N_24_CD" else 5,
-                "eligible": class_type in {"24_AB_N_24_CD", "24_CD_N_24_CD"},
-            },
-            "upper_lower": {
-                "priority": 5,
-                "eligible": class_type == "24_CD_N_24_CD",
-            },
-            "fused": {
-                "priority": 0 if bridgehead_role == "fused_bridgehead_substitute_pair" else 18,
-                "eligible": class_type == "24_CD_N_24_CD",
-            },
-        }.items()
-        if bool(dict(contract or {}).get("eligible", False))
-    }
-    pair_segment_span = 2
-    pair_ring_allowed = bool(class_type in {"24_AB_N_24_CD", "24_CD_N_24_CD"})
-    pair_side_allowed = pair_ring_allowed
-    pair_flex_allowed = bool(class_type == "24_AB_N_24_AB")
     return {
         "required_branch_kinds_by_anchor": {},
-        "branch_contracts": [],
-        "fixed_connection_types": [],
         "required_branch_closures_by_anchor_in_ring": {"side": {}, "upper_lower": {}, "fused": {}},
         "ring_eligibility": sorted({str(item) for item in allowed}),
         "ring_slot_signatures": sorted({str(item) for item in slots}),
@@ -3839,27 +3764,31 @@ def _like24_bridge_ring_evidence(
                 ),
                 priority=12 if class_type == "24_AB_N_24_CD" else (5 if class_type == "24_CD_N_24_CD" else 25),
                 slot_roles=(
-                    ["side_anchor", "side_core", "side_anchor_core_pair"]
-                    if class_type == "24_AB_N_24_CD" else ["side_pair_core", "side_core"]
+                    ["side_anchor_pair"]
+                    if class_type == "24_AB_N_24_AB"
+                    else (["side_anchor", "side_core", "side_anchor_core_pair"] if class_type == "24_AB_N_24_CD" else ["side_pair_core", "side_core"])
                 ),
                 slot_coverage=(
                     ["left_anchor", "left_middle"]
-                    if class_type == "24_AB_N_24_CD" else ["left_middle", "right_middle"]
+                    if class_type == "24_AB_N_24_CD"
+                    else (["left_middle", "right_middle"] if class_type != "24_AB_N_24_AB" else ["left_anchor", "right_anchor"])
                 ),
                 slot_coverage_mode=(
                     "pair_core"
-                    if class_type == "24_CD_N_24_CD" else ("anchor_core_pair" if class_type == "24_AB_N_24_CD" else "single_slot")
+                    if class_type == "24_CD_N_24_CD"
+                    else ("anchor_pair" if class_type == "24_AB_N_24_AB" else ("anchor_core_pair" if class_type == "24_AB_N_24_CD" else "single_slot"))
                 ),
                 required_real_like24_slots=(
                     ["left_anchor", "left_middle"]
-                    if class_type == "24_AB_N_24_CD" else ["left_middle", "right_middle"]
+                    if class_type == "24_AB_N_24_CD"
+                    else (["left_middle", "right_middle"] if class_type != "24_AB_N_24_AB" else ["left_anchor", "right_anchor"])
                 ),
                 required_branch_kinds_by_slot=branch_kinds_by_slot["side_ring_plan"],
                 optional_pool23_slots=["left_bridge", "right_bridge"],
                 optional_pool24_slots=["left_middle", "right_middle"],
-                pool24_requires_11_slots=[],
+                pool24_requires_11_slots=["left_anchor", "right_anchor"] if class_type == "24_AB_N_24_AB" else [],
                 fixed_connector_position="dual",
-                outer_anchor_must_touch_aromatic=class_type == "24_AB_N_24_CD",
+                outer_anchor_must_touch_aromatic=class_type in {"24_AB_N_24_AB", "24_AB_N_24_CD"},
                 touches_aromatic_anchor=bool(touches_aromatic_anchor),
                 render_policy={"suppress_generic_open": True},
             ),
@@ -3914,27 +3843,34 @@ def _like24_bridge_ring_evidence(
                 render_policy={"suppress_generic_open": True},
             ),
         },
-        "ring_allowed": pair_ring_allowed,
-        "ring_roles_by_skeleton": pair_ring_roles,
-        "ring_segment_span": {
-            str(kind): int(pair_segment_span)
-            for kind, details in pair_ring_roles.items()
-            if bool(details.get("allowed", False))
-        },
-        "ring_priority": pair_ring_priority,
-        "fixed_connection_role": "dual",
-        "side_allowed": pair_side_allowed,
+        "ring_allowed": bool(allowed),
+        "side_allowed": bool(class_type != "24_AB_N_24_AB"),
         "assembly_capabilities": {
-            "flex_allowed": pair_flex_allowed,
-            "side_allowed": pair_side_allowed,
-            "ring_allowed": pair_ring_allowed,
-            "ring_roles_by_skeleton": pair_ring_roles,
-            "ring_segment_span": {
-                str(kind): int(pair_segment_span)
-                for kind, details in pair_ring_roles.items()
-                if bool(details.get("allowed", False))
+            "flex_allowed": bool(class_type == "24_AB_N_24_AB"),
+            "side_allowed": bool(class_type != "24_AB_N_24_AB"),
+            "ring_allowed": bool(allowed),
+            "ring_roles_by_skeleton": {
+                f"{skeleton}_ring_plan": {
+                    "allowed": bool(skeleton in allowed),
+                    "roles": [
+                        str(role)
+                        for role in list(ring_slot_capabilities.get(skeleton, []) or [])
+                    ],
+                    "slot_coverage": [],
+                }
+                for skeleton in ("side", "upper_lower", "fused")
             },
-            "ring_priority": pair_ring_priority,
+            "ring_segment_span": {
+                f"{skeleton}_ring_plan": 2
+                for skeleton in allowed
+            },
+            "ring_priority": {
+                "side_ring_plan": 12 if class_type == "24_AB_N_24_CD" else 5,
+                **(
+                    {"upper_lower_ring_plan": 5, "fused_ring_plan": 18}
+                    if class_type == "24_CD_N_24_CD" else {}
+                ),
+            },
             "fixed_connection_role": "dual",
         },
         "suppressed_support_node_ids": [],
@@ -4207,29 +4143,23 @@ def _resolve_like24_secondary_rule(
         for profile in list(connector_profiles or [])
     ]
     if base_class in {"24_A", "24_B"}:
-        # Double-ended Like24 units are classified from both fixed sides.
-        # M dominates because it supplies the flexible-chain mainline; N is
-        # the next open form and P is only the closed side-chain form.
-        if "M" in all_side_classes:
-            class_type = "24_AB_M"
-        elif "N" in all_side_classes:
-            class_type = "24_AB_N"
-        else:
-            class_type = "24_AB_P" if "P" in all_side_classes else None
+        class_type = {
+            "M": "24_AB_M",
+            "N": "24_AB_N",
+            "P": "24_AB_P",
+        }.get(str(primary_side_class))
         if class_type is None:
             return None
         return dict(LIKE24_SECONDARY_BY_CLASS.get(class_type, {}) or {})
     if base_class in {"24_C", "24_D"}:
-        if "M" in all_side_classes:
-            class_type = (
-                "24_CD_M_FULL"
-                if len(all_side_classes) >= 2 and all(side == "M" for side in all_side_classes)
-                else "24_CD_M"
-            )
-        elif "N" in all_side_classes:
+        if str(primary_side_class) == "M":
+            class_type = "24_CD_M_FULL" if len(all_side_classes) >= 2 and all(side == "M" for side in all_side_classes) else "24_CD_M"
+        elif str(primary_side_class) == "N":
             class_type = "24_CD_N"
+        elif str(primary_side_class) == "P":
+            class_type = "24_CD_P"
         else:
-            class_type = "24_CD_P" if "P" in all_side_classes else None
+            class_type = None
         if class_type is None:
             return None
         return dict(LIKE24_SECONDARY_BY_CLASS.get(class_type, {}) or {})
@@ -4294,6 +4224,87 @@ def _match_like24_fragment(
     if primary_connector is None:
         _record_reject(rejects, token, family="like24", reason="missing_primary_connector")
         return None
+    open_su11_ids = sorted(
+        int(neighbor.node_id)
+        for neighbor in list(token.neighbor_tokens or [])
+        if int(neighbor.su_type) == 11
+        and is_open_boundary_semantic(neighbor)
+    )
+    terminal_28_ring_branch = bool(
+        str(token.subtype) == "single19d3"
+        and len(connector_profiles) == 1
+        and _safe_int(connector_profiles[0].get("connector_su_type"), -1) == 28
+        and _normalize_fixed_side_class(connector_profiles[0].get("side_class")) == "N"
+        and bool(connector_profiles[0].get("fixed_terminal_branch", False))
+        and not list(connector_profiles[0].get("remaining_node_ids", []) or [])
+    )
+    if str(token.subtype).startswith("single") and (
+        len(open_su11_ids) >= 2 or terminal_28_ring_branch
+    ):
+        contracts = _build_fixed_connection_contracts(
+            class_type=str(base_rule.get("class_type")),
+            connector_profiles=connector_profiles,
+            primary_connector=None,
+        )
+        for contract in contracts:
+            contract["role_candidates"] = ["branch_only"]
+        # This branch has two open mainline boundaries, so it is also a
+        # legitimate ring segment.  Keep that fact explicit in the
+        # classification contract; assembly must not infer ring eligibility
+        # from the preferred flex/side product type.
+        ring_contracts = dict(base_fragment.evidence.get("ring_contracts", {}) or {})
+        ring_branch_kind_names = {
+            "side_ring_plan": "side",
+            "upper_lower_ring_plan": "upper_lower",
+            "fused_ring_plan": "fused",
+        }
+        ring_branch_kinds = sorted({
+            str(ring_branch_kind_names.get(str(kind), str(kind)))
+            for kind, contract in ring_contracts.items()
+            if bool(dict(contract or {}).get("eligible", False))
+        })
+        ring_branch_roles = sorted({
+            str(role)
+            for contract in ring_contracts.values()
+            if bool(dict(contract or {}).get("eligible", False))
+            for role in list(dict(contract or {}).get("slot_roles", []) or [])
+            if str(role)
+        })
+        base_fragment.evidence.update({
+            "connector_profiles": connector_profiles,
+            "selected_primary_connector": {},
+            "secondary_connector_profiles": connector_profiles,
+            "fixed_connection_contracts": contracts,
+            "fixed_branch_double_open_flex": bool(not terminal_28_ring_branch),
+            # Preserve the ring-first shape without turning it into a mandatory
+            # ring.  It remains eligible for D-like side closure after failure.
+            "terminal_28_ring_only_branch": False,
+            "terminal_28_ring_preferred_branch": bool(terminal_28_ring_branch),
+            "ring_branch_capable": bool(ring_branch_kinds),
+            "ring_branch_allowed_skeletons": list(ring_branch_kinds),
+            "ring_branch_roles": list(ring_branch_roles),
+            "ring_branch_open_aromatic_endpoint": bool(terminal_28_ring_branch),
+            "selected_su11_anchor_ids": [],
+            "released_extra_su11_ids": list(open_su11_ids),
+            "secondary_skipped_reason": (
+                "terminal_28_prefers_24b_n_ring_branch"
+                if terminal_28_ring_branch
+                else "two_open_mainline_boundaries_keep_fixed_connection_as_branch"
+            ),
+        })
+        base_fragment.topology_template = "-24(?)-"
+        base_fragment.open_slots = ["OPEN", "OPEN"]
+        base_fragment.open_mainline_slots = []
+        base_fragment.source_node_ids = _union_source_ids(
+            _like24_owned_fixed_component_node_ids(token, tokens_by_id),
+            [
+                int(node_id)
+                for contract in contracts
+                for node_id in list(dict(contract or {}).get("base_path_node_ids", []) or [])
+            ],
+        )
+        base_fragment.claimed_node_ids = list(base_fragment.source_node_ids)
+        return base_fragment
     secondary_rule = _resolve_like24_secondary_rule(
         str(base_rule.get("class_type")),
         str(primary_connector.get("side_class")),

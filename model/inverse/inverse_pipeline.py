@@ -8,7 +8,6 @@ import re
 import os
 import shutil
 import time
-import inspect
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional, Any, Sequence
 
@@ -47,22 +46,22 @@ from .topology.stage3.flex_audit import _compute_flex_audit
 class InversePipelineV3:
     """
     改进的逆向推理主类
-
+    
     核心改进：
     1. 软约束系统：约束按优先级分级，允许临时违反低优先级约束
     2. 合成模板生成：库缺失时动态生成化学合理的模板
     3. 增量优化：保留历史信息，避免全盘推翻
     4. 多目标评估：不仅看R²，还考虑分段匹配、尖峰抑制、元素平衡
     """
-
-    def __init__(self,
+    
+    def __init__(self, 
                  s2n_model: S2NModel,
                  vae_model: NMR_VAE,
                  templates: Optional[Any],
                  device: str = 'cuda'):
         """
         初始化推理管道
-
+        
         Args:
             s2n_model: Spectrum-to-Node模型
             vae_model: NMR VAE模型（用于解码mu/pi）
@@ -82,11 +81,11 @@ class InversePipelineV3:
                     self.default_template_lib_path = str(Path(lib_path))
             except Exception:
                 pass
-
+        
         # 加载常量到设备
         self.E_SU = E_SU.to(device)
         self.SU_PPM_RANGES = SU_PPM_RANGES  # 字典，不需要.to(device)
-
+        
         # 初始化分层组件（委托模式）
         self.layer0_estimator = Layer0Estimator(
             s2n_model=self.s2n,
@@ -304,6 +303,438 @@ class InversePipelineV3:
             'layer1_config': layer1_config,
             'layer3_config': layer3_config,
         }
+
+    @staticmethod
+    def _stage3_snapshot_json_value(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            if value.ndim == 0:
+                return value.detach().cpu().item()
+            return value.detach().cpu().tolist()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, set):
+            return [
+                InversePipelineV3._stage3_snapshot_json_value(item)
+                for item in sorted(value, key=str)
+            ]
+        if isinstance(value, dict):
+            return {
+                str(key): InversePipelineV3._stage3_snapshot_json_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [
+                InversePipelineV3._stage3_snapshot_json_value(item)
+                for item in value
+            ]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if hasattr(value, 'to_dict'):
+            try:
+                return InversePipelineV3._stage3_snapshot_json_value(
+                    value.to_dict()
+                )
+            except Exception:
+                pass
+        return str(value)
+
+    @classmethod
+    def _write_stage3_snapshot_json(cls, path: Path, value: Any) -> None:
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump(
+                cls._stage3_snapshot_json_value(value),
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+
+    @staticmethod
+    def _stage3_snapshot_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, 'rb') as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _restore_numeric_json_keys(value: Any) -> Any:
+        if isinstance(value, list):
+            return [
+                InversePipelineV3._restore_numeric_json_keys(item)
+                for item in value
+            ]
+        if not isinstance(value, dict):
+            return value
+        restored: Dict[Any, Any] = {}
+        for raw_key, item in value.items():
+            key: Any = raw_key
+            if isinstance(raw_key, str) and raw_key.lstrip('-').isdigit():
+                key = int(raw_key)
+            restored[key] = InversePipelineV3._restore_numeric_json_keys(item)
+        return restored
+
+    @staticmethod
+    def _load_stage3_snapshot_torch(path: Path, *, map_location: Any) -> Any:
+        try:
+            return torch.load(
+                path,
+                map_location=map_location,
+                weights_only=False,
+            )
+        except TypeError:
+            return torch.load(path, map_location=map_location)
+
+    def _archive_stage3_snapshot_path(
+        self,
+        snapshot_path: Path,
+        *,
+        run_id: str,
+    ) -> Optional[Path]:
+        if not snapshot_path.exists():
+            return None
+        archive_dir = snapshot_path.parent / 'archive'
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target = archive_dir / f'{snapshot_path.name}-{run_id}'
+        suffix = 1
+        while target.exists():
+            target = archive_dir / f'{snapshot_path.name}-{run_id}-{suffix}'
+            suffix += 1
+        shutil.move(str(snapshot_path), str(target))
+        return target
+
+    def _save_stage3_input_snapshot(
+        self,
+        *,
+        output_dir: str,
+        nodes: Sequence[_NodeV3],
+        H: torch.Tensor,
+        S_target: torch.Tensor,
+        E_target: torch.Tensor,
+        current_diff: Dict[str, Any],
+        fixed_partition_meta: Dict[str, Any],
+        layer1_runtime_cfg: Dict[str, Any],
+        stage3_resource_cfg: Dict[str, Any],
+        eval_lib_path: str,
+        outer_idx: int,
+        run_id: str,
+    ) -> Path:
+        baseline = dict(current_diff or {})
+        if (
+            str(baseline.get('source_stage', '') or '') != 'layer2'
+            or str(baseline.get('spectral_contract', '') or '')
+            != 'template_center_mu'
+        ):
+            raise ValueError('stage3_snapshot_requires_saved_layer2_baseline')
+
+        output_root = Path(output_dir)
+        output_root.mkdir(parents=True, exist_ok=True)
+        snapshot_dir = output_root / 'stage3_input_snapshot'
+        self._archive_stage3_snapshot_path(snapshot_dir, run_id=run_id)
+        temp_dir = output_root / (
+            f'.stage3_input_snapshot.tmp-{int(os.getpid())}-{time.time_ns()}'
+        )
+        temp_dir.mkdir(parents=False, exist_ok=False)
+        try:
+            snapshot_nodes = copy.deepcopy(list(nodes or []))
+            torch.save(snapshot_nodes, temp_dir / 'nodes.pt')
+            torch.save(H.detach().cpu().clone(), temp_dir / 'H.pt')
+            torch.save(
+                S_target.detach().cpu().clone(), temp_dir / 'S_target.pt'
+            )
+            torch.save(
+                E_target.detach().cpu().clone(), temp_dir / 'E_target.pt'
+            )
+            self._write_stage3_snapshot_json(
+                temp_dir / 'current_diff.json', baseline
+            )
+            self._write_stage3_snapshot_json(
+                temp_dir / 'fixed_partition_meta.json', fixed_partition_meta
+            )
+            self._write_stage3_snapshot_json(
+                temp_dir / 'layer1_runtime_config.json', layer1_runtime_cfg
+            )
+            self._write_stage3_snapshot_json(
+                temp_dir / 'stage3_resource_config.json', stage3_resource_cfg
+            )
+
+            node_rows: List[Dict[str, Any]] = []
+            node_hops: Dict[str, Dict[str, Any]] = {}
+            for node in sorted(
+                snapshot_nodes,
+                key=lambda item: int(getattr(item, 'global_id', -1)),
+            ):
+                node_id = int(getattr(node, 'global_id', -1))
+                hop1_su = {
+                    str(key): int(value)
+                    for key, value in dict(
+                        getattr(node, 'hop1_su', {}) or {}
+                    ).items()
+                }
+                hop2_su = {
+                    str(key): int(value)
+                    for key, value in dict(
+                        getattr(node, 'hop2_su', {}) or {}
+                    ).items()
+                }
+                hop_record = {
+                    'hop1_ids': sorted(
+                        int(value)
+                        for value in list(getattr(node, 'hop1_ids', []) or [])
+                    ),
+                    'hop2_ids': sorted(
+                        int(value)
+                        for value in list(getattr(node, 'hop2_ids', []) or [])
+                    ),
+                    'fixed_hop1_ids': sorted(
+                        int(value)
+                        for value in list(
+                            getattr(node, 'fixed_hop1_ids', set()) or set()
+                        )
+                    ),
+                    'hop1_su': hop1_su,
+                    'hop2_su': hop2_su,
+                }
+                node_hops[str(node_id)] = hop_record
+                z_vec = getattr(node, 'z_vec', None)
+                node_rows.append({
+                    'global_id': node_id,
+                    'su_type': int(getattr(node, 'su_type', -1)),
+                    'mu': float(getattr(node, 'mu', 0.0) or 0.0),
+                    'pi': float(getattr(node, 'pi', 0.0) or 0.0),
+                    'template_key': str(getattr(node, 'template_key', None)),
+                    'target_hop1_degree': getattr(
+                        node, 'target_hop1_degree', None
+                    ),
+                    'target_fixed_anchor_count': getattr(
+                        node, 'target_fixed_anchor_count', None
+                    ),
+                    'special_anchor_partition': str(
+                        getattr(node, 'special_anchor_partition', '') or ''
+                    ),
+                    'special_anchor_mode': str(
+                        getattr(node, 'special_anchor_mode', '') or ''
+                    ),
+                    'hop1_ids': json.dumps(hop_record['hop1_ids']),
+                    'hop2_ids': json.dumps(hop_record['hop2_ids']),
+                    'fixed_hop1_ids': json.dumps(
+                        hop_record['fixed_hop1_ids']
+                    ),
+                    'hop1_su': json.dumps(hop1_su, sort_keys=True),
+                    'hop2_su': json.dumps(hop2_su, sort_keys=True),
+                    'z_vec': json.dumps(
+                        z_vec.detach().cpu().flatten().tolist()
+                        if isinstance(z_vec, torch.Tensor) else []
+                    ),
+                })
+            pd.DataFrame(node_rows).to_csv(
+                temp_dir / 'nodes_by_global_id.csv', index=False
+            )
+            self._write_stage3_snapshot_json(
+                temp_dir / 'node_hops.json', node_hops
+            )
+
+            data_files = sorted(
+                path.name
+                for path in temp_dir.iterdir()
+                if path.is_file()
+            )
+            manifest = {
+                'format': 'graphnmr_stage3_input_snapshot',
+                'version': 1,
+                'created_at_unix': float(time.time()),
+                'run_id': str(run_id),
+                'outer_idx': int(outer_idx),
+                'node_count': int(len(snapshot_nodes)),
+                'source_stage': 'layer2',
+                'spectral_contract': 'template_center_mu',
+                'eval_lib_path': str(eval_lib_path),
+                'files': data_files,
+                'sha256': {
+                    name: self._stage3_snapshot_sha256(temp_dir / name)
+                    for name in data_files
+                },
+            }
+            self._write_stage3_snapshot_json(
+                temp_dir / 'snapshot_manifest.json', manifest
+            )
+            temp_dir.rename(snapshot_dir)
+        except Exception:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
+            raise
+        return snapshot_dir
+
+    def replay_stage3_from_snapshot(
+        self,
+        snapshot_dir: str | Path,
+        output_dir: Optional[str] = None,
+        stage_configs: Optional[Dict[str, Any]] = None,
+        outer_idx: int = 0,
+    ) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, Any], Dict[str, Any]]:
+        """Run Stage3 directly from a saved pre-Stage3 Layer2 boundary."""
+        snapshot_path = Path(snapshot_dir)
+        manifest_path = snapshot_path / 'snapshot_manifest.json'
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f'missing Stage3 snapshot manifest: {manifest_path}'
+            )
+        with open(manifest_path, 'r', encoding='utf-8') as handle:
+            manifest = dict(json.load(handle) or {})
+        if str(manifest.get('format', '')) != 'graphnmr_stage3_input_snapshot':
+            raise ValueError('invalid_stage3_snapshot_format')
+        for name, expected in dict(manifest.get('sha256', {}) or {}).items():
+            file_path = snapshot_path / str(name)
+            if not file_path.is_file():
+                raise FileNotFoundError(
+                    f'missing Stage3 snapshot file: {file_path}'
+                )
+            if self._stage3_snapshot_sha256(file_path) != str(expected):
+                raise ValueError(f'stage3_snapshot_checksum_mismatch:{name}')
+
+        nodes = self._load_stage3_snapshot_torch(
+            snapshot_path / 'nodes.pt', map_location=self.device
+        )
+        H = self._load_stage3_snapshot_torch(
+            snapshot_path / 'H.pt', map_location=self.device
+        ).to(self.device)
+        S_target = self._load_stage3_snapshot_torch(
+            snapshot_path / 'S_target.pt', map_location=self.device
+        ).to(self.device)
+        E_target = self._load_stage3_snapshot_torch(
+            snapshot_path / 'E_target.pt', map_location=self.device
+        ).to(self.device)
+        with open(snapshot_path / 'current_diff.json', 'r', encoding='utf-8') as handle:
+            current_diff = dict(json.load(handle) or {})
+        with open(
+            snapshot_path / 'fixed_partition_meta.json', 'r', encoding='utf-8'
+        ) as handle:
+            fixed_partition_meta = self._restore_numeric_json_keys(
+                json.load(handle)
+            )
+        with open(
+            snapshot_path / 'layer1_runtime_config.json', 'r', encoding='utf-8'
+        ) as handle:
+            layer1_runtime_cfg = dict(json.load(handle) or {})
+        with open(
+            snapshot_path / 'stage3_resource_config.json', 'r', encoding='utf-8'
+        ) as handle:
+            resource_cfg = dict(json.load(handle) or {})
+
+        override = dict(stage_configs or {})
+        if override:
+            if 'block_c_resource' in override:
+                unknown_sections = set(override) - {'block_c_resource'}
+                if unknown_sections:
+                    raise ValueError(
+                        'replay only accepts block_c_resource overrides: '
+                        + ', '.join(sorted(str(key) for key in unknown_sections))
+                    )
+                resource_cfg.update(
+                    dict(override.get('block_c_resource', {}) or {})
+                )
+            else:
+                resource_cfg.update(override)
+        if not bool(resource_cfg.pop('enabled', True)):
+            raise ValueError('replay_stage3_requires_block_c_resource_enabled')
+
+        supported_resource_keys = {
+            'flex_max_primary_adjustments',
+            'external_max_primary_adjustments',
+            'internal_max_primary_adjustments',
+            'max_h_compensation_ops_per_adjustment',
+            'residual_flex_preferred_23',
+            'residual_flex_min_23',
+            'residual_side_preferred_23',
+            'residual_side_min_23',
+            'h_tolerance',
+            'enable_post_external_spectrum',
+            'spectrum_active_through_cycle',
+            'spectrum_candidate_limit',
+            'spectrum_max_primary_adjustments',
+            'spectrum_min_r2_gain',
+            'verbose',
+        }
+        unknown_keys = set(resource_cfg) - supported_resource_keys
+        if unknown_keys:
+            raise ValueError(
+                'block_c_resource contains unknown replay keys: '
+                + ', '.join(sorted(str(key) for key in unknown_keys))
+            )
+        if len(list(nodes or [])) != int(manifest.get('node_count', -1)):
+            raise ValueError('stage3_snapshot_node_count_mismatch')
+        if (
+            str(current_diff.get('source_stage', '') or '') != 'layer2'
+            or str(current_diff.get('spectral_contract', '') or '')
+            != 'template_center_mu'
+        ):
+            raise ValueError('stage3_snapshot_layer2_contract_invalid')
+
+        self._set_fixed_partition_meta(fixed_partition_meta)
+        resolved_lib = str(
+            manifest.get('eval_lib_path', '')
+            or self.default_template_lib_path
+            or ''
+        )
+        if not resolved_lib:
+            raise ValueError('stage3_snapshot_missing_template_library')
+        self.layer1_assigner._configure_exact_hop1_shift_constraints(resolved_lib)
+        hop1_adjuster = getattr(self.layer1_assigner, '_hop1_adjuster', None)
+        self.layer4_adjuster.set_spectrum_hop1_template_options(
+            getattr(hop1_adjuster, 'shift_options_by_su', {}) or {}
+        )
+        self.layer4_adjuster._spectrum_search_memory = {}
+
+        replay_output = None
+        if output_dir:
+            replay_root = Path(output_dir)
+            replay_root.mkdir(parents=True, exist_ok=True)
+            replay_output = str(replay_root / 'block_c')
+        result = self._run_topology_stage3_resource_cycles(
+            nodes=copy.deepcopy(list(nodes or [])),
+            H=H.detach().clone(),
+            current_diff=copy.deepcopy(current_diff),
+            S_target=S_target,
+            E_target=E_target,
+            eval_lib_path=resolved_lib,
+            layer1_runtime_cfg=layer1_runtime_cfg,
+            outer_idx=int(outer_idx),
+            flex_max_primary_adjustments=int(resource_cfg.get('flex_max_primary_adjustments', 10)),
+            external_max_primary_adjustments=int(resource_cfg.get('external_max_primary_adjustments', 10)),
+            internal_max_primary_adjustments=int(resource_cfg.get('internal_max_primary_adjustments', 30)),
+            max_h_compensation_ops_per_adjustment=int(resource_cfg.get('max_h_compensation_ops_per_adjustment', 8)),
+            residual_flex_preferred_23=int(resource_cfg.get('residual_flex_preferred_23', 3)),
+            residual_flex_min_23=int(resource_cfg.get('residual_flex_min_23', 2)),
+            residual_side_preferred_23=int(resource_cfg.get('residual_side_preferred_23', 2)),
+            residual_side_min_23=int(resource_cfg.get('residual_side_min_23', 1)),
+            h_tolerance=float(resource_cfg.get('h_tolerance', 0.08)),
+            enable_post_external_spectrum=bool(resource_cfg.get('enable_post_external_spectrum', True)),
+            spectrum_active_through_cycle=int(resource_cfg.get('spectrum_active_through_cycle', 20)),
+            spectrum_candidate_limit=int(resource_cfg.get('spectrum_candidate_limit', 8)),
+            spectrum_max_primary_adjustments=int(resource_cfg.get('spectrum_max_primary_adjustments', 10)),
+            spectrum_min_r2_gain=float(resource_cfg.get('spectrum_min_r2_gain', 0.0005)),
+            verbose=bool(resource_cfg.get('verbose', False)),
+            output_dir=replay_output,
+        )
+        replay_nodes, replay_H, replay_diff, replay_meta = result
+        if output_dir:
+            replay_root = Path(output_dir)
+            torch.save(copy.deepcopy(replay_nodes), replay_root / 'nodes.pt')
+            torch.save(replay_H.detach().cpu().clone(), replay_root / 'H.pt')
+            self._write_stage3_snapshot_json(
+                replay_root / 'current_diff.json', replay_diff
+            )
+            self._write_stage3_snapshot_json(
+                replay_root / 'stage3_meta.json', replay_meta
+            )
+        return replay_nodes, replay_H, replay_diff, replay_meta
 
     @staticmethod
     def _format_nonzero_histogram(H: torch.Tensor) -> str:
@@ -525,18 +956,6 @@ class InversePipelineV3:
         ))
         verbose = bool(runtime_cfg.get('verbose', False))
 
-        def _call_layer2_assign(**kwargs):
-            """Call Layer2 while remaining compatible with test/service adapters."""
-            try:
-                accepts_summary = 'emit_summary' in inspect.signature(
-                    self.layer2_assign
-                ).parameters
-            except (TypeError, ValueError):
-                accepts_summary = True
-            if not accepts_summary:
-                kwargs.pop('emit_summary', None)
-            return self.layer2_assign(**kwargs)
-
         variants, generation_diagnostics = (
             self.layer1_assigner.build_rule_valid_graph_variants(
                 H_init=H_seed.detach().clone(),
@@ -636,7 +1055,7 @@ class InversePipelineV3:
                     raw_layer1_nodes,
                     raw_layer1_snapshot.get('assignments', {}),
                 )
-                raw_layer2_nodes = _call_layer2_assign(
+                raw_layer2_nodes = self.layer2_assign(
                     nodes=copy.deepcopy(raw_layer1_nodes),
                     S_target=S_target,
                     E_target=E_target,
@@ -734,7 +1153,7 @@ class InversePipelineV3:
                         {},
                     ) or {}
                 )
-                refined_layer2_nodes = _call_layer2_assign(
+                refined_layer2_nodes = self.layer2_assign(
                     nodes=copy.deepcopy(refined_layer1_nodes),
                     S_target=S_target,
                     E_target=E_target,
@@ -2663,7 +3082,7 @@ class InversePipelineV3:
                 indent=2,
                 default=str,
             )
-
+    
     def infer(self, S_target: torch.Tensor, E_target: torch.Tensor,
               save_intermediates: bool = True,
               output_dir: str = 'inverse_result',
@@ -2675,7 +3094,7 @@ class InversePipelineV3:
               outer_improve_eps: float = 1e-4) -> Tuple[List[_NodeV3], torch.Tensor]:
         """
         逆向推理主入口
-
+        
         流程：
         1. Layer0 初始化 SU 直方图
         2. Layer1 -> Layer2 得到并保存完整基线状态
@@ -2688,7 +3107,7 @@ class InversePipelineV3:
              的 Stage3 组装循环；资源差谱候选仅以 Layer2-to-Layer2 R2 验收
            - Stage3（包括SU24阶段）完成后执行固定模板 Layer3 z 细化
         4. 返回当前外循环结束时的状态
-
+        
         Args:
             stage_configs: Layer4 正式阶段配置，推荐格式如:
                 {
@@ -2751,6 +3170,10 @@ class InversePipelineV3:
             archive_dir = output_root / 'archive'
             archive_dir.mkdir(parents=True, exist_ok=True)
             shutil.move(str(previous_final), str(archive_dir / f'final_outputs-{run_id}'))
+        self._archive_stage3_snapshot_path(
+            output_root / 'stage3_input_snapshot',
+            run_id=run_id,
+        )
 
         default_stage_configs = {
             'block_a': {
@@ -3260,6 +3683,35 @@ class InversePipelineV3:
                 'stage3_disabled' if not bool(resource_enabled) else 'stage3_not_started'
             )
             if bool(resource_enabled):
+                if int(outer_idx) == 0 and save_round_outputs and output_dir:
+                    snapshot_path = self._save_stage3_input_snapshot(
+                        output_dir=str(output_dir),
+                        nodes=copy.deepcopy(current_layer2_nodes),
+                        H=current_layer2_H.detach().clone(),
+                        S_target=S_target,
+                        E_target=E_target,
+                        current_diff=copy.deepcopy(current_layer2_diff),
+                        fixed_partition_meta=copy.deepcopy(
+                            getattr(
+                                self.layer4_adjuster,
+                                'fixed_partition_meta',
+                                {},
+                            )
+                            or {}
+                        ),
+                        layer1_runtime_cfg=copy.deepcopy(layer1_runtime_cfg),
+                        stage3_resource_cfg={
+                            'enabled': True,
+                            **copy.deepcopy(resource_cfg),
+                        },
+                        eval_lib_path=str(eval_lib_path),
+                        outer_idx=int(outer_idx),
+                        run_id=str(run_id),
+                    )
+                    print(
+                        f"[Outer Cycle {outer_idx + 1}] "
+                        f"Stage3 input snapshot: {snapshot_path}"
+                    )
                 try:
                     stage3_nodes, stage3_H, stage3_diff, stage3_meta = self._run_topology_stage3_resource_cycles(
                         nodes=copy.deepcopy(current_layer2_nodes),
@@ -3623,7 +4075,7 @@ class InversePipelineV3:
             if 0 <= su < NUM_SU_TYPES:
                 H[su] += 1
         return H
-
+    
     def estimate_su_histogram(self, S_target: torch.Tensor, E_target: torch.Tensor) -> torch.Tensor:
         """委托给Layer0Estimator执行SU直方图估计"""
         return self.layer0_estimator.estimate_su_histogram(S_target, E_target)
@@ -3734,7 +4186,7 @@ class InversePipelineV3:
                       emit_summary: bool = True) -> List[_NodeV3]:
         """
         Layer2: 委托给Layer2Estimator进行2-hop推导和模板检索
-
+        
         功能：
         1. 从1-hop邻居推导2-hop邻居
         2. 模板精确匹配和近似匹配
@@ -3769,11 +4221,11 @@ class InversePipelineV3:
         self.layer3_estimator.lib_path = resolved_path
         self.layer3_estimator._template_cache = layer2_cache
         return True
-
+    
     # ========================================================================
     # Layer3: z调优（改进版）
     # ========================================================================
-
+    
     def layer3_adjust_templates(self,
                                 nodes: List[_NodeV3],
                                 S_target: torch.Tensor,
@@ -3790,7 +4242,7 @@ class InversePipelineV3:
                                 -> Tuple[List[_NodeV3], float]:
         """
         Layer3: 通过调整z向量优化谱图匹配
-
+        
         改进点：
         1. 分段优先优化：集中火力攻克尖峰区域
         2. 候选池扩展：增加多样性采样
@@ -4817,11 +5269,11 @@ class InversePipelineV3:
             print(f"[Final Topology Export] 保存失败: {e}")
             if raise_topology_errors:
                 raise
-
+    
     # ========================================================================
     # 辅助方法
     # ========================================================================
-
+    
     def reconstruct_spectrum(self, nodes: List[_NodeV3]) -> torch.Tensor:
         """Reconstruct the inverse spectrum with unit peaks and HWHM 1.0."""
         device = self.device
@@ -4928,7 +5380,7 @@ def parse_elements(expr: str) -> torch.Tensor:
     """解析元素表达式，如 'C=100 H=150 O=10 N=2'"""
     import re
     matches = dict(re.findall(r"([CHONSX])\s*=\s*(\d+)", expr.upper()))
-    return torch.tensor([int(matches.get(sym, 0)) for sym in ['C', 'H', 'O', 'N', 'S', 'X']],
+    return torch.tensor([int(matches.get(sym, 0)) for sym in ['C', 'H', 'O', 'N', 'S', 'X']], 
                        dtype=torch.float)
 
 
@@ -4938,7 +5390,7 @@ def parse_elements(expr: str) -> torch.Tensor:
 
 if __name__ == '__main__':
     import argparse
-
+    
     parser = argparse.ArgumentParser(description='InversePipelineV3: 改进的逆向推理')
     parser.add_argument('--s2n_ckpt', type=str, required=True, help='S2N模型检查点路径')
     parser.add_argument('--vae_ckpt', type=str, required=True, help='VAE模型检查点路径')
@@ -4947,23 +5399,23 @@ if __name__ == '__main__':
     parser.add_argument('--elements', type=str, required=True, help='元素组成，如 C=100 H=150 O=10')
     parser.add_argument('--device', type=str, default='cuda', help='计算设备')
     parser.add_argument('--output', type=str, default='inverse_result', help='输出目录')
-
+    
     args = parser.parse_args()
-
+    
     # 加载管道
     print(f"加载模型: S2N={args.s2n_ckpt}, VAE={args.vae_ckpt}")
     pipeline = load_pipeline(args.s2n_ckpt, args.vae_ckpt, args.templates, args.device)
-
+    
     # 读取输入
     print(f"读取谱图: {args.spectrum}")
     S_target_raw = read_spectrum_csv(args.spectrum)
-
+    
     print(f"解析元素: {args.elements}")
     E_target = parse_elements(args.elements)
     S_target = normalize_spectrum_to_carbon_count(S_target_raw, float(E_target[0].item()))
-
+    
     print(f"目标谱图维度: {S_target.shape}, 元素组成: {E_target.tolist()}")
-
+    
     # 执行推理
     nodes, H_final = pipeline.infer(
         S_target,
@@ -4972,7 +5424,7 @@ if __name__ == '__main__':
         output_dir=args.output,
         eval_lib_path=args.templates,
     )
-
+    
     print(f"\n推理完成！结果已保存至 {args.output}/")
     print(f"最终SU数量: {len(nodes)}")
     print(f"SU直方图: {H_final.long().tolist()}")

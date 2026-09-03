@@ -74,7 +74,7 @@ def resolve_ring_candidate_topology(
                 int(item[0]),
             ),
         ):
-            segment = ring_segments_module.resolve_planned_ring_segment(assembler,
+            segment = ring_segments_module.resolve_planned_ring_segment(assembler, 
                 segment_spec,
                 branch_donors,
                 skeleton_kind=str(resolved_skeleton_kind),
@@ -383,7 +383,7 @@ def product_from_ring_topology_contract(
             fixed_label = str(materialization.backbone_labels[0])
             topology_notation = f"{topology_notation}-@({fixed_label})"
             node_id_notation = f"{node_id_notation}-@({int(cycle[0])})"
-    ring_contract = build_ring_topology_contract(assembler,
+    ring_contract = build_ring_topology_contract(assembler, 
         ring_kind=ring_kind,
         materialization=materialization,
         cycles=cycles,
@@ -392,7 +392,7 @@ def product_from_ring_topology_contract(
         role_node_ids=role_node_ids,
         diagnostics=diagnostics_payload,
     )
-    product = chain_materializer_module.make_product(assembler,
+    product = chain_materializer_module.make_product(assembler, 
         product_kind=str(product_kind),
         reason=str(reason),
         source_views=list(materialization.source_views or []),
@@ -400,7 +400,7 @@ def product_from_ring_topology_contract(
         node_ids=list(materialization.node_ids or []),
         branch_map={},
         branch_id_map={},
-        suppressed_support_node_ids=chain_materializer_module.collect_suppressed_support_node_ids(assembler,
+        suppressed_support_node_ids=chain_materializer_module.collect_suppressed_support_node_ids(assembler, 
             materialization.source_views,
             extra_ids=materialization.support_node_ids,
         ),
@@ -431,7 +431,7 @@ def commit_single_cycle_ring_candidate(
     assembler.last_ring_missing_counts = {}
     donor_snapshot = list(branch_donors)
     try:
-        materialization = resolve_ring_candidate_topology(assembler,
+        materialization = resolve_ring_candidate_topology(assembler, 
             plan,
             skeleton_kind=str(skeleton_kind),
             branch_donors=branch_donors,
@@ -462,7 +462,7 @@ def commit_single_cycle_ring_candidate(
         "ring_has_fixed_anchor": bool(ring_has_fixed_anchor),
         **dict(extra_diagnostics or {}),
     }
-    product = product_from_ring_topology_contract(assembler,
+    product = product_from_ring_topology_contract(assembler, 
         product_kind=str(product_kind),
         reason=str(reason),
         materialization=materialization,
@@ -477,7 +477,7 @@ def commit_single_cycle_ring_candidate(
         assembler.allocator.rollback(snapshot)
         branch_donors[:] = donor_snapshot
         return False
-    if not ownership_module.commit_product(assembler,
+    if not ownership_module.commit_product(assembler, 
         product,
         allocator_snapshot=snapshot,
         branch_donors=branch_donors,
@@ -513,7 +513,7 @@ def commit_fused_ring_candidate(assembler, plan: RingCandidatePlan, branch_donor
     assembler.last_ring_missing_counts = {}
     planned_required_counts = {
         str(key): int(value)
-        for key, value in dict(ring_planner_module.pool_ring_attempt(assembler,
+        for key, value in dict(ring_planner_module.pool_ring_attempt(assembler, 
             plan,
             product_kind="fatty_ring_fused",
             skeleton_kind="fused",
@@ -554,17 +554,17 @@ def commit_fused_ring_candidate(assembler, plan: RingCandidatePlan, branch_donor
         branch_donors[:] = donor_snapshot
         return False
 
-    left_anchor_segment = ring_segments_module.resolve_planned_ring_segment(assembler,
+    left_anchor_segment = ring_segments_module.resolve_planned_ring_segment(assembler, 
         left_anchor_spec,
         branch_donors,
         skeleton_kind="fused",
     )
-    left_bridge_segment = ring_segments_module.resolve_planned_ring_segment(assembler,
+    left_bridge_segment = ring_segments_module.resolve_planned_ring_segment(assembler, 
         left_bridge_spec,
         branch_donors,
         skeleton_kind="fused",
     )
-    inner_segment = ring_segments_module.resolve_planned_ring_segment(assembler,
+    inner_segment = ring_segments_module.resolve_planned_ring_segment(assembler, 
         inner_spec,
         branch_donors,
         skeleton_kind="fused",
@@ -573,12 +573,12 @@ def commit_fused_ring_candidate(assembler, plan: RingCandidatePlan, branch_donor
         str(right_bridge_spec.get("shared_candidate_id", ""))
         and str(right_bridge_spec.get("shared_candidate_id", "")) == str(left_bridge_spec.get("candidate_id", ""))
     )
-    right_bridge_segment = left_bridge_segment if pair_bridgehead_mode else ring_segments_module.resolve_planned_ring_segment(assembler,
+    right_bridge_segment = left_bridge_segment if pair_bridgehead_mode else ring_segments_module.resolve_planned_ring_segment(assembler, 
         right_bridge_spec,
         branch_donors,
         skeleton_kind="fused",
     )
-    right_anchor_segment = ring_segments_module.resolve_planned_ring_segment(assembler,
+    right_anchor_segment = ring_segments_module.resolve_planned_ring_segment(assembler, 
         right_anchor_spec,
         branch_donors,
         skeleton_kind="fused",
@@ -778,7 +778,7 @@ def commit_fused_ring_candidate(assembler, plan: RingCandidatePlan, branch_donor
             for requirement in list(segment.replaced_branch_requirements or [])
         ],
     )
-    product = product_from_ring_topology_contract(assembler,
+    product = product_from_ring_topology_contract(assembler, 
         product_kind="fatty_ring_fused",
         reason="ring:fused_template",
         materialization=materialization,
@@ -805,7 +805,7 @@ def commit_fused_ring_candidate(assembler, plan: RingCandidatePlan, branch_donor
             assembler.last_ring_materialization_reason or "fused_ring_contract_audit_failed"
         )
     _remember_required_counts()
-    if not ownership_module.commit_product(assembler,
+    if not ownership_module.commit_product(assembler, 
         product,
         allocator_snapshot=snapshot,
         branch_donors=branch_donors,
@@ -877,7 +877,7 @@ def assemble_ring(
             if expanded
             else 24
         )
-        enumerated_plans = ring_planner_module.enumerate_ring_plans(assembler,
+        enumerated_plans = ring_planner_module.enumerate_ring_plans(assembler, 
             builder,
             max_plans=int(enumeration_plans),
             max_evaluations=int(enumeration_evaluations),
@@ -887,7 +887,7 @@ def assemble_ring(
             candidate
             for candidate in enumerated_plans
             if (
-                ring_planner_module.ring_plan_contains_candidate_view(assembler,
+                ring_planner_module.ring_plan_contains_candidate_view(assembler, 
                     candidate, candidate_views
                 )
                 or (
@@ -898,7 +898,7 @@ def assemble_ring(
         ]
         ranked_plans: List[Tuple[Tuple[Any, ...], RingCandidatePlan, Dict[str, Any]]] = []
         for candidate in complete_plans:
-            attempt = ring_planner_module.pool_ring_attempt(assembler,
+            attempt = ring_planner_module.pool_ring_attempt(assembler, 
                 candidate,
                 product_kind=str(product_kind),
                 skeleton_kind=str(skeleton_kind),
@@ -927,7 +927,7 @@ def assemble_ring(
             if str(product_kind) == "fatty_ring_fused":
                 created = commit_fused_ring_candidate(assembler, candidate, branch_donors)
             else:
-                created = commit_single_cycle_ring_candidate(assembler,
+                created = commit_single_cycle_ring_candidate(assembler, 
                     candidate,
                     branch_donors,
                     skeleton_kind=str(skeleton_kind),
@@ -1054,19 +1054,13 @@ def assemble_ring(
             view for view in list(preferred_views or [])
             if str(allowed_name) in ring_planner_module.view_ring_allowed_skeletons(assembler, view)
         ]
-    failure_reason = str(reason or "")
-    if not failure_reason:
-        failure_reason = (
-            "ring_candidate_not_generated"
-            if plan is None else "ring_cycle_audit_failed"
-        )
     for view in list(relevant_views or []):
         if not ownership_module.fragment_available(assembler, int(view.fragment_id)):
             continue
-        assembler.ring_pending_reasons[int(view.fragment_id)] = failure_reason
+        assembler.ring_pending_reasons[int(view.fragment_id)] = str(reason)
         missing_slots = sorted({
             str(item)
-            for item in ([failure_reason] if failure_reason else [])
+            for item in ([str(reason)] if str(reason) else [])
             + (list(plan.missing_slots or []) if plan is not None else [])
         })
         assembler.ring_pending_attempts[int(view.fragment_id)] = {
@@ -1106,6 +1100,6 @@ def assemble_ring(
                     for key, value in selected_missing_counts.items()
                     if int(value) > 0
                 },
-                "failure_reason": failure_reason,
+                "failure_reason": str(reason),
             }
     return False

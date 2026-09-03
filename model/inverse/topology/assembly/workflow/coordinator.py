@@ -156,18 +156,7 @@ def run_external_assembly_phases(assembler: Any) -> ExternalAssemblyPhaseState:
         # Recovery is a controlled second attempt for both fatty/SU24 rings
         # and side chains.  It is only requested by Stage3 after the ordinary
         # conversion planner has proved the resource path infeasible.
-        ring_resource_blockers = {
-            int(fragment_id): dict(blocker or {})
-            for fragment_id, blocker in ring_planner_module.ring_resource_blockers(assembler).items()
-            if not bool(next(
-                (
-                    getattr(view, "can_side", False)
-                    for view in list(getattr(assembler, "views", []) or [])
-                    if int(getattr(view, "fragment_id", -1)) == int(fragment_id)
-                ),
-                False,
-            ))
-        }
+        ring_resource_blockers = ring_planner_module.ring_resource_blockers(assembler)
         if (
             ring_resource_blockers
             and bool(getattr(assembler, "allow_ring_recovery", False))
@@ -182,18 +171,7 @@ def run_external_assembly_phases(assembler: Any) -> ExternalAssemblyPhaseState:
                 ring_planner_module.assemble_priority_rings(
                     assembler, branch_donors
                 )
-    ring_resource_blockers = {
-        int(fragment_id): dict(blocker or {})
-        for fragment_id, blocker in ring_planner_module.ring_resource_blockers(assembler).items()
-        if not bool(next(
-            (
-                getattr(view, "can_side", False)
-                for view in list(getattr(assembler, "views", []) or [])
-                if int(getattr(view, "fragment_id", -1)) == int(fragment_id)
-            ),
-            False,
-        ))
-    }
+    ring_resource_blockers = ring_planner_module.ring_resource_blockers(assembler)
     ring_materialization_blockers = (
         ring_planner_module.ring_materialization_blockers(assembler)
     )
@@ -207,15 +185,6 @@ def run_external_assembly_phases(assembler: Any) -> ExternalAssemblyPhaseState:
             for value in dict(
                 dict(contract or {}).get("required_counts", {}) or {}
             ).values()
-        )
-        and any(
-            not bool(getattr(view, "can_side", False))
-            for view in list(getattr(assembler, "views", []) or [])
-            if int(getattr(view, "fragment_id", -1))
-            in {
-                int(value)
-                for value in list(dict(contract or {}).get("source_fragment_ids", []) or [])
-            }
         )
     ]
     # A continuation may legitimately skip the ring planner because this

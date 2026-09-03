@@ -491,7 +491,7 @@ def make_product(
     if is_ring:
         if ring_contract is None:
             validation_reason = "ring_contract_missing"
-            record_invalid_topology_attempt(assembler,
+            record_invalid_topology_attempt(assembler, 
                 product_kind=str(product_kind),
                 actual_topology_su=str(dict(diagnostics or {}).get("actual_topology_su", "")),
                 actual_topology_gid=str(dict(diagnostics or {}).get("actual_topology_gid", "")),
@@ -507,7 +507,7 @@ def make_product(
         if validation_reason is not None:
             ring_contract.complete = False
             ring_contract.audit_reason = str(validation_reason)
-            record_invalid_topology_attempt(assembler,
+            record_invalid_topology_attempt(assembler, 
                 product_kind=str(product_kind),
                 actual_topology_su=str(ring_contract.topology_notation),
                 actual_topology_gid=str(ring_contract.node_id_notation),
@@ -525,7 +525,7 @@ def make_product(
     physical_diagnostics: Dict[str, Any] = {}
     physical_validation_reason = (
         (None if is_ring else _validate_branch_capacity(labels, branch_map))
-        or physical_product_reason(assembler,
+        or physical_product_reason(assembler, 
             product_kind=str(product_kind),
             source_views=source_views,
             node_ids=node_ids,
@@ -536,14 +536,14 @@ def make_product(
         )
     )
     if physical_validation_reason is not None:
-        attempted_render = render_product(assembler,
+        attempted_render = render_product(assembler, 
             labels,
             node_ids,
             branch_map,
             branch_id_map,
             suppressed_support_node_ids=suppressed_support_node_ids,
         )
-        record_invalid_topology_attempt(assembler,
+        record_invalid_topology_attempt(assembler, 
             product_kind=str(product_kind),
             actual_topology_su=str(attempted_render.topology_notation),
             actual_topology_gid=str(attempted_render.node_id_notation),
@@ -552,7 +552,7 @@ def make_product(
             diagnostics={**dict(diagnostics or {}), **physical_diagnostics},
         )
         return None
-    render = render_product(assembler,
+    render = render_product(assembler, 
         labels,
         node_ids,
         branch_map,
@@ -597,12 +597,12 @@ def make_product(
         if ring_contract is not None
         else source_fragment_ids
     )
-    identity_conflict = ownership_module.candidate_identity_conflict(assembler,
+    identity_conflict = ownership_module.candidate_identity_conflict(assembler, 
         rendered_node_ids=identity_rendered_node_ids,
         source_fragment_ids=identity_source_fragment_ids,
     )
     if identity_conflict is not None:
-        record_invalid_topology_attempt(assembler,
+        record_invalid_topology_attempt(assembler, 
             product_kind=str(product_kind),
             actual_topology_su=str(render.topology_notation),
             actual_topology_gid=str(render.node_id_notation),
@@ -634,7 +634,7 @@ def make_product(
         )
     elif "canonical_labels" in diagnostics_payload:
         canonical_labels = list(diagnostics_payload.get("canonical_labels", list(labels or [])) or [])
-        canonical_render = render_product(assembler,
+        canonical_render = render_product(assembler, 
             canonical_labels,
             [None for _ in canonical_labels],
             {},
@@ -839,7 +839,7 @@ def build_main_closure(
             if bridge_already_materialized:
                 labels = list(endcap.main_labels or [])
                 node_ids = list(endcap.main_node_ids or [])
-            return (labels, node_ids), required_counts_from_pool_ids(assembler,
+            return (labels, node_ids), required_counts_from_pool_ids(assembler, 
                 endcap.pool_node_ids_by_su
             )
         closure = resolve_mainline_closure(assembler, str(closure_mode))
@@ -861,7 +861,7 @@ def build_main_closure(
             else:
                 labels = [str(bridge_label)] + list(labels)
                 node_ids = [int(bridge_id)] + list(node_ids)
-        return (labels, node_ids), required_counts_from_pool_ids(assembler,
+        return (labels, node_ids), required_counts_from_pool_ids(assembler, 
             closure.pool_node_ids_by_su
         )
     closure = resolve_mainline_closure(assembler, str(closure_mode))
@@ -871,7 +871,7 @@ def build_main_closure(
             for key, value in minimum_closure_required_counts(str(closure_mode)).items()
         }
     labels, node_ids = closure_sequence(assembler, closure, side)
-    return (labels, node_ids), required_counts_from_pool_ids(assembler,
+    return (labels, node_ids), required_counts_from_pool_ids(assembler, 
         closure.pool_node_ids_by_su
     )
 
@@ -1012,7 +1012,7 @@ def record_invalid_materialization_failure(
     validation_reason: str,
 ) -> bool:
     rolled_back_resource_ids = assembler.allocator.claimed_ids_since(snapshot)
-    attempted_render = render_product(assembler,
+    attempted_render = render_product(assembler, 
         labels,
         node_ids,
         branch_map,
@@ -1049,7 +1049,7 @@ def record_invalid_materialization_failure(
         },
     }
     physical_diagnostics: Dict[str, Any] = {}
-    physical_product_reason(assembler,
+    physical_product_reason(assembler, 
         product_kind=str(product_kind),
         source_views=source_views,
         node_ids=node_ids,
@@ -1081,7 +1081,7 @@ def record_failed_product_result(
         if assembler.last_invalid_topology
         else "product_materialization_failed"
     )
-    return record_invalid_materialization_failure(assembler,
+    return record_invalid_materialization_failure(assembler, 
         snapshot=snapshot,
         donor_snapshot=donor_snapshot,
         branch_donors=branch_donors,
@@ -1227,7 +1227,7 @@ def pending_kind_for_view(
     if preferred == "side_chain":
         return "explicit_side"
     if preferred == "ring_candidate":
-        return "like24_ring_candidate"
+        return "ring_only_like24"
     return "other"
 
 
@@ -1237,11 +1237,8 @@ def is_side_pending_view(
 ) -> bool:
     if view is None:
         return False
-    # Side-chain eligibility is a capability of the projected fragment.
-    # preferred_product_type is only an ordering hint; a ring-capable
-    # Like24 fragment must remain eligible for side fallback after ring stage.
-    if hasattr(view, "can_side"):
-        return bool(getattr(view, "can_side", False))
+    if bool(getattr(view, "can_side", False)):
+        return True
     return bool(
         str(getattr(view, "class_type", "")) in E_LIKE_OPEN_CLASSES
         or str(getattr(view, "preferred_product_type", "")) == "side_chain"
@@ -1253,7 +1250,7 @@ def available_remaining_side_views(
     *,
     require_generic_join: bool,
 ) -> List[AssemblyFragmentView]:
-    return ownership_module.available_views(assembler,
+    return ownership_module.available_views(assembler, 
         lambda item: (
             not ring_policy_module.ring_candidate_pending_for_ring_stage(
                 assembler, item
@@ -1272,11 +1269,12 @@ def available_remaining_b_open_views(
     *,
     require_generic_join: bool,
 ) -> List[AssemblyFragmentView]:
-    return ownership_module.available_views(assembler,
+    return ownership_module.available_views(assembler, 
         lambda item: (
             not ring_policy_module.ring_candidate_pending_for_ring_stage(
                 assembler, item
             )
+            and bool(getattr(item, "can_side", False))
             and view_has_flex_reconcile_role(assembler, item, "b_like_open")
             and (
                 not require_generic_join
@@ -1287,7 +1285,7 @@ def available_remaining_b_open_views(
 
 
 def available_branch_donors(assembler: Any) -> List[AssemblyFragmentView]:
-    return ownership_module.available_views(assembler,
+    return ownership_module.available_views(assembler, 
         lambda item: str(getattr(item, "class_type", "")) in {"E", "E+", "G"}
     )
 
@@ -1300,7 +1298,7 @@ def available_flex_reconcile_views(
     require_generic_join: bool = False,
 ) -> List[AssemblyFragmentView]:
     roles = {str(role) for role in list(require_roles or []) if str(role)}
-    candidates = ownership_module.available_views(assembler,
+    candidates = ownership_module.available_views(assembler, 
         lambda item: (
             (
                 str(assembler.flex_audit.get("scenario", "") or "") != "below_range"
@@ -1492,7 +1490,7 @@ def finalize_with_two_end_closures(
     trace_checkpoint = assembler.allocator.trace_checkpoint()
     donor_snapshot = list(branch_donors)
     original_view = view
-    attempt_slots = attempt_mainline_slots(assembler,
+    attempt_slots = attempt_mainline_slots(assembler, 
         original_view,
         [("left", str(left_mode)), ("right", str(right_mode))],
     )
@@ -1501,7 +1499,7 @@ def finalize_with_two_end_closures(
         assembler.allocator.rollback(snapshot)
         required_counts = Counter(context_required)
         required_counts.update(_slot_required_counts(attempt_slots))
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(original_view.fragment_id),
             pending_kind=pending_kind_for_view(assembler, original_view),
             views=[original_view],
@@ -1525,7 +1523,7 @@ def finalize_with_two_end_closures(
         required_counts = Counter(context_required)
         required_counts.update(Counter(branch_required))
         required_counts.update(_slot_required_counts(attempt_slots))
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(view.fragment_id),
             pending_kind=pending_kind_for_view(assembler, view),
             views=[view],
@@ -1546,7 +1544,7 @@ def finalize_with_two_end_closures(
     if validation_reason is not None:
         assembler.allocator.rollback(snapshot)
         branch_donors[:] = donor_snapshot
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(view.fragment_id),
             pending_kind=pending_kind_for_view(assembler, view),
             views=[view],
@@ -1577,7 +1575,7 @@ def finalize_with_two_end_closures(
         for chunk in (left_required, right_required):
             for key, value in dict(chunk or {}).items():
                 required_counts[str(key)] = int(required_counts.get(str(key), 0)) + int(value)
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(view.fragment_id),
             pending_kind=pending_kind_for_view(assembler, view),
             views=[view],
@@ -1619,7 +1617,7 @@ def finalize_with_two_end_closures(
             list(left_ids) + list(view.main_node_ids or [])
         ),
     )
-    branch_map, branch_id_map = build_branch_maps(assembler,
+    branch_map, branch_id_map = build_branch_maps(assembler, 
         view,
         branch_resolved,
         anchor_offset=len(left_labels),
@@ -1644,12 +1642,12 @@ def finalize_with_two_end_closures(
     )
     source_views = collect_source_views_from_branches(assembler, [view], branch_resolved)
     validation_reason = invalid_product_reason(assembler, str(product_kind), labels, source_views, node_ids)
-    suppressed_support_node_ids = collect_suppressed_support_node_ids(assembler,
+    suppressed_support_node_ids = collect_suppressed_support_node_ids(assembler, 
         source_views,
         branch_resolved,
     )
     if validation_reason is not None:
-        return record_invalid_materialization_failure(assembler,
+        return record_invalid_materialization_failure(assembler, 
             snapshot=snapshot,
             donor_snapshot=donor_snapshot,
             branch_donors=branch_donors,
@@ -1662,7 +1660,7 @@ def finalize_with_two_end_closures(
             suppressed_support_node_ids=suppressed_support_node_ids,
             validation_reason=str(validation_reason),
         )
-    product = make_product(assembler,
+    product = make_product(assembler, 
         product_kind=str(product_kind),
         reason=f"main_close:{left_mode}+{right_mode}",
         source_views=source_views,
@@ -1677,7 +1675,7 @@ def finalize_with_two_end_closures(
     if product is not None:
         product.mainline_slots = [dict(item or {}) for item in attempt_slots]
     if product is None:
-        return record_failed_product_result(assembler,
+        return record_failed_product_result(assembler, 
             snapshot=snapshot,
             donor_snapshot=donor_snapshot,
             branch_donors=branch_donors,
@@ -1689,7 +1687,7 @@ def finalize_with_two_end_closures(
             branch_id_map=branch_id_map,
             suppressed_support_node_ids=suppressed_support_node_ids,
         )
-    if not ownership_module.commit_product(assembler,
+    if not ownership_module.commit_product(assembler, 
         product,
         allocator_snapshot=snapshot,
         branch_donors=branch_donors,
@@ -1716,7 +1714,7 @@ def finalize_single_view_product(
     view, context_required = claim_view_context_resources(assembler, view)
     if view is None:
         assembler.allocator.rollback(snapshot)
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(original_view.fragment_id),
             pending_kind=pending_kind_for_view(assembler, original_view),
             views=[original_view],
@@ -1737,7 +1735,7 @@ def finalize_single_view_product(
         branch_donors[:] = donor_snapshot
         total_required = Counter(context_required)
         total_required.update(Counter(required_counts))
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(view.fragment_id),
             pending_kind=pending_kind_for_view(assembler, view),
             views=[view],
@@ -1756,7 +1754,7 @@ def finalize_single_view_product(
     if validation_reason is not None:
         assembler.allocator.rollback(snapshot)
         branch_donors[:] = donor_snapshot
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(view.fragment_id),
             pending_kind=pending_kind_for_view(assembler, view),
             views=[view],
@@ -1778,18 +1776,18 @@ def finalize_single_view_product(
     view.main_node_ids = normalized_node_ids
     branch_map, branch_id_map = build_branch_maps(assembler, view, branch_resolved)
     source_views = collect_source_views_from_branches(assembler, [view], branch_resolved)
-    validation_reason = invalid_product_reason(assembler,
+    validation_reason = invalid_product_reason(assembler, 
         str(product_kind),
         list(view.main_labels or []),
         source_views,
         list(view.main_node_ids or []),
     )
-    suppressed_support_node_ids = collect_suppressed_support_node_ids(assembler,
+    suppressed_support_node_ids = collect_suppressed_support_node_ids(assembler, 
         source_views,
         branch_resolved,
     )
     if validation_reason is not None:
-        return record_invalid_materialization_failure(assembler,
+        return record_invalid_materialization_failure(assembler, 
             snapshot=snapshot,
             donor_snapshot=donor_snapshot,
             branch_donors=branch_donors,
@@ -1802,7 +1800,7 @@ def finalize_single_view_product(
             suppressed_support_node_ids=suppressed_support_node_ids,
             validation_reason=str(validation_reason),
         )
-    product = make_product(assembler,
+    product = make_product(assembler, 
         product_kind=str(product_kind),
         reason=str(reason),
         source_views=source_views,
@@ -1815,7 +1813,7 @@ def finalize_single_view_product(
         branch_results=branch_resolved,
     )
     if product is None:
-        return record_failed_product_result(assembler,
+        return record_failed_product_result(assembler, 
             snapshot=snapshot,
             donor_snapshot=donor_snapshot,
             branch_donors=branch_donors,
@@ -1827,7 +1825,7 @@ def finalize_single_view_product(
             branch_id_map=branch_id_map,
             suppressed_support_node_ids=suppressed_support_node_ids,
         )
-    if not ownership_module.commit_product(assembler,
+    if not ownership_module.commit_product(assembler, 
         product,
         allocator_snapshot=snapshot,
         branch_donors=branch_donors,
@@ -1861,7 +1859,7 @@ def finalize_with_closure(
         assembler.allocator.rollback(snapshot)
         required_counts = Counter(context_required)
         required_counts.update(_slot_required_counts(attempt_slots))
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(original_view.fragment_id),
             pending_kind=pending_kind_for_view(assembler, original_view),
             views=[original_view],
@@ -1884,7 +1882,7 @@ def finalize_with_closure(
         required_counts = Counter(context_required)
         required_counts.update(Counter(branch_required))
         required_counts.update(_slot_required_counts(attempt_slots))
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(view.fragment_id),
             pending_kind=pending_kind_for_view(assembler, view),
             views=[view],
@@ -1905,7 +1903,7 @@ def finalize_with_closure(
     if validation_reason is not None:
         assembler.allocator.rollback(snapshot)
         branch_donors[:] = donor_snapshot
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(view.fragment_id),
             pending_kind=pending_kind_for_view(assembler, view),
             views=[view],
@@ -1927,7 +1925,7 @@ def finalize_with_closure(
     )[:2]
     view.main_labels = normalized_labels
     view.main_node_ids = normalized_node_ids
-    closure_payload, closure_required = build_main_closure(assembler,
+    closure_payload, closure_required = build_main_closure(assembler, 
         view,
         side="left" if bool(view.open_left) else "right",
         closure_mode=str(closure_mode),
@@ -1940,7 +1938,7 @@ def finalize_with_closure(
             required_counts[str(key)] = int(required_counts.get(str(key), 0)) + int(value)
         for key, value in dict(closure_required or {}).items():
             required_counts[str(key)] = int(required_counts.get(str(key), 0)) + int(value)
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(view.fragment_id),
             pending_kind=pending_kind_for_view(assembler, view),
             views=[view],
@@ -1966,7 +1964,7 @@ def finalize_with_closure(
     labels = list(view.main_labels or [])
     node_ids = list(view.main_node_ids or [])
     closure_labels, closure_ids = closure_payload
-    branch_map, branch_id_map = build_branch_maps(assembler,
+    branch_map, branch_id_map = build_branch_maps(assembler, 
         view,
         branch_resolved,
         anchor_offset=len(closure_labels) if bool(view.open_left) else 0,
@@ -1994,12 +1992,12 @@ def finalize_with_closure(
         canonical_labels = canonical_labels + main_closure_canonical_labels(str(closure_mode), side)
     source_views = collect_source_views_from_branches(assembler, [view], branch_resolved)
     validation_reason = invalid_product_reason(assembler, str(product_kind), labels, source_views, node_ids)
-    suppressed_support_node_ids = collect_suppressed_support_node_ids(assembler,
+    suppressed_support_node_ids = collect_suppressed_support_node_ids(assembler, 
         source_views,
         branch_resolved,
     )
     if validation_reason is not None:
-        return record_invalid_materialization_failure(assembler,
+        return record_invalid_materialization_failure(assembler, 
             snapshot=snapshot,
             donor_snapshot=donor_snapshot,
             branch_donors=branch_donors,
@@ -2012,7 +2010,7 @@ def finalize_with_closure(
             suppressed_support_node_ids=suppressed_support_node_ids,
             validation_reason=str(validation_reason),
         )
-    product = make_product(assembler,
+    product = make_product(assembler, 
         product_kind=str(product_kind),
         reason=f"main_close:{closure_mode}",
         source_views=source_views,
@@ -2027,7 +2025,7 @@ def finalize_with_closure(
     if product is not None:
         product.mainline_slots = [dict(item or {}) for item in attempt_slots]
     if product is None:
-        return record_failed_product_result(assembler,
+        return record_failed_product_result(assembler, 
             snapshot=snapshot,
             donor_snapshot=donor_snapshot,
             branch_donors=branch_donors,
@@ -2039,7 +2037,7 @@ def finalize_with_closure(
             branch_id_map=branch_id_map,
             suppressed_support_node_ids=suppressed_support_node_ids,
         )
-    if not ownership_module.commit_product(assembler,
+    if not ownership_module.commit_product(assembler, 
         product,
         allocator_snapshot=snapshot,
         branch_donors=branch_donors,
@@ -2256,7 +2254,7 @@ def compose_two_views(
         branch_donors[:] = donor_snapshot
         required = Counter(left_context_required)
         required.update(Counter(right_context_required))
-        record_composition_failure(assembler,
+        record_composition_failure(assembler, 
             candidate,
             validation_reason="context_resource_shortage",
             required_counts={str(key): int(value) for key, value in required.items()},
@@ -2280,7 +2278,7 @@ def compose_two_views(
     if left_branch is None:
         assembler.allocator.rollback(snapshot)
         branch_donors[:] = donor_snapshot
-        record_composition_failure(assembler,
+        record_composition_failure(assembler, 
             candidate,
             validation_reason=branch_pending_reason(assembler, left_diag, default="left_branch_pool_shortage"),
             required_counts={
@@ -2297,7 +2295,7 @@ def compose_two_views(
     if left_validation_reason is not None:
         assembler.allocator.rollback(snapshot)
         branch_donors[:] = donor_snapshot
-        record_composition_failure(assembler,
+        record_composition_failure(assembler, 
             candidate,
             validation_reason=str(left_validation_reason),
             required_counts=left_required,
@@ -2313,7 +2311,7 @@ def compose_two_views(
         req.update(Counter(right_context_required))
         req.update(Counter(left_required))
         req.update(Counter(right_required))
-        record_composition_failure(assembler,
+        record_composition_failure(assembler, 
             candidate,
             validation_reason=branch_pending_reason(assembler, right_diag, default="right_branch_pool_shortage"),
             required_counts={str(k): int(v) for k, v in req.items()},
@@ -2327,7 +2325,7 @@ def compose_two_views(
         branch_donors[:] = donor_snapshot
         req = Counter(left_required)
         req.update(Counter(right_required))
-        record_composition_failure(assembler,
+        record_composition_failure(assembler, 
             candidate,
             validation_reason=str(right_validation_reason),
             required_counts={str(k): int(v) for k, v in req.items()},
@@ -2337,12 +2335,12 @@ def compose_two_views(
     labels, node_ids, bridge_labels, _ = composition_path(assembler, candidate)
     left_labels, _ = left.oriented_mainline(reversed_view=bool(candidate.left_reversed))
     canonical_labels = ["11", "23", "11"] if str(candidate.product_kind) == "flex_chain" else ["11", "23", "22"]
-    branch_map, branch_id_map = build_branch_maps(assembler,
+    branch_map, branch_id_map = build_branch_maps(assembler, 
         left,
         left_branch,
         reverse=bool(candidate.left_reversed),
     )
-    right_branch_map, right_branch_id_map = build_branch_maps(assembler,
+    right_branch_map, right_branch_id_map = build_branch_maps(assembler, 
         right,
         right_branch,
         reverse=bool(candidate.right_reversed),
@@ -2352,13 +2350,13 @@ def compose_two_views(
     branch_id_map.update(right_branch_id_map)
     all_branch_results = list(left_branch or []) + list(right_branch or [])
     source_views = collect_source_views_from_branches(assembler, [left, right], all_branch_results)
-    validation_reason = invalid_product_reason(assembler,
+    validation_reason = invalid_product_reason(assembler, 
         str(candidate.product_kind),
         labels,
         source_views,
         node_ids,
     )
-    suppressed_support_node_ids = collect_suppressed_support_node_ids(assembler,
+    suppressed_support_node_ids = collect_suppressed_support_node_ids(assembler, 
         source_views,
         all_branch_results,
     )
@@ -2366,14 +2364,14 @@ def compose_two_views(
         claimed_ids = assembler.allocator.claimed_ids_since(snapshot)
         assembler.allocator.rollback(snapshot)
         branch_donors[:] = donor_snapshot
-        record_composition_failure(assembler,
+        record_composition_failure(assembler, 
             candidate,
             validation_reason=str(validation_reason),
             rolled_back_resource_ids=claimed_ids,
         )
         ownership_module.release_reserved_fragments(assembler, reserved_fragment_ids)
         return False
-    product = make_product(assembler,
+    product = make_product(assembler, 
         product_kind=str(candidate.product_kind),
         reason=str(candidate.reason),
         source_views=source_views,
@@ -2396,7 +2394,7 @@ def compose_two_views(
         branch_donors[:] = donor_snapshot
         ownership_module.release_reserved_fragments(assembler, reserved_fragment_ids)
         return False
-    if not ownership_module.commit_product(assembler,
+    if not ownership_module.commit_product(assembler, 
         product,
         allocator_snapshot=snapshot,
         branch_donors=branch_donors,
@@ -2417,14 +2415,14 @@ def assemble_remaining_external_b_plus_b_flex(
 ) -> bool:
     progress_made = False
     while int(current_flex_product_count(assembler, )) < int(target_count) and can_create_more_flex(assembler, ):
-        b_views = available_flex_reconcile_views(assembler,
+        b_views = available_flex_reconcile_views(assembler, 
             require_roles=["b_like_open"],
             require_materializable=True,
             require_generic_join=True,
         )
         if len(b_views) < 2:
             break
-        candidates = build_composition_candidates(assembler,
+        candidates = build_composition_candidates(assembler, 
             [
                 (b_views[left_index], b_views[right_index])
                 for left_index in range(len(b_views))
@@ -2455,7 +2453,7 @@ def assemble_remaining_external_b_plus_e_side(
         e_views = available_remaining_side_views(assembler, require_generic_join=True)
         if not b_views or not e_views:
             break
-        candidates = build_composition_candidates(assembler,
+        candidates = build_composition_candidates(assembler, 
             [(b_view, e_view) for b_view in b_views for e_view in e_views],
             product_kind="side_chain",
             reason="B_plus_E_or_G",
@@ -2481,12 +2479,12 @@ def assemble_remaining_external_d_double_flex(
     progress_made = False
     while int(current_flex_product_count(assembler, )) < int(target_count) and can_create_more_flex(assembler, ):
         cycle_progress = False
-        for view in available_flex_reconcile_views(assembler,
+        for view in available_flex_reconcile_views(assembler, 
             require_roles=["d_like_open", "double_end_flex_source"],
             require_materializable=True,
             require_generic_join=False,
         ):
-            if finalize_with_two_end_closures(assembler,
+            if finalize_with_two_end_closures(assembler, 
                 view,
                 product_kind="flex_chain",
                 left_mode="F1",
@@ -2510,12 +2508,12 @@ def assemble_remaining_external_single_b_closures_for_flex(
     progress_made = False
     while int(current_flex_product_count(assembler, )) < int(target_count) and can_create_more_flex(assembler, ):
         cycle_progress = False
-        for view in available_flex_reconcile_views(assembler,
+        for view in available_flex_reconcile_views(assembler, 
             require_roles=["b_like_open", "single_end_flex_source"],
             require_materializable=True,
             require_generic_join=False,
         ):
-            if finalize_with_closure(assembler,
+            if finalize_with_closure(assembler, 
                 view,
                 product_kind="flex_chain",
                 closure_mode="F1",
@@ -2535,7 +2533,11 @@ def assemble_remaining_external_single_e_closures_for_side(
 ) -> bool:
     progress_made = False
     for view in available_remaining_side_views(assembler, require_generic_join=False):
-        if finalize_with_closure(assembler,
+        if view_has_flex_reconcile_role(
+            assembler, view, "b_like_open", "d_like_open"
+        ):
+            continue
+        if finalize_with_closure(assembler, 
             view,
             product_kind="side_chain",
             closure_mode="F1",
@@ -2553,9 +2555,10 @@ def assemble_remaining_b_d_as_side(
     progress_made = False
 
     branch_only_views = sorted(
-        ownership_module.available_views(assembler,
+        ownership_module.available_views(assembler, 
             lambda item: (
                 is_like24_family(item)
+                and bool(getattr(item, "can_side", False))
                 and bool(
                     dict(item.evidence or {}).get(
                         "edge_semantics_finalized", False
@@ -2570,7 +2573,7 @@ def assemble_remaining_b_d_as_side(
         key=lambda item: int(item.fragment_id),
     )
     for view in branch_only_views:
-        if finalize_single_view_product(assembler,
+        if finalize_single_view_product(assembler, 
             view,
             product_kind="side_chain",
             reason="canonical_branch_only_closure",
@@ -2581,6 +2584,7 @@ def assemble_remaining_b_d_as_side(
     def _eligible(item: AssemblyFragmentView, role: str) -> bool:
         return bool(
             str(item.class_type) not in {"25_AB", "25_CD"}
+            and bool(getattr(item, "can_side", False))
             and not ring_policy_module.ring_candidate_pending_for_ring_stage(
                 assembler, item
             )
@@ -2593,7 +2597,7 @@ def assemble_remaining_b_d_as_side(
         key=lambda item: (view_flex_reconcile_priority(assembler, item), int(item.fragment_id)),
     )
     for view in d_views:
-        if finalize_with_two_end_closures(assembler,
+        if finalize_with_two_end_closures(assembler, 
             view,
             product_kind="side_chain",
             left_mode="F1",
@@ -2607,7 +2611,7 @@ def assemble_remaining_b_d_as_side(
         key=lambda item: (view_flex_reconcile_priority(assembler, item), int(item.fragment_id)),
     )
     for view in b_views:
-        if finalize_with_closure(assembler,
+        if finalize_with_closure(assembler, 
             view,
             product_kind="side_chain",
             closure_mode="F2",
@@ -2678,7 +2682,7 @@ def release_satisfied_flex_selection(assembler: Any) -> List[int]:
             else []
         )
     }
-    ownership_module.invalidate_pending_identity(assembler,
+    ownership_module.invalidate_pending_identity(assembler, 
         fragment_ids=released_ids,
         claimed_node_ids=released_node_ids,
     )
@@ -2706,7 +2710,7 @@ def close_explicit_flex_branches_if_needed(
 ) -> bool:
     progress_made = False
     views = sorted(
-        ownership_module.available_views(assembler,
+        ownership_module.available_views(assembler, 
             lambda item: str(pending_kind_for_view(assembler, item)) == "explicit_flex"
         ),
         key=lambda item: (
@@ -2714,7 +2718,7 @@ def close_explicit_flex_branches_if_needed(
         ),
     )
     for view in views:
-        if finalize_single_view_product(assembler,
+        if finalize_single_view_product(assembler, 
             view,
             product_kind="flex_chain",
             reason="explicit_branch_closure",
@@ -2801,7 +2805,7 @@ def assemble_selected_supplemental_flex(
                 "selected_flex_group_id": str(group.get("group_id", "") or ""),
                 "structure_signature_mismatches": signature_mismatches,
             }
-            pending_module.record_pending(assembler,
+            pending_module.record_pending(assembler, 
                 unit_id=min(fragment_ids),
                 pending_kind=pending_kind_for_view(assembler, views[0]),
                 views=views,
@@ -2825,7 +2829,7 @@ def assemble_selected_supplemental_flex(
         strategy = str(group.get("strategy", "") or "")
         assembled = False
         if strategy == "b_plus_b" and len(views) == 2:
-            candidates = build_composition_candidates(assembler,
+            candidates = build_composition_candidates(assembler, 
                 [(views[0], views[1])],
                 product_kind="flex_chain",
                 reason="B_plus_B",
@@ -2836,7 +2840,7 @@ def assemble_selected_supplemental_flex(
                 for candidate in candidates
             )
         elif strategy == "d_double_closure" and len(views) == 1:
-            assembled = finalize_with_two_end_closures(assembler,
+            assembled = finalize_with_two_end_closures(assembler, 
                 views[0],
                 product_kind="flex_chain",
                 left_mode="F1",
@@ -2844,7 +2848,7 @@ def assemble_selected_supplemental_flex(
                 branch_donors=branch_donors,
             )
         elif strategy == "b_single_closure" and len(views) == 1:
-            assembled = finalize_with_closure(assembler,
+            assembled = finalize_with_closure(assembler, 
                 views[0],
                 product_kind="flex_chain",
                 closure_mode="F1",
@@ -2856,20 +2860,20 @@ def assemble_selected_supplemental_flex(
         return progress_made
 
     progress_made = bool(
-        assemble_remaining_external_b_plus_b_flex(assembler,
+        assemble_remaining_external_b_plus_b_flex(assembler, 
             branch_donors,
             target_count=target_count,
         )
         or progress_made
     )
     progress_made = bool(
-        assemble_remaining_external_d_double_flex(assembler,
+        assemble_remaining_external_d_double_flex(assembler, 
             branch_donors,
             target_count=target_count,
         ) or progress_made
     )
     progress_made = bool(
-        assemble_remaining_external_single_b_closures_for_flex(assembler,
+        assemble_remaining_external_single_b_closures_for_flex(assembler, 
             branch_donors,
             target_count=target_count,
         ) or progress_made
@@ -2902,18 +2906,18 @@ def assemble_remaining_flex(
         if flex_bounds_enforced(assembler, )
         else 10**9
     )
-    progress_made = assemble_remaining_external_b_plus_b_flex(assembler,
+    progress_made = assemble_remaining_external_b_plus_b_flex(assembler, 
         branch_donors,
         target_count=target_count,
     )
     progress_made = bool(
-        assemble_remaining_external_d_double_flex(assembler,
+        assemble_remaining_external_d_double_flex(assembler, 
             branch_donors,
             target_count=target_count,
         ) or progress_made
     )
     progress_made = bool(
-        assemble_remaining_external_single_b_closures_for_flex(assembler,
+        assemble_remaining_external_single_b_closures_for_flex(assembler, 
             branch_donors,
             target_count=target_count,
         ) or progress_made
@@ -2935,14 +2939,14 @@ def assemble_remaining_su25(
         str(item.class_type) in {"25_AB", "25_CD"}
     )):
         if str(view.class_type) == "25_AB":
-            assembled_now = finalize_with_closure(assembler,
+            assembled_now = finalize_with_closure(assembler, 
                 view,
                 product_kind="side_chain",
                 closure_mode="F2",
                 branch_donors=branch_donors,
             )
         else:
-            assembled_now = finalize_with_two_end_closures(assembler,
+            assembled_now = finalize_with_two_end_closures(assembler, 
                 view,
                 product_kind="side_chain",
                 left_mode="F1",
@@ -2959,18 +2963,21 @@ def _assemble_remaining_side_products_once(
 ) -> bool:
     progress_made = False
     for view in sorted(
-        ownership_module.available_views(assembler,
+        ownership_module.available_views(assembler, 
             lambda item: (
                 not ring_policy_module.ring_candidate_pending_for_ring_stage(
                     assembler, item
                 )
-                and str(pending_kind_for_view(assembler, item)) == "explicit_side"
+                and bool(getattr(item, "can_side", False))
+                and not view_has_flex_reconcile_role(
+                    assembler, item, "b_like_open", "d_like_open", "e_like_open"
+                )
             )
         ),
         key=lambda item: int(item.fragment_id),
     ):
         progress_made = bool(
-            finalize_single_view_product(assembler,
+            finalize_single_view_product(assembler, 
                 view,
                 product_kind="side_chain",
                 reason="explicit_side_closure",
@@ -3240,6 +3247,8 @@ def remaining_pending_kind_and_reason(
         return "explicit_flex", "remaining_external_halfclosed_open"
     if str(getattr(view, "preferred_product_type", "")) == "flex_chain":
         return "explicit_flex", "remaining_external_halfclosed_open"
+    if str(getattr(view, "preferred_product_type", "")) == "ring_candidate":
+        return "ring_only_like24", "remaining_external_halfclosed_open"
     return "other", "remaining_external_halfclosed_open"
 
 
@@ -3265,15 +3274,24 @@ def record_remaining_external_pending(
             ).items()
             if int(value) > 0
         }
+        # Optional ring capability is a preferred attempt only.  If its
+        # concrete candidate is unavailable, the same view must be allowed to
+        # flow into its declared side/flex fallback.  Only a mandatory ring
+        # may remain pending on a ring resource contract.
         resource_backed_ring_pending = bool(
             bool(getattr(view, "can_ring", False))
             and ring_required_counts
             and ring_missing_counts
+            and ring_policy_module.view_requires_ring(view)
+        )
+        mandatory_ring_pending = bool(
+            bool(getattr(view, "can_ring", False))
+            and ring_policy_module.view_requires_ring(view)
         )
         materialization_failure = dict(
             assembler.materialization_failure_by_fragment_id.get(fragment_id, {}) or {}
         )
-        if resource_backed_ring_pending:
+        if resource_backed_ring_pending or mandatory_ring_pending:
             if not str(
                 materialization_failure.get("attempted_product_kind", "")
                 or ""
@@ -3318,7 +3336,7 @@ def record_remaining_external_pending(
             ).items()
             if int(value) > 0
         }
-        pending_module.record_pending(assembler,
+        pending_module.record_pending(assembler, 
             unit_id=int(view.fragment_id),
             pending_kind=str(pending_kind),
             views=[view],
@@ -3357,7 +3375,7 @@ def record_remaining_external_pending(
                     )
                 ]
                 if (
-                    not resource_backed_ring_pending
+                    not (resource_backed_ring_pending or mandatory_ring_pending)
                     and materialization_failure.get("attempted_mainline_slots")
                 )
                 else None

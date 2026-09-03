@@ -214,7 +214,7 @@ def claim_ring_pool_segment(
             )
             if claimed_support is None:
                 if (
-                    ownership_module.is_bound_su24_support(assembler,
+                    ownership_module.is_bound_su24_support(assembler, 
                         node_id,
                         int(support_su),
                         int(support_id),
@@ -507,7 +507,7 @@ def view_fixed_branch_contracts_for_skeleton(
         }
         backbone_node_ids = {
             int(node_id)
-            for node_id in view_ring_backbone_node_ids(assembler,
+            for node_id in view_ring_backbone_node_ids(assembler, 
                 view,
                 skeleton_kind=str(skeleton_kind),
                 reverse=False,
@@ -597,7 +597,7 @@ def render_resolved_view(
         branch_id_map.setdefault(int(anchor_index), [])
         branch_id_map[int(anchor_index)].append(str(item.branch_node_ids))
     suppressed_support_node_ids = chain_materializer_module.collect_suppressed_support_node_ids(assembler, [view], branch_resolved)
-    return chain_materializer_module.render_product(assembler,
+    return chain_materializer_module.render_product(assembler, 
         labels,
         node_ids,
         branch_map,
@@ -683,12 +683,12 @@ def build_ring_template_segment(
     ):
         return None
     if view is not None:
-        backbone_labels = view_ring_backbone_labels(assembler,
+        backbone_labels = view_ring_backbone_labels(assembler, 
             view,
             skeleton_kind=str(skeleton_kind),
             reverse=bool(reverse),
         )
-        backbone_node_ids = view_ring_backbone_node_ids(assembler,
+        backbone_node_ids = view_ring_backbone_node_ids(assembler, 
             view,
             skeleton_kind=str(skeleton_kind),
             reverse=bool(reverse),
@@ -807,7 +807,7 @@ def build_pool_ring_template_segments(
                     skeleton_kind=str(skeleton_kind),
                     slot_role=str(role),
                 )
-                candidate = build_ring_template_segment(assembler,
+                candidate = build_ring_template_segment(assembler, 
                     skeleton_kind=str(skeleton_kind),
                     role=str(role),
                     candidate_id=f"pool:{str(skeleton_kind)}:{str(role)}:24:{int(profile.node_id)}",
@@ -862,7 +862,7 @@ def build_pool_ring_template_segments(
                                 int(cap_ids[0]) if cap_ids else None,
                             ]
                     individual_24_candidates.append(candidate)
-            individual_24_candidates = ring_planner_module.bound_ring_role_candidates(assembler,
+            individual_24_candidates = ring_planner_module.bound_ring_role_candidates(assembler, 
                 individual_24_candidates,
                 include_unavailable=bool(include_unavailable),
             )
@@ -943,7 +943,7 @@ def build_pool_ring_template_segments(
         # shortage and Stage3 can plan the conversion transaction.
         count = int(logical_slot_limits.get((str(skeleton_kind), str(role)), 1))
         for idx in range(count):
-            candidate = build_ring_template_segment(assembler,
+            candidate = build_ring_template_segment(assembler, 
                 skeleton_kind=str(skeleton_kind),
                 role=str(role),
                 candidate_id=f"pool:{str(skeleton_kind)}:{str(role)}:{int(su_type)}:{int(idx)}",
@@ -969,7 +969,7 @@ def build_pool_ring_endpoint_segment(
 ) -> Dict[str, Any]:
     """Build one logical endpoint whose real IDs are claimed atomically."""
     children = [
-        build_ring_template_segment(assembler,
+        build_ring_template_segment(assembler, 
             skeleton_kind=str(skeleton_kind),
             role=str(role),
             candidate_id=(
@@ -1030,7 +1030,7 @@ def resolve_planned_ring_segment(
                 int(item[0]),
             ),
         ):
-            segment = resolve_planned_ring_segment(assembler,
+            segment = resolve_planned_ring_segment(assembler, 
                 dict(child or {}),
                 branch_donors,
                 skeleton_kind=str(skeleton_kind),
@@ -1050,7 +1050,6 @@ def resolve_planned_ring_segment(
         like24_node_ids: List[int] = []
         node_profiles_by_id: Dict[int, str] = {}
         replaced_branch_requirements: List[Dict[str, Any]] = []
-        source_views: List[AssemblyFragmentView] = []
         for segment in resolved:
             offset = len(labels)
             labels.extend(str(value) for value in list(segment.labels or []))
@@ -1076,11 +1075,6 @@ def resolve_planned_ring_segment(
             replaced_branch_requirements.extend(
                 dict(value or {})
                 for value in list(segment.replaced_branch_requirements or [])
-            )
-            source_views.extend(
-                view
-                for view in list(segment.source_views or [])
-                if view is not None
             )
         render = _render_linear_path(
             labels=labels,
@@ -1113,10 +1107,7 @@ def resolve_planned_ring_segment(
                 for segment in resolved
                 for node_id in list(segment.fixed_source_node_ids or [])
             }),
-            source_views=list({
-                int(view.fragment_id): view
-                for view in source_views
-            }.values()),
+            source_views=[],
             suppressed_support_node_ids=sorted({
                 int(node_id)
                 for segment in resolved
@@ -1134,7 +1125,7 @@ def resolve_planned_ring_segment(
             },
         )
     if str(segment_spec.get("kind", "")) == "pool":
-        segment = claim_ring_pool_segment(assembler,
+        segment = claim_ring_pool_segment(assembler, 
             int(segment_spec.get("pool_su", -1)),
             mode=f"ring:{str(skeleton_kind)}:{str(segment_spec.get('role', 'pool'))}",
             candidate_id=str(segment_spec.get("candidate_id", "") or ""),
@@ -1188,7 +1179,7 @@ def resolve_planned_ring_segment(
             f"ring_segment_view_missing:{candidate_id}"
         )
         return None
-    segment, segment_required_counts, diag = resolve_view_segment(assembler,
+    segment, segment_required_counts, diag = resolve_view_segment(assembler, 
         view,
         branch_donors,
         reverse=bool(segment_spec.get("reverse", False)),
@@ -1252,7 +1243,7 @@ def resolve_view_segment(
                     kept.append(str(kind))
             filtered_override[int(anchor)] = kept
         branch_override = filtered_override
-    branch_resolved, required_counts, branch_diag = branch_closure_module.resolve_branches(assembler,
+    branch_resolved, required_counts, branch_diag = branch_closure_module.resolve_branches(assembler, 
         view,
         branch_donors,
         branch_kind_map_override=branch_override,
@@ -1322,7 +1313,7 @@ def resolve_view_segment(
         render_labels = list(labels)
         render_node_ids = list(node_ids)
         ring_pool_ids_by_su = {}
-    render = render_resolved_view(assembler,
+    render = render_resolved_view(assembler, 
         view,
         branch_resolved,
         reverse=bool(reverse),

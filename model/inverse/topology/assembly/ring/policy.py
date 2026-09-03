@@ -6,10 +6,11 @@ from ..core.fragment import AssemblyFragmentView
 
 
 def view_requires_ring(view: AssemblyFragmentView) -> bool:
-    # Like24 ring eligibility is optional and is evaluated after the flex
-    # stage.  A ring-capable fragment must never become ring-only merely
-    # because fatty_ring is present in target_roles.
-    return False
+    return bool(
+        bool(getattr(view, "can_ring", False))
+        and not bool(getattr(view, "can_side", False))
+        and not bool(getattr(view, "can_flex", False))
+    )
 
 
 def ring_candidate_pending_for_ring_stage(

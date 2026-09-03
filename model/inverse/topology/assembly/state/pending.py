@@ -253,6 +253,36 @@ def pending_target_role(
         # the flex selection; every unselected fragment is closed later
         # as an ordinary side chain.
         return "flex_chain" if selected_for_flex else "side_chain"
+    # These kinds are emitted by a concrete phase dispatcher.  A view may
+    # advertise both capabilities (for example 24_AB_M is flex-preferred
+    # but can fall back to a side chain), so do not infer the target from the
+    # full capability set and report an artificial ambiguity.
+    if pending_kind_name in {"explicit_side", "e_like_open"}:
+        return "side_chain"
+    if pending_kind_name == "explicit_flex":
+        return "flex_chain"
+    if pending_kind_name == "ring_only_like24":
+        available_roles = {
+            str(role)
+            for view in list(views or [])
+            for role in list(getattr(view, "target_roles", []) or [])
+            if str(role)
+        }
+        # Once the ring planner has exhausted this candidate, a legal side
+        # capability is the intended fallback.  During ring planning itself,
+        # keep the contract owned by the fatty-ring phase.
+        ring_pending = any(
+            bool(getattr(view, "can_ring", False))
+            and int(view.fragment_id)
+            not in set(
+                getattr(assembler, "ring_exhausted_fragment_ids", set()) or set()
+            )
+            for view in list(views or [])
+        )
+        if "side_chain" in available_roles and not ring_pending:
+            return "side_chain"
+        if "fatty_ring" in available_roles:
+            return "fatty_ring"
     available_roles = {
         str(role)
         for view in list(views or [])
@@ -643,7 +673,7 @@ def record_pending(
                 **dict(structural_details),
                 **({"diagnostics": diagnostic_payload} if diagnostic_payload else {}),
             }
-            record_pending_contract(assembler,
+            record_pending_contract(assembler, 
                 unit_id=int(unit_id),
                 pending_kind=str(pending_kind),
                 views=list(views or []),
@@ -659,7 +689,7 @@ def record_pending(
                 diagnostics=diagnostic_payload,
             )
             return
-    record_pending_contract(assembler,
+    record_pending_contract(assembler, 
         unit_id=int(unit_id),
         pending_kind=str(pending_kind),
         views=list(views or []),
