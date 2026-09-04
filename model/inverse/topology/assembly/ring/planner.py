@@ -1509,7 +1509,6 @@ def assemble_priority_rings(
         assembler,
         lambda item: bool(getattr(item, "can_ring", False)),
     )
-    resource_blocked_any = bool(ring_resource_blockers(assembler))
     for view in available_ring_views:
         fragment_id = int(view.fragment_id)
         resource_contract = dict(
@@ -1547,14 +1546,11 @@ def assemble_priority_rings(
             continue
 
         # A plan is allowed to use only a bounded representative prefix of
-        # equivalent middle/anchor candidates.  When that selected plan is
-        # resource-blocked, the remaining views have not been tried yet and
-        # must stay available for the next continuation after conversion.
-        # Marking them exhausted here loses valid candidates such as a later
-        # ``24_D`` view (414) and can leave the generation with only the
-        # structural failure of an earlier fused probe.
-        if resource_blocked_any or pool_only_blocked:
-            continue
+        # equivalent middle/anchor candidates.  The per-view resource check
+        # above is authoritative: a shortage belonging to another fragment
+        # must not keep this fully-probed view in ring-pending state.  That
+        # global coupling previously left valid 24_D side fallbacks blocked
+        # whenever any unrelated ring needed a conversion.
         assembler.ring_exhausted_fragment_ids.add(fragment_id)
         assembler.ring_pending_reasons.pop(fragment_id, None)
         assembler.ring_pending_attempts.pop(fragment_id, None)
