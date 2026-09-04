@@ -13,6 +13,7 @@ from ..projection.engine import (
     _skeleton_allowed_name,
 )
 from . import materializer as ring_materializer_module
+from . import policy as ring_policy_module
 from . import search as ring_search_module
 from . import segments as ring_segments_module
 from .limits import (
@@ -78,8 +79,22 @@ def ring_candidate_shape(candidate: Dict[str, Any]) -> Tuple[Any, ...]:
         int(value)
         for value in dict(profile.get("terminal_su_by_node_id", {}) or {}).values()
     ))
+    # Classified fragment views are not interchangeable resources.  Two
+    # ``24_D`` views can have different fixed neighbours, branch contracts,
+    # and ownership state even when their rendered labels are identical.  The
+    # old shape omitted the fragment identity, so
+    # ``MAX_EQUIVALENT_RING_IDENTITIES`` silently discarded later views (for
+    # example 414 after 402-413 had been consumed).  Pool IDs remain
+    # interchangeable and continue to use the compact structural shape.
+    fragment_identity = (
+        int(candidate.get("fragment_id"))
+        if str(candidate.get("kind", "")) == "view"
+        and candidate.get("fragment_id") is not None
+        else None
+    )
     return (
         str(candidate.get("kind", "")),
+        fragment_identity,
         str(candidate.get("role", "")),
         int(candidate.get("pool_su", -1) or -1),
         int(candidate.get("backbone_span", 0) or 0),
@@ -1380,11 +1395,13 @@ def ring_resource_blockers(assembler) -> Dict[int, Dict[str, Any]]:
     blockers: Dict[int, Dict[str, Any]] = {}
     for fragment_id, raw_contract in dict(assembler.ring_infeasible_contracts or {}).items():
         view = getattr(assembler, "view_by_id", {}).get(int(fragment_id))
-        # A ring-capable view that can legally fall back to a side/flex
-        # product must not hold the whole external phase behind a ring
-        # resource conversion.  Resource blockers are reserved for views
-        # whose classification contract makes the ring mandatory.
-        if view is not None and not view_requires_ring(view):
+        # Mandatory rings and ring-first dual-use views both retain a concrete
+        # resource blocker.  The latter may fall back to side/flex only after
+        # the ring planner has no resource-backed candidate left to retry.
+        if (
+            view is not None
+            and not ring_policy_module.view_requires_ring_resource_retry(view)
+        ):
             continue
         raw_required = dict(dict(raw_contract or {}).get("required_counts", {}) or {})
         required = {
@@ -1399,13 +1416,30 @@ def ring_resource_blockers(assembler) -> Dict[int, Dict[str, Any]]:
         }
         if not missing:
             continue
+        attempt_state = dict(
+            getattr(assembler, "ring_pending_attempts", {}).get(
+                int(fragment_id), {}
+            )
+            or {}
+        )
+        attempt_reasons = [
+            f"{str(key)}:{str(dict(value or {}).get('reason', '') or '')}"
+            for key, value in sorted(
+                dict(attempt_state.get("by_skeleton", {}) or {}).items()
+            )
+            if str(dict(value or {}).get("reason", "") or "")
+        ]
         blockers[int(fragment_id)] = {
             "required_counts": required,
             "available_counts": dict(available),
             "missing_counts": missing,
             "reasons": [
-                str(assembler.ring_pending_reasons.get(int(fragment_id), ""))
-            ] if str(assembler.ring_pending_reasons.get(int(fragment_id), "")) else [],
+                *attempt_reasons,
+                *([
+                    str(assembler.ring_pending_reasons.get(int(fragment_id), ""))
+                ] if str(assembler.ring_pending_reasons.get(int(fragment_id), ""))
+                and not attempt_reasons else []),
+            ],
             "candidate_signature": str(dict(raw_contract or {}).get("candidate_signature", "")),
         }
     return blockers
@@ -1429,6 +1463,26 @@ def ring_materialization_blockers(assembler) -> Dict[int, Dict[str, Any]]:
             failure.get("attempted_product_kind", "") or ""
         ).startswith("fatty_ring_"):
             continue
+        attempts = dict(
+            getattr(assembler, "ring_pending_attempts", {}).get(
+                int(view.fragment_id), {}
+            )
+            or {}
+        )
+        by_skeleton = {
+            str(key)
+            for key in dict(attempts.get("by_skeleton", {}) or {})
+        }
+        allowed_skeletons = {
+            str(value)
+            for value in view_ring_allowed_skeletons(assembler, view)
+        }
+        # A structural failure from one skeleton is not a terminal blocker
+        # while another contract-defined skeleton has not been attempted.
+        # In particular, fused/upper-lower diagnostics must not suppress a
+        # legal side-ring route for the same 24_D fragment.
+        if allowed_skeletons and not allowed_skeletons.issubset(by_skeleton):
+            continue
         blockers[int(view.fragment_id)] = failure
     return blockers
 
@@ -1451,9 +1505,12 @@ def assemble_priority_rings(
         candidate_predicate=lambda item: bool(getattr(item, "can_ring", False)),
     )
     pool_only_blocked = False
-    for view in ownership_module.available_views(assembler, 
-        lambda item: bool(getattr(item, "can_ring", False))
-    ):
+    available_ring_views = ownership_module.available_views(
+        assembler,
+        lambda item: bool(getattr(item, "can_ring", False)),
+    )
+    resource_blocked_any = bool(ring_resource_blockers(assembler))
+    for view in available_ring_views:
         fragment_id = int(view.fragment_id)
         resource_contract = dict(
             assembler.ring_infeasible_contracts.get(fragment_id, {}) or {}
@@ -1462,8 +1519,41 @@ def assemble_priority_rings(
             dict(resource_contract.get("required_counts", {}) or {})
             and dict(resource_contract.get("missing_counts", {}) or {})
         )
-        if has_resource_deficit and view_requires_ring(view):
+        if (
+            has_resource_deficit
+            and ring_policy_module.view_requires_ring_resource_retry(view)
+        ):
             pool_only_blocked = True
+            continue
+
+        attempts = dict(
+            getattr(assembler, "ring_pending_attempts", {}).get(
+                fragment_id, {}
+            )
+            or {}
+        )
+        attempted_skeletons = {
+            str(key)
+            for key in dict(attempts.get("by_skeleton", {}) or {})
+        }
+        allowed_skeletons = {
+            str(value)
+            for value in view_ring_allowed_skeletons(assembler, view)
+        }
+        # Do not consume a view merely because another candidate represented
+        # the current skeleton.  It is exhausted only after every skeleton
+        # allowed by its own contract has had a concrete attempt.
+        if allowed_skeletons and not allowed_skeletons.issubset(attempted_skeletons):
+            continue
+
+        # A plan is allowed to use only a bounded representative prefix of
+        # equivalent middle/anchor candidates.  When that selected plan is
+        # resource-blocked, the remaining views have not been tried yet and
+        # must stay available for the next continuation after conversion.
+        # Marking them exhausted here loses valid candidates such as a later
+        # ``24_D`` view (414) and can leave the generation with only the
+        # structural failure of an earlier fused probe.
+        if resource_blocked_any or pool_only_blocked:
             continue
         assembler.ring_exhausted_fragment_ids.add(fragment_id)
         assembler.ring_pending_reasons.pop(fragment_id, None)

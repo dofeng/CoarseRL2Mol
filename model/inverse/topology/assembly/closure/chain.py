@@ -3274,15 +3274,14 @@ def record_remaining_external_pending(
             ).items()
             if int(value) > 0
         }
-        # Optional ring capability is a preferred attempt only.  If its
-        # concrete candidate is unavailable, the same view must be allowed to
-        # flow into its declared side/flex fallback.  Only a mandatory ring
-        # may remain pending on a ring resource contract.
+        # A dual-use 24_D-like view may eventually fall back to side/flex, but
+        # a concrete resource-backed ring plan remains authoritative until the
+        # Stage3 conversion pass has had an opportunity to satisfy it.
         resource_backed_ring_pending = bool(
             bool(getattr(view, "can_ring", False))
             and ring_required_counts
             and ring_missing_counts
-            and ring_policy_module.view_requires_ring(view)
+            and ring_policy_module.view_requires_ring_resource_retry(view)
         )
         mandatory_ring_pending = bool(
             bool(getattr(view, "can_ring", False))
@@ -3298,6 +3297,19 @@ def record_remaining_external_pending(
             ).startswith("fatty_ring_"):
                 materialization_failure = {}
             pending_kind = "pending_ring_candidate"
+            ring_attempt_state = dict(
+                getattr(assembler, "ring_pending_attempts", {}).get(
+                    fragment_id, {}
+                )
+                or {}
+            )
+            untried_skeletons = [
+                str(value)
+                for value in list(
+                    ring_attempt_state.get("untried_skeletons", []) or []
+                )
+                if str(value)
+            ]
             ring_reason = str(
                 assembler.ring_pending_reasons.get(fragment_id, "")
                 or ""
@@ -3305,6 +3317,11 @@ def record_remaining_external_pending(
             pending_reason = str(
                 ring_reason
                 if ring_reason
+                else (
+                    "ring_skeletons_remaining:"
+                    + ",".join(sorted(untried_skeletons))
+                )
+                if untried_skeletons
                 else "mandatory_ring_candidates_exhausted"
             )
         else:

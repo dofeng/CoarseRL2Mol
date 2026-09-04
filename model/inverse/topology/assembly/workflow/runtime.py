@@ -502,6 +502,16 @@ class ExternalTopologyAssembler:
         from .result_builder import build_external_assembly_result
 
         phase_state = run_external_assembly_phases(self)
+        # Ring/side materialization may consume concrete allocator resources
+        # while creating a product.  The contracts emitted during that same
+        # pass must describe the post-materialization inventory; otherwise a
+        # later Stage3 continuation can see a stale ``claimable=1`` snapshot
+        # even though the live bucket is already empty and report an
+        # accounting inconsistency instead of a real resource deficit.
+        self.sync_after_resource_adjustments(
+            list(self.nodes or []),
+            H=self.current_H,
+        )
         return build_external_assembly_result(self, phase_state)
 
 

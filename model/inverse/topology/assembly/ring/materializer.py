@@ -159,11 +159,53 @@ def resolved_ring_support_node_ids(
     assembler,
     resolved_segments: Sequence[ResolvedRingSegment],
 ) -> List[int]:
-    return sorted({
-        int(node_id)
-        for segment in list(resolved_segments or [])
-        for node_id in list(getattr(segment, "suppressed_support_node_ids", []) or [])
-    })
+    physical_support_ids: Set[int] = set()
+    for segment in list(resolved_segments or []):
+        suppressed_ids = {
+            int(node_id)
+            for node_id in list(
+                getattr(segment, "suppressed_support_node_ids", []) or []
+            )
+        }
+        # Suppressed IDs also contain non-fixed hop context used only by the
+        # degree audit.  Such neighbours are not physical members of the new
+        # ring and must never enter its ownership contract.  A suppressed node
+        # is physical here only when this candidate claimed it from the pool or
+        # explicitly resolved it as a fixed source route.
+        claimed_ids = {
+            int(node_id)
+            for values in dict(
+                getattr(segment, "pool_node_ids_by_su", {}) or {}
+            ).values()
+            for node_id in list(values or [])
+        }
+        fixed_ids = {
+            int(node_id)
+            for node_id in list(
+                getattr(segment, "fixed_source_node_ids", []) or []
+            )
+        }
+        view = getattr(segment, "view", None)
+        if view is not None:
+            # A classified SU24 may carry a real fixed cap/terminal that is
+            # intentionally absent from the rendered ring backbone.  Keep
+            # only IDs explicitly owned by the view or marked fixed by its
+            # classification evidence; ordinary context_node_ids are never
+            # promoted to physical support by this fallback.
+            view_evidence = dict(getattr(view, "evidence", {}) or {})
+            fixed_ids.update(
+                int(node_id)
+                for node_id in list(getattr(view, "source_node_ids", []) or [])
+            )
+            for key in ("fixed_source_node_ids", "fixed_hop1_ids"):
+                fixed_ids.update(
+                    int(node_id)
+                    for node_id in list(view_evidence.get(key, []) or [])
+                )
+        physical_support_ids.update(
+            suppressed_ids & (claimed_ids | fixed_ids)
+        )
+    return sorted(physical_support_ids)
 
 
 def build_ring_topology_contract(
@@ -829,6 +871,12 @@ def assemble_ring(
     reason = "ring_slot_selection_failed"
     selected_required_counts: Dict[str, int] = {}
     selected_missing_counts: Dict[str, int] = {}
+    skeleton_kind_for_attempt = {
+        "fatty_ring_fused": "fused",
+        "fatty_ring_upper_lower": "upper_lower",
+        "fatty_ring_side": "side",
+    }.get(str(product_kind), "")
+    attempt_failures_by_fragment: Dict[int, Dict[str, Any]] = {}
 
     def _build_and_materialize(
         candidate_views: Sequence[AssemblyFragmentView],
@@ -982,6 +1030,24 @@ def assemble_ring(
                 assembler.last_ring_materialization_reason
                 or "ring_candidate_materialization_rejected"
             )
+            candidate_signature = ring_planner_module.ring_plan_signature(candidate)
+            candidate_failure = {
+                "reason": str(failure_reason),
+                "required_counts": dict(required),
+                "missing_counts": dict(missing),
+                "plan_complete": True,
+                "candidate_signature": str(candidate_signature),
+                "source_fragment_ids": sorted({
+                    int(source_view.fragment_id)
+                    for source_view in list(
+                        getattr(candidate, "source_views", []) or []
+                    )
+                }),
+            }
+            for source_view in list(getattr(candidate, "source_views", []) or []):
+                attempt_failures_by_fragment[int(source_view.fragment_id)] = dict(
+                    candidate_failure
+                )
             failures.append((candidate, failure_reason, required, missing))
 
         if failures:
@@ -1011,6 +1077,14 @@ def assemble_ring(
                 else "ring_slot_selection_failed"
             ])[0]
         )
+        for candidate_view in list(candidate_views or []):
+            attempt_failures_by_fragment.setdefault(int(candidate_view.fragment_id), {
+                "reason": str(structural_reason),
+                "required_counts": {},
+                "missing_counts": {},
+                "plan_complete": False,
+                "candidate_signature": "",
+            })
         return False, structural_probe, structural_reason, {}, {}
 
     # Classified like24 fragments may supplement an external ring
@@ -1046,7 +1120,18 @@ def assemble_ring(
         "fatty_ring_upper_lower": "upper_lower_ring_plan",
         "fatty_ring_side": "side_ring_plan",
     }.get(str(product_kind), "")
-    if plan is not None and list(plan.source_views or []):
+    attempted_view_ids = {
+        int(fragment_id) for fragment_id in attempt_failures_by_fragment
+    }
+    if attempted_view_ids:
+        # The planner may test many alternatives before returning one
+        # representative failure.  Preserve every fragment that participated
+        # in a real attempt so unselected alternatives are not exhausted.
+        relevant_views = [
+            view for view in list(candidate_views or [])
+            if int(view.fragment_id) in attempted_view_ids
+        ]
+    elif plan is not None and list(plan.source_views or []):
         relevant_views = list(plan.source_views or [])
     else:
         allowed_name = _skeleton_allowed_name(str(skeleton_name))
@@ -1057,20 +1142,49 @@ def assemble_ring(
     for view in list(relevant_views or []):
         if not ownership_module.fragment_available(assembler, int(view.fragment_id)):
             continue
-        assembler.ring_pending_reasons[int(view.fragment_id)] = str(reason)
+        view_failure = dict(
+            attempt_failures_by_fragment.get(int(view.fragment_id), {}) or {}
+        )
+        view_reason = str(view_failure.get("reason", reason) or reason)
+        view_required_counts = {
+            str(key): int(value)
+            for key, value in dict(
+                view_failure.get("required_counts", selected_required_counts)
+                or {}
+            ).items()
+            if int(value) > 0
+        }
+        view_missing_counts = {
+            str(key): int(value)
+            for key, value in dict(
+                view_failure.get("missing_counts", selected_missing_counts)
+                or {}
+            ).items()
+            if int(value) > 0
+        }
+        view_plan_complete = bool(
+            view_failure.get(
+                "plan_complete",
+                plan is not None
+                and getattr(plan, "template_complete", False)
+                and not list(getattr(plan, "missing_slots", []) or []),
+            )
+        )
+        view_candidate_signature = str(
+            view_failure.get("candidate_signature", "") or ""
+        )
+        view_source_fragment_ids = [
+            int(value)
+            for value in list(view_failure.get("source_fragment_ids", []) or [])
+        ]
         missing_slots = sorted({
             str(item)
-            for item in ([str(reason)] if str(reason) else [])
+            for item in ([str(view_reason)] if str(view_reason) else [])
             + (list(plan.missing_slots or []) if plan is not None else [])
         })
-        assembler.ring_pending_attempts[int(view.fragment_id)] = {
-            "missing_slots": missing_slots,
-        }
-        plan_complete = bool(
-            plan is not None
-            and getattr(plan, "template_complete", False)
-            and not list(getattr(plan, "missing_slots", []) or [])
-        )
+        plan_complete = bool(view_plan_complete)
+        selected_required_counts = dict(view_required_counts)
+        selected_missing_counts = dict(view_missing_counts)
         required_counts_payload = (
             dict(selected_required_counts or {}) if plan_complete else {}
         )
@@ -1084,11 +1198,22 @@ def assemble_ring(
         # contract from the fragment's generic F1/H slots.
         if plan_complete and selected_missing_counts:
             assembler.ring_infeasible_contracts[int(view.fragment_id)] = {
-                "candidate_signature": ring_planner_module.ring_plan_signature(plan),
+                "candidate_signature": str(
+                    view_candidate_signature
+                    or ring_planner_module.ring_plan_signature(plan)
+                ),
                 "product_kind": str(product_kind),
                 "source_fragment_ids": sorted({
-                    int(source.fragment_id)
-                    for source in list(getattr(plan, "source_views", []) or [])
+                    int(value)
+                    for value in (
+                        view_source_fragment_ids
+                        or [
+                            int(source.fragment_id)
+                            for source in list(
+                                getattr(plan, "source_views", []) or []
+                            )
+                        ]
+                    )
                 }),
                 "required_counts": {
                     str(key): int(value)
@@ -1100,6 +1225,106 @@ def assemble_ring(
                     for key, value in selected_missing_counts.items()
                     if int(value) > 0
                 },
-                "failure_reason": str(reason),
+                "failure_reason": str(view_reason),
             }
+
+        fragment_id = int(view.fragment_id)
+        # A fragment can advertise more than one legal ring skeleton.  Keep
+        # the outcome of each skeleton independently; a later probe (for
+        # example upper/lower) must not overwrite the fact that side/fused
+        # still needs a retry or is a valid fallback.  The flat fields remain
+        # for old consumers and intentionally expose the latest attempt only.
+        attempt_state = dict(
+            assembler.ring_pending_attempts.get(fragment_id, {}) or {}
+        )
+        by_skeleton = {
+            str(key): dict(value or {})
+            for key, value in dict(attempt_state.get("by_skeleton", {}) or {}).items()
+        }
+        skeleton_attempt = {
+            "skeleton": str(skeleton_kind_for_attempt),
+            "product_kind": str(product_kind),
+            "reason": str(view_reason),
+            "missing_slots": list(missing_slots),
+            "plan_complete": bool(plan_complete),
+            "required_counts": {
+                str(key): int(value)
+                for key, value in dict(required_counts_payload or {}).items()
+                if int(value) > 0
+            },
+            "missing_counts": {
+                str(key): int(value)
+                for key, value in dict(selected_missing_counts or {}).items()
+                if int(value) > 0
+            },
+            "candidate_signature": (
+                str(view_candidate_signature)
+                or ring_planner_module.ring_plan_signature(plan)
+                if plan is not None and hasattr(plan, "ordered_segments")
+                else str(view_candidate_signature)
+            ),
+        }
+        by_skeleton[str(skeleton_kind_for_attempt)] = skeleton_attempt
+        all_missing_slots = sorted({
+            str(value)
+            for item in by_skeleton.values()
+            for value in list(item.get("missing_slots", []) or [])
+            if str(value)
+        })
+        attempt_state.update({
+            "missing_slots": all_missing_slots,
+            "by_skeleton": by_skeleton,
+            "last_skeleton": str(skeleton_kind_for_attempt),
+        })
+        assembler.ring_pending_attempts[fragment_id] = attempt_state
+        allowed_skeletons = {
+            str(value)
+            for value in ring_planner_module.view_ring_allowed_skeletons(
+                assembler, view
+            )
+        }
+        attempted_skeletons = set(by_skeleton)
+        if allowed_skeletons and not allowed_skeletons.issubset(attempted_skeletons):
+            # No aggregate structural blocker exists yet.  Keep the fragment
+            # visible to the next allowed skeleton, and retain the latest
+            # concrete reason only inside ``by_skeleton``.
+            assembler.ring_pending_reasons.pop(fragment_id, None)
+            attempt_state["untried_skeletons"] = sorted(
+                allowed_skeletons - attempted_skeletons
+            )
+            attempt_state["all_allowed_skeletons_attempted"] = False
+        else:
+            attempt_state["untried_skeletons"] = []
+            attempt_state["all_allowed_skeletons_attempted"] = True
+            assembler.ring_pending_reasons[fragment_id] = str(view_reason)
+
+        existing_failure = dict(
+            assembler.materialization_failure_by_fragment_id.get(fragment_id, {})
+            or {}
+        )
+        historical_attempts = {
+            str(key): dict(value or {})
+            for key, value in dict(existing_failure.get("attempts_by_skeleton", {}) or {}).items()
+        }
+        historical_attempts[str(skeleton_kind_for_attempt)] = dict(skeleton_attempt)
+        # Keep one compatibility payload at the top level, while making the
+        # complete per-skeleton failure map available to diagnostics and
+        # pending-contract replay.
+        assembler.materialization_failure_by_fragment_id[fragment_id] = {
+            **existing_failure,
+            "attempted_product_kind": str(product_kind),
+            "attempted_skeleton": str(skeleton_kind_for_attempt),
+            "validation_reason": str(view_reason),
+            "attempted_resource_counts": {
+                str(key): int(value)
+                for key, value in dict(required_counts_payload or {}).items()
+                if int(value) > 0
+            },
+            "attempted_missing_counts": {
+                str(key): int(value)
+                for key, value in dict(selected_missing_counts or {}).items()
+                if int(value) > 0
+            },
+            "attempts_by_skeleton": historical_attempts,
+        }
     return False

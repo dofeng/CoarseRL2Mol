@@ -203,6 +203,73 @@ def _evaluate_external_phases(
         for item in list(diagnostics.get("pending_contracts", []) or [])
         if dict(item or {})
     ]
+    # The assembler owns the live resource identity after a materialization
+    # pass.  Reconcile the serialized contract snapshots once more at this
+    # boundary so a contract cannot claim a resource that was consumed by a
+    # product created in the same continuation.  This is deliberately a
+    # snapshot update only; it does not claim, release, or reorder resources.
+    if live_assembler is not None:
+        live_allocator = getattr(live_assembler, "allocator", None)
+        if live_allocator is not None:
+            live_raw_counts = {
+                str(key): int(value)
+                for key, value in dict(
+                    live_allocator.available_counts() or {}
+                ).items()
+            }
+            live_claimable_counts = {
+                str(key): int(value)
+                for key, value in dict(
+                    live_allocator.claimable_counts() or {}
+                ).items()
+            }
+            for contract in pending_contracts:
+                required = dict(contract.get("required_counts", {}) or {})
+                live_missing = {
+                    str(key): max(
+                        0,
+                        int(value)
+                        - int(live_claimable_counts.get(str(key), 0)),
+                    )
+                    for key, value in required.items()
+                    if int(value) > int(live_claimable_counts.get(str(key), 0))
+                }
+                contract["raw_available_counts"] = dict(live_raw_counts)
+                contract["available_counts"] = dict(live_claimable_counts)
+                contract["claimable_available_counts"] = dict(
+                    live_claimable_counts
+                )
+                contract["missing_counts"] = dict(live_missing)
+                proof = dict(contract.get("proof", {}) or {})
+                proof.update({
+                    "raw_available_counts": dict(live_raw_counts),
+                    "available_counts": dict(live_claimable_counts),
+                    "claimable_available_counts": dict(live_claimable_counts),
+                    "missing_counts": dict(live_missing),
+                })
+                contract["proof"] = proof
+                contract_diagnostics = dict(contract.get("diagnostics", {}) or {})
+                contract_diagnostics.update({
+                    "raw_available_counts": dict(live_raw_counts),
+                    "claimable_available_counts": dict(live_claimable_counts),
+                    "missing_counts": dict(live_missing),
+                })
+                contract["diagnostics"] = contract_diagnostics
+            # Keep the public assembly view consistent with the canonical
+            # contracts consumed below.  Without this mirror, later
+            # diagnostics would still serialize the pre-reconciliation
+            # ``claimable_available_counts`` even though planning used the
+            # live allocator values.
+            diagnostics["pending_contracts"] = [
+                dict(item or {}) for item in pending_contracts if dict(item or {})
+            ]
+            assembly["diagnostics"] = {
+                **dict(assembly.get("diagnostics", {}) or {}),
+                "pending_contracts": list(diagnostics["pending_contracts"]),
+            }
+            assembly["pending_contracts"] = list(diagnostics["pending_contracts"])
+            # ``working`` is created below, so retain the reconciled view in a
+            # local object that is assigned after the deepcopy.
     working = deepcopy(phase_eval)
     # Dynamic runtime handle; Stage3AdjustmentPlan.to_dict intentionally omits
     # phase-evaluation runtime objects and therefore cannot leak this object.

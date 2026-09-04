@@ -13,6 +13,25 @@ def view_requires_ring(view: AssemblyFragmentView) -> bool:
     )
 
 
+def view_requires_ring_resource_retry(view: AssemblyFragmentView) -> bool:
+    """Keep a ring-first view pending while its concrete plan lacks resources.
+
+    ``view_requires_ring`` deliberately describes exclusive capability.  A
+    24_D-like view can legally fall back to a side chain, but its routing
+    contract still says to try a ring first.  Resource conversion therefore
+    gets one chance to satisfy a concrete ring plan before that fallback is
+    released.
+    """
+    return bool(
+        bool(getattr(view, "can_ring", False))
+        and (
+            view_requires_ring(view)
+            or str(getattr(view, "preferred_product_type", ""))
+            == "ring_candidate"
+        )
+    )
+
+
 def ring_candidate_pending_for_ring_stage(
     assembler,
     view: AssemblyFragmentView,
@@ -24,4 +43,8 @@ def ring_candidate_pending_for_ring_stage(
     )
 
 
-__all__ = ["ring_candidate_pending_for_ring_stage", "view_requires_ring"]
+__all__ = [
+    "ring_candidate_pending_for_ring_stage",
+    "view_requires_ring",
+    "view_requires_ring_resource_retry",
+]
