@@ -431,7 +431,12 @@ def record_pending(
         for node_id in list(getattr(stub, "source_node_ids", []) or [])
     }
     claimed_source_node_ids = sorted(
-        set(_fixed_source_ids_from_views(list(views or [])))
+        set(
+            _fixed_source_ids_from_views(
+                list(views or []),
+                assembler=assembler,
+            )
+        )
         | rendered_branch_source_ids
     )
     if not claimed_source_node_ids:

@@ -2640,15 +2640,20 @@ def _like24_required_branch_kinds(
     if class_name in {"24_D", "24_CD_P"} and subtype not in {"14"}:
         return {}
     if class_name in {"24_AB_M", "24_CD_M", "24_CD_M_FULL"}:
-        generic_count = _like24_direct_generic_count(token)
-        if generic_count > 0:
-            return {"center": ["H" for _ in range(int(generic_count))]}
         has_closed_fixed_branch = any(
             str(dict(profile or {}).get("side_class", "")) in {"M", "P"}
             for profile in list(connector_profiles or [])[1:]
         )
+        # ``double19d3`` / ``double20d3`` can already be fully accounted for by
+        # their fixed branch contract.  In that case the remaining generic
+        # neighbors belong to the main backbone/ring route, not to an extra H
+        # branch.  Keep the closed-branch special case ahead of the generic
+        # fallback so we do not accidentally manufacture a second side branch.
         if subtype in {"double19d3", "double20d3"} and has_closed_fixed_branch:
             return {}
+        generic_count = _like24_direct_generic_count(token)
+        if generic_count > 0:
+            return {"center": ["H" for _ in range(int(generic_count))]}
         return {"center": ["H"]}
     if class_name in {"24_C", "24_D"} and subtype == "14":
         if terminal_visible_count > 0:

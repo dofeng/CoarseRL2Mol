@@ -1,0 +1,2 @@
+r2,r2_carbonyl,r2_aromatic,r2_aliphatic,exact_match,approx_match,missing,matched_ratio,n_nodes,n_carbon_nodes,selected_spectral_source
+0.2851932644844055,0.30555713176727295,0.05483126640319824,-0.4363901615142822,326,274,0,1.0,715,600,template

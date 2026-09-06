@@ -1,0 +1,2 @@
+unit_id,node_id,local_axial,degree,distinct_internal_direction_count,neighbors,external_contract_ids
+topology:12,499,"[1, 1]",4,4,"[{""direction"": [-1, -1], ""kind"": ""internal"", ""node_id"": 443, ""su_type"": 23}, {""direction"": [0, -1], ""kind"": ""internal"", ""node_id"": 418, ""su_type"": 22}, {""direction"": [0, 1], ""kind"": ""internal"", ""node_id"": 311, ""su_type"": 15}, {""direction"": [1, 0], ""kind"": ""internal"", ""node_id"": 444, ""su_type"": 23}]",[]

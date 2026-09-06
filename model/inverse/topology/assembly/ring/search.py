@@ -86,7 +86,7 @@ def fused_inner_priority(
 ) -> Tuple[int, int, int]:
     class_type = str(getattr(view, "class_type", ""))
     family = str(getattr(view, "family", ""))
-    backbone_labels = ring_segments_module.view_ring_backbone_labels(assembler,
+    backbone_labels = ring_segments_module.view_ring_backbone_labels(assembler, 
         view,
         skeleton_kind="fused",
         reverse=False,

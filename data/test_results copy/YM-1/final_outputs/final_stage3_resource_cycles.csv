@@ -1,0 +1,2 @@
+outer_cycle,cycle,phase,applied,stage3_stop_reason,accepted_cycles_total,accepted_state_retained,rebuild_valid,blocked_reason,accepted,acceptance_reason,layer2_r2,primary_adjustment_count,physical_conversion_count,h_compensation_count,parity_balance_count,fresh_rebuild
+6,1,complete,False,stage3_complete,0,True,False,,True,stage3_complete,,0,0,0,0,False

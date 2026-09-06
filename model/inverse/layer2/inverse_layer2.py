@@ -20,19 +20,19 @@ from ...shared.inverse_common import (
 class Layer2Estimator:
     """
     Layer2: 2-hop 推导和模板检索
-
+    
     功能：
     1. 从1-hop邻居推导2-hop邻居
     2. 模板精确匹配和近似匹配
     3. z向量初始化
     4. mu/pi重建和NMR评估
     """
-
+    
     def __init__(self, device: torch.device = None,
                  lib_path: Optional[str] = None):
         """
         初始化 Layer2 估计器
-
+        
         Args:
             device: 计算设备
             lib_path: 子图库路径
@@ -44,16 +44,16 @@ class Layer2Estimator:
             for i in range(NUM_SU_TYPES)
             if float(E_SU[int(i), 0].detach().cpu().item()) > 0.0
         }
-
+        
         # 路径配置
         base_dir = Z_LIBRARY_DIR
         self.lib_path = lib_path or str(base_dir / 'subgraph_library.pt')
-
-
+        
+        
         # 缓存
         self._template_cache = None
         self._layer1_mu_prior_cache = None
-
+        
         # 统计
         self.stats = {
             'exact_match': 0,
@@ -176,11 +176,11 @@ class Layer2Estimator:
         except Exception:
             pass
         return self._get_layer1_mu_prior(center_su, hop1_ms, lib)
-
+    
     # ========================================================================
     # 主方法
     # ========================================================================
-
+    
     def layer2_assign(self, nodes: List[_NodeV3],
                       S_target: torch.Tensor,
                       E_target: torch.Tensor,
@@ -189,20 +189,20 @@ class Layer2Estimator:
                       emit_summary: bool = True) -> List[_NodeV3]:
         """
         Layer2: 为每个节点分配2-hop邻居和z向量
-
+        
         Args:
             nodes: Layer1分配后的节点列表
             S_target: 目标谱图
             E_target: 目标元素组成
             output_dir: 输出目录
-
+        
         Returns:
             nodes: 更新后的节点列表
         """
         device = self.device
         S_target = S_target.to(device).flatten()
         E_target = E_target.to(device).flatten()
-
+        
         if verbose:
             print("\n" + "=" * 60)
             print("Layer2: 2-hop推导 & 模板匹配")
@@ -217,11 +217,12 @@ class Layer2Estimator:
             'approx_residual_fill': 0,
             'approx_least_damage': 0,
             'inventory_filtered_candidates': 0,
+            'inventory_relaxed_assignments': 0,
         }
-
+        
         # 2-hop推导
         self._derive_hop2(nodes)
-
+        
         # 加载模板库
         lib = self._get_template_library()
         if lib is None:
@@ -259,7 +260,7 @@ class Layer2Estimator:
             except Exception as e:
                 import logging
                 logging.debug(f"Failed to get mu_prior for node {n.global_id}: {e}")
-
+            
             inventory_filter_diag: Dict[str, object] = {}
             mode, candidates = self._minimum_hop2_distance_candidates(
                 center_su,
@@ -276,6 +277,8 @@ class Layer2Estimator:
             inventory_filtered_su_types.update(
                 inventory_filter_diag.get('filtered_su_types', {})
             )
+            if any(bool(candidate.get('inventory_relaxed', False)) for candidate in candidates):
+                self.stats['inventory_relaxed_assignments'] += 1
             if mode == 'exact':
                 self.stats['exact_match'] += 1
                 fixed_assignments.append({
@@ -436,7 +439,7 @@ class Layer2Estimator:
 
         self.stats['selected_spectral_source'] = 'template'
         self.stats['spectral_contract'] = 'template_center_mu'
-
+        
         # NMR评估
         S_recon = self.reconstruct_spectrum(nodes)
         eval_info = evaluate_spectrum_reconstruction(
@@ -451,7 +454,8 @@ class Layer2Estimator:
                 f"  近似选择: 唯一={self.stats['forced_approx']}, "
                 f"补差谱={self.stats['approx_residual_fill']}, "
                 f"最小损伤={self.stats['approx_least_damage']}, "
-                f"库存过滤={self.stats['inventory_filtered_candidates']}"
+                f"库存过滤={self.stats['inventory_filtered_candidates']}, "
+                f"库存妥协={self.stats['inventory_relaxed_assignments']}"
             )
             print(f"  R²={r2:.4f}")
         elif emit_summary:
@@ -462,10 +466,11 @@ class Layer2Estimator:
                 f"fill={self.stats['approx_residual_fill']} "
                 f"damage={self.stats['approx_least_damage']}) "
                 f"filtered={self.stats['inventory_filtered_candidates']} "
+                f"relaxed={self.stats['inventory_relaxed_assignments']} "
                 f"missing={self.stats['missing']} r2={r2:.4f}",
                 flush=True,
             )
-
+        
         # 保存结果
         if output_dir:
             self._save_results(nodes, S_target, S_recon, r2, output_dir)
@@ -475,16 +480,16 @@ class Layer2Estimator:
                 pd.DataFrame(match_detail_rows).to_csv(str(Path(output_dir) / 'layer2_template_match_detail.csv'), index=False)
             except Exception as e:
                 print(f"  [Layer2] 保存模板匹配明细失败: {e}")
-
+        
         if verbose:
             print("Layer2 完成\n")
-
+        
         return nodes
-
+    
     # ========================================================================
     # 2-hop 推导
     # ========================================================================
-
+    
     def _derive_hop2(self, nodes: List[_NodeV3]):
         """从1-hop邻居推导2-hop邻居"""
         node_map: Dict[int, _NodeV3] = {}
@@ -499,7 +504,7 @@ class Layer2Estimator:
             c_id = int(n.global_id)
             hop2 = Counter()
             hop2_ids = set()
-
+            
             for nb_id in n.hop1_ids:
                 try:
                     nb = node_map.get(int(nb_id), None)
@@ -512,14 +517,14 @@ class Layer2Estimator:
                         continue
                 except Exception:
                     continue
-
+                
                 for nb2_id in nb.hop1_ids:
                     nb2_id_i = int(nb2_id)
                     if nb2_id_i == c_id:
                         continue
                     if nb2_id_i in hop2_ids:
                         continue
-
+                    
                     try:
                         nb2 = node_map.get(nb2_id_i, None)
                         if nb2 is None:
@@ -531,26 +536,26 @@ class Layer2Estimator:
                         su2 = int(nb2.su_type)
                     except:
                         continue
-
+                    
                     hop2[su2] += 1
                     hop2_ids.add(nb2_id_i)
-
+            
             n.hop2_su = hop2
             n.hop2_ids = sorted(int(node_id) for node_id in hop2_ids)
-
+    
     # ========================================================================
     # 模板检索
     # ========================================================================
-
+    
     def _get_template_library(self) -> Optional[Dict]:
         """获取模板库（带缓存）"""
         if self._template_cache is not None:
             return self._template_cache
-
+        
         lib_path = self.lib_path
         if not Path(lib_path).exists():
             return None
-
+        
         try:
             import warnings
             with warnings.catch_warnings():
@@ -584,7 +589,7 @@ class Layer2Estimator:
                     mu_tpl = None
                 item = (kt, h1_t, h2_t, int(sample_count), mu_tpl)
                 center_hop1_index[(int(center_su), tuple(h1_t))].append(item)
-
+            
             self._template_cache = {
                 'templates': templates,
                 'center_index': center_index,
@@ -594,7 +599,7 @@ class Layer2Estimator:
         except Exception as e:
             print(f"  加载模板库失败: {e}")
             return None
-
+    
     def _select_template_key(self, center_su: int,
                               hop1_ms: Tuple[int, ...],
                               hop2_ms: Tuple[int, ...],
@@ -658,6 +663,7 @@ class Layer2Estimator:
 
     @staticmethod
     def _candidate_match_meta(candidate: Dict[str, object]) -> Dict[str, object]:
+        missing_su_types = tuple(int(v) for v in tuple(candidate.get('inventory_missing_su_types', ()) or ()))
         return {
             'chosen_hop1': tuple(candidate.get('chosen_hop1', ())),
             'chosen_hop2': tuple(candidate.get('chosen_hop2', ())),
@@ -665,6 +671,8 @@ class Layer2Estimator:
             'hop2_match_tier': int(candidate.get('hop2_match_tier', 0)),
             'template_mu': candidate.get('template_mu', ''),
             'mu_diff': candidate.get('mu_diff', ''),
+            'inventory_relaxed': bool(candidate.get('inventory_relaxed', False)),
+            'inventory_missing_su_types': list(missing_su_types),
         }
 
     def _minimum_hop2_distance_candidates(
@@ -677,7 +685,12 @@ class Layer2Estimator:
             available_su_types: Optional[Set[int]] = None,
             filter_diagnostics: Optional[Dict[str, object]] = None,
     ) -> Tuple[str, List[Dict[str, object]]]:
-        """Return all templates in the minimum 2-hop-distance tier."""
+        """Return all templates in the minimum 2-hop-distance tier.
+
+        Hop1 remains a hard constraint. If the exact hop1 bucket exists but all
+        inventory-compatible candidates are filtered out, fall back to the same
+        hop1 bucket in a relaxed mode instead of widening hop1.
+        """
         templates = lib.get('templates', {})
         key_exact = (int(center_su), tuple(hop1_ms), tuple(hop2_ms))
         if key_exact in templates:
@@ -701,7 +714,8 @@ class Layer2Estimator:
                 [],
             ) or []
         )
-        candidates: List[Dict[str, object]] = []
+        strict_candidates: List[Dict[str, object]] = []
+        relaxed_candidates: List[Dict[str, object]] = []
         seen_keys = set()
         filtered_candidates = 0
         filtered_su_types = Counter()
@@ -713,14 +727,6 @@ class Layer2Estimator:
             if not isinstance(tpl, dict):
                 continue
             candidate_hop2 = tuple(int(value) for value in tuple(h2_t))
-            if available_su_types is not None:
-                absent_su_types = sorted(
-                    set(candidate_hop2) - set(available_su_types)
-                )
-                if absent_su_types:
-                    filtered_candidates += 1
-                    filtered_su_types.update(absent_su_types)
-                    continue
             template_mu = tpl.get('center_mu', indexed_mu)
             hop2_diff = int(multiset_diff_nodes(tuple(hop2_ms), candidate_hop2))
             mu_diff = (
@@ -728,7 +734,7 @@ class Layer2Estimator:
                 if mu_prior is not None and self._valid_mu(template_mu)
                 else float('inf')
             )
-            candidates.append({
+            candidate = {
                 'key': kt,
                 'template': tpl,
                 'chosen_hop1': tuple(h1_t),
@@ -738,23 +744,48 @@ class Layer2Estimator:
                 'template_mu': float(template_mu) if self._valid_mu(template_mu) else template_mu,
                 'mu_diff': float(mu_diff) if np.isfinite(mu_diff) else '',
                 'sample_count': int(tpl.get('sample_count', sample_count)),
-            })
+                'inventory_relaxed': False,
+                'inventory_missing_su_types': (),
+            }
+            relaxed_candidates.append(candidate)
+            if available_su_types is not None:
+                absent_su_types = sorted(
+                    set(candidate_hop2) - set(available_su_types)
+                )
+                if absent_su_types:
+                    filtered_candidates += 1
+                    filtered_su_types.update(absent_su_types)
+                    candidate = dict(candidate)
+                    candidate['inventory_relaxed'] = True
+                    candidate['inventory_missing_su_types'] = tuple(absent_su_types)
+                    relaxed_candidates[-1] = candidate
+                    continue
+            strict_candidates.append(candidate)
+
+        chosen_pool = strict_candidates if strict_candidates else relaxed_candidates
 
         if filter_diagnostics is not None:
             filter_diagnostics['filtered_candidates'] = int(filtered_candidates)
             filter_diagnostics['filtered_su_types'] = dict(filtered_su_types)
-        if not candidates:
+            filter_diagnostics['strict_candidates'] = int(len(strict_candidates))
+            filter_diagnostics['relaxed_candidates'] = int(len(relaxed_candidates))
+            filter_diagnostics['relaxed_fallback_used'] = bool(
+                not strict_candidates and bool(relaxed_candidates) and filtered_candidates > 0
+            )
+        if not chosen_pool:
             return ('missing_inventory' if filtered_candidates else 'missing'), []
-        minimum_tier = min(int(candidate['hop2_match_tier']) for candidate in candidates)
+        minimum_tier = min(int(candidate['hop2_match_tier']) for candidate in chosen_pool)
         minimum_candidates = [
             candidate
-            for candidate in candidates
+            for candidate in chosen_pool
             if int(candidate['hop2_match_tier']) == minimum_tier
         ]
         minimum_candidates.sort(
             key=lambda candidate: self._candidate_prior_rank(candidate, mu_prior)
         )
-        return 'approx_h2_tier', minimum_candidates
+        if strict_candidates:
+            return 'approx_h2_tier', minimum_candidates
+        return 'approx_h2_tier_relaxed_inventory', minimum_candidates
 
     def _validate_template_candidate(self,
                                      node: _NodeV3,
@@ -807,6 +838,9 @@ class Layer2Estimator:
         score_components['layer2_hop2_match_tier'] = int(candidate['hop2_match_tier'])
         score_components['layer2_mu_diff'] = candidate.get('mu_diff', '')
         score_components['layer2_candidate_count'] = int(candidate_count)
+        score_components['layer2_inventory_relaxed'] = bool(candidate.get('inventory_relaxed', False))
+        missing_su_types = tuple(int(v) for v in tuple(candidate.get('inventory_missing_su_types', ()) or ()))
+        score_components['layer2_inventory_missing_su_types'] = list(missing_su_types)
         score_components['layer2_library_mu'] = template_mu
         score_components['layer2_library_source'] = 'template_center_mu'
         score_components['layer2_sample_idx'] = int(tpl.get('center_sample_idx', -1))
@@ -827,30 +861,30 @@ class Layer2Estimator:
     def _unit_peak(mu: float, ppm_axis: torch.Tensor, hwhm: float = 1.0) -> torch.Tensor:
         hwhm_sq = float(hwhm) ** 2
         return hwhm_sq / ((ppm_axis - float(mu)) ** 2 + hwhm_sq)
-
+    
     # ========================================================================
     # 谱图重建
     # ========================================================================
-
+    
     def reconstruct_spectrum(self, nodes: List[_NodeV3]) -> torch.Tensor:
         """从节点重建NMR谱图"""
         device = self.device
         ppm_axis = PPM_AXIS.to(device)
-
+        
         mus = []
         pis = []
-
+        
         for n in nodes:
             # 只处理含碳的SU
             if int(n.su_type) not in self._carbon_su_set:
                 continue
-
+            
             mu = float(getattr(n, 'mu', 0.0))
             if mu == 0.0:
                 continue
             mus.append(mu)
             pis.append(1.0)
-
+        
         return reconstruct_from_mu_pi(
             mus=mus,
             pis=pis,
@@ -908,11 +942,11 @@ class Layer2Estimator:
                 'template_key': str(tpl_key) if tpl_key is not None else '',
             })
         return rows
-
+    
     # ========================================================================
     # 结果保存
     # ========================================================================
-
+    
     def _save_results(self, nodes: List[_NodeV3],
                       S_target: torch.Tensor,
                       S_recon: torch.Tensor,
@@ -922,9 +956,9 @@ class Layer2Estimator:
         try:
             out_dir = Path(output_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
-
+            
             ppm_axis = PPM_AXIS.cpu().numpy()
-
+            
             # 保存谱图对比
             df = pd.DataFrame({
                 'ppm': ppm_axis,
@@ -986,7 +1020,7 @@ class Layer2Estimator:
                 pd.DataFrame([metrics]).to_csv(str(out_dir / 'layer2_eval_metrics.csv'), index=False)
             except Exception:
                 pass
-
+            
             # 保存节点详情
             su_names = [name for name, _ in SU_DEFS]
             lib = self._get_template_library()
@@ -1082,10 +1116,10 @@ class Layer2Estimator:
                     'mu': float(getattr(n, 'mu', 0.0)),
                     'pi': float(getattr(n, 'pi', 0.0)),
                 })
-
+            
             pd.DataFrame(node_data).to_csv(str(out_dir / 'layer2_nodes_detail.csv'), index=False)
             pd.DataFrame(peaks_data).to_csv(str(out_dir / 'layer2_node_peaks.csv'), index=False)
-
+            
             print(f"  结果已保存至 {output_dir}")
         except Exception as e:
             print(f"  保存失败: {e}")
@@ -1103,7 +1137,7 @@ def run_layer2_estimation(nodes: List[_NodeV3],
                           output_dir: Optional[str] = None) -> List[_NodeV3]:
     """
     独立运行 Layer2 估计
-
+    
     Args:
         nodes: Layer1分配后的节点列表
         S_target: 目标谱图
@@ -1111,7 +1145,7 @@ def run_layer2_estimation(nodes: List[_NodeV3],
         lib_path: 模板库路径
         device: 计算设备
         output_dir: 输出目录
-
+    
     Returns:
         nodes: 更新后的节点列表
     """

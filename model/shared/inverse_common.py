@@ -17,15 +17,15 @@ except ImportError:
         SU_DEFS, E_SU, NUM_SU_TYPES, PPM_AXIS, PPM_STEP
     )
 # SU分类（用于快速索引）
-SU_CARBONYL = [0, 1, 2, 3, 4]
-SU_AROMATIC = [5, 6, 7, 8, 9, 10, 11, 12, 13]
-SU_UNSATURATED = [14, 15, 16, 17, 18]
-SU_ALIPHATIC = [19, 20, 21, 22, 23, 24, 25]
+SU_CARBONYL = [0, 1, 2, 3, 4]  
+SU_AROMATIC = [5, 6, 7, 8, 9, 10, 11, 12, 13] 
+SU_UNSATURATED = [14, 15, 16, 17, 18] 
+SU_ALIPHATIC = [19, 20, 21, 22, 23, 24, 25] 
 
 # PPM分段定义
 PPM_SEGMENTS = {
-    'carbonyl': (160.0, 240.0),
-    'aromatic': (90.0, 160.0),
+    'carbonyl': (160.0, 240.0),  
+    'aromatic': (90.0, 160.0),   
     'aliphatic': (0.0, 90.0),
     'ordinary_aliphatic': (0.0, 50.0),
     'oxygenated_aliphatic': (50.0, 100.0),
@@ -992,16 +992,16 @@ SU_FIXED_CONNECTIONS = {
 
 # 外接结构要求
 SU_EXTERNAL_CONNECTIONS = {
-    5: [2, 28, 29],
-    6: [0, 27],
-    7: [31],
-    8: [32],
-    9: [0, 1, 2, 3],
+    5: [2, 28, 29],  
+    6: [0, 27],      
+    7: [31],         
+    8: [32],         
+    9: [0, 1, 2, 3], 
     10: [10],
-    11: [23, 24, 25, 22, 19, 20, 21, 15, 17],
-    19: [2, 28, 29, 31],
-    20: [0, 27],
-    21: [32],
+    11: [23, 24, 25, 22, 19, 20, 21, 15, 17],  
+    19: [2, 28, 29, 31],  
+    20: [0, 27],   
+    21: [32],       
 }
 
 
@@ -1071,13 +1071,13 @@ def check_external_connection_requirement(center_su: int, hop1_counter: Counter)
     """
     if center_su not in SU_EXTERNAL_CONNECTIONS:
         return True, ""
-
+    
     required_external = SU_EXTERNAL_CONNECTIONS[center_su]
     hop1_types = set(hop1_counter.keys())
 
     if not any(ext_su in hop1_types for ext_su in required_external):
         return False, f"SU {center_su} requires external connection to {required_external}"
-
+    
     return True, ""
 
 
@@ -1107,7 +1107,7 @@ def compute_r2_score(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
     return float(r2.item())
 
 
-def compute_segment_r2(y_true: torch.Tensor, y_pred: torch.Tensor,
+def compute_segment_r2(y_true: torch.Tensor, y_pred: torch.Tensor, 
                        ppm_axis: torch.Tensor, segment_name: str) -> float:
     """计算特定PPM分段的R²"""
     lo, hi = PPM_SEGMENTS[segment_name]
@@ -1353,20 +1353,20 @@ def save_spectrum_figure(S_target: torch.Tensor,
         save_dir=output_dir,
     )
 
-def visualize_su_distribution(su_hist: torch.Tensor, layer_name: str,
+def visualize_su_distribution(su_hist: torch.Tensor, layer_name: str, 
                                save_dir: str = 'inverse_result'):
     """可视化SU分布（保持与v2兼容）"""
     Path(save_dir).mkdir(parents=True, exist_ok=True)
     su_names = [name for name, _ in SU_DEFS]
-
+    
     fig, ax = plt.subplots(figsize=(14, 5))
     x = np.arange(NUM_SU_TYPES)
     counts = su_hist.detach().cpu().numpy()
-
-    colors = ['#d62728' if i in SU_CARBONYL else
-              '#2ca02c' if i in SU_AROMATIC else
+    
+    colors = ['#d62728' if i in SU_CARBONYL else 
+              '#2ca02c' if i in SU_AROMATIC else 
               '#1f77b4' for i in range(NUM_SU_TYPES)]
-
+    
     ax.bar(x, counts, color=colors, alpha=0.7)
     ax.set_xlabel('SU Index', fontsize=14)
     ax.set_ylabel('Count', fontsize=14)
@@ -1374,7 +1374,7 @@ def visualize_su_distribution(su_hist: torch.Tensor, layer_name: str,
     ax.set_xticks(x)
     ax.set_xticklabels(su_names, rotation=90, fontsize=8)
     ax.grid(axis='y', alpha=0.3)
-
+    
     fig.tight_layout()
     fig.savefig(f'{save_dir}/{layer_name.lower()}_su_distribution.png', dpi=300)
     plt.close(fig)
@@ -1385,26 +1385,26 @@ def visualize_spectrum_comparison(S_target: torch.Tensor, S_recon: torch.Tensor,
                                    save_dir: str = 'inverse_result'):
     """可视化谱图对比"""
     Path(save_dir).mkdir(parents=True, exist_ok=True)
-
+    
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-
+    
     ppm = ppm_axis.detach().cpu().numpy()
     target = S_target.detach().cpu().numpy()
     recon = S_recon.detach().cpu().numpy()
     diff = target - recon
-
+    
     # 对比图
     ax1.fill_between(ppm, 0, target, alpha=0.3, color='#1f77b4', label='Target (area)')
     ax1.fill_between(ppm, 0, recon, alpha=0.3, color='#ff7f0e', label='Reconstructed (area)')
     ax1.plot(ppm, target, label='Target', lw=2.0, color='#1f77b4')
-    ax1.plot(ppm, recon, label=f'Reconstructed ({layer_name})', lw=2.0,
+    ax1.plot(ppm, recon, label=f'Reconstructed ({layer_name})', lw=2.0, 
              color='#ff7f0e', linestyle='--')
     ax1.set_ylabel('Intensity', fontsize=14)
     ax1.set_title(f'Target vs. Reconstructed ({layer_name})', fontsize=16)
     ax1.invert_xaxis()
     ax1.legend(frameon=False, fontsize=12)
     ax1.grid(alpha=0.3)
-
+    
     # 差谱图
     ax2.fill_between(ppm, 0, diff, alpha=0.4, color='crimson', label='Difference (area)')
     ax2.plot(ppm, diff, label='Difference (Target - Recon)', lw=1.5, color='crimson')
@@ -1415,7 +1415,7 @@ def visualize_spectrum_comparison(S_target: torch.Tensor, S_recon: torch.Tensor,
     ax2.invert_xaxis()
     ax2.legend(frameon=False, fontsize=12)
     ax2.grid(alpha=0.3)
-
+    
     fig.tight_layout()
     fig.savefig(f'{save_dir}/{layer_name.lower()}_comparison.png', dpi=300)
     plt.close(fig)
@@ -1431,7 +1431,7 @@ class _NodeV3:
     """
     __slots__ = ['global_id', 'su_type', 'hop1_su', 'hop2_su', 'hop1_ids', 'hop2_ids',
                  'fixed_hop1_ids',
-                 'z_vec', 'mu', 'pi', 'z_history',
+                 'z_vec', 'mu', 'pi', 'z_history', 
                  'constraint_violations', 'score_components', 'template_key',
                  'target_hop1_degree', 'init_target_hop1_degree', 'special_degree_source',
                  'special_anchor_partition',
@@ -1439,9 +1439,9 @@ class _NodeV3:
                  'special_anchor_mode',
                  'stage3_topology_owner_id', 'stage3_topology_role',
                  'stage3_locked_neighbor_ids', 'stage3_resource_claimed']
-
+    
     def __init__(self, global_id: int, su_type: int,
-                 hop1_su: Optional[Counter] = None,
+                 hop1_su: Optional[Counter] = None, 
                  hop2_su: Optional[Counter] = None,
                  z_vec: Optional[torch.Tensor] = None,
                  mu: float = 0.0, pi: float = 1.0,
@@ -1483,31 +1483,31 @@ class _NodeV3:
         self.stage3_topology_role = None
         self.stage3_locked_neighbor_ids = set()
         self.stage3_resource_claimed = False
-
+    
     @property
     def center_su(self):
         """兼容性属性，返回su_type"""
         return self.su_type
-
+    
     @property
     def hop1_counter(self):
         """兼容性属性，返回hop1_su"""
         return self.hop1_su
-
+    
     @property
     def hop2_counter(self):
         """兼容性属性，返回hop2_su"""
         return self.hop2_su
-
+    
     @property
     def z(self):
         """兼容性属性，返回z_vec"""
         return self.z_vec
-
+    
     def get_hop1_degree(self) -> int:
         """获取当前1-hop连接度"""
         return sum(self.hop1_su.values())
-
+    
     def get_max_degree(self) -> int:
         """获取该SU类型的最大连接度"""
         try:
@@ -1519,46 +1519,46 @@ class _NodeV3:
         if isinstance(max_deg, tuple):
             return max_deg[1]
         return max_deg
-
+    
     def is_hop1_complete(self) -> bool:
         """检查1-hop是否已完成分配"""
         return self.get_hop1_degree() >= self.get_max_degree()
-
+    
     def is_hop1_empty(self) -> bool:
         """检查1-hop是否为空"""
         return self.get_hop1_degree() == 0
-
+    
     def remaining_hop1_slots(self) -> int:
         """剩余可分配的1-hop槽位"""
         return max(0, self.get_max_degree() - self.get_hop1_degree())
-
+    
     def has_neighbor(self, neighbor_id: int) -> bool:
         """检查是否已连接到指定邻居"""
         return neighbor_id in self.hop1_ids
-
+    
     def validate_hop1_consistency(self) -> Tuple[bool, List[str]]:
         """
         验证hop1_su与hop1_ids的一致性
-
+        
         Returns:
             (is_valid, error_messages)
         """
         errors = []
-
+        
         # 检查数量一致性
         if len(self.hop1_ids) != sum(self.hop1_su.values()):
             errors.append(f"Node {self.global_id}: hop1_ids长度({len(self.hop1_ids)}) != hop1_su总数({sum(self.hop1_su.values())})")
-
+        
         # 检查度数约束
         current_degree = self.get_hop1_degree()
         max_degree = self.get_max_degree()
         if current_degree > max_degree:
             errors.append(f"Node {self.global_id}: 度数超限 {current_degree} > {max_degree}")
-
+        
         # 检查hop1_ids中无重复
         if len(self.hop1_ids) != len(set(self.hop1_ids)):
             errors.append(f"Node {self.global_id}: hop1_ids中存在重复ID")
-
+        
         # 检查hop1_ids中不含自身
         if self.global_id in self.hop1_ids:
             errors.append(f"Node {self.global_id}: hop1_ids中包含自身ID")
@@ -1566,9 +1566,9 @@ class _NodeV3:
         invalid_fixed = [nid for nid in self.fixed_hop1_ids if nid not in self.hop1_ids]
         if invalid_fixed:
             errors.append(f"Node {self.global_id}: fixed_hop1_ids包含不存在的邻居 {sorted(invalid_fixed)}")
-
+        
         return len(errors) == 0, errors
-
+    
     def __repr__(self):
         return (f"NodeV3(id={self.global_id}, su={self.su_type}, "
                 f"hop1={dict(self.hop1_su)}, degree={self.get_hop1_degree()}/{self.get_max_degree()}, "

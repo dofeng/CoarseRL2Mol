@@ -1,0 +1,241 @@
+{
+  "summary": {
+    "cycle_rows": 8,
+    "applied_cycle_count": 7,
+    "accepted_cycle_count": 7,
+    "history_retention": "latest_outer_cycle_compact_rows_only",
+    "outer_cycles_with_stage3": [
+      2
+    ],
+    "last_stop_reason": "stage3_complete",
+    "accepted_spectrum_cycle_count": 2,
+    "generation_count": 12,
+    "final_generation_internal_physical_conversion_count": 0,
+    "final_generation_internal_ring_count": 0,
+    "remaining_resource_counts": {
+      "11": 2,
+      "22": 0,
+      "23": 0,
+      "10": 30,
+      "12": 42,
+      "13": 33,
+      "24": 0
+    },
+    "generation_metrics": [
+      {
+        "generation_id": 2000000,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 2000001,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 2000002,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 2000003,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 2000004,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 2000005,
+        "internal_physical_conversion_count": 1,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 2000006,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 2000007,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 2000008,
+        "internal_physical_conversion_count": 1,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 2000009,
+        "internal_physical_conversion_count": 2,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 2000010,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 2000011,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      }
+    ]
+  },
+  "cycles": [
+    {
+      "outer_cycle": 2,
+      "cycle": 5,
+      "phase": "remaining_pool_spectrum_rebalance",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 11,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "layer2_r2_gain_threshold_met",
+      "layer2_r2": 0.7251746654510498,
+      "primary_adjustment_count": 10,
+      "physical_conversion_count": 0,
+      "h_compensation_count": 0,
+      "parity_balance_count": 1,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 2,
+      "cycle": 6,
+      "phase": "internal_topology",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 11,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.7417126893997192,
+      "primary_adjustment_count": 1,
+      "physical_conversion_count": 1,
+      "h_compensation_count": 0,
+      "parity_balance_count": 0,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 2,
+      "cycle": 7,
+      "phase": "remaining_pool_spectrum_rebalance",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 11,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "layer2_r2_gain_threshold_met",
+      "layer2_r2": 0.7424521446228027,
+      "primary_adjustment_count": 10,
+      "physical_conversion_count": 0,
+      "h_compensation_count": 0,
+      "parity_balance_count": 0,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 2,
+      "cycle": 8,
+      "phase": "resource_su24_ring_closure",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 11,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.7371372580528259,
+      "primary_adjustment_count": 2,
+      "physical_conversion_count": 2,
+      "h_compensation_count": 0,
+      "parity_balance_count": 0,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 2,
+      "cycle": 9,
+      "phase": "internal_topology",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 11,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.71297287940979,
+      "primary_adjustment_count": 1,
+      "physical_conversion_count": 1,
+      "h_compensation_count": 0,
+      "parity_balance_count": 0,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 2,
+      "cycle": 10,
+      "phase": "internal_topology",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 11,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.7048492431640625,
+      "primary_adjustment_count": 2,
+      "physical_conversion_count": 2,
+      "h_compensation_count": 0,
+      "parity_balance_count": 0,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 2,
+      "cycle": 11,
+      "phase": "resource_su24_ring_closure",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 11,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.6962311267852783,
+      "primary_adjustment_count": 1,
+      "physical_conversion_count": 3,
+      "h_compensation_count": 0,
+      "parity_balance_count": 2,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 2,
+      "cycle": 12,
+      "phase": "complete",
+      "applied": false,
+      "stage3_stop_reason": "stage3_complete",
+      "accepted_cycles_total": 11,
+      "accepted_state_retained": true,
+      "rebuild_valid": false,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "stage3_complete",
+      "layer2_r2": null,
+      "primary_adjustment_count": 0,
+      "physical_conversion_count": 0,
+      "h_compensation_count": 0,
+      "parity_balance_count": 0,
+      "fresh_rebuild": false
+    }
+  ]
+}

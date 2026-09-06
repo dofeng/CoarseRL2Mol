@@ -57,11 +57,11 @@ SU_DEFS: List[Tuple[str, str]] = [
     ('Amide_Group', '[#6](=[O])[#7]'),
     ('Carboxylic_Acid', '[CX3](=[O])[OX2H1]'),
     ('Ester_Group', '[#6](=[O])[#8;X2;!H1]'),
-
+    
     # B类: 其他单原子官能团 (橙色)
     ('Aldehyde_Ketone_C', '[#6;H1,H0](=[O])'),
     ('Nitrile_C', '[#6]#[N]'),
-
+    
     # C类: 芳香碳 (蓝色)（5-13）
     ('O_Substituted_Aro_C', '[c;$(c-O)]'),
     ('N_Substituted_Aro_C', '[c;$(c-N)]'),
@@ -70,16 +70,16 @@ SU_DEFS: List[Tuple[str, str]] = [
     ('Keto_Substituted_Aro_C', '[c;$(c-C=O)]'),
     ('Aryl_Substituted_Aro_C', '[c;$(c-!@c)]'),
     ('Alkyl_Substituted_Aro_C','[c;$(c-C)]'),
-    ('Aromatic_Bridgehead_C', '[c;a;H0;R2,R3,R4]'),
+    ('Aromatic_Bridgehead_C', '[c;a;H0;R2,R3,R4]'),  
     ('Carbocyclic_Aro_CH', '[cH1;a]'),
-
+    
     # D类: 链状不饱和碳 (青色)（14-18）
     ('Vinyllic_Cq', '[CX3H0;$(C=C)]'),
     ('Vinyllic_CH', '[CX3H1;$(C=C)]'),
     ('Vinyllic_CH2', '[CX3H2;$(C=C)]'),
     ('Alkynyl_Cq', '[CX2H0;$(C#C)]'),
     ('Alkynyl_CH', '[CX2H1;$(C#C)]'),
-
+    
     # E类: 饱和脂肪碳 (绿色)（19-25）
     ('Alcohol_Ether_C', '[CX4;$(C-[O,o,S,s])]'),
     ('Amine_C', '[CX4;$(C-[N,n])]'),
@@ -88,7 +88,7 @@ SU_DEFS: List[Tuple[str, str]] = [
     ('Alkyl_CH2', '[CX4H2]'),
     ('Alkyl_CH', '[CX4H1]'),
     ('Alkyl_Cq', '[CX4H0]'),
-
+    
     # F类: 杂原子节点 (紫色)（26-32）
     ('Heterocyclic_N', '[n;r;+0;!$(nC=O)]'),
     ('Amine_Nitrogen', '[N;X3;v3;+0;!$(NC=O)]'),
@@ -157,12 +157,12 @@ def calculate_actual_atom_counts_for_su(mol: Chem.Mol, atom_indices: List[int]) 
     for atom_idx in atom_indices:
         atom = mol.GetAtomWithIdx(atom_idx)
         symbol = atom.GetSymbol()
-
+        
         # 统计与该重原子相连的显式氢原子数量（AddHs 之后为显式氢）
         for nbr in atom.GetNeighbors():
             if nbr.GetSymbol() == 'H':
                 total_h_in_su += 1
-
+        
         # 累加重原子本身的计数
         if symbol in counts:
             counts[symbol] += 1
@@ -206,7 +206,7 @@ SU_PPM_RANGES = {
     'Alkyl_CH2': (18, 45),
     'Alkyl_CH': (28, 60),
     'Alkyl_Cq': (15, 60),
-    # F类: 杂原子节点
+    # F类: 杂原子节点 
     'Heterocyclic_N': (-1, 1),
     'Amine_Nitrogen': (-1, 1),
     'Hydroxyl_O': (-1, 1),
@@ -965,7 +965,7 @@ def _assign_atoms_to_su(mol: Chem.Mol) -> Tuple[List[Dict], List[int]]:
     """将分子中的原子分配给结构单元(SU)。返回匹配列表和原子->SU索引的映射。"""
     atom_to_su_idx = [-1] * mol.GetNumAtoms()
     su_matches = []
-
+    
     for su_name, pattern in SU_PATTERNS:
         matches = mol.GetSubstructMatches(pattern)
         for match in matches:
@@ -975,7 +975,7 @@ def _assign_atoms_to_su(mol: Chem.Mol) -> Tuple[List[Dict], List[int]]:
                 su_matches.append({'name': su_name, 'atoms': match})
                 for atom_idx in match:
                     atom_to_su_idx[atom_idx] = su_id
-
+    
     return su_matches, atom_to_su_idx
 
 def smiles_to_coarse_grained_graph(
@@ -1007,7 +1007,7 @@ def smiles_to_coarse_grained_graph(
     # V49: 确保先执行AddHs，让后续所有函数都操作在带H的完整分子上
     mol = Chem.AddHs(mol)
     AllChem.Compute2DCoords(mol)
-
+    
     try:
         AllChem.ComputeGasteigerCharges(mol)
     except Exception:
@@ -1027,7 +1027,7 @@ def smiles_to_coarse_grained_graph(
 
     # 检查是否有任何重原子未被分配到SU
     unassigned_heavy_atoms = [
-        atom.GetIdx() for atom in mol.GetAtoms()
+        atom.GetIdx() for atom in mol.GetAtoms() 
         if atom.GetSymbol() != 'H' and atom_to_su_idx[atom.GetIdx()] == -1
     ]
     if unassigned_heavy_atoms:
@@ -1070,9 +1070,9 @@ def smiles_to_coarse_grained_graph(
     for su_info in su_matches:
         su_type_id = SU_NAME_TO_ID[su_info['name']]
         one_hot_su_type = F.one_hot(torch.tensor(su_type_id), num_classes=NUM_SU_TYPES).float()
-
+        
         atom_counts = calculate_actual_atom_counts_for_su(mol, su_info['atoms'])
-
+        
         # V-Refactored: 节点特征现在是干净的 39 维: 33 (one-hot SU) + 6 (原子数)
         node_feat = torch.cat([
             one_hot_su_type,
@@ -1119,11 +1119,11 @@ def smiles_to_coarse_grained_graph(
             total_counts['X'] += 1
 
     total_atom_counts = torch.tensor([
-        total_counts['C'],
-        total_counts['H'],
-        total_counts['O'],
-        total_counts['N'],
-        total_counts['S'],
+        total_counts['C'], 
+        total_counts['H'], 
+        total_counts['O'], 
+        total_counts['N'], 
+        total_counts['S'], 
         total_counts['X']
     ], dtype=torch.float)
 
@@ -1133,7 +1133,7 @@ def smiles_to_coarse_grained_graph(
     # 创建PyG Data对象
     data = Data(x=node_feat_matrix, edge_index=edge_index, edge_attr=edge_attr)
     data.smiles = smiles_string
-
+    
     # data.y 仅做兼容保留，不再用于训练。
     # 该谱图将被下面基于节点信息新生成的谱图所覆盖。
     if y_spectrum is not None:
@@ -1144,15 +1144,15 @@ def smiles_to_coarse_grained_graph(
 
     data.total_atom_counts = total_atom_counts
     data.su_max_degrees = su_max_degrees
-
+    
     # V-Fix (Robustness #6): 为损失函数预先计算好节点类型标签
     data.su_type_indices = torch.tensor([SU_NAME_TO_ID[su['name']] for su in su_matches], dtype=torch.long)
-
+    
     # V-Refactored: 从39维特征中提取 one-hot 部分
     su_onehot = data.x[:, 0:NUM_SU_TYPES]
-    data.su_hist = su_onehot.sum(0)
-
-    # ❷ is_carbon 标记
+    data.su_hist = su_onehot.sum(0) 
+    
+    # ❷ is_carbon 标记 
     data.is_carbon = (data.x[:, :26].sum(-1) > 0)
 
     # ==========================================================
@@ -1203,11 +1203,11 @@ def smiles_to_coarse_grained_graph(
     if current_total_intensity > 1e-6 and num_carbons > 0:
         scaling_factor = num_carbons / current_total_intensity
         real_intensity_tensor = real_intensity_tensor * scaling_factor
+        
+    data.real_ppm       = real_ppm_tensor        
+    data.real_intensity = real_intensity_tensor 
 
-    data.real_ppm       = real_ppm_tensor
-    data.real_intensity = real_intensity_tensor
-
-    hwhm = 1.0
+    hwhm = 1.0  
     hwhm_sq = hwhm**2
 
     delta_ppm_sq = (PPM_AXIS.unsqueeze(0) - data.real_ppm.unsqueeze(1))**2
@@ -1247,7 +1247,7 @@ def smiles_to_coarse_grained_graph(
 
 if __name__ == '__main__':
     import argparse
-
+    
     parser = argparse.ArgumentParser(
         description='将SMILES分子转换为粗粒度图并可视化',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1255,10 +1255,10 @@ if __name__ == '__main__':
 示例用法:
   # 手动指定单个SMILES
   python coarse_graph.py --smiles "CC(=O)OC1=CC=CC=C1C(=O)O" --name Aspirin --output_dir ./demo
-
+  
   # 使用默认测试分子
   python coarse_graph.py --output_dir ./demo
-
+  
   # 只输出图片，不保存pt文件
   python coarse_graph.py --smiles "c1ccccc1" --name Benzene --no_pt
         """
@@ -1283,24 +1283,24 @@ if __name__ == '__main__':
                         help='节点中心 SU ID 字号')
     parser.add_argument('--hide_su_id', action='store_true',
                         help='隐藏节点中心 SU ID，只展示粗粒度节点颜色和拓扑')
-
+    
     args = parser.parse_args()
-
+    
     if not VISUALIZATION_ENABLED:
         print("警告: 可视化库(networkx, matplotlib)未安装，图片将不会被生成。")
-
+    
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"输出目录: {args.output_dir}\n")
-
+    
     def process_smiles(smiles: str, name: str, save_pt: bool = True):
         """处理单个SMILES"""
         print(f"{'='*60}")
         print(f"分子: {name}")
         print(f"SMILES: {smiles}")
         print(f"{'='*60}")
-
+        
         output_prefix = os.path.join(args.output_dir, name)
-
+        
         try:
             result = smiles_to_coarse_grained_graph(
                 smiles,
@@ -1322,7 +1322,7 @@ if __name__ == '__main__':
                     su_id = SU_NAME_TO_ID[su_info['name']]
                     print(f"   节点 {i:2d}: SU {su_id:2d} ({su_info['name']:<25})")
                 print(f"\n🖼️  图片: {output_prefix}.png")
-
+                
                 if not save_pt:
                     # 删除pt文件
                     pt_path = f"{output_prefix}.pt"
@@ -1338,7 +1338,7 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ 错误: {e}")
             return False
-
+    
     if args.smiles:
         # 处理用户指定的SMILES
         process_smiles(args.smiles, args.name, save_pt=not args.no_pt)
@@ -1351,7 +1351,7 @@ if __name__ == '__main__':
             "Naphthalene": "c1ccc2ccccc2c1",
             "Biphenyl": "c1ccccc1-c1ccccc1",
         }
-
+        
         print("运行内置测试分子演示...\n")
         for name, smiles in test_smiles.items():
             process_smiles(smiles, name, save_pt=not args.no_pt)

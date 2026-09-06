@@ -1709,14 +1709,20 @@ def _append_stage3_parity_balance(
         int(key): sorted(set(values)) for key, values in aggregate_before.items()
     }
     used_ids = _stage3_used_conversion_ids(histogram_plan)
-    for group in groups:
-        for op in [getattr(group, "primary_op", None)] + list(
-            getattr(group, "h_compensation_ops", []) or []
-        ):
-            if op is None:
-                continue
-            for node_id in list(getattr(op, "node_ids", []) or []):
-                node_types[int(node_id)] = int(getattr(op, "to_su", -1))
+    conversion_ops = [
+        op
+        for group in groups
+        for op in [getattr(group, "primary_op", None)]
+        + list(getattr(group, "h_compensation_ops", []) or [])
+    ] + [
+        getattr(histogram_plan, field, None)
+        for field in ("parity_balance_op", "port_role_balance_op")
+    ]
+    for op in conversion_ops:
+        if op is None:
+            continue
+        for node_id in list(getattr(op, "node_ids", []) or []):
+            node_types[int(node_id)] = int(getattr(op, "to_su", -1))
     # A classification-authorized accounting view may omit aromatic donors;
     # they were added to ``remaining`` before the empty-ledger check above.
     for su_type in (12, 13):
@@ -1725,6 +1731,27 @@ def _append_stage3_parity_balance(
             for node_id in list(remaining.get(int(su_type), []) or [])
             if int(node_id) not in used_ids
         ]
+    remaining = {
+        int(key): sorted(set(values)) for key, values in remaining.items()
+    }
+    # Primary/compensation conversions change the type of a real node; they
+    # do not consume or remove that node from the Stage3 inventory.  The
+    # ``used_ids`` filter above is only for preventing a converted node from
+    # being selected again as a port-balance donor.  Keep every converted node
+    # in the final resource partition under its post-conversion type so the
+    # strict aggregate accounting can reconcile the full inventory.
+    committed_resource_ids = {
+        int(node_id)
+        for node_ids in dict(
+            accounting_before.get("committed_claimed_ids_by_su", {}) or {}
+        ).values()
+        for node_id in list(node_ids or [])
+    }
+    for node_id in sorted(used_ids - committed_resource_ids):
+        target_su = int(node_types.get(int(node_id), -1))
+        if target_su < 0:
+            continue
+        remaining.setdefault(target_su, []).append(int(node_id))
     remaining = {
         int(key): sorted(set(values)) for key, values in remaining.items()
     }

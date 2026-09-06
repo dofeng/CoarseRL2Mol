@@ -274,7 +274,7 @@ def claim_branch_from_pool(
     branch_kind: str,
 ) -> Optional[BranchClosureResult]:
     for index, sequence in enumerate(closure_sequences(str(branch_kind))):
-        result = claim_pool_sequence(assembler,
+        result = claim_pool_sequence(assembler, 
             closure_kind=str(branch_kind),
             sequence=sequence,
             branch=True,
@@ -303,7 +303,7 @@ def claim_closure_tail_after_prefix(
                 main_labels=[],
                 main_node_ids=[],
             )
-        result = claim_pool_sequence(assembler,
+        result = claim_pool_sequence(assembler, 
             closure_kind=str(closure_kind),
             sequence=suffix,
             branch=False,
@@ -360,7 +360,7 @@ def consume_branch_placeholder(
     attach_role: str = "center_branch",
     target_path: str = "center_side_branch",
 ) -> Optional[BranchClosureResult]:
-    return resolve_branch_closure(assembler,
+    return resolve_branch_closure(assembler, 
         str(branch_kind),
         branch_donors,
         anchor_index=int(anchor_index),
@@ -421,7 +421,7 @@ def materialize_fixed_branch_contract(
     route_resolution: Optional[FixedRouteResolution] = None,
 ) -> BranchClosureResult:
     contract_local = dict(contract or {})
-    resolution = route_resolution or resolve_fixed_contract_route(assembler,
+    resolution = route_resolution or resolve_fixed_contract_route(assembler, 
         contract_local,
         owner_view,
     )
@@ -511,7 +511,7 @@ def resolve_fixed_branch_contract(
     route_resolution: Optional[FixedRouteResolution] = None,
 ) -> Tuple[Optional[BranchClosureResult], Dict[str, int], str]:
     contract_local = dict(contract or {})
-    route_resolution = route_resolution or resolve_fixed_contract_route(assembler,
+    route_resolution = route_resolution or resolve_fixed_contract_route(assembler, 
         contract_local,
         owner_view,
     )
@@ -532,7 +532,7 @@ def resolve_fixed_branch_contract(
     if "mainline_only" in role_candidates:
         return None, {}, "fixed_branch_role_conflict"
     if bool(contract_local.get("externally_closed", False)):
-        return materialize_fixed_branch_contract(assembler,
+        return materialize_fixed_branch_contract(assembler, 
             contract_local,
             anchor_index=int(anchor_index),
             owner_view=owner_view,
@@ -546,7 +546,7 @@ def resolve_fixed_branch_contract(
             # Appending H1 would create the forbidden route
             # ``...-28-23-22`` and give the terminal two connections.
             return (
-                materialize_fixed_branch_contract(assembler,
+                materialize_fixed_branch_contract(assembler, 
                     contract_local,
                     anchor_index=int(anchor_index),
                     owner_view=owner_view,
@@ -555,7 +555,7 @@ def resolve_fixed_branch_contract(
                 {},
                 "",
             )
-        tail_result = resolve_branch_closure(assembler,
+        tail_result = resolve_branch_closure(assembler, 
             "H1",
             branch_donors,
             anchor_index=int(anchor_index),
@@ -565,7 +565,7 @@ def resolve_fixed_branch_contract(
         if tail_result is None:
             return None, dict(required_counts or {}), "fixed_branch_H1_missing"
         return (
-            materialize_fixed_branch_contract(assembler,
+            materialize_fixed_branch_contract(assembler, 
                 contract_local,
                 anchor_index=int(anchor_index),
                 owner_view=owner_view,
@@ -595,7 +595,7 @@ def resolve_fixed_branch_contract(
             }
             return None, required_counts, "raw_branch_H_tail_missing"
         return (
-            materialize_fixed_branch_contract(assembler,
+            materialize_fixed_branch_contract(assembler, 
                 contract_local,
                 anchor_index=int(anchor_index),
                 owner_view=owner_view,
@@ -614,7 +614,7 @@ def resolve_fixed_branch_contract(
     if tail_kind == "paired_like24":
         partner_spec = dict(contract_local.get("partner_spec", {}) or {})
         if bool(contract_local.get("paired_like24_resolved", False)) or bool(partner_spec.get("resolved", False)):
-            return materialize_fixed_branch_contract(assembler,
+            return materialize_fixed_branch_contract(assembler, 
                 contract_local,
                 anchor_index=int(anchor_index),
                 owner_view=owner_view,
@@ -622,7 +622,7 @@ def resolve_fixed_branch_contract(
             ), {}, ""
         return None, {}, "fixed_branch_partner_missing"
     if tail_kind == "OPEN_BOUNDARY":
-        return materialize_fixed_branch_contract(assembler,
+        return materialize_fixed_branch_contract(assembler, 
             contract_local,
             anchor_index=int(anchor_index),
             owner_view=owner_view,
@@ -659,11 +659,11 @@ def resolve_branches(
     for anchor in sorted(int(value) for value in branch_contract_map.keys()):
         for contract in list(branch_contract_map.get(int(anchor), []) or []):
             contract_local = dict(contract or {})
-            route_resolution = resolve_fixed_contract_route(assembler,
+            route_resolution = resolve_fixed_contract_route(assembler, 
                 contract_local,
                 view,
             )
-            contract_result, contract_required, blocker = resolve_fixed_branch_contract(assembler,
+            contract_result, contract_required, blocker = resolve_fixed_branch_contract(assembler, 
                 contract_local,
                 branch_donors,
                 anchor_index=int(anchor),
@@ -737,7 +737,7 @@ def resolve_branches(
                     {str(key): int(value) for key, value in dict(option or {}).items()}
                     for option in alternatives
                 ]
-            branch_result = consume_branch_placeholder(assembler,
+            branch_result = consume_branch_placeholder(assembler, 
                 str(branch_kind),
                 branch_donors,
                 anchor_index=int(anchor),

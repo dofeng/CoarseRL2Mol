@@ -36,11 +36,23 @@ def ring_candidate_pending_for_ring_stage(
     assembler,
     view: AssemblyFragmentView,
 ) -> bool:
-    return bool(
-        bool(getattr(view, "can_ring", False))
-        and int(view.fragment_id)
-        not in set(getattr(assembler, "ring_exhausted_fragment_ids", set()) or set())
-    )
+    if not bool(getattr(view, "can_ring", False)):
+        return False
+    if int(view.fragment_id) in set(
+        getattr(assembler, "ring_exhausted_fragment_ids", set()) or set()
+    ):
+        return False
+    if view_requires_ring(view):
+        return True
+    # Ring/side dual-use fragments are protected only while the ring phase is
+    # still active.  Once the authoritative ring phase has completed without a
+    # blocking contract, side-chain fallback must be released even if the ring
+    # planner did not write an explicit per-fragment exhausted marker.
+    if "real_like24_ring_assembly" in set(
+        getattr(assembler, "completed_phases", set()) or set()
+    ):
+        return False
+    return True
 
 
 __all__ = [

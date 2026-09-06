@@ -1,0 +1,9107 @@
+{
+  "placements": {
+    "aromatic:0": {
+      "rotation": 0,
+      "translation": [
+        294,
+        9
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "aromatic:1": {
+      "rotation": 3,
+      "translation": [
+        299,
+        10
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "aromatic:10": {
+      "rotation": 5,
+      "translation": [
+        301,
+        23
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:11": {
+      "rotation": 2,
+      "translation": [
+        298,
+        23
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:12": {
+      "rotation": 2,
+      "translation": [
+        309,
+        27
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:13": {
+      "rotation": 5,
+      "translation": [
+        312,
+        27
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:14": {
+      "rotation": 3,
+      "translation": [
+        316,
+        23
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "aromatic:15": {
+      "rotation": 0,
+      "translation": [
+        313,
+        23
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "aromatic:16": {
+      "rotation": 4,
+      "translation": [
+        289,
+        20
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:17": {
+      "rotation": 1,
+      "translation": [
+        289,
+        23
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:18": {
+      "rotation": 0,
+      "translation": [
+        285,
+        6
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:19": {
+      "rotation": 3,
+      "translation": [
+        282,
+        3
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:2": {
+      "rotation": 0,
+      "translation": [
+        306,
+        21
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:20": {
+      "rotation": 5,
+      "translation": [
+        280,
+        8
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "aromatic:21": {
+      "rotation": 2,
+      "translation": [
+        280,
+        5
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "aromatic:22": {
+      "rotation": 4,
+      "translation": [
+        293,
+        16
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:23": {
+      "rotation": 1,
+      "translation": [
+        293,
+        19
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:24": {
+      "rotation": 2,
+      "translation": [
+        276,
+        9
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "aromatic:25": {
+      "rotation": 5,
+      "translation": [
+        276,
+        12
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "aromatic:26": {
+      "rotation": 2,
+      "translation": [
+        284,
+        22
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "aromatic:27": {
+      "rotation": 5,
+      "translation": [
+        284,
+        25
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "aromatic:28": {
+      "rotation": 4,
+      "translation": [
+        278,
+        19
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:29": {
+      "rotation": 1,
+      "translation": [
+        278,
+        22
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:3": {
+      "rotation": 3,
+      "translation": [
+        299,
+        16
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:30": {
+      "rotation": 0,
+      "translation": [
+        288,
+        0
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:31": {
+      "rotation": 5,
+      "translation": [
+        287,
+        -5
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:32": {
+      "rotation": 3,
+      "translation": [
+        283,
+        -7
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:33": {
+      "rotation": 0,
+      "translation": [
+        303,
+        3
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:34": {
+      "rotation": 4,
+      "translation": [
+        307,
+        5
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:4": {
+      "rotation": 5,
+      "translation": [
+        286,
+        14
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:5": {
+      "rotation": 2,
+      "translation": [
+        283,
+        14
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:6": {
+      "rotation": 0,
+      "translation": [
+        300,
+        6
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:7": {
+      "rotation": 3,
+      "translation": [
+        297,
+        3
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:8": {
+      "rotation": 1,
+      "translation": [
+        308,
+        16
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "aromatic:9": {
+      "rotation": 4,
+      "translation": [
+        308,
+        13
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:0": {
+      "rotation": 3,
+      "translation": [
+        295,
+        7
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:1": {
+      "rotation": 2,
+      "translation": [
+        299,
+        14
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:10": {
+      "rotation": 2,
+      "translation": [
+        312,
+        25
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:11": {
+      "rotation": 2,
+      "translation": [
+        293,
+        5
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:12": {
+      "rotation": 1,
+      "translation": [
+        288,
+        2
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:13": {
+      "rotation": 4,
+      "translation": [
+        296,
+        11
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:137": {
+      "rotation": 2,
+      "translation": [
+        300,
+        4
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:138": {
+      "rotation": 5,
+      "translation": [
+        306,
+        8
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:139": {
+      "rotation": 0,
+      "translation": [
+        282,
+        22
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:14": {
+      "rotation": 0,
+      "translation": [
+        304,
+        15
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:140": {
+      "rotation": 2,
+      "translation": [
+        280,
+        3
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:15": {
+      "rotation": 2,
+      "translation": [
+        302,
+        20
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:16": {
+      "rotation": 1,
+      "translation": [
+        306,
+        23
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:17": {
+      "rotation": 3,
+      "translation": [
+        309,
+        20
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:18": {
+      "rotation": 1,
+      "translation": [
+        286,
+        16
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:19": {
+      "rotation": 4,
+      "translation": [
+        288,
+        10
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:2": {
+      "rotation": 5,
+      "translation": [
+        292,
+        10
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:20": {
+      "rotation": 4,
+      "translation": [
+        283,
+        12
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:3": {
+      "rotation": 4,
+      "translation": [
+        306,
+        10
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:4": {
+      "rotation": 0,
+      "translation": [
+        289,
+        15
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:5": {
+      "rotation": 3,
+      "translation": [
+        278,
+        12
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:6": {
+      "rotation": 4,
+      "translation": [
+        285,
+        -5
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:7": {
+      "rotation": 1,
+      "translation": [
+        281,
+        18
+      ],
+      "reflection": false,
+      "reembedded": false
+    },
+    "topology:8": {
+      "rotation": 2,
+      "translation": [
+        299,
+        8
+      ],
+      "reflection": true,
+      "reembedded": false
+    },
+    "topology:9": {
+      "rotation": 2,
+      "translation": [
+        279,
+        16
+      ],
+      "reflection": false,
+      "reembedded": false
+    }
+  },
+  "nodes": [
+    {
+      "node_id": 0,
+      "su_type": 0,
+      "planned_su_type": 0,
+      "axial": [
+        285,
+        -5
+      ],
+      "unit_id": "topology:6",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 15,
+      "su_type": 2,
+      "planned_su_type": 2,
+      "axial": [
+        295,
+        7
+      ],
+      "unit_id": "topology:0",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 16,
+      "su_type": 2,
+      "planned_su_type": 2,
+      "axial": [
+        299,
+        14
+      ],
+      "unit_id": "topology:1",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 17,
+      "su_type": 2,
+      "planned_su_type": 2,
+      "axial": [
+        300,
+        14
+      ],
+      "unit_id": "topology:1",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 18,
+      "su_type": 2,
+      "planned_su_type": 2,
+      "axial": [
+        292,
+        10
+      ],
+      "unit_id": "topology:2",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 19,
+      "su_type": 2,
+      "planned_su_type": 2,
+      "axial": [
+        290,
+        12
+      ],
+      "unit_id": "topology:2",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 21,
+      "su_type": 2,
+      "planned_su_type": 2,
+      "axial": [
+        306,
+        10
+      ],
+      "unit_id": "topology:3",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 22,
+      "su_type": 3,
+      "planned_su_type": 3,
+      "axial": [
+        282,
+        19
+      ],
+      "unit_id": "topology:7",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 23,
+      "su_type": 3,
+      "planned_su_type": 3,
+      "axial": [
+        300,
+        8
+      ],
+      "unit_id": "topology:8",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 24,
+      "su_type": 3,
+      "planned_su_type": 3,
+      "axial": [
+        279,
+        17
+      ],
+      "unit_id": "topology:9",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 25,
+      "su_type": 3,
+      "planned_su_type": 3,
+      "axial": [
+        313,
+        25
+      ],
+      "unit_id": "topology:10",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 26,
+      "su_type": 3,
+      "planned_su_type": 3,
+      "axial": [
+        295,
+        4
+      ],
+      "unit_id": "topology:11",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 27,
+      "su_type": 3,
+      "planned_su_type": 3,
+      "axial": [
+        306,
+        11
+      ],
+      "unit_id": "topology:3",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 28,
+      "su_type": 3,
+      "planned_su_type": 3,
+      "axial": [
+        289,
+        15
+      ],
+      "unit_id": "topology:4",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 29,
+      "su_type": 3,
+      "planned_su_type": 3,
+      "axial": [
+        291,
+        16
+      ],
+      "unit_id": "topology:4",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 31,
+      "su_type": 3,
+      "planned_su_type": 3,
+      "axial": [
+        278,
+        12
+      ],
+      "unit_id": "topology:5",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 32,
+      "su_type": 3,
+      "planned_su_type": 3,
+      "axial": [
+        280,
+        13
+      ],
+      "unit_id": "topology:5",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 34,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        294,
+        10
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 35,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        291,
+        5
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 36,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        291,
+        8
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 37,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        290,
+        6
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 38,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        297,
+        10
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 39,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        297,
+        8
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 40,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        299,
+        12
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 41,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        300,
+        10
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 42,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        302,
+        14
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 43,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        302,
+        12
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 44,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        303,
+        13
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 45,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        304,
+        19
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 46,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        304,
+        21
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 47,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        306,
+        19
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 48,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        307,
+        19
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 49,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        307,
+        22
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 50,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        308,
+        21
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 51,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        302,
+        17
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 52,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        301,
+        18
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 53,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        301,
+        16
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 54,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        299,
+        18
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 55,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        298,
+        18
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 56,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        297,
+        17
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 57,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        297,
+        16
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 58,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        285,
+        13
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 59,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        287,
+        15
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 60,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        286,
+        12
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 61,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        287,
+        11
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 62,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        289,
+        13
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 63,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        284,
+        15
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 64,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        282,
+        13
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 65,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        283,
+        16
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 66,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        282,
+        17
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 67,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        280,
+        15
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 68,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        299,
+        6
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 69,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        302,
+        6
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 70,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        302,
+        8
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 71,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        304,
+        7
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 72,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        304,
+        9
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 73,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        298,
+        3
+      ],
+      "unit_id": "aromatic:7",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 74,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        297,
+        4
+      ],
+      "unit_id": "aromatic:7",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 75,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        297,
+        2
+      ],
+      "unit_id": "aromatic:7",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 76,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        296,
+        2
+      ],
+      "unit_id": "aromatic:7",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 77,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        307,
+        15
+      ],
+      "unit_id": "aromatic:8",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 78,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        309,
+        16
+      ],
+      "unit_id": "aromatic:8",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 79,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        309,
+        17
+      ],
+      "unit_id": "aromatic:8",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 80,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        308,
+        17
+      ],
+      "unit_id": "aromatic:8",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 81,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        309,
+        14
+      ],
+      "unit_id": "aromatic:9",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 82,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        307,
+        13
+      ],
+      "unit_id": "aromatic:9",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 83,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        309,
+        13
+      ],
+      "unit_id": "aromatic:9",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 84,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        308,
+        12
+      ],
+      "unit_id": "aromatic:9",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 85,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        301,
+        24
+      ],
+      "unit_id": "aromatic:10",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 86,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        300,
+        22
+      ],
+      "unit_id": "aromatic:10",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 87,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        302,
+        24
+      ],
+      "unit_id": "aromatic:10",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 88,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        302,
+        23
+      ],
+      "unit_id": "aromatic:10",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 89,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        298,
+        22
+      ],
+      "unit_id": "aromatic:11",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 90,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        299,
+        24
+      ],
+      "unit_id": "aromatic:11",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 91,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        297,
+        22
+      ],
+      "unit_id": "aromatic:11",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 92,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        298,
+        24
+      ],
+      "unit_id": "aromatic:11",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 93,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        297,
+        23
+      ],
+      "unit_id": "aromatic:11",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 94,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        309,
+        26
+      ],
+      "unit_id": "aromatic:12",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 95,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        310,
+        28
+      ],
+      "unit_id": "aromatic:12",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 96,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        309,
+        28
+      ],
+      "unit_id": "aromatic:12",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 97,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        308,
+        27
+      ],
+      "unit_id": "aromatic:12",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 98,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        312,
+        28
+      ],
+      "unit_id": "aromatic:13",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 99,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        311,
+        26
+      ],
+      "unit_id": "aromatic:13",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 100,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        313,
+        28
+      ],
+      "unit_id": "aromatic:13",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 101,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        313,
+        27
+      ],
+      "unit_id": "aromatic:13",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 102,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        315,
+        22
+      ],
+      "unit_id": "aromatic:14",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 103,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        316,
+        24
+      ],
+      "unit_id": "aromatic:14",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 104,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        316,
+        22
+      ],
+      "unit_id": "aromatic:14",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 105,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        317,
+        24
+      ],
+      "unit_id": "aromatic:14",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 106,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        317,
+        23
+      ],
+      "unit_id": "aromatic:14",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 107,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        314,
+        24
+      ],
+      "unit_id": "aromatic:15",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 108,
+      "su_type": 5,
+      "planned_su_type": 5,
+      "axial": [
+        294,
+        7
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 109,
+      "su_type": 5,
+      "planned_su_type": 5,
+      "axial": [
+        299,
+        15
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 110,
+      "su_type": 5,
+      "planned_su_type": 5,
+      "axial": [
+        300,
+        13
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 111,
+      "su_type": 5,
+      "planned_su_type": 5,
+      "axial": [
+        292,
+        9
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 112,
+      "su_type": 5,
+      "planned_su_type": 5,
+      "axial": [
+        289,
+        12
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 113,
+      "su_type": 13,
+      "planned_su_type": 5,
+      "axial": [
+        313,
+        22
+      ],
+      "unit_id": "aromatic:15",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 114,
+      "su_type": 5,
+      "planned_su_type": 5,
+      "axial": [
+        305,
+        9
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 115,
+      "su_type": 6,
+      "planned_su_type": 6,
+      "axial": [
+        287,
+        -1
+      ],
+      "unit_id": "aromatic:30",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 116,
+      "su_type": 6,
+      "planned_su_type": 6,
+      "axial": [
+        287,
+        -4
+      ],
+      "unit_id": "aromatic:31",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 117,
+      "su_type": 9,
+      "planned_su_type": 9,
+      "axial": [
+        288,
+        14
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 118,
+      "su_type": 9,
+      "planned_su_type": 9,
+      "axial": [
+        281,
+        14
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 119,
+      "su_type": 9,
+      "planned_su_type": 9,
+      "axial": [
+        292,
+        16
+      ],
+      "unit_id": "aromatic:22",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 120,
+      "su_type": 9,
+      "planned_su_type": 9,
+      "axial": [
+        307,
+        12
+      ],
+      "unit_id": "aromatic:9",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 121,
+      "su_type": 9,
+      "planned_su_type": 9,
+      "axial": [
+        284,
+        -6
+      ],
+      "unit_id": "aromatic:32",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 122,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        312,
+        23
+      ],
+      "unit_id": "aromatic:15",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 123,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        290,
+        21
+      ],
+      "unit_id": "aromatic:16",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 124,
+      "su_type": 9,
+      "planned_su_type": 9,
+      "axial": [
+        277,
+        12
+      ],
+      "unit_id": "aromatic:25",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 125,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        288,
+        20
+      ],
+      "unit_id": "aromatic:16",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 126,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        290,
+        20
+      ],
+      "unit_id": "aromatic:16",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 127,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        289,
+        19
+      ],
+      "unit_id": "aromatic:16",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 128,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        288,
+        22
+      ],
+      "unit_id": "aromatic:17",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 129,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        290,
+        23
+      ],
+      "unit_id": "aromatic:17",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 130,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        288,
+        23
+      ],
+      "unit_id": "aromatic:17",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 131,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        290,
+        24
+      ],
+      "unit_id": "aromatic:17",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 132,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        289,
+        24
+      ],
+      "unit_id": "aromatic:17",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 133,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        284,
+        6
+      ],
+      "unit_id": "aromatic:18",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 134,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        285,
+        5
+      ],
+      "unit_id": "aromatic:18",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 135,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        285,
+        7
+      ],
+      "unit_id": "aromatic:18",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 136,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        286,
+        6
+      ],
+      "unit_id": "aromatic:18",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 137,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        283,
+        3
+      ],
+      "unit_id": "aromatic:19",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 138,
+      "su_type": 13,
+      "planned_su_type": 9,
+      "axial": [
+        282,
+        4
+      ],
+      "unit_id": "aromatic:19",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 139,
+      "su_type": 9,
+      "planned_su_type": 9,
+      "axial": [
+        296,
+        8
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 140,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        295,
+        9
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 141,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        303,
+        19
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 142,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        302,
+        18
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 143,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        285,
+        14
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 144,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        284,
+        14
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 145,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        299,
+        5
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 146,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        298,
+        4
+      ],
+      "unit_id": "aromatic:7",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 147,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        308,
+        15
+      ],
+      "unit_id": "aromatic:8",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 148,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        308,
+        14
+      ],
+      "unit_id": "aromatic:9",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 149,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        300,
+        23
+      ],
+      "unit_id": "aromatic:10",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 150,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        299,
+        23
+      ],
+      "unit_id": "aromatic:11",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 151,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        310,
+        27
+      ],
+      "unit_id": "aromatic:12",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 152,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        311,
+        27
+      ],
+      "unit_id": "aromatic:13",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 153,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        315,
+        23
+      ],
+      "unit_id": "aromatic:14",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 154,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        314,
+        23
+      ],
+      "unit_id": "aromatic:15",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 155,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        289,
+        21
+      ],
+      "unit_id": "aromatic:16",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 156,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        289,
+        22
+      ],
+      "unit_id": "aromatic:17",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 157,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        284,
+        5
+      ],
+      "unit_id": "aromatic:18",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 158,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        283,
+        4
+      ],
+      "unit_id": "aromatic:19",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 159,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        280,
+        7
+      ],
+      "unit_id": "aromatic:20",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 160,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        280,
+        6
+      ],
+      "unit_id": "aromatic:21",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 161,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        293,
+        17
+      ],
+      "unit_id": "aromatic:22",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 162,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        293,
+        18
+      ],
+      "unit_id": "aromatic:23",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 163,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        276,
+        10
+      ],
+      "unit_id": "aromatic:24",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 164,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        276,
+        11
+      ],
+      "unit_id": "aromatic:25",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 165,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        284,
+        23
+      ],
+      "unit_id": "aromatic:26",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 166,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        284,
+        24
+      ],
+      "unit_id": "aromatic:27",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 167,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        278,
+        20
+      ],
+      "unit_id": "aromatic:28",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 168,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        278,
+        21
+      ],
+      "unit_id": "aromatic:29",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 169,
+      "su_type": 10,
+      "planned_su_type": 10,
+      "axial": [
+        296,
+        9
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 170,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        281,
+        17
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 171,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        283,
+        21
+      ],
+      "unit_id": "aromatic:26",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 172,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        299,
+        9
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 173,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        300,
+        7
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 174,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        280,
+        16
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 175,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        278,
+        18
+      ],
+      "unit_id": "aromatic:28",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 176,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        312,
+        26
+      ],
+      "unit_id": "aromatic:13",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 177,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        313,
+        24
+      ],
+      "unit_id": "aromatic:15",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 178,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        293,
+        6
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 179,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        296,
+        3
+      ],
+      "unit_id": "aromatic:7",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 180,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        288,
+        1
+      ],
+      "unit_id": "aromatic:30",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 181,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        290,
+        5
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 182,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        295,
+        10
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 183,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        298,
+        15
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 184,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        303,
+        14
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 185,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        307,
+        16
+      ],
+      "unit_id": "aromatic:8",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 186,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        303,
+        20
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 187,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        301,
+        22
+      ],
+      "unit_id": "aromatic:10",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 188,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        306,
+        22
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 189,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        308,
+        26
+      ],
+      "unit_id": "aromatic:12",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 190,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        308,
+        20
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 191,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        312,
+        22
+      ],
+      "unit_id": "aromatic:15",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 192,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        286,
+        15
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 193,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        288,
+        19
+      ],
+      "unit_id": "aromatic:16",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 194,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        288,
+        11
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 195,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        286,
+        7
+      ],
+      "unit_id": "aromatic:18",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 196,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        283,
+        13
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 197,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        281,
+        9
+      ],
+      "unit_id": "aromatic:20",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 198,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        282,
+        2
+      ],
+      "unit_id": "aromatic:19",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 199,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        281,
+        2
+      ],
+      "unit_id": "aromatic:19",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 200,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        281,
+        8
+      ],
+      "unit_id": "aromatic:20",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 201,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        279,
+        7
+      ],
+      "unit_id": "aromatic:20",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 202,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        279,
+        8
+      ],
+      "unit_id": "aromatic:20",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 203,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        280,
+        9
+      ],
+      "unit_id": "aromatic:20",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 204,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        279,
+        5
+      ],
+      "unit_id": "aromatic:21",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 205,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        281,
+        6
+      ],
+      "unit_id": "aromatic:21",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 206,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        279,
+        4
+      ],
+      "unit_id": "aromatic:21",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 207,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        281,
+        5
+      ],
+      "unit_id": "aromatic:21",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 208,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        294,
+        17
+      ],
+      "unit_id": "aromatic:22",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 209,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        294,
+        16
+      ],
+      "unit_id": "aromatic:22",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 210,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        292,
+        15
+      ],
+      "unit_id": "aromatic:22",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 211,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        293,
+        15
+      ],
+      "unit_id": "aromatic:22",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 212,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        292,
+        18
+      ],
+      "unit_id": "aromatic:23",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 213,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        294,
+        19
+      ],
+      "unit_id": "aromatic:23",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 214,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        292,
+        19
+      ],
+      "unit_id": "aromatic:23",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 215,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        294,
+        20
+      ],
+      "unit_id": "aromatic:23",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 216,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        293,
+        20
+      ],
+      "unit_id": "aromatic:23",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 217,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        275,
+        9
+      ],
+      "unit_id": "aromatic:24",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 218,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        277,
+        10
+      ],
+      "unit_id": "aromatic:24",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 219,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        275,
+        8
+      ],
+      "unit_id": "aromatic:24",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 220,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        277,
+        9
+      ],
+      "unit_id": "aromatic:24",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 221,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        276,
+        8
+      ],
+      "unit_id": "aromatic:24",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 222,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        275,
+        11
+      ],
+      "unit_id": "aromatic:25",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 223,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        300,
+        5
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 224,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        302,
+        3
+      ],
+      "unit_id": "aromatic:33",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 225,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        305,
+        8
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 226,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        307,
+        6
+      ],
+      "unit_id": "aromatic:34",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 227,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        283,
+        22
+      ],
+      "unit_id": "aromatic:26",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 228,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        279,
+        20
+      ],
+      "unit_id": "aromatic:28",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 229,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        280,
+        4
+      ],
+      "unit_id": "aromatic:21",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 230,
+      "su_type": 11,
+      "planned_su_type": 11,
+      "axial": [
+        281,
+        3
+      ],
+      "unit_id": "aromatic:19",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 231,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        277,
+        13
+      ],
+      "unit_id": "aromatic:25",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 232,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        275,
+        12
+      ],
+      "unit_id": "aromatic:25",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 233,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        276,
+        13
+      ],
+      "unit_id": "aromatic:25",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 234,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        285,
+        23
+      ],
+      "unit_id": "aromatic:26",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 235,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        285,
+        22
+      ],
+      "unit_id": "aromatic:26",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 236,
+      "su_type": 13,
+      "planned_su_type": 11,
+      "axial": [
+        284,
+        21
+      ],
+      "unit_id": "aromatic:26",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 237,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        294,
+        8
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 238,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        293,
+        8
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 239,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        293,
+        9
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 240,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        292,
+        6
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 241,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        292,
+        7
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 242,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        291,
+        7
+      ],
+      "unit_id": "aromatic:0",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 243,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        298,
+        10
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 244,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        298,
+        9
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 245,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        299,
+        11
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 246,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        300,
+        11
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 247,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        301,
+        13
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 248,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        301,
+        12
+      ],
+      "unit_id": "aromatic:1",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 249,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        305,
+        20
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 250,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        305,
+        21
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 251,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        306,
+        20
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 252,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        307,
+        21
+      ],
+      "unit_id": "aromatic:2",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 253,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        300,
+        17
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 254,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        300,
+        16
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 255,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        299,
+        17
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 256,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        298,
+        16
+      ],
+      "unit_id": "aromatic:3",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 257,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        286,
+        13
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 258,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        287,
+        14
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 259,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        287,
+        12
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 260,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        288,
+        13
+      ],
+      "unit_id": "aromatic:4",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 261,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        283,
+        15
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 262,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        282,
+        14
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 263,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        282,
+        16
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 264,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        281,
+        15
+      ],
+      "unit_id": "aromatic:5",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 265,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        301,
+        6
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 266,
+      "su_type": 12,
+      "planned_su_type": 12,
+      "axial": [
+        301,
+        7
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 267,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        285,
+        25
+      ],
+      "unit_id": "aromatic:27",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 268,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        283,
+        24
+      ],
+      "unit_id": "aromatic:27",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 269,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        285,
+        26
+      ],
+      "unit_id": "aromatic:27",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 270,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        283,
+        25
+      ],
+      "unit_id": "aromatic:27",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 271,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        284,
+        26
+      ],
+      "unit_id": "aromatic:27",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 272,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        277,
+        19
+      ],
+      "unit_id": "aromatic:28",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 273,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        279,
+        19
+      ],
+      "unit_id": "aromatic:28",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 275,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        277,
+        18
+      ],
+      "unit_id": "aromatic:28",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 276,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        277,
+        21
+      ],
+      "unit_id": "aromatic:29",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 277,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        279,
+        22
+      ],
+      "unit_id": "aromatic:29",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 278,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        277,
+        22
+      ],
+      "unit_id": "aromatic:29",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 279,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        279,
+        23
+      ],
+      "unit_id": "aromatic:29",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 280,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        278,
+        23
+      ],
+      "unit_id": "aromatic:29",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 281,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        287,
+        0
+      ],
+      "unit_id": "aromatic:30",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 282,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        288,
+        -1
+      ],
+      "unit_id": "aromatic:30",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 283,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        289,
+        0
+      ],
+      "unit_id": "aromatic:30",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 284,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        289,
+        1
+      ],
+      "unit_id": "aromatic:30",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 285,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        286,
+        -5
+      ],
+      "unit_id": "aromatic:31",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 286,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        286,
+        -6
+      ],
+      "unit_id": "aromatic:31",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 287,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        288,
+        -4
+      ],
+      "unit_id": "aromatic:31",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 288,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        287,
+        -6
+      ],
+      "unit_id": "aromatic:31",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 289,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        288,
+        -5
+      ],
+      "unit_id": "aromatic:31",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 290,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        284,
+        -7
+      ],
+      "unit_id": "aromatic:32",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 291,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        283,
+        -6
+      ],
+      "unit_id": "aromatic:32",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 292,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        283,
+        -8
+      ],
+      "unit_id": "aromatic:32",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 293,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        282,
+        -7
+      ],
+      "unit_id": "aromatic:32",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 294,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        282,
+        -8
+      ],
+      "unit_id": "aromatic:32",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 295,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        302,
+        2
+      ],
+      "unit_id": "aromatic:33",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 296,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        303,
+        2
+      ],
+      "unit_id": "aromatic:33",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 297,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        303,
+        4
+      ],
+      "unit_id": "aromatic:33",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 298,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        304,
+        3
+      ],
+      "unit_id": "aromatic:33",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 299,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        304,
+        4
+      ],
+      "unit_id": "aromatic:33",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 300,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        308,
+        6
+      ],
+      "unit_id": "aromatic:34",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 301,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        306,
+        5
+      ],
+      "unit_id": "aromatic:34",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 302,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        308,
+        5
+      ],
+      "unit_id": "aromatic:34",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 303,
+      "su_type": 13,
+      "planned_su_type": 13,
+      "axial": [
+        306,
+        4
+      ],
+      "unit_id": "aromatic:34",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 304,
+      "su_type": 14,
+      "planned_su_type": 14,
+      "axial": [
+        296,
+        12
+      ],
+      "unit_id": "topology:13",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 305,
+      "su_type": 15,
+      "planned_su_type": 15,
+      "axial": [
+        290,
+        11
+      ],
+      "unit_id": "topology:2",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 306,
+      "su_type": 15,
+      "planned_su_type": 15,
+      "axial": [
+        294,
+        5
+      ],
+      "unit_id": "topology:11",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 307,
+      "su_type": 15,
+      "planned_su_type": 15,
+      "axial": [
+        294,
+        4
+      ],
+      "unit_id": "topology:11",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 308,
+      "su_type": 15,
+      "planned_su_type": 15,
+      "axial": [
+        284,
+        -3
+      ],
+      "unit_id": "topology:6",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 309,
+      "su_type": 15,
+      "planned_su_type": 15,
+      "axial": [
+        284,
+        -4
+      ],
+      "unit_id": "topology:6",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 310,
+      "su_type": 15,
+      "planned_su_type": 15,
+      "axial": [
+        297,
+        13
+      ],
+      "unit_id": "topology:13",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 311,
+      "su_type": 15,
+      "planned_su_type": 15,
+      "axial": [
+        290,
+        3
+      ],
+      "unit_id": "topology:12",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 312,
+      "su_type": 15,
+      "planned_su_type": 15,
+      "axial": [
+        295,
+        12
+      ],
+      "unit_id": "topology:13",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 313,
+      "su_type": 16,
+      "planned_su_type": 16,
+      "axial": [
+        291,
+        4
+      ],
+      "unit_id": "topology:12",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 314,
+      "su_type": 16,
+      "planned_su_type": 16,
+      "axial": [
+        295,
+        13
+      ],
+      "unit_id": "topology:13",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 315,
+      "su_type": 16,
+      "planned_su_type": 16,
+      "axial": [
+        291,
+        11
+      ],
+      "unit_id": "topology:2",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 391,
+      "su_type": 19,
+      "planned_su_type": 19,
+      "axial": [
+        282,
+        11
+      ],
+      "unit_id": "topology:20",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 392,
+      "su_type": 19,
+      "planned_su_type": 19,
+      "axial": [
+        305,
+        15
+      ],
+      "unit_id": "topology:14",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 393,
+      "su_type": 19,
+      "planned_su_type": 19,
+      "axial": [
+        302,
+        21
+      ],
+      "unit_id": "topology:15",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 394,
+      "su_type": 19,
+      "planned_su_type": 19,
+      "axial": [
+        307,
+        24
+      ],
+      "unit_id": "topology:16",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 395,
+      "su_type": 19,
+      "planned_su_type": 19,
+      "axial": [
+        310,
+        21
+      ],
+      "unit_id": "topology:17",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 396,
+      "su_type": 19,
+      "planned_su_type": 19,
+      "axial": [
+        287,
+        17
+      ],
+      "unit_id": "topology:18",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 397,
+      "su_type": 19,
+      "planned_su_type": 19,
+      "axial": [
+        287,
+        9
+      ],
+      "unit_id": "topology:19",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 414,
+      "su_type": 20,
+      "planned_su_type": 20,
+      "axial": [
+        285,
+        -4
+      ],
+      "unit_id": "topology:6",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 415,
+      "su_type": 20,
+      "planned_su_type": 20,
+      "axial": [
+        286,
+        -3
+      ],
+      "unit_id": "topology:6",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 418,
+      "su_type": 22,
+      "planned_su_type": 22,
+      "axial": [
+        288,
+        3
+      ],
+      "unit_id": "topology:12",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 420,
+      "su_type": 22,
+      "planned_su_type": 22,
+      "axial": [
+        283,
+        -3
+      ],
+      "unit_id": "topology:6",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 433,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        291,
+        10
+      ],
+      "unit_id": "topology:2",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 434,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        281,
+        18
+      ],
+      "unit_id": "topology:7",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 435,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        282,
+        20
+      ],
+      "unit_id": "topology:7",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 436,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        279,
+        16
+      ],
+      "unit_id": "topology:9",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 437,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        278,
+        17
+      ],
+      "unit_id": "topology:9",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 438,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        290,
+        15
+      ],
+      "unit_id": "topology:4",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 439,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        293,
+        5
+      ],
+      "unit_id": "topology:11",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 440,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        279,
+        13
+      ],
+      "unit_id": "topology:5",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 441,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        295,
+        3
+      ],
+      "unit_id": "topology:11",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 442,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        299,
+        8
+      ],
+      "unit_id": "topology:8",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 443,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        288,
+        2
+      ],
+      "unit_id": "topology:12",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 444,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        289,
+        4
+      ],
+      "unit_id": "topology:12",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 445,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        312,
+        25
+      ],
+      "unit_id": "topology:10",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 446,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        296,
+        11
+      ],
+      "unit_id": "topology:13",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 447,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        297,
+        14
+      ],
+      "unit_id": "topology:13",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 448,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        304,
+        15
+      ],
+      "unit_id": "topology:14",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 449,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        306,
+        16
+      ],
+      "unit_id": "topology:14",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 450,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        302,
+        20
+      ],
+      "unit_id": "topology:15",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 451,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        301,
+        21
+      ],
+      "unit_id": "topology:15",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 452,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        306,
+        23
+      ],
+      "unit_id": "topology:16",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 453,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        307,
+        25
+      ],
+      "unit_id": "topology:16",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 454,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        309,
+        20
+      ],
+      "unit_id": "topology:17",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 455,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        311,
+        21
+      ],
+      "unit_id": "topology:17",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 456,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        286,
+        16
+      ],
+      "unit_id": "topology:18",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 457,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        287,
+        18
+      ],
+      "unit_id": "topology:18",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 458,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        288,
+        10
+      ],
+      "unit_id": "topology:19",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 459,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        287,
+        8
+      ],
+      "unit_id": "topology:19",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 460,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        283,
+        12
+      ],
+      "unit_id": "topology:20",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 461,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        282,
+        10
+      ],
+      "unit_id": "topology:20",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 489,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        300,
+        4
+      ],
+      "unit_id": "topology:137",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 490,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        301,
+        4
+      ],
+      "unit_id": "topology:137",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 491,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        301,
+        3
+      ],
+      "unit_id": "topology:137",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 492,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        306,
+        8
+      ],
+      "unit_id": "topology:138",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 493,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        306,
+        7
+      ],
+      "unit_id": "topology:138",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 494,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        307,
+        7
+      ],
+      "unit_id": "topology:138",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 495,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        282,
+        22
+      ],
+      "unit_id": "topology:139",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 496,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        281,
+        21
+      ],
+      "unit_id": "topology:139",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 497,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        280,
+        21
+      ],
+      "unit_id": "topology:139",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 498,
+      "su_type": 23,
+      "planned_su_type": 23,
+      "axial": [
+        280,
+        3
+      ],
+      "unit_id": "topology:140",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 499,
+      "su_type": 25,
+      "planned_su_type": 25,
+      "axial": [
+        289,
+        3
+      ],
+      "unit_id": "topology:12",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 500,
+      "su_type": 13,
+      "planned_su_type": 26,
+      "axial": [
+        307,
+        4
+      ],
+      "unit_id": "aromatic:34",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 501,
+      "su_type": 12,
+      "planned_su_type": 26,
+      "axial": [
+        303,
+        8
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 502,
+      "su_type": 12,
+      "planned_su_type": 26,
+      "axial": [
+        303,
+        7
+      ],
+      "unit_id": "aromatic:6",
+      "role": "aromatic_site"
+    },
+    {
+      "node_id": 503,
+      "su_type": 27,
+      "planned_su_type": 27,
+      "axial": [
+        286,
+        -2
+      ],
+      "unit_id": "topology:6",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 504,
+      "su_type": 27,
+      "planned_su_type": 27,
+      "axial": [
+        287,
+        -3
+      ],
+      "unit_id": "topology:6",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 519,
+      "su_type": 28,
+      "planned_su_type": 28,
+      "axial": [
+        281,
+        11
+      ],
+      "unit_id": "topology:20",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 520,
+      "su_type": 28,
+      "planned_su_type": 28,
+      "axial": [
+        305,
+        14
+      ],
+      "unit_id": "topology:14",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 521,
+      "su_type": 28,
+      "planned_su_type": 28,
+      "axial": [
+        303,
+        22
+      ],
+      "unit_id": "topology:15",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 522,
+      "su_type": 28,
+      "planned_su_type": 28,
+      "axial": [
+        308,
+        24
+      ],
+      "unit_id": "topology:16",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 523,
+      "su_type": 28,
+      "planned_su_type": 28,
+      "axial": [
+        310,
+        22
+      ],
+      "unit_id": "topology:17",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 524,
+      "su_type": 28,
+      "planned_su_type": 28,
+      "axial": [
+        288,
+        17
+      ],
+      "unit_id": "topology:18",
+      "role": "topology_node"
+    },
+    {
+      "node_id": 525,
+      "su_type": 28,
+      "planned_su_type": 28,
+      "axial": [
+        286,
+        9
+      ],
+      "unit_id": "topology:19",
+      "role": "topology_node"
+    }
+  ],
+  "edges": [
+    {
+      "source_node_id": 140,
+      "target_node_id": 182,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 140,
+      "target_node_id": 237,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 182,
+      "target_node_id": 34,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 108,
+      "target_node_id": 237,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 108,
+      "target_node_id": 178,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 237,
+      "target_node_id": 238,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 34,
+      "target_node_id": 239,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 178,
+      "target_node_id": 240,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 238,
+      "target_node_id": 239,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 238,
+      "target_node_id": 241,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 239,
+      "target_node_id": 111,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 240,
+      "target_node_id": 241,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 240,
+      "target_node_id": 35,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 241,
+      "target_node_id": 242,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 111,
+      "target_node_id": 36,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 35,
+      "target_node_id": 181,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 242,
+      "target_node_id": 36,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 242,
+      "target_node_id": 37,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 181,
+      "target_node_id": 37,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 169,
+      "target_node_id": 139,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 169,
+      "target_node_id": 38,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 139,
+      "target_node_id": 39,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 38,
+      "target_node_id": 243,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 39,
+      "target_node_id": 244,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 243,
+      "target_node_id": 244,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 243,
+      "target_node_id": 245,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 244,
+      "target_node_id": 172,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 40,
+      "target_node_id": 245,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 40,
+      "target_node_id": 110,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 245,
+      "target_node_id": 246,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 172,
+      "target_node_id": 41,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 110,
+      "target_node_id": 247,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 246,
+      "target_node_id": 41,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 246,
+      "target_node_id": 248,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 247,
+      "target_node_id": 248,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 247,
+      "target_node_id": 42,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 248,
+      "target_node_id": 43,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 42,
+      "target_node_id": 184,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 43,
+      "target_node_id": 44,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 184,
+      "target_node_id": 44,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 149,
+      "target_node_id": 85,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 149,
+      "target_node_id": 86,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 85,
+      "target_node_id": 87,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 86,
+      "target_node_id": 187,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 87,
+      "target_node_id": 88,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 187,
+      "target_node_id": 88,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 150,
+      "target_node_id": 89,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 150,
+      "target_node_id": 90,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 89,
+      "target_node_id": 91,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 90,
+      "target_node_id": 92,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 91,
+      "target_node_id": 93,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 92,
+      "target_node_id": 93,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 151,
+      "target_node_id": 94,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 151,
+      "target_node_id": 95,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 94,
+      "target_node_id": 189,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 95,
+      "target_node_id": 96,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 189,
+      "target_node_id": 97,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 96,
+      "target_node_id": 97,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 152,
+      "target_node_id": 98,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 152,
+      "target_node_id": 99,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 98,
+      "target_node_id": 100,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 99,
+      "target_node_id": 176,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 100,
+      "target_node_id": 101,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 176,
+      "target_node_id": 101,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 153,
+      "target_node_id": 102,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 153,
+      "target_node_id": 103,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 102,
+      "target_node_id": 104,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 103,
+      "target_node_id": 105,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 104,
+      "target_node_id": 106,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 105,
+      "target_node_id": 106,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 154,
+      "target_node_id": 107,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 154,
+      "target_node_id": 113,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 107,
+      "target_node_id": 177,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 113,
+      "target_node_id": 191,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 177,
+      "target_node_id": 122,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 191,
+      "target_node_id": 122,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 155,
+      "target_node_id": 123,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 155,
+      "target_node_id": 125,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 123,
+      "target_node_id": 126,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 125,
+      "target_node_id": 193,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 126,
+      "target_node_id": 127,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 193,
+      "target_node_id": 127,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 156,
+      "target_node_id": 128,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 156,
+      "target_node_id": 129,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 128,
+      "target_node_id": 130,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 129,
+      "target_node_id": 131,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 130,
+      "target_node_id": 132,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 131,
+      "target_node_id": 132,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 157,
+      "target_node_id": 133,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 157,
+      "target_node_id": 134,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 133,
+      "target_node_id": 135,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 134,
+      "target_node_id": 136,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 135,
+      "target_node_id": 195,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 136,
+      "target_node_id": 195,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 158,
+      "target_node_id": 137,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 158,
+      "target_node_id": 138,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 137,
+      "target_node_id": 198,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 138,
+      "target_node_id": 230,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 198,
+      "target_node_id": 199,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 230,
+      "target_node_id": 199,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 141,
+      "target_node_id": 186,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 141,
+      "target_node_id": 45,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 186,
+      "target_node_id": 46,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 45,
+      "target_node_id": 249,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 46,
+      "target_node_id": 250,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 249,
+      "target_node_id": 250,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 249,
+      "target_node_id": 251,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 250,
+      "target_node_id": 188,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 47,
+      "target_node_id": 251,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 47,
+      "target_node_id": 48,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 251,
+      "target_node_id": 252,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 188,
+      "target_node_id": 49,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 48,
+      "target_node_id": 190,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 252,
+      "target_node_id": 49,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 252,
+      "target_node_id": 50,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 190,
+      "target_node_id": 50,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 159,
+      "target_node_id": 200,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 159,
+      "target_node_id": 201,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 200,
+      "target_node_id": 197,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 201,
+      "target_node_id": 202,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 197,
+      "target_node_id": 203,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 202,
+      "target_node_id": 203,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 160,
+      "target_node_id": 204,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 160,
+      "target_node_id": 205,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 204,
+      "target_node_id": 206,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 205,
+      "target_node_id": 207,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 206,
+      "target_node_id": 229,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 207,
+      "target_node_id": 229,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 161,
+      "target_node_id": 208,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 161,
+      "target_node_id": 119,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 208,
+      "target_node_id": 209,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 119,
+      "target_node_id": 210,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 209,
+      "target_node_id": 211,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 210,
+      "target_node_id": 211,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 162,
+      "target_node_id": 212,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 162,
+      "target_node_id": 213,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 212,
+      "target_node_id": 214,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 213,
+      "target_node_id": 215,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 214,
+      "target_node_id": 216,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 215,
+      "target_node_id": 216,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 163,
+      "target_node_id": 217,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 163,
+      "target_node_id": 218,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 217,
+      "target_node_id": 219,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 218,
+      "target_node_id": 220,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 219,
+      "target_node_id": 221,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 220,
+      "target_node_id": 221,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 164,
+      "target_node_id": 124,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 164,
+      "target_node_id": 222,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 124,
+      "target_node_id": 231,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 222,
+      "target_node_id": 232,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 231,
+      "target_node_id": 233,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 232,
+      "target_node_id": 233,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 165,
+      "target_node_id": 227,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 165,
+      "target_node_id": 234,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 227,
+      "target_node_id": 171,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 234,
+      "target_node_id": 235,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 171,
+      "target_node_id": 236,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 235,
+      "target_node_id": 236,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 166,
+      "target_node_id": 267,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 166,
+      "target_node_id": 268,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 267,
+      "target_node_id": 269,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 268,
+      "target_node_id": 270,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 269,
+      "target_node_id": 271,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 270,
+      "target_node_id": 271,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 167,
+      "target_node_id": 228,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 167,
+      "target_node_id": 272,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 228,
+      "target_node_id": 273,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 272,
+      "target_node_id": 275,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 273,
+      "target_node_id": 175,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 275,
+      "target_node_id": 175,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 168,
+      "target_node_id": 276,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 168,
+      "target_node_id": 277,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 276,
+      "target_node_id": 278,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 277,
+      "target_node_id": 279,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 278,
+      "target_node_id": 280,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 279,
+      "target_node_id": 280,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 142,
+      "target_node_id": 51,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 142,
+      "target_node_id": 52,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 51,
+      "target_node_id": 53,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 52,
+      "target_node_id": 253,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 53,
+      "target_node_id": 254,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 253,
+      "target_node_id": 254,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 253,
+      "target_node_id": 255,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 254,
+      "target_node_id": 109,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 54,
+      "target_node_id": 255,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 54,
+      "target_node_id": 55,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 255,
+      "target_node_id": 256,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 109,
+      "target_node_id": 183,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 55,
+      "target_node_id": 56,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 256,
+      "target_node_id": 183,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 256,
+      "target_node_id": 57,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 56,
+      "target_node_id": 57,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 115,
+      "target_node_id": 281,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 115,
+      "target_node_id": 282,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 281,
+      "target_node_id": 180,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 282,
+      "target_node_id": 283,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 180,
+      "target_node_id": 284,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 283,
+      "target_node_id": 284,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 285,
+      "target_node_id": 116,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 285,
+      "target_node_id": 286,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 116,
+      "target_node_id": 287,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 286,
+      "target_node_id": 288,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 287,
+      "target_node_id": 289,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 288,
+      "target_node_id": 289,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 121,
+      "target_node_id": 290,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 121,
+      "target_node_id": 291,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 290,
+      "target_node_id": 292,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 291,
+      "target_node_id": 293,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 292,
+      "target_node_id": 294,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 293,
+      "target_node_id": 294,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 295,
+      "target_node_id": 224,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 295,
+      "target_node_id": 296,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 224,
+      "target_node_id": 297,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 296,
+      "target_node_id": 298,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 297,
+      "target_node_id": 299,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 298,
+      "target_node_id": 299,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 226,
+      "target_node_id": 300,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 226,
+      "target_node_id": 301,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 300,
+      "target_node_id": 302,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 301,
+      "target_node_id": 303,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 302,
+      "target_node_id": 500,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 303,
+      "target_node_id": 500,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 143,
+      "target_node_id": 192,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 143,
+      "target_node_id": 58,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 192,
+      "target_node_id": 59,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 58,
+      "target_node_id": 257,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 59,
+      "target_node_id": 258,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 257,
+      "target_node_id": 258,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 257,
+      "target_node_id": 60,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 258,
+      "target_node_id": 117,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 60,
+      "target_node_id": 259,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 117,
+      "target_node_id": 260,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 259,
+      "target_node_id": 260,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 259,
+      "target_node_id": 61,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 260,
+      "target_node_id": 62,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 61,
+      "target_node_id": 194,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 62,
+      "target_node_id": 112,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 194,
+      "target_node_id": 112,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 144,
+      "target_node_id": 196,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 144,
+      "target_node_id": 63,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 196,
+      "target_node_id": 64,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 63,
+      "target_node_id": 261,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 64,
+      "target_node_id": 262,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 261,
+      "target_node_id": 262,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 261,
+      "target_node_id": 65,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 262,
+      "target_node_id": 118,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 65,
+      "target_node_id": 263,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 118,
+      "target_node_id": 264,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 263,
+      "target_node_id": 264,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 263,
+      "target_node_id": 66,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 264,
+      "target_node_id": 67,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 66,
+      "target_node_id": 170,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 67,
+      "target_node_id": 174,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 170,
+      "target_node_id": 174,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 145,
+      "target_node_id": 68,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 145,
+      "target_node_id": 223,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 68,
+      "target_node_id": 173,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 223,
+      "target_node_id": 265,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 173,
+      "target_node_id": 266,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 265,
+      "target_node_id": 266,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 265,
+      "target_node_id": 69,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 266,
+      "target_node_id": 70,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 69,
+      "target_node_id": 502,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 70,
+      "target_node_id": 501,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 502,
+      "target_node_id": 501,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 502,
+      "target_node_id": 71,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 501,
+      "target_node_id": 72,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 71,
+      "target_node_id": 225,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 72,
+      "target_node_id": 114,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 225,
+      "target_node_id": 114,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 146,
+      "target_node_id": 73,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 146,
+      "target_node_id": 74,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 73,
+      "target_node_id": 75,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 74,
+      "target_node_id": 179,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 75,
+      "target_node_id": 76,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 179,
+      "target_node_id": 76,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 147,
+      "target_node_id": 77,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 147,
+      "target_node_id": 78,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 77,
+      "target_node_id": 185,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 78,
+      "target_node_id": 79,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 185,
+      "target_node_id": 80,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 79,
+      "target_node_id": 80,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 148,
+      "target_node_id": 81,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 148,
+      "target_node_id": 82,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 81,
+      "target_node_id": 83,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 82,
+      "target_node_id": 120,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 83,
+      "target_node_id": 84,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 120,
+      "target_node_id": 84,
+      "kind": "aromatic",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 16,
+      "target_node_id": 17,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 445,
+      "target_node_id": 25,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 439,
+      "target_node_id": 306,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 306,
+      "target_node_id": 307,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 307,
+      "target_node_id": 26,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 26,
+      "target_node_id": 441,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 443,
+      "target_node_id": 499,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 499,
+      "target_node_id": 418,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 499,
+      "target_node_id": 311,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 311,
+      "target_node_id": 313,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 499,
+      "target_node_id": 444,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 446,
+      "target_node_id": 304,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 304,
+      "target_node_id": 312,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 312,
+      "target_node_id": 314,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 304,
+      "target_node_id": 310,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 310,
+      "target_node_id": 447,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 489,
+      "target_node_id": 490,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 490,
+      "target_node_id": 491,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 492,
+      "target_node_id": 493,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 493,
+      "target_node_id": 494,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 495,
+      "target_node_id": 496,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 496,
+      "target_node_id": 497,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 448,
+      "target_node_id": 392,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 392,
+      "target_node_id": 520,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 392,
+      "target_node_id": 449,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 450,
+      "target_node_id": 393,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 393,
+      "target_node_id": 521,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 393,
+      "target_node_id": 451,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 452,
+      "target_node_id": 394,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 394,
+      "target_node_id": 522,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 394,
+      "target_node_id": 453,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 454,
+      "target_node_id": 395,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 395,
+      "target_node_id": 523,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 395,
+      "target_node_id": 455,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 456,
+      "target_node_id": 396,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 396,
+      "target_node_id": 524,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 396,
+      "target_node_id": 457,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 458,
+      "target_node_id": 397,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 397,
+      "target_node_id": 525,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 397,
+      "target_node_id": 459,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 18,
+      "target_node_id": 433,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 433,
+      "target_node_id": 315,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 315,
+      "target_node_id": 305,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 305,
+      "target_node_id": 19,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 460,
+      "target_node_id": 391,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 391,
+      "target_node_id": 519,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 391,
+      "target_node_id": 461,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 21,
+      "target_node_id": 27,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 28,
+      "target_node_id": 438,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 438,
+      "target_node_id": 29,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 31,
+      "target_node_id": 440,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 440,
+      "target_node_id": 32,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 0,
+      "target_node_id": 414,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 414,
+      "target_node_id": 309,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 309,
+      "target_node_id": 308,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 308,
+      "target_node_id": 420,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 414,
+      "target_node_id": 415,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 415,
+      "target_node_id": 504,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 415,
+      "target_node_id": 503,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 434,
+      "target_node_id": 22,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 22,
+      "target_node_id": 435,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 442,
+      "target_node_id": 23,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 436,
+      "target_node_id": 24,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 24,
+      "target_node_id": 437,
+      "kind": "flex",
+      "contract_id": "",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 140,
+      "target_node_id": 169,
+      "kind": "rigid",
+      "contract_id": "rigid:0:140-169",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 159,
+      "target_node_id": 160,
+      "kind": "rigid",
+      "contract_id": "rigid:10:159-160",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 161,
+      "target_node_id": 162,
+      "kind": "rigid",
+      "contract_id": "rigid:11:161-162",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 163,
+      "target_node_id": 164,
+      "kind": "rigid",
+      "contract_id": "rigid:12:163-164",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 165,
+      "target_node_id": 166,
+      "kind": "rigid",
+      "contract_id": "rigid:13:165-166",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 167,
+      "target_node_id": 168,
+      "kind": "rigid",
+      "contract_id": "rigid:14:167-168",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 141,
+      "target_node_id": 142,
+      "kind": "rigid",
+      "contract_id": "rigid:1:141-142",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 143,
+      "target_node_id": 144,
+      "kind": "rigid",
+      "contract_id": "rigid:2:143-144",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 145,
+      "target_node_id": 146,
+      "kind": "rigid",
+      "contract_id": "rigid:3:145-146",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 147,
+      "target_node_id": 148,
+      "kind": "rigid",
+      "contract_id": "rigid:4:147-148",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 149,
+      "target_node_id": 150,
+      "kind": "rigid",
+      "contract_id": "rigid:5:149-150",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 151,
+      "target_node_id": 152,
+      "kind": "rigid",
+      "contract_id": "rigid:6:151-152",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 153,
+      "target_node_id": 154,
+      "kind": "rigid",
+      "contract_id": "rigid:7:153-154",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 155,
+      "target_node_id": 156,
+      "kind": "rigid",
+      "contract_id": "rigid:8:155-156",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 157,
+      "target_node_id": 158,
+      "kind": "rigid",
+      "contract_id": "rigid:9:157-158",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 15,
+      "target_node_id": 108,
+      "kind": "flex",
+      "contract_id": "flex:0:108-15",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 15,
+      "target_node_id": 139,
+      "kind": "flex",
+      "contract_id": "flex:0:139-15",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 445,
+      "target_node_id": 176,
+      "kind": "flex",
+      "contract_id": "flex:10:176-445",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 25,
+      "target_node_id": 177,
+      "kind": "flex",
+      "contract_id": "flex:10:177-25",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 439,
+      "target_node_id": 178,
+      "kind": "flex",
+      "contract_id": "flex:11:178-439",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 441,
+      "target_node_id": 179,
+      "kind": "flex",
+      "contract_id": "flex:11:179-441",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 443,
+      "target_node_id": 180,
+      "kind": "flex",
+      "contract_id": "flex:12:180-443",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 444,
+      "target_node_id": 181,
+      "kind": "flex",
+      "contract_id": "flex:12:181-444",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 489,
+      "target_node_id": 223,
+      "kind": "flex",
+      "contract_id": "flex:137:223-489",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 491,
+      "target_node_id": 224,
+      "kind": "flex",
+      "contract_id": "flex:137:224-491",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 492,
+      "target_node_id": 225,
+      "kind": "flex",
+      "contract_id": "flex:138:225-492",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 494,
+      "target_node_id": 226,
+      "kind": "flex",
+      "contract_id": "flex:138:226-494",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 495,
+      "target_node_id": 227,
+      "kind": "flex",
+      "contract_id": "flex:139:227-495",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 497,
+      "target_node_id": 228,
+      "kind": "flex",
+      "contract_id": "flex:139:228-497",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 446,
+      "target_node_id": 182,
+      "kind": "flex",
+      "contract_id": "flex:13:182-446",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 447,
+      "target_node_id": 183,
+      "kind": "flex",
+      "contract_id": "flex:13:183-447",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 498,
+      "target_node_id": 229,
+      "kind": "flex",
+      "contract_id": "flex:140:229-498",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 498,
+      "target_node_id": 230,
+      "kind": "flex",
+      "contract_id": "flex:140:230-498",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 448,
+      "target_node_id": 184,
+      "kind": "flex",
+      "contract_id": "flex:14:184-448",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 449,
+      "target_node_id": 185,
+      "kind": "flex",
+      "contract_id": "flex:14:185-449",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 450,
+      "target_node_id": 186,
+      "kind": "flex",
+      "contract_id": "flex:15:186-450",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 451,
+      "target_node_id": 187,
+      "kind": "flex",
+      "contract_id": "flex:15:187-451",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 452,
+      "target_node_id": 188,
+      "kind": "flex",
+      "contract_id": "flex:16:188-452",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 453,
+      "target_node_id": 189,
+      "kind": "flex",
+      "contract_id": "flex:16:189-453",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 454,
+      "target_node_id": 190,
+      "kind": "flex",
+      "contract_id": "flex:17:190-454",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 455,
+      "target_node_id": 191,
+      "kind": "flex",
+      "contract_id": "flex:17:191-455",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 456,
+      "target_node_id": 192,
+      "kind": "flex",
+      "contract_id": "flex:18:192-456",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 457,
+      "target_node_id": 193,
+      "kind": "flex",
+      "contract_id": "flex:18:193-457",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 458,
+      "target_node_id": 194,
+      "kind": "flex",
+      "contract_id": "flex:19:194-458",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 459,
+      "target_node_id": 195,
+      "kind": "flex",
+      "contract_id": "flex:19:195-459",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 16,
+      "target_node_id": 109,
+      "kind": "flex",
+      "contract_id": "flex:1:109-16",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 17,
+      "target_node_id": 110,
+      "kind": "flex",
+      "contract_id": "flex:1:110-17",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 460,
+      "target_node_id": 196,
+      "kind": "flex",
+      "contract_id": "flex:20:196-460",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 461,
+      "target_node_id": 197,
+      "kind": "flex",
+      "contract_id": "flex:20:197-461",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 18,
+      "target_node_id": 111,
+      "kind": "flex",
+      "contract_id": "flex:2:111-18",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 19,
+      "target_node_id": 112,
+      "kind": "flex",
+      "contract_id": "flex:2:112-19",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 21,
+      "target_node_id": 114,
+      "kind": "flex",
+      "contract_id": "flex:3:114-21",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 27,
+      "target_node_id": 120,
+      "kind": "flex",
+      "contract_id": "flex:3:120-27",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 28,
+      "target_node_id": 117,
+      "kind": "flex",
+      "contract_id": "flex:4:117-28",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 29,
+      "target_node_id": 119,
+      "kind": "flex",
+      "contract_id": "flex:4:119-29",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 32,
+      "target_node_id": 118,
+      "kind": "flex",
+      "contract_id": "flex:5:118-32",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 31,
+      "target_node_id": 124,
+      "kind": "flex",
+      "contract_id": "flex:5:124-31",
+      "direction": [
+        -1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 503,
+      "target_node_id": 115,
+      "kind": "flex",
+      "contract_id": "flex:6:115-503",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 504,
+      "target_node_id": 116,
+      "kind": "flex",
+      "contract_id": "flex:6:116-504",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 0,
+      "target_node_id": 121,
+      "kind": "flex",
+      "contract_id": "flex:6:121-0",
+      "direction": [
+        -1,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 434,
+      "target_node_id": 170,
+      "kind": "flex",
+      "contract_id": "flex:7:170-434",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 435,
+      "target_node_id": 171,
+      "kind": "flex",
+      "contract_id": "flex:7:171-435",
+      "direction": [
+        1,
+        1
+      ]
+    },
+    {
+      "source_node_id": 442,
+      "target_node_id": 172,
+      "kind": "flex",
+      "contract_id": "flex:8:172-442",
+      "direction": [
+        0,
+        1
+      ]
+    },
+    {
+      "source_node_id": 23,
+      "target_node_id": 173,
+      "kind": "flex",
+      "contract_id": "flex:8:173-23",
+      "direction": [
+        0,
+        -1
+      ]
+    },
+    {
+      "source_node_id": 436,
+      "target_node_id": 174,
+      "kind": "flex",
+      "contract_id": "flex:9:174-436",
+      "direction": [
+        1,
+        0
+      ]
+    },
+    {
+      "source_node_id": 437,
+      "target_node_id": 175,
+      "kind": "flex",
+      "contract_id": "flex:9:175-437",
+      "direction": [
+        0,
+        1
+      ]
+    }
+  ],
+  "audit": {
+    "complete": false,
+    "stage": "flex",
+    "placed_unit_count": 60,
+    "unit_count": 179,
+    "placed_node_count": 361,
+    "expected_node_count": 615,
+    "missing_node_ids": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      20,
+      30,
+      33,
+      316,
+      317,
+      318,
+      319,
+      320,
+      321,
+      322,
+      323,
+      324,
+      325,
+      326,
+      327,
+      328,
+      329,
+      330,
+      331,
+      332,
+      333,
+      334,
+      335,
+      336,
+      337,
+      338,
+      339,
+      340,
+      341,
+      342,
+      343,
+      344,
+      345,
+      346,
+      347,
+      348,
+      349,
+      350,
+      351,
+      352,
+      353,
+      354,
+      355,
+      356,
+      357,
+      358,
+      359,
+      360,
+      361,
+      362,
+      363,
+      364,
+      365,
+      366,
+      367,
+      368,
+      369,
+      370,
+      371,
+      372,
+      373,
+      374,
+      375,
+      376,
+      377,
+      378,
+      379,
+      380,
+      381,
+      382,
+      383,
+      384,
+      385,
+      386,
+      387,
+      388,
+      389,
+      390,
+      398,
+      399,
+      400,
+      401,
+      402,
+      403,
+      404,
+      405,
+      406,
+      407,
+      408,
+      409,
+      410,
+      411,
+      412,
+      413,
+      416,
+      417,
+      419,
+      421,
+      422,
+      423,
+      424,
+      425,
+      426,
+      427,
+      428,
+      429,
+      430,
+      431,
+      432,
+      462,
+      463,
+      464,
+      465,
+      466,
+      467,
+      468,
+      469,
+      470,
+      471,
+      472,
+      473,
+      474,
+      475,
+      476,
+      477,
+      478,
+      479,
+      480,
+      481,
+      482,
+      483,
+      484,
+      485,
+      486,
+      487,
+      488,
+      505,
+      506,
+      507,
+      508,
+      509,
+      510,
+      511,
+      512,
+      513,
+      514,
+      515,
+      516,
+      517,
+      518,
+      526,
+      527,
+      528,
+      529,
+      530,
+      531,
+      532,
+      533,
+      534,
+      535,
+      536,
+      537,
+      538,
+      539,
+      540,
+      541,
+      542,
+      543,
+      544,
+      545,
+      546,
+      547,
+      548,
+      549,
+      550,
+      551,
+      552,
+      553,
+      554,
+      555,
+      556,
+      557,
+      558,
+      559,
+      560,
+      561,
+      562,
+      563,
+      564,
+      565,
+      566,
+      567,
+      568,
+      569,
+      570,
+      571,
+      572,
+      573,
+      574,
+      575,
+      576,
+      577,
+      578,
+      579,
+      580,
+      581,
+      582,
+      583,
+      584,
+      585,
+      586,
+      587,
+      588,
+      589,
+      590,
+      591,
+      592,
+      593,
+      594,
+      595,
+      596,
+      597,
+      598,
+      599,
+      600,
+      601,
+      602,
+      603,
+      604,
+      605,
+      606,
+      607,
+      608,
+      609,
+      610,
+      611,
+      612,
+      613,
+      614,
+      615
+    ],
+    "unexpected_node_ids": [],
+    "pending_contract_ids": [
+      "side:100:97-605",
+      "side:101:98-606",
+      "side:102:99-607",
+      "side:103:100-608",
+      "side:104:101-609",
+      "side:105:102-610",
+      "side:106:103-611",
+      "side:107:104-612",
+      "side:108:105-613",
+      "side:109:106-614",
+      "side:110:107-615",
+      "side:111:123-33",
+      "side:112:198-462",
+      "side:113:199-464",
+      "side:114:200-466",
+      "side:115:201-468",
+      "side:116:202-470",
+      "side:117:203-472",
+      "side:118:204-474",
+      "side:119:205-476",
+      "side:120:206-478",
+      "side:121:207-480",
+      "side:122:208-482",
+      "side:123:209-483",
+      "side:124:210-484",
+      "side:125:211-485",
+      "side:126:212-486",
+      "side:127:213-487",
+      "side:128:214-488",
+      "side:129:215-383",
+      "side:130:216-384",
+      "side:131:217-385",
+      "side:132:218-386",
+      "side:133:219-387",
+      "side:134:220-388",
+      "side:135:221-389",
+      "side:136:222-390",
+      "side:141:231-430",
+      "side:142:232-431",
+      "side:143:233-432",
+      "side:21:126-1",
+      "side:22:128-2",
+      "side:23:130-3",
+      "side:24:125-4",
+      "side:25:129-5",
+      "side:26:132-6",
+      "side:27:134-7",
+      "side:28:127-8",
+      "side:29:133-9",
+      "side:30:136-10",
+      "side:31:138-11",
+      "side:32:131-12",
+      "side:33:137-13",
+      "side:34:135-14",
+      "side:35:113-20",
+      "side:36:122-30",
+      "side:37:34-536",
+      "side:38:35-537",
+      "side:39:36-538",
+      "side:40:37-539",
+      "side:41:38-540",
+      "side:42:39-541",
+      "side:43:40-542",
+      "side:44:41-543",
+      "side:45:42-544",
+      "side:46:43-545",
+      "side:47:44-546",
+      "side:48:45-547",
+      "side:49:46-548",
+      "side:50:47-549",
+      "side:51:48-550",
+      "side:52:49-551",
+      "side:53:50-552",
+      "side:54:51-553",
+      "side:55:52-554",
+      "side:56:53-555",
+      "side:57:54-556",
+      "side:58:55-563",
+      "side:59:56-564",
+      "side:60:57-565",
+      "side:61:58-566",
+      "side:62:59-567",
+      "side:63:60-568",
+      "side:64:61-569",
+      "side:65:62-570",
+      "side:66:63-571",
+      "side:67:64-572",
+      "side:68:65-573",
+      "side:69:66-574",
+      "side:70:67-575",
+      "side:71:68-576",
+      "side:72:69-577",
+      "side:73:70-578",
+      "side:74:71-579",
+      "side:75:72-580",
+      "side:76:73-581",
+      "side:77:74-582",
+      "side:78:75-583",
+      "side:79:76-584",
+      "side:80:77-585",
+      "side:81:78-586",
+      "side:82:79-587",
+      "side:83:80-588",
+      "side:84:81-589",
+      "side:85:82-590",
+      "side:86:83-591",
+      "side:87:84-592",
+      "side:88:85-593",
+      "side:89:86-594",
+      "side:90:87-595",
+      "side:91:88-596",
+      "side:92:89-597",
+      "side:93:90-598",
+      "side:94:91-599",
+      "side:95:92-600",
+      "side:96:93-601",
+      "side:97:94-602",
+      "side:98:95-603",
+      "side:99:96-604"
+    ],
+    "duplicate_axials": {},
+    "non_hex_edges": [],
+    "topology_conformation_errors": [],
+    "topology_conformation_valid": true,
+    "port_direction_errors": [],
+    "port_directions_valid": true,
+    "unintended_contacts": [],
+    "nonbonded_contacts_valid": true,
+    "allowed_unbonded_contacts": [
+      [
+        0,
+        285
+      ],
+      [
+        35,
+        313
+      ]
+    ],
+    "geometry_valid": true,
+    "component_count": 1,
+    "edge_count": 418,
+    "geometry_fallback_contract_ids": []
+  }
+}

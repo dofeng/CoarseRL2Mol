@@ -20,6 +20,7 @@ from ...classification.classification_tokens import (
 )
 from ...stage3.flex_audit import _compute_flex_audit
 from ...fixed_edges import nodes_have_fixed_edge as _nodes_have_fixed_edge
+from ...resources.types import PHYSICAL_TOPOLOGY_RESOURCE_TYPES
 from ...stage3_models import (
     TopologyAssemblyResult,
     TopologyPathRender,
@@ -461,13 +462,41 @@ def _collect_source_metadata(source_views: Sequence["AssemblyFragmentView"]) -> 
     return source_fragment_ids, source_fragment_classes, source_node_ids
 
 
-def _fixed_source_ids_from_views(source_views: Sequence["AssemblyFragmentView"]) -> List[int]:
+def _fixed_source_ids_from_views(
+    source_views: Sequence["AssemblyFragmentView"],
+    *,
+    assembler: Optional[Any] = None,
+) -> List[int]:
     fixed_ids: Set[int] = set()
+    source_fragment_ids = {
+        int(getattr(view, "fragment_id", -1))
+        for view in list(source_views or [])
+    }
+    owner_map = {
+        int(node_id): int(fragment_id)
+        for node_id, fragment_id in dict(
+            getattr(assembler, "fixed_node_owner_by_id", {}) or {}
+        ).items()
+    } if assembler is not None else {}
+    nodes_by_id = dict(getattr(assembler, "nodes_by_id", {}) or {}) if assembler is not None else {}
+
+    def _keep_source_id(node_id: int) -> bool:
+        owner = owner_map.get(int(node_id))
+        if owner is not None:
+            return int(owner) in source_fragment_ids
+        node = nodes_by_id.get(int(node_id))
+        if node is not None and int(
+            getattr(node, "su_type", -1)
+        ) in set(PHYSICAL_TOPOLOGY_RESOURCE_TYPES):
+            return False
+        return True
+
     for view in list(source_views or []):
         evidence = dict(getattr(view, "evidence", {}) or {})
         fixed_ids.update(
             int(value)
             for value in list(getattr(view, "source_node_ids", []) or [])
+            if _keep_source_id(int(value))
         )
         for key in (
             "center_node_ids",
@@ -475,7 +504,11 @@ def _fixed_source_ids_from_views(source_views: Sequence["AssemblyFragmentView"])
             "fixed_source_node_ids",
             "fixed_hop1_ids",
         ):
-            fixed_ids.update(int(value) for value in list(evidence.get(key, []) or []))
+            fixed_ids.update(
+                int(value)
+                for value in list(evidence.get(key, []) or [])
+                if _keep_source_id(int(value))
+            )
         fixed_ids.add(int(view.fragment_id))
     return sorted(fixed_ids)
 
@@ -2328,7 +2361,16 @@ def project_fragment_views(
             unsupported.append((int(fragment.fragment_id), family))
             continue
         _route_unrendered_claimed_fixed_components(fragment, view, nodes_by_id)
-        _validate_fragment_view_projection(fragment, view)
+        _validate_fragment_view_projection(
+            fragment,
+            view,
+            fixed_node_owner_by_id=getattr(
+                classification,
+                "fixed_node_owner_by_id",
+                {},
+            ),
+            nodes_by_id=nodes_by_id,
+        )
         views.append(view)
     if unsupported:
         details = ", ".join(

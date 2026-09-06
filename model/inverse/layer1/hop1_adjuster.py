@@ -139,7 +139,7 @@ class PeakRegion:
     """峰区域描述"""
     ppm_min: float
     ppm_max: float
-    intensity: float
+    intensity: float  
     center_ppm: float
     area: float = 0.0
 
@@ -206,7 +206,7 @@ class Hop1Adjuster:
         if not self.exact_hop1_required_centers and self.carbon_su_set:
             self.exact_hop1_required_centers = set(self.carbon_su_set)
         self.strict_swap_branch_limit = max(1, int(strict_swap_branch_limit))
-
+        
         # 统计
         self.stats = {
             'adjustments_attempted': 0,
@@ -518,7 +518,7 @@ class Hop1Adjuster:
             f"aliphatic={metrics['r2_aliphatic']:.4f})"
         )
         return metrics
-
+    
     def _required_degree(self, center_su: int) -> Optional[Tuple[int, ...]]:
         if not isinstance(self.port_combinations, dict):
             return None
@@ -602,20 +602,20 @@ class Hop1Adjuster:
                                     min_width_ppm: float = 2.0) -> Tuple[List[PeakRegion], List[PeakRegion]]:
         """
         分析差谱，识别负峰和正峰区域
-
+        
         Args:
             diff: 差谱数组 (target - reconstructed)
             ppm: ppm轴
             neg_threshold: 负峰阈值（小于此值视为负峰）
             pos_threshold: 正峰阈值（大于此值视为正峰）
             min_width_ppm: 最小峰宽度(ppm)
-
+        
         Returns:
             (negative_peaks, positive_peaks): 负峰和正峰区域列表
         """
         negative_peaks = []
         positive_peaks = []
-
+        
         # 找负峰区域（差谱<neg_threshold）
         neg_regions = self._find_continuous_regions(diff, ppm, lambda x: x < neg_threshold)
         for region in neg_regions:
@@ -627,7 +627,7 @@ class Hop1Adjuster:
                     center_ppm=region['center_ppm'],
                     area=region['abs_area'],
                 ))
-
+        
         # 找正峰区域（差谱>pos_threshold）
         pos_regions = self._find_continuous_regions(diff, ppm, lambda x: x > pos_threshold)
         for region in pos_regions:
@@ -639,22 +639,22 @@ class Hop1Adjuster:
                     center_ppm=region['center_ppm'],
                     area=region['abs_area'],
                 ))
-
+        
         # 按强度排序（负峰按绝对值降序，正峰按值降序）
         negative_peaks.sort(key=lambda p: (-float(p.area), float(p.intensity)))
         positive_peaks.sort(key=lambda p: (-float(p.area), -float(p.intensity)))
-
+        
         return negative_peaks, positive_peaks
-
-    def _find_continuous_regions(self,
-                                  arr: np.ndarray,
+    
+    def _find_continuous_regions(self, 
+                                  arr: np.ndarray, 
                                   ppm: np.ndarray,
                                   condition_fn) -> List[Dict]:
         """找连续满足条件的区域"""
         regions = []
         in_region = False
         start_idx = 0
-
+        
         for i, val in enumerate(arr):
             if condition_fn(val):
                 if not in_region:
@@ -664,23 +664,23 @@ class Hop1Adjuster:
                 if in_region:
                     in_region = False
                     regions.append(self._extract_region_info(arr, ppm, start_idx, i-1))
-
+        
         # 处理末尾
         if in_region:
             regions.append(self._extract_region_info(arr, ppm, start_idx, len(arr)-1))
-
+        
         return regions
-
-    def _extract_region_info(self, arr: np.ndarray, ppm: np.ndarray,
+    
+    def _extract_region_info(self, arr: np.ndarray, ppm: np.ndarray, 
                               start_idx: int, end_idx: int) -> Dict:
         """提取区域信息"""
         region_arr = arr[start_idx:end_idx+1]
         region_ppm = ppm[start_idx:end_idx+1]
-
+        
         # 找极值位置
         min_idx = np.argmin(region_arr)
         max_idx = np.argmax(region_arr)
-
+        
         return {
             'ppm_min': float(region_ppm.min()),
             'ppm_max': float(region_ppm.max()),
@@ -689,23 +689,23 @@ class Hop1Adjuster:
             'center_ppm': float(region_ppm[min_idx if abs(region_arr.min()) > abs(region_arr.max()) else max_idx]),
             'abs_area': float(np.trapz(np.abs(region_arr), region_ppm)) if len(region_arr) > 1 else float(abs(region_arr[0])),
         }
-
+    
     # ========================================================================
     # 节点-峰区域匹配
     # ========================================================================
-
+    
     def find_nodes_in_peak_region(self,
                                    nodes: List,  # List[_NodeV3]
                                    node_peaks: Any,
                                    peak_region: PeakRegion) -> List[Dict]:
         """
         找出mu落在指定峰区域内的节点
-
+        
         Args:
             nodes: 节点列表
             node_peaks: layer1_library_node_peaks.csv数据
             peak_region: 峰区域
-
+        
         Returns:
             匹配的节点信息列表
         """
@@ -758,7 +758,7 @@ class Hop1Adjuster:
             })
 
         return matched
-
+    
     def _parse_hop1_string(self, s: str) -> Tuple[int, ...]:
         """解析hop1字符串如'[10 11]'为元组"""
         if pd.isna(s):
@@ -771,7 +771,7 @@ class Hop1Adjuster:
     # ========================================================================
     # 候选1-hop查找
     # ========================================================================
-
+    
     def find_shift_guided_hop1_targets(self,
                                        center_su: int,
                                        current_hop1: Tuple[int, ...],
@@ -819,11 +819,11 @@ class Hop1Adjuster:
             tuple(x['hop1_tuple']),
         ))
         return candidates
-
+    
     # ========================================================================
     # 1-hop替换执行
     # ========================================================================
-
+    
     def execute_hop1_replacement(self,
                                   nodes: List,
                                   target_node_id: int,
@@ -834,7 +834,7 @@ class Hop1Adjuster:
                                   return_undo_state: bool = False) -> Dict:
         """
         执行1-hop替换，处理互为1-hop的级联更新
-
+        
         Args:
             nodes: 节点列表
             target_node_id: 目标节点ID
@@ -843,7 +843,7 @@ class Hop1Adjuster:
             dry_run: 是否仅模拟执行
             nodes_by_su: 可复用的 SU -> 节点ID 索引
             return_undo_state: 成功提交时是否返回轻量回滚状态
-
+        
         Returns:
             执行结果字典
         """
@@ -855,7 +855,7 @@ class Hop1Adjuster:
             'affected_nodes': [],
             'error': None,
         }
-
+        
         # 找目标节点；常规节点池 global_id 与列表下标一致，保留回退以兼容外部构造。
         target_node = None
         if 0 <= int(target_node_id) < len(nodes):
@@ -867,11 +867,11 @@ class Hop1Adjuster:
                 if int(getattr(n, 'global_id', -1)) == int(target_node_id):
                     target_node = n
                     break
-
+        
         if target_node is None:
             result['error'] = f"未找到节点ID={target_node_id}"
             return result
-
+        
         old_hop1 = tuple(sorted(target_node.hop1_su.elements()))
         result['old_hop1'] = old_hop1
 
@@ -888,7 +888,7 @@ class Hop1Adjuster:
             if port_sets and not can_match_ports_exact(list(new_hop1_tuple), port_sets, center_node=target_node):
                 result['error'] = f"新的1-hop组合不满足状态感知端口规则: {tuple(new_hop1_tuple)}"
                 return result
-
+        
         if nodes_by_su is None:
             nodes_by_su_local: Mapping[int, Sequence[int]] = defaultdict(list)
             for n in nodes:
@@ -899,13 +899,13 @@ class Hop1Adjuster:
         # 检查新的1-hop是否可行
         # 1. 检查SU类型是否存在于当前节点池
         needed_sus = Counter(new_hop1_tuple)
-
+        
         for su_type, count in needed_sus.items():
             available_count = int(len(nodes_by_su_local.get(int(su_type), [])))
             if available_count < int(count):
                 result['error'] = f"SU类型{su_type}数量不足（需要{count}，可用{available_count}）"
                 return result
-
+        
         # 2. 通过“2-edge swap”执行严格换位：
         #    remove (t-u) + (v-w), add (t-v) + (u-w)
         try:
@@ -928,7 +928,7 @@ class Hop1Adjuster:
                 self.stats['adjustments_successful'] += 1
         except Exception as e:
             result['error'] = str(e)
-
+        
         self.stats['adjustments_attempted'] += 1
         return result
 
@@ -970,7 +970,7 @@ class Hop1Adjuster:
             if int(available_edges) < int(required):
                 shortages[int(su_type)] = int(required) - int(available_edges)
         return shortages
-
+    
     @staticmethod
     def _capture_topology_state(nodes: Sequence[Any]) -> List[Tuple[Counter, List[int], Set[int]]]:
         return [
@@ -1179,28 +1179,28 @@ class Hop1Adjuster:
             return True, int(w), [int(t), int(u), int(v), int(w)]
 
         return False, -1, []
-
+    
     def _remove_hop1_edge(self, nodes: List, id1: int, id2: int):
         """移除一条双向1-hop边"""
         node1 = nodes[id1] if id1 < len(nodes) else None
         node2 = nodes[id2] if id2 < len(nodes) else None
-
+        
         if node1 is None or node2 is None:
             return
         if self._edge_is_fixed(nodes, int(id1), int(id2)):
             return
-
+        
         # 更新hop1_su计数
         if node2.su_type in node1.hop1_su and node1.hop1_su[node2.su_type] > 0:
             node1.hop1_su[node2.su_type] -= 1
             if node1.hop1_su[node2.su_type] == 0:
                 del node1.hop1_su[node2.su_type]
-
+        
         if node1.su_type in node2.hop1_su and node2.hop1_su[node1.su_type] > 0:
             node2.hop1_su[node1.su_type] -= 1
             if node2.hop1_su[node1.su_type] == 0:
                 del node2.hop1_su[node1.su_type]
-
+        
         # 更新hop1_ids
         if id2 in node1.hop1_ids:
             node1.hop1_ids.remove(id2)
@@ -1226,18 +1226,18 @@ class Hop1Adjuster:
         node1.hop1_su[int(node2.su_type)] += 1
         node2.hop1_su[int(node1.su_type)] += 1
         return True
-
+    
     def _add_hop1_edge(self, nodes: List, id1: int, id2: int) -> bool:
         """添加一条双向1-hop边"""
         node1 = nodes[id1] if id1 < len(nodes) else None
         node2 = nodes[id2] if id2 < len(nodes) else None
-
+        
         if node1 is None or node2 is None:
             return False
-
+        
         if id1 == id2:
             return False
-
+        
         # 检查是否已存在
         if id2 in node1.hop1_ids:
             return False
@@ -1263,7 +1263,7 @@ class Hop1Adjuster:
             neighbor_nodes=self._get_neighbor_nodes(nodes, node2) + [node1],
         ):
             return False
-
+        
         # 添加连接
         node1.hop1_su[node2.su_type] += 1
         node2.hop1_su[node1.su_type] += 1
@@ -1647,4 +1647,4 @@ class Hop1Adjuster:
             'initial_r2': float(initial_snapshot.get('r2', 0.0)),
             'final_r2': float(final_snapshot.get('r2', 0.0)),
         }
-
+    

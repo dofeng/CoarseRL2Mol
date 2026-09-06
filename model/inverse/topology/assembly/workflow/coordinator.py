@@ -202,6 +202,13 @@ def run_external_assembly_phases(assembler: Any) -> ExternalAssemblyPhaseState:
     )
     if ring_stage_ok:
         completed.add("real_like24_ring_assembly")
+        # Side-chain fallback predicates read ``assembler.completed_phases`` to
+        # decide whether a dual-use ring candidate has been released from the
+        # ring-first stage.  Keep the runtime state synchronized before
+        # entering ``remaining_external_halfclosed_closure``; otherwise a
+        # valid B/D/24_D side fallback can be skipped and later recorded as a
+        # spurious half-open pending contract.
+        assembler.completed_phases = set(completed)
     if flex_stage_ok and ring_stage_ok:
         side_pending = bool(
             chain_materializer_module.has_pending_contracts_for_subphase(

@@ -1,0 +1,5 @@
+variant_id,graph_signature,raw_layer1_r2,raw_layer2_r2,final_layer1_r2,final_layer2_r2,unique_hop1_motif_count,selected_for_refinement,selected,status,failure_reason,final_graph_signature,branch_phase,branch_stack_index,branch_center_id,branch_partner_id
+layer1:baseline,3666b6dfe5677022bffdfd213701d601bf48069c,0.03939133882522583,0.3593786358833313,0.06865966320037842,0.4145682454109192,154,True,False,refined,,b1d869ae771fa3e2529e39e097d35dfbb10c4f37,,,,
+layer1:fork:1,cc96ceef08a0ea76f20c744a1258b7422d54dac8,0.03939133882522583,0.35891711711883545,,,152,False,False,raw_scored,,,non_aromatic,1,17,493
+layer1:fork:2,68b742dfcd936d62a69e9f990c70b071e67eac17,0.03939133882522583,0.3593786358833313,0.08343327045440674,0.4272630214691162,155,True,True,selected,,23ae5ae5376c9a79bdc463953ba02280344cb03c,aromatic,29,123,501
+layer1:fork:3,ff3b028b2fac89ed149c042dcdf62f9b780c7023,0.03939145803451538,0.35829734802246094,,,152,False,False,raw_scored,,,non_aromatic,2,18,448

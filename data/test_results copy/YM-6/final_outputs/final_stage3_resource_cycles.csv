@@ -1,0 +1,9 @@
+outer_cycle,cycle,phase,applied,stage3_stop_reason,accepted_cycles_total,accepted_state_retained,rebuild_valid,blocked_reason,accepted,acceptance_reason,layer2_r2,primary_adjustment_count,physical_conversion_count,h_compensation_count,parity_balance_count,fresh_rebuild
+1,5,external_topology_assembly,True,accepted,11,True,True,,True,valid_topology_histogram_fresh_rebuild,0.8452526926994324,10,10,0,0,True
+1,6,external_topology_assembly,True,accepted,11,True,True,,True,valid_topology_histogram_fresh_rebuild,0.8487327694892883,10,10,0,0,True
+1,7,remaining_pool_spectrum_rebalance,True,accepted,11,True,True,,True,layer2_r2_gain_threshold_met,0.8626526594161987,10,0,0,1,True
+1,8,external_topology_assembly,True,accepted,11,True,True,,True,valid_topology_histogram_fresh_rebuild,0.8471952080726624,2,2,0,0,True
+1,9,external_topology_assembly,True,accepted,11,True,True,,True,valid_topology_histogram_fresh_rebuild,0.8784673810005188,1,3,0,2,True
+1,10,external_topology_assembly,True,accepted,11,True,True,,True,valid_topology_histogram_fresh_rebuild,0.8614661693572998,2,2,0,0,True
+1,11,external_topology_assembly,True,accepted,11,True,True,,True,valid_topology_histogram_fresh_rebuild,0.8552391529083252,1,3,0,2,True
+1,12,complete,False,stage3_complete,11,True,False,,True,stage3_complete,,0,0,0,0,False

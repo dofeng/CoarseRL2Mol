@@ -1,0 +1,716 @@
+node_id,su_type,state,topology_id,contract_id,fragment_id,fragment_class,role,slot_id,resource_pool
+0,0,completed_topology,157-0-171,,[0],flex_chain,completed_topology,,False
+1,0,completed_topology,158-1-175,,[1],flex_chain,completed_topology,,False
+2,1,completed_topology,177-2,,[2],side_chain,completed_topology,,False
+3,1,completed_topology,179-3,,[3],side_chain,completed_topology,,False
+4,1,completed_topology,173-4,,[4],side_chain,completed_topology,,False
+5,1,completed_topology,180-5,,[5],side_chain,completed_topology,,False
+6,1,completed_topology,176-6,,[6],side_chain,completed_topology,,False
+7,1,completed_topology,178-7,,[7],side_chain,completed_topology,,False
+8,1,completed_topology,8-12-130,,"[8, 12]",side_chain,completed_topology,,False
+9,1,completed_topology,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+10,1,completed_topology,10-233-13-131,,"[10, 13]",side_chain,completed_topology,,False
+11,2,completed_topology,129-11-414,,[11],side_chain,completed_topology,,False
+12,2,completed_topology,8-12-130,,"[8, 12]",side_chain,completed_topology,,False
+13,2,completed_topology,10-233-13-131,,"[10, 13]",side_chain,completed_topology,,False
+14,2,completed_topology,421-27-14-132,,"[14, 27]",side_chain,completed_topology,,False
+15,2,completed_topology,426-28-236-342-343-15-133,,"[15, 28]",side_chain,completed_topology,,False
+16,2,completed_topology,134-16-428,,[16],side_chain,completed_topology,,False
+17,2,completed_topology,431-29-344-345-17-135,,"[17, 29]",side_chain,completed_topology,,False
+18,2,completed_topology,136-18-443,,[18],side_chain,completed_topology,,False
+19,2,completed_topology,137-19-500,,[19],side_chain,completed_topology,,False
+20,2,completed_topology,138-20-522,,[20],side_chain,completed_topology,,False
+21,2,completed_topology,139-21-537,,[21],side_chain,completed_topology,,False
+22,2,completed_topology,140-22-547,,[22],side_chain,completed_topology,,False
+23,2,completed_topology,440-30-385-256-23-141,,"[23, 30]",side_chain,completed_topology,,False
+24,2,completed_topology,483-31-351-347-24-142,,"[24, 31]",side_chain,completed_topology,,False
+25,2,completed_topology,41-25-143,,"[25, 41]",side_chain,completed_topology,,False
+26,3,completed_topology,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+27,3,completed_topology,421-27-14-132,,"[14, 27]",side_chain,completed_topology,,False
+28,3,completed_topology,426-28-236-342-343-15-133,,"[15, 28]",side_chain,completed_topology,,False
+29,3,completed_topology,431-29-344-345-17-135,,"[17, 29]",side_chain,completed_topology,,False
+30,3,completed_topology,440-30-385-256-23-141,,"[23, 30]",side_chain,completed_topology,,False
+31,3,completed_topology,483-31-351-347-24-142,,"[24, 31]",side_chain,completed_topology,,False
+32,3,completed_topology,164-32-502,,[32],side_chain,completed_topology,,False
+33,3,completed_topology,166-33-523,,[33],side_chain,completed_topology,,False
+34,3,completed_topology,168-34-538,,[34],side_chain,completed_topology,,False
+35,3,completed_topology,170-35-548,,[35],side_chain,completed_topology,,False
+36,3,completed_topology,353-349-36-165,,"[36, 353]",side_chain,completed_topology,,False
+37,3,completed_topology,354-350-37-169,,"[37, 354]",side_chain,completed_topology,,False
+38,3,completed_topology,357-355-266-38-172,,"[38, 357]",side_chain,completed_topology,,False
+39,3,completed_topology,358-356-352-348-39-174,,"[39, 358]",side_chain,completed_topology,,False
+40,3,completed_topology,618-40-167,,"[40, 618]",side_chain,completed_topology,,False
+41,4,completed_topology,41-25-143,,"[25, 41]",side_chain,completed_topology,,False
+42,4,completed_topology,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+43,5,completed_topology,43-628,,[628],side_chain,completed_topology,,False
+44,5,completed_topology,44-629,,[629],side_chain,completed_topology,,False
+45,5,completed_topology,45-630,,[630],side_chain,completed_topology,,False
+46,5,completed_topology,46-631,,[631],side_chain,completed_topology,,False
+47,5,completed_topology,47-632,,[632],side_chain,completed_topology,,False
+48,5,completed_topology,48-633,,[633],side_chain,completed_topology,,False
+49,5,completed_topology,49-634,,[634],side_chain,completed_topology,,False
+50,5,completed_topology,50-635,,[635],side_chain,completed_topology,,False
+51,5,completed_topology,51-636,,[636],side_chain,completed_topology,,False
+52,5,completed_topology,52-637,,[637],side_chain,completed_topology,,False
+53,5,completed_topology,53-638,,[638],side_chain,completed_topology,,False
+54,5,completed_topology,54-639,,[639],side_chain,completed_topology,,False
+55,5,completed_topology,55-640,,[640],side_chain,completed_topology,,False
+56,5,completed_topology,56-641,,[641],side_chain,completed_topology,,False
+57,5,completed_topology,57-642,,[642],side_chain,completed_topology,,False
+58,5,completed_topology,58-643,,[643],side_chain,completed_topology,,False
+59,5,completed_topology,59-644,,[644],side_chain,completed_topology,,False
+60,5,completed_topology,60-645,,[645],side_chain,completed_topology,,False
+61,5,completed_topology,61-646,,[646],side_chain,completed_topology,,False
+62,5,completed_topology,62-647,,[647],side_chain,completed_topology,,False
+63,5,completed_topology,63-648,,[648],side_chain,completed_topology,,False
+64,5,completed_topology,64-649,,[649],side_chain,completed_topology,,False
+65,5,completed_topology,65-650,,[650],side_chain,completed_topology,,False
+66,5,completed_topology,66-651,,[651],side_chain,completed_topology,,False
+67,5,completed_topology,67-652,,[652],side_chain,completed_topology,,False
+68,5,completed_topology,68-653,,[653],side_chain,completed_topology,,False
+69,5,completed_topology,69-654,,[654],side_chain,completed_topology,,False
+70,5,completed_topology,70-655,,[655],side_chain,completed_topology,,False
+71,5,completed_topology,71-656,,[656],side_chain,completed_topology,,False
+72,5,completed_topology,72-657,,[657],side_chain,completed_topology,,False
+73,5,completed_topology,73-658,,[658],side_chain,completed_topology,,False
+74,5,completed_topology,74-659,,[659],side_chain,completed_topology,,False
+75,5,completed_topology,75-660,,[660],side_chain,completed_topology,,False
+76,5,completed_topology,76-661,,[661],side_chain,completed_topology,,False
+77,5,completed_topology,77-668-395-662-360,,[395],side_chain,completed_topology,,False
+78,5,completed_topology,78-669-396-663-361,,[396],side_chain,completed_topology,,False
+79,5,completed_topology,79-670-397-664-362,,[397],side_chain,completed_topology,,False
+80,5,completed_topology,80-671-398-665-363,,[398],side_chain,completed_topology,,False
+81,5,completed_topology,81-672-399-666-364,,[399],side_chain,completed_topology,,False
+82,5,completed_topology,82-673-400-667-365,,[400],side_chain,completed_topology,,False
+83,5,completed_topology,83-681-373,,[681],side_chain,completed_topology,,False
+84,5,completed_topology,84-682-374,,[682],side_chain,completed_topology,,False
+85,5,completed_topology,85-683-375,,[683],side_chain,completed_topology,,False
+86,5,completed_topology,86-684-376,,[684],side_chain,completed_topology,,False
+87,5,completed_topology,87-685-377,,[685],side_chain,completed_topology,,False
+88,5,completed_topology,88-686-378,,[686],side_chain,completed_topology,,False
+89,5,completed_topology,89-687-379,,[687],side_chain,completed_topology,,False
+90,5,completed_topology,90-688-380,,[688],side_chain,completed_topology,,False
+91,5,completed_topology,91-689-381,,[689],side_chain,completed_topology,,False
+92,5,completed_topology,92-690-382,,[690],side_chain,completed_topology,,False
+93,5,completed_topology,93-691-383,,[691],side_chain,completed_topology,,False
+94,5,completed_topology,94-692-384,,[692],side_chain,completed_topology,,False
+95,5,completed_topology,95-693-96,,[693],flex_chain,completed_topology,,False
+96,5,completed_topology,95-693-96,,[693],flex_chain,completed_topology,,False
+97,5,completed_topology,97-694-98,,[694],flex_chain,completed_topology,,False
+98,5,completed_topology,97-694-98,,[694],flex_chain,completed_topology,,False
+99,5,completed_topology,99-695-100,,[695],flex_chain,completed_topology,,False
+100,5,completed_topology,99-695-100,,[695],flex_chain,completed_topology,,False
+101,5,completed_topology,101-696-102,,[696],flex_chain,completed_topology,,False
+102,5,completed_topology,101-696-102,,[696],flex_chain,completed_topology,,False
+103,5,completed_topology,103-697-104,,[697],flex_chain,completed_topology,,False
+104,5,completed_topology,103-697-104,,[697],flex_chain,completed_topology,,False
+105,5,completed_topology,105-698-106,,[698],flex_chain,completed_topology,,False
+106,5,completed_topology,105-698-106,,[698],flex_chain,completed_topology,,False
+107,5,completed_topology,107-699-108,,[699],flex_chain,completed_topology,,False
+108,5,completed_topology,107-699-108,,[699],flex_chain,completed_topology,,False
+109,5,completed_topology,109-700-110,,[700],flex_chain,completed_topology,,False
+110,5,completed_topology,109-700-110,,[700],flex_chain,completed_topology,,False
+111,5,completed_topology,111-701-112,,[701],flex_chain,completed_topology,,False
+112,5,completed_topology,111-701-112,,[701],flex_chain,completed_topology,,False
+113,5,completed_topology,113-702-114,,[702],flex_chain,completed_topology,,False
+114,5,completed_topology,113-702-114,,[702],flex_chain,completed_topology,,False
+115,5,completed_topology,115-703-116,,[703],flex_chain,completed_topology,,False
+116,5,completed_topology,115-703-116,,[703],flex_chain,completed_topology,,False
+117,5,completed_topology,117-704-118,,[704],flex_chain,completed_topology,,False
+118,5,completed_topology,117-704-118,,[704],flex_chain,completed_topology,,False
+119,5,completed_topology,119-705-120,,[705],flex_chain,completed_topology,,False
+120,5,completed_topology,119-705-120,,[705],flex_chain,completed_topology,,False
+121,5,completed_topology,121-706-122,,[706],flex_chain,completed_topology,,False
+122,5,completed_topology,121-706-122,,[706],flex_chain,completed_topology,,False
+123,5,completed_topology,123-707-124,,[707],flex_chain,completed_topology,,False
+124,5,completed_topology,123-707-124,,[707],flex_chain,completed_topology,,False
+125,5,completed_topology,125-708-126,,[708],flex_chain,completed_topology,,False
+126,5,completed_topology,125-708-126,,[708],flex_chain,completed_topology,,False
+127,5,completed_topology,127-709-128,,[709],flex_chain,completed_topology,,False
+128,5,completed_topology,127-709-128,,[709],flex_chain,completed_topology,,False
+129,5,completed_topology,129-11-414,,[11],side_chain,completed_topology,,False
+130,5,completed_topology,8-12-130,,"[8, 12]",side_chain,completed_topology,,False
+131,5,completed_topology,10-233-13-131,,"[10, 13]",side_chain,completed_topology,,False
+132,5,completed_topology,421-27-14-132,,"[14, 27]",side_chain,completed_topology,,False
+133,5,completed_topology,426-28-236-342-343-15-133,,"[15, 28]",side_chain,completed_topology,,False
+134,5,completed_topology,134-16-428,,[16],side_chain,completed_topology,,False
+135,5,completed_topology,431-29-344-345-17-135,,"[17, 29]",side_chain,completed_topology,,False
+136,5,completed_topology,136-18-443,,[18],side_chain,completed_topology,,False
+137,5,completed_topology,137-19-500,,[19],side_chain,completed_topology,,False
+138,5,completed_topology,138-20-522,,[20],side_chain,completed_topology,,False
+139,5,completed_topology,139-21-537,,[21],side_chain,completed_topology,,False
+140,5,completed_topology,140-22-547,,[22],side_chain,completed_topology,,False
+141,5,completed_topology,440-30-385-256-23-141,,"[23, 30]",side_chain,completed_topology,,False
+142,5,completed_topology,483-31-351-347-24-142,,"[24, 31]",side_chain,completed_topology,,False
+143,5,completed_topology,41-25-143,,"[25, 41]",side_chain,completed_topology,,False
+144,6,completed_topology,619-386-408-604-144,,"[604, 619]",side_chain,completed_topology,,False
+145,6,completed_topology,145-605-146,,[605],flex_chain,completed_topology,,False
+146,6,completed_topology,145-605-146,,[605],flex_chain,completed_topology,,False
+147,6,completed_topology,147-606-148,,[606],flex_chain,completed_topology,,False
+148,6,completed_topology,147-606-148,,[606],flex_chain,completed_topology,,False
+149,6,completed_topology,149-607-150,,[607],flex_chain,completed_topology,,False
+150,6,completed_topology,149-607-150,,[607],flex_chain,completed_topology,,False
+151,6,completed_topology,151-608-152,,[608],flex_chain,completed_topology,,False
+152,6,completed_topology,151-608-152,,[608],flex_chain,completed_topology,,False
+153,6,completed_topology,153-609-154,,[609],flex_chain,completed_topology,,False
+154,6,completed_topology,153-609-154,,[609],flex_chain,completed_topology,,False
+155,6,completed_topology,155-610-156,,[610],flex_chain,completed_topology,,False
+156,6,completed_topology,155-610-156,,[610],flex_chain,completed_topology,,False
+157,6,completed_topology,157-0-171,,[0],flex_chain,completed_topology,,False
+158,6,completed_topology,158-1-175,,[1],flex_chain,completed_topology,,False
+159,7,completed_topology,159-712-160,,[712],flex_chain,completed_topology,,False
+160,7,completed_topology,159-712-160,,[712],flex_chain,completed_topology,,False
+161,7,completed_topology,161-713-162,,[713],flex_chain,completed_topology,,False
+162,7,completed_topology,161-713-162,,[713],flex_chain,completed_topology,,False
+163,7,completed_topology,620-387-359-714-163,,"[620, 714]",side_chain,completed_topology,,False
+164,9,completed_topology,164-32-502,,[32],side_chain,completed_topology,,False
+165,9,completed_topology,353-349-36-165,,"[36, 353]",side_chain,completed_topology,,False
+166,9,completed_topology,166-33-523,,[33],side_chain,completed_topology,,False
+167,9,completed_topology,618-40-167,,"[40, 618]",side_chain,completed_topology,,False
+168,9,completed_topology,168-34-538,,[34],side_chain,completed_topology,,False
+169,9,completed_topology,354-350-37-169,,"[37, 354]",side_chain,completed_topology,,False
+170,9,completed_topology,170-35-548,,[35],side_chain,completed_topology,,False
+171,9,completed_topology,157-0-171,,[0],flex_chain,completed_topology,,False
+172,9,completed_topology,357-355-266-38-172,,"[38, 357]",side_chain,completed_topology,,False
+173,9,completed_topology,173-4,,[4],side_chain,completed_topology,,False
+174,9,completed_topology,358-356-352-348-39-174,,"[39, 358]",side_chain,completed_topology,,False
+175,9,completed_topology,158-1-175,,[1],flex_chain,completed_topology,,False
+176,9,completed_topology,176-6,,[6],side_chain,completed_topology,,False
+177,9,completed_topology,177-2,,[2],side_chain,completed_topology,,False
+178,9,completed_topology,178-7,,[7],side_chain,completed_topology,,False
+179,9,completed_topology,179-3,,[3],side_chain,completed_topology,,False
+180,9,completed_topology,180-5,,[5],side_chain,completed_topology,,False
+181,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+182,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+183,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+184,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+185,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+186,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+187,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+188,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+189,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+190,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+191,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+192,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+193,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+194,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+195,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+196,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+197,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+198,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+199,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+200,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+201,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+202,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+203,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+204,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+205,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+206,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+207,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+208,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+209,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+210,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+211,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+212,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+213,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+214,10,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+215,11,claimed_closure_resource,215-235-596(-415)(-388-621)-237-416,,"[596, 621]",side_chain,completed_topology,,False
+216,11,claimed_closure_resource,216-238-597(-417)(-389-622)-239-418,,"[597, 622]",side_chain,completed_topology,,False
+217,11,claimed_closure_resource,217-240-598(-390-623)(-411)-241-422,,"[598, 623]",side_chain,completed_topology,,False
+218,11,claimed_closure_resource,218-243-599(-242-423)(-420)-246-424,,[599],side_chain,completed_topology,,False
+219,11,claimed_closure_resource,219-249-391(-624)-252-427,,[391],side_chain,completed_topology,,False
+220,11,claimed_closure_resource,220-254-392(-625)-258-429,,[392],side_chain,completed_topology,,False
+221,11,claimed_closure_resource,221-265-393(-626)-267-432,,[393],side_chain,completed_topology,,False
+222,11,claimed_closure_resource,222-268-394(-627)-269-433,,[394],side_chain,completed_topology,,False
+223,11,claimed_closure_resource,223-270-401(-611)-674-366,,[401],side_chain,completed_topology,,False
+224,11,claimed_closure_resource,224-271-402(-612)-675-367,,[402],side_chain,completed_topology,,False
+225,11,claimed_closure_resource,225-272-403(-613)-676-368,,[403],side_chain,completed_topology,,False
+226,11,claimed_closure_resource,226-273-404(-614)-677-369,,[404],side_chain,completed_topology,,False
+227,11,claimed_closure_resource,227-274-405(-615)-678-370,,[405],side_chain,completed_topology,,False
+228,11,claimed_closure_resource,228-285-406(-616)-679-371,,[406],side_chain,completed_topology,,False
+229,11,claimed_closure_resource,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+230,11,claimed_closure_resource,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+231,11,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+232,23,claimed_closure_resource,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+233,23,completed_topology,10-233-13-131,,"[10, 13]",side_chain,completed_topology,,False
+234,23,claimed_closure_resource,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+235,23,claimed_closure_resource,215-235-596(-415)(-388-621)-237-416,,"[596, 621]",side_chain,completed_topology,,False
+236,23,completed_topology,426-28-236-342-343-15-133,,"[15, 28]",side_chain,completed_topology,,False
+237,23,claimed_closure_resource,215-235-596(-415)(-388-621)-237-416,,"[596, 621]",side_chain,completed_topology,,False
+238,23,claimed_closure_resource,216-238-597(-417)(-389-622)-239-418,,"[597, 622]",side_chain,completed_topology,,False
+239,23,claimed_closure_resource,216-238-597(-417)(-389-622)-239-418,,"[597, 622]",side_chain,completed_topology,,False
+240,23,claimed_closure_resource,217-240-598(-390-623)(-411)-241-422,,"[598, 623]",side_chain,completed_topology,,False
+241,23,claimed_closure_resource,217-240-598(-390-623)(-411)-241-422,,"[598, 623]",side_chain,completed_topology,,False
+242,23,claimed_closure_resource,218-243-599(-242-423)(-420)-246-424,,[599],side_chain,completed_topology,,False
+243,23,claimed_closure_resource,218-243-599(-242-423)(-420)-246-424,,[599],side_chain,completed_topology,,False
+244,24,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+245,24,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+246,23,claimed_closure_resource,218-243-599(-242-423)(-420)-246-424,,[599],side_chain,completed_topology,,False
+247,24,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+248,24,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+249,23,claimed_closure_resource,219-249-391(-624)-252-427,,[391],side_chain,completed_topology,,False
+250,24,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+251,24,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+252,23,claimed_closure_resource,219-249-391(-624)-252-427,,[391],side_chain,completed_topology,,False
+253,24,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+254,23,claimed_closure_resource,220-254-392(-625)-258-429,,[392],side_chain,completed_topology,,False
+255,24,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+256,23,completed_topology,440-30-385-256-23-141,,"[23, 30]",side_chain,completed_topology,,False
+257,24,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+258,23,claimed_closure_resource,220-254-392(-625)-258-429,,[392],side_chain,completed_topology,,False
+259,24,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+260,24,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+261,24,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+262,24,claimed_closure_resource,496-444-262(-493)-263(-511)-434-437-439-@(444),,[],aliphatic_ring,completed_topology,,False
+263,24,claimed_closure_resource,496-444-262(-493)-263(-511)-434-437-439-@(444),,[],aliphatic_ring,completed_topology,,False
+264,24,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+265,23,claimed_closure_resource,221-265-393(-626)-267-432,,[393],side_chain,completed_topology,,False
+266,23,completed_topology,357-355-266-38-172,,"[38, 357]",side_chain,completed_topology,,False
+267,23,claimed_closure_resource,221-265-393(-626)-267-432,,[393],side_chain,completed_topology,,False
+268,23,claimed_closure_resource,222-268-394(-627)-269-433,,[394],side_chain,completed_topology,,False
+269,23,claimed_closure_resource,222-268-394(-627)-269-433,,[394],side_chain,completed_topology,,False
+270,23,claimed_closure_resource,223-270-401(-611)-674-366,,[401],side_chain,completed_topology,,False
+271,23,claimed_closure_resource,224-271-402(-612)-675-367,,[402],side_chain,completed_topology,,False
+272,23,claimed_closure_resource,225-272-403(-613)-676-368,,[403],side_chain,completed_topology,,False
+273,23,claimed_closure_resource,226-273-404(-614)-677-369,,[404],side_chain,completed_topology,,False
+274,23,claimed_closure_resource,227-274-405(-615)-678-370,,[405],side_chain,completed_topology,,False
+275,11,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+276,24,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+277,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+278,24,claimed_closure_resource,509-484-278(-533)-279(-541)-449-450-461-@(484),,[],aliphatic_ring,completed_topology,,False
+279,24,claimed_closure_resource,509-484-278(-533)-279(-541)-449-450-461-@(484),,[],aliphatic_ring,completed_topology,,False
+280,24,claimed_closure_resource,513-486(-462-527)-280(-544)-463-487(-464-530)-524,,[],aliphatic_ring,completed_topology,,False
+281,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+282,11,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+283,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+284,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+285,23,claimed_closure_resource,228-285-406(-616)-679-371,,[406],side_chain,completed_topology,,False
+286,23,claimed_closure_resource,525-286-407(-617)-680-372,,[407],side_chain,completed_topology,,False
+287,23,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+288,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+289,23,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+290,23,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+291,23,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+292,23,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+293,23,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+294,23,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+295,23,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+296,23,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+297,23,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+298,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+299,24,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+300,11,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+301,23,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+302,24,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+303,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+304,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+305,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+306,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+307,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+308,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+309,23,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+310,23,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+311,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+312,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+313,24,claimed_closure_resource,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+314,24,claimed_closure_resource,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+315,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+316,24,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+317,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+318,24,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+319,24,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+320,24,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+321,23,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+322,24,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+323,24,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+324,24,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+325,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+326,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+327,24,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+328,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+329,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+330,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+331,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+332,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+333,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+334,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+335,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+336,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+337,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+338,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+339,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+340,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+341,14,completed_topology,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+342,15,completed_topology,426-28-236-342-343-15-133,,"[15, 28]",side_chain,completed_topology,,False
+343,15,completed_topology,426-28-236-342-343-15-133,,"[15, 28]",side_chain,completed_topology,,False
+344,15,completed_topology,431-29-344-345-17-135,,"[17, 29]",side_chain,completed_topology,,False
+345,15,completed_topology,431-29-344-345-17-135,,"[17, 29]",side_chain,completed_topology,,False
+346,15,completed_topology,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+347,15,completed_topology,483-31-351-347-24-142,,"[24, 31]",side_chain,completed_topology,,False
+348,15,completed_topology,358-356-352-348-39-174,,"[39, 358]",side_chain,completed_topology,,False
+349,15,completed_topology,353-349-36-165,,"[36, 353]",side_chain,completed_topology,,False
+350,15,completed_topology,354-350-37-169,,"[37, 354]",side_chain,completed_topology,,False
+351,16,completed_topology,483-31-351-347-24-142,,"[24, 31]",side_chain,completed_topology,,False
+352,16,completed_topology,358-356-352-348-39-174,,"[39, 358]",side_chain,completed_topology,,False
+353,16,completed_topology,353-349-36-165,,"[36, 353]",side_chain,completed_topology,,False
+354,16,completed_topology,354-350-37-169,,"[37, 354]",side_chain,completed_topology,,False
+355,17,completed_topology,357-355-266-38-172,,"[38, 357]",side_chain,completed_topology,,False
+356,17,completed_topology,358-356-352-348-39-174,,"[39, 358]",side_chain,completed_topology,,False
+357,18,completed_topology,357-355-266-38-172,,"[38, 357]",side_chain,completed_topology,,False
+358,18,completed_topology,358-356-352-348-39-174,,"[39, 358]",side_chain,completed_topology,,False
+359,19,completed_topology,620-387-359-714-163,,"[620, 714]",side_chain,completed_topology,,False
+360,19,completed_topology,77-668-395-662-360,,[395],side_chain,completed_topology,,False
+361,19,completed_topology,78-669-396-663-361,,[396],side_chain,completed_topology,,False
+362,19,completed_topology,79-670-397-664-362,,[397],side_chain,completed_topology,,False
+363,19,completed_topology,80-671-398-665-363,,[398],side_chain,completed_topology,,False
+364,19,completed_topology,81-672-399-666-364,,[399],side_chain,completed_topology,,False
+365,19,completed_topology,82-673-400-667-365,,[400],side_chain,completed_topology,,False
+366,19,completed_topology,223-270-401(-611)-674-366,,[401],side_chain,completed_topology,,False
+367,19,completed_topology,224-271-402(-612)-675-367,,[402],side_chain,completed_topology,,False
+368,19,completed_topology,225-272-403(-613)-676-368,,[403],side_chain,completed_topology,,False
+369,19,completed_topology,226-273-404(-614)-677-369,,[404],side_chain,completed_topology,,False
+370,19,completed_topology,227-274-405(-615)-678-370,,[405],side_chain,completed_topology,,False
+371,19,completed_topology,228-285-406(-616)-679-371,,[406],side_chain,completed_topology,,False
+372,19,completed_topology,525-286-407(-617)-680-372,,[407],side_chain,completed_topology,,False
+373,19,completed_topology,83-681-373,,[681],side_chain,completed_topology,,False
+374,19,completed_topology,84-682-374,,[682],side_chain,completed_topology,,False
+375,19,completed_topology,85-683-375,,[683],side_chain,completed_topology,,False
+376,19,completed_topology,86-684-376,,[684],side_chain,completed_topology,,False
+377,19,completed_topology,87-685-377,,[685],side_chain,completed_topology,,False
+378,19,completed_topology,88-686-378,,[686],side_chain,completed_topology,,False
+379,19,completed_topology,89-687-379,,[687],side_chain,completed_topology,,False
+380,19,completed_topology,90-688-380,,[688],side_chain,completed_topology,,False
+381,19,completed_topology,91-689-381,,[689],side_chain,completed_topology,,False
+382,19,completed_topology,92-690-382,,[690],side_chain,completed_topology,,False
+383,19,completed_topology,93-691-383,,[691],side_chain,completed_topology,,False
+384,19,completed_topology,94-692-384,,[692],side_chain,completed_topology,,False
+385,19,completed_topology,440-30-385-256-23-141,,"[23, 30]",side_chain,completed_topology,,False
+386,19,completed_topology,619-386-408-604-144,,"[604, 619]",side_chain,completed_topology,,False
+387,19,completed_topology,620-387-359-714-163,,"[620, 714]",side_chain,completed_topology,,False
+388,19,completed_topology,215-235-596(-415)(-388-621)-237-416,,"[596, 621]",side_chain,completed_topology,,False
+389,19,completed_topology,216-238-597(-417)(-389-622)-239-418,,"[597, 622]",side_chain,completed_topology,,False
+390,19,completed_topology,217-240-598(-390-623)(-411)-241-422,,"[598, 623]",side_chain,completed_topology,,False
+391,19,completed_topology,219-249-391(-624)-252-427,,[391],side_chain,completed_topology,,False
+392,19,completed_topology,220-254-392(-625)-258-429,,[392],side_chain,completed_topology,,False
+393,19,completed_topology,221-265-393(-626)-267-432,,[393],side_chain,completed_topology,,False
+394,19,completed_topology,222-268-394(-627)-269-433,,[394],side_chain,completed_topology,,False
+395,19,completed_topology,77-668-395-662-360,,[395],side_chain,completed_topology,,False
+396,19,completed_topology,78-669-396-663-361,,[396],side_chain,completed_topology,,False
+397,19,completed_topology,79-670-397-664-362,,[397],side_chain,completed_topology,,False
+398,19,completed_topology,80-671-398-665-363,,[398],side_chain,completed_topology,,False
+399,19,completed_topology,81-672-399-666-364,,[399],side_chain,completed_topology,,False
+400,19,completed_topology,82-673-400-667-365,,[400],side_chain,completed_topology,,False
+401,19,completed_topology,223-270-401(-611)-674-366,,[401],side_chain,completed_topology,,False
+402,19,completed_topology,224-271-402(-612)-675-367,,[402],side_chain,completed_topology,,False
+403,19,completed_topology,225-272-403(-613)-676-368,,[403],side_chain,completed_topology,,False
+404,19,completed_topology,226-273-404(-614)-677-369,,[404],side_chain,completed_topology,,False
+405,19,completed_topology,227-274-405(-615)-678-370,,[405],side_chain,completed_topology,,False
+406,19,completed_topology,228-285-406(-616)-679-371,,[406],side_chain,completed_topology,,False
+407,19,completed_topology,525-286-407(-617)-680-372,,[407],side_chain,completed_topology,,False
+408,20,completed_topology,619-386-408-604-144,,"[604, 619]",side_chain,completed_topology,,False
+409,22,claimed_closure_resource,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+410,22,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+411,22,completed_topology,217-240-598(-390-623)(-411)-241-422,,"[598, 623]",side_chain,completed_topology,,False
+412,22,completed_topology,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+413,22,claimed_closure_resource,229-313(-232-409)-341(-26-412)-346-314(-234-413)-230,,"[26, 341]",aliphatic_ring,completed_topology,,False
+414,22,completed_topology,129-11-414,,[11],side_chain,completed_topology,,False
+415,22,claimed_closure_resource,215-235-596(-415)(-388-621)-237-416,,"[596, 621]",side_chain,completed_topology,,False
+416,22,claimed_closure_resource,215-235-596(-415)(-388-621)-237-416,,"[596, 621]",side_chain,completed_topology,,False
+417,22,claimed_closure_resource,216-238-597(-417)(-389-622)-239-418,,"[597, 622]",side_chain,completed_topology,,False
+418,22,claimed_closure_resource,216-238-597(-417)(-389-622)-239-418,,"[597, 622]",side_chain,completed_topology,,False
+419,22,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+420,22,completed_topology,218-243-599(-242-423)(-420)-246-424,,[599],side_chain,completed_topology,,False
+421,22,completed_topology,421-27-14-132,,"[14, 27]",side_chain,completed_topology,,False
+422,22,claimed_closure_resource,217-240-598(-390-623)(-411)-241-422,,"[598, 623]",side_chain,completed_topology,,False
+423,22,claimed_closure_resource,218-243-599(-242-423)(-420)-246-424,,[599],side_chain,completed_topology,,False
+424,22,claimed_closure_resource,218-243-599(-242-423)(-420)-246-424,,[599],side_chain,completed_topology,,False
+425,22,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+426,22,completed_topology,426-28-236-342-343-15-133,,"[15, 28]",side_chain,completed_topology,,False
+427,22,claimed_closure_resource,219-249-391(-624)-252-427,,[391],side_chain,completed_topology,,False
+428,22,completed_topology,134-16-428,,[16],side_chain,completed_topology,,False
+429,22,claimed_closure_resource,220-254-392(-625)-258-429,,[392],side_chain,completed_topology,,False
+430,22,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+431,22,completed_topology,431-29-344-345-17-135,,"[17, 29]",side_chain,completed_topology,,False
+432,22,claimed_closure_resource,221-265-393(-626)-267-432,,[393],side_chain,completed_topology,,False
+433,22,claimed_closure_resource,222-268-394(-627)-269-433,,[394],side_chain,completed_topology,,False
+434,23,claimed_closure_resource,496-444-262(-493)-263(-511)-434-437-439-@(444),,[],aliphatic_ring,completed_topology,,False
+435,22,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+436,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+437,23,claimed_closure_resource,496-444-262(-493)-263(-511)-434-437-439-@(444),,[],aliphatic_ring,completed_topology,,False
+438,22,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+439,23,claimed_closure_resource,496-444-262(-493)-263(-511)-434-437-439-@(444),,[],aliphatic_ring,completed_topology,,False
+440,22,completed_topology,440-30-385-256-23-141,,"[23, 30]",side_chain,completed_topology,,False
+441,22,claimed_closure_resource,231-316(-287-435)-248-[-290-244(-42)-245(-9)-291-]-250-318(-289-441)-275,,[],aliphatic_ring,completed_topology,,False
+442,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+443,22,completed_topology,136-18-443,,[18],side_chain,completed_topology,,False
+444,24,claimed_closure_resource,496-444-262(-493)-263(-511)-434-437-439-@(444),,[],aliphatic_ring,completed_topology,,False
+445,23,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+446,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+447,23,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+448,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+449,23,claimed_closure_resource,509-484-278(-533)-279(-541)-449-450-461-@(484),,[],aliphatic_ring,completed_topology,,False
+450,23,claimed_closure_resource,509-484-278(-533)-279(-541)-449-450-461-@(484),,[],aliphatic_ring,completed_topology,,False
+451,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+452,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+453,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+454,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+455,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+456,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+457,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+458,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+459,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+460,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+461,23,claimed_closure_resource,509-484-278(-533)-279(-541)-449-450-461-@(484),,[],aliphatic_ring,completed_topology,,False
+462,23,claimed_closure_resource,513-486(-462-527)-280(-544)-463-487(-464-530)-524,,[],aliphatic_ring,completed_topology,,False
+463,23,claimed_closure_resource,513-486(-462-527)-280(-544)-463-487(-464-530)-524,,[],aliphatic_ring,completed_topology,,False
+464,23,claimed_closure_resource,513-486(-462-527)-280(-544)-463-487(-464-530)-524,,[],aliphatic_ring,completed_topology,,False
+465,23,claimed_closure_resource,529-465-466-531,,[],residual_resource_conversion,completed_topology,,False
+466,23,claimed_closure_resource,529-465-466-531,,[],residual_resource_conversion,completed_topology,,False
+467,23,claimed_closure_resource,532-467-468-534,,[],residual_resource_conversion,completed_topology,,False
+468,23,claimed_closure_resource,532-467-468-534,,[],residual_resource_conversion,completed_topology,,False
+469,23,claimed_closure_resource,535-469-470-539,,[],residual_resource_conversion,completed_topology,,False
+470,23,claimed_closure_resource,535-469-470-539,,[],residual_resource_conversion,completed_topology,,False
+471,23,claimed_closure_resource,536-471-472-542,,[],residual_resource_conversion,completed_topology,,False
+472,23,claimed_closure_resource,536-471-472-542,,[],residual_resource_conversion,completed_topology,,False
+473,23,claimed_closure_resource,540-473-475-543,,[],residual_resource_conversion,completed_topology,,False
+474,22,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+475,23,claimed_closure_resource,540-473-475-543,,[],residual_resource_conversion,completed_topology,,False
+476,23,claimed_closure_resource,545-476-489-546,,[],residual_resource_conversion,completed_topology,,False
+477,11,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+478,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+479,24,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+480,11,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+481,24,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+482,22,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+483,22,completed_topology,483-31-351-347-24-142,,"[24, 31]",side_chain,completed_topology,,False
+484,24,claimed_closure_resource,509-484-278(-533)-279(-541)-449-450-461-@(484),,[],aliphatic_ring,completed_topology,,False
+485,11,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+486,24,claimed_closure_resource,513-486(-462-527)-280(-544)-463-487(-464-530)-524,,[],aliphatic_ring,completed_topology,,False
+487,24,claimed_closure_resource,513-486(-462-527)-280(-544)-463-487(-464-530)-524,,[],aliphatic_ring,completed_topology,,False
+488,22,claimed_closure_resource,282-319(-292-474)-257-[-294-247(-410)-251(-419)-295-]-261-320(-293-488)-300,,[],aliphatic_ring,completed_topology,,False
+489,23,claimed_closure_resource,545-476-489-546,,[],residual_resource_conversion,completed_topology,,False
+490,11,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+491,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+492,22,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+493,22,claimed_closure_resource,496-444-262(-493)-263(-511)-434-437-439-@(444),,[],aliphatic_ring,completed_topology,,False
+494,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+495,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+496,11,claimed_closure_resource,496-444-262(-493)-263(-511)-434-437-439-@(444),,[],aliphatic_ring,completed_topology,,False
+497,22,claimed_closure_resource,477-322(-296-492)-299-[-301-253(-425)-255(-430)-309-]-302-323(-297-497)-480,,[],aliphatic_ring,completed_topology,,False
+498,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+499,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+500,22,completed_topology,137-19-500,,[19],side_chain,completed_topology,,False
+501,11,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+502,22,completed_topology,164-32-502,,[32],side_chain,completed_topology,,False
+503,11,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+504,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+505,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+506,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+507,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+508,23,remaining_closure_resource,,,,,remaining_closure_resource,,True
+509,11,claimed_closure_resource,509-484-278(-533)-279(-541)-449-450-461-@(484),,[],aliphatic_ring,completed_topology,,False
+510,22,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+511,22,claimed_closure_resource,496-444-262(-493)-263(-511)-434-437-439-@(444),,[],aliphatic_ring,completed_topology,,False
+512,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+513,11,claimed_closure_resource,513-486(-462-527)-280(-544)-463-487(-464-530)-524,,[],aliphatic_ring,completed_topology,,False
+514,22,claimed_closure_resource,485-324(-310-510)-259(-438)-260(-482)-327(-321-514)-490,,[],aliphatic_ring,completed_topology,,False
+515,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+516,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+517,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+518,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+519,22,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+520,22,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+521,22,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+522,22,completed_topology,138-20-522,,[20],side_chain,completed_topology,,False
+523,22,completed_topology,166-33-523,,[33],side_chain,completed_topology,,False
+524,11,claimed_closure_resource,513-486(-462-527)-280(-544)-463-487(-464-530)-524,,[],aliphatic_ring,completed_topology,,False
+525,11,claimed_closure_resource,525-286-407(-617)-680-372,,[407],side_chain,completed_topology,,False
+526,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+527,22,claimed_closure_resource,513-486(-462-527)-280(-544)-463-487(-464-530)-524,,[],aliphatic_ring,completed_topology,,False
+528,22,claimed_closure_resource,501-479(-445-519)-264(-520)-276(-528)-481(-447-521)-503,,[],aliphatic_ring,completed_topology,,False
+529,11,claimed_closure_resource,529-465-466-531,,[],residual_resource_conversion,completed_topology,,False
+530,22,claimed_closure_resource,513-486(-462-527)-280(-544)-463-487(-464-530)-524,,[],aliphatic_ring,completed_topology,,False
+531,22,claimed_closure_resource,529-465-466-531,,[],residual_resource_conversion,completed_topology,,False
+532,11,claimed_closure_resource,532-467-468-534,,[],residual_resource_conversion,completed_topology,,False
+533,22,claimed_closure_resource,509-484-278(-533)-279(-541)-449-450-461-@(484),,[],aliphatic_ring,completed_topology,,False
+534,22,claimed_closure_resource,532-467-468-534,,[],residual_resource_conversion,completed_topology,,False
+535,11,claimed_closure_resource,535-469-470-539,,[],residual_resource_conversion,completed_topology,,False
+536,11,claimed_closure_resource,536-471-472-542,,[],residual_resource_conversion,completed_topology,,False
+537,22,completed_topology,139-21-537,,[21],side_chain,completed_topology,,False
+538,22,completed_topology,168-34-538,,[34],side_chain,completed_topology,,False
+539,22,claimed_closure_resource,535-469-470-539,,[],residual_resource_conversion,completed_topology,,False
+540,11,claimed_closure_resource,540-473-475-543,,[],residual_resource_conversion,completed_topology,,False
+541,22,claimed_closure_resource,509-484-278(-533)-279(-541)-449-450-461-@(484),,[],aliphatic_ring,completed_topology,,False
+542,22,claimed_closure_resource,536-471-472-542,,[],residual_resource_conversion,completed_topology,,False
+543,22,claimed_closure_resource,540-473-475-543,,[],residual_resource_conversion,completed_topology,,False
+544,22,claimed_closure_resource,513-486(-462-527)-280(-544)-463-487(-464-530)-524,,[],aliphatic_ring,completed_topology,,False
+545,11,claimed_closure_resource,545-476-489-546,,[],residual_resource_conversion,completed_topology,,False
+546,22,claimed_closure_resource,545-476-489-546,,[],residual_resource_conversion,completed_topology,,False
+547,22,completed_topology,140-22-547,,[22],side_chain,completed_topology,,False
+548,22,completed_topology,170-35-548,,[35],side_chain,completed_topology,,False
+549,23,remaining_closure_resource,,,,,remaining_closure_resource,,True
+550,23,remaining_closure_resource,,,,,remaining_closure_resource,,True
+551,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+552,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+553,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+554,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+555,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+556,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+557,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+558,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+559,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+560,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+561,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+562,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+563,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+564,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+565,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+566,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+567,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+568,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+569,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+570,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+571,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+572,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+573,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+574,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+575,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+576,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+577,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+578,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+579,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+580,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+581,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+582,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+583,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+584,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+585,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+586,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+587,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+588,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+589,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+590,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+591,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+592,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+593,13,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+594,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+595,12,remaining_aromatic_donor,,,,,remaining_aromatic_donor,,True
+596,25,completed_topology,215-235-596(-415)(-388-621)-237-416,,"[596, 621]",side_chain,completed_topology,,False
+597,25,completed_topology,216-238-597(-417)(-389-622)-239-418,,"[597, 622]",side_chain,completed_topology,,False
+598,25,completed_topology,217-240-598(-390-623)(-411)-241-422,,"[598, 623]",side_chain,completed_topology,,False
+599,25,completed_topology,218-243-599(-242-423)(-420)-246-424,,[599],side_chain,completed_topology,,False
+600,26,support_context,,,,,support_context,,False
+601,26,support_context,,,,,support_context,,False
+602,26,support_context,,,,,support_context,,False
+603,26,support_context,,,,,support_context,,False
+604,27,completed_topology,619-386-408-604-144,,"[604, 619]",side_chain,completed_topology,,False
+605,27,completed_topology,145-605-146,,[605],flex_chain,completed_topology,,False
+606,27,completed_topology,147-606-148,,[606],flex_chain,completed_topology,,False
+607,27,completed_topology,149-607-150,,[607],flex_chain,completed_topology,,False
+608,27,completed_topology,151-608-152,,[608],flex_chain,completed_topology,,False
+609,27,completed_topology,153-609-154,,[609],flex_chain,completed_topology,,False
+610,27,completed_topology,155-610-156,,[610],flex_chain,completed_topology,,False
+611,28,completed_topology,223-270-401(-611)-674-366,,[401],side_chain,completed_topology,,False
+612,28,completed_topology,224-271-402(-612)-675-367,,[402],side_chain,completed_topology,,False
+613,28,completed_topology,225-272-403(-613)-676-368,,[403],side_chain,completed_topology,,False
+614,28,completed_topology,226-273-404(-614)-677-369,,[404],side_chain,completed_topology,,False
+615,28,completed_topology,227-274-405(-615)-678-370,,[405],side_chain,completed_topology,,False
+616,28,completed_topology,228-285-406(-616)-679-371,,[406],side_chain,completed_topology,,False
+617,28,completed_topology,525-286-407(-617)-680-372,,[407],side_chain,completed_topology,,False
+618,28,completed_topology,618-40-167,,"[40, 618]",side_chain,completed_topology,,False
+619,28,completed_topology,619-386-408-604-144,,"[604, 619]",side_chain,completed_topology,,False
+620,28,completed_topology,620-387-359-714-163,,"[620, 714]",side_chain,completed_topology,,False
+621,28,completed_topology,215-235-596(-415)(-388-621)-237-416,,"[596, 621]",side_chain,completed_topology,,False
+622,28,completed_topology,216-238-597(-417)(-389-622)-239-418,,"[597, 622]",side_chain,completed_topology,,False
+623,28,completed_topology,217-240-598(-390-623)(-411)-241-422,,"[598, 623]",side_chain,completed_topology,,False
+624,28,completed_topology,219-249-391(-624)-252-427,,[391],side_chain,completed_topology,,False
+625,28,completed_topology,220-254-392(-625)-258-429,,[392],side_chain,completed_topology,,False
+626,28,completed_topology,221-265-393(-626)-267-432,,[393],side_chain,completed_topology,,False
+627,28,completed_topology,222-268-394(-627)-269-433,,[394],side_chain,completed_topology,,False
+628,28,completed_topology,43-628,,[628],side_chain,completed_topology,,False
+629,28,completed_topology,44-629,,[629],side_chain,completed_topology,,False
+630,28,completed_topology,45-630,,[630],side_chain,completed_topology,,False
+631,28,completed_topology,46-631,,[631],side_chain,completed_topology,,False
+632,28,completed_topology,47-632,,[632],side_chain,completed_topology,,False
+633,28,completed_topology,48-633,,[633],side_chain,completed_topology,,False
+634,28,completed_topology,49-634,,[634],side_chain,completed_topology,,False
+635,28,completed_topology,50-635,,[635],side_chain,completed_topology,,False
+636,28,completed_topology,51-636,,[636],side_chain,completed_topology,,False
+637,28,completed_topology,52-637,,[637],side_chain,completed_topology,,False
+638,28,completed_topology,53-638,,[638],side_chain,completed_topology,,False
+639,28,completed_topology,54-639,,[639],side_chain,completed_topology,,False
+640,28,completed_topology,55-640,,[640],side_chain,completed_topology,,False
+641,28,completed_topology,56-641,,[641],side_chain,completed_topology,,False
+642,28,completed_topology,57-642,,[642],side_chain,completed_topology,,False
+643,28,completed_topology,58-643,,[643],side_chain,completed_topology,,False
+644,28,completed_topology,59-644,,[644],side_chain,completed_topology,,False
+645,28,completed_topology,60-645,,[645],side_chain,completed_topology,,False
+646,28,completed_topology,61-646,,[646],side_chain,completed_topology,,False
+647,28,completed_topology,62-647,,[647],side_chain,completed_topology,,False
+648,28,completed_topology,63-648,,[648],side_chain,completed_topology,,False
+649,28,completed_topology,64-649,,[649],side_chain,completed_topology,,False
+650,28,completed_topology,65-650,,[650],side_chain,completed_topology,,False
+651,28,completed_topology,66-651,,[651],side_chain,completed_topology,,False
+652,28,completed_topology,67-652,,[652],side_chain,completed_topology,,False
+653,28,completed_topology,68-653,,[653],side_chain,completed_topology,,False
+654,28,completed_topology,69-654,,[654],side_chain,completed_topology,,False
+655,28,completed_topology,70-655,,[655],side_chain,completed_topology,,False
+656,28,completed_topology,71-656,,[656],side_chain,completed_topology,,False
+657,28,completed_topology,72-657,,[657],side_chain,completed_topology,,False
+658,28,completed_topology,73-658,,[658],side_chain,completed_topology,,False
+659,28,completed_topology,74-659,,[659],side_chain,completed_topology,,False
+660,28,completed_topology,75-660,,[660],side_chain,completed_topology,,False
+661,28,completed_topology,76-661,,[661],side_chain,completed_topology,,False
+662,29,completed_topology,77-668-395-662-360,,[395],side_chain,completed_topology,,False
+663,29,completed_topology,78-669-396-663-361,,[396],side_chain,completed_topology,,False
+664,29,completed_topology,79-670-397-664-362,,[397],side_chain,completed_topology,,False
+665,29,completed_topology,80-671-398-665-363,,[398],side_chain,completed_topology,,False
+666,29,completed_topology,81-672-399-666-364,,[399],side_chain,completed_topology,,False
+667,29,completed_topology,82-673-400-667-365,,[400],side_chain,completed_topology,,False
+668,29,completed_topology,77-668-395-662-360,,[395],side_chain,completed_topology,,False
+669,29,completed_topology,78-669-396-663-361,,[396],side_chain,completed_topology,,False
+670,29,completed_topology,79-670-397-664-362,,[397],side_chain,completed_topology,,False
+671,29,completed_topology,80-671-398-665-363,,[398],side_chain,completed_topology,,False
+672,29,completed_topology,81-672-399-666-364,,[399],side_chain,completed_topology,,False
+673,29,completed_topology,82-673-400-667-365,,[400],side_chain,completed_topology,,False
+674,29,completed_topology,223-270-401(-611)-674-366,,[401],side_chain,completed_topology,,False
+675,29,completed_topology,224-271-402(-612)-675-367,,[402],side_chain,completed_topology,,False
+676,29,completed_topology,225-272-403(-613)-676-368,,[403],side_chain,completed_topology,,False
+677,29,completed_topology,226-273-404(-614)-677-369,,[404],side_chain,completed_topology,,False
+678,29,completed_topology,227-274-405(-615)-678-370,,[405],side_chain,completed_topology,,False
+679,29,completed_topology,228-285-406(-616)-679-371,,[406],side_chain,completed_topology,,False
+680,29,completed_topology,525-286-407(-617)-680-372,,[407],side_chain,completed_topology,,False
+681,29,completed_topology,83-681-373,,[681],side_chain,completed_topology,,False
+682,29,completed_topology,84-682-374,,[682],side_chain,completed_topology,,False
+683,29,completed_topology,85-683-375,,[683],side_chain,completed_topology,,False
+684,29,completed_topology,86-684-376,,[684],side_chain,completed_topology,,False
+685,29,completed_topology,87-685-377,,[685],side_chain,completed_topology,,False
+686,29,completed_topology,88-686-378,,[686],side_chain,completed_topology,,False
+687,29,completed_topology,89-687-379,,[687],side_chain,completed_topology,,False
+688,29,completed_topology,90-688-380,,[688],side_chain,completed_topology,,False
+689,29,completed_topology,91-689-381,,[689],side_chain,completed_topology,,False
+690,29,completed_topology,92-690-382,,[690],side_chain,completed_topology,,False
+691,29,completed_topology,93-691-383,,[691],side_chain,completed_topology,,False
+692,29,completed_topology,94-692-384,,[692],side_chain,completed_topology,,False
+693,29,completed_topology,95-693-96,,[693],flex_chain,completed_topology,,False
+694,29,completed_topology,97-694-98,,[694],flex_chain,completed_topology,,False
+695,29,completed_topology,99-695-100,,[695],flex_chain,completed_topology,,False
+696,29,completed_topology,101-696-102,,[696],flex_chain,completed_topology,,False
+697,29,completed_topology,103-697-104,,[697],flex_chain,completed_topology,,False
+698,29,completed_topology,105-698-106,,[698],flex_chain,completed_topology,,False
+699,29,completed_topology,107-699-108,,[699],flex_chain,completed_topology,,False
+700,29,completed_topology,109-700-110,,[700],flex_chain,completed_topology,,False
+701,29,completed_topology,111-701-112,,[701],flex_chain,completed_topology,,False
+702,29,completed_topology,113-702-114,,[702],flex_chain,completed_topology,,False
+703,29,completed_topology,115-703-116,,[703],flex_chain,completed_topology,,False
+704,29,completed_topology,117-704-118,,[704],flex_chain,completed_topology,,False
+705,29,completed_topology,119-705-120,,[705],flex_chain,completed_topology,,False
+706,29,completed_topology,121-706-122,,[706],flex_chain,completed_topology,,False
+707,29,completed_topology,123-707-124,,[707],flex_chain,completed_topology,,False
+708,29,completed_topology,125-708-126,,[708],flex_chain,completed_topology,,False
+709,29,completed_topology,127-709-128,,[709],flex_chain,completed_topology,,False
+710,30,support_context,,,,,support_context,,False
+711,30,support_context,,,,,support_context,,False
+712,31,completed_topology,159-712-160,,[712],flex_chain,completed_topology,,False
+713,31,completed_topology,161-713-162,,[713],flex_chain,completed_topology,,False
+714,31,completed_topology,620-387-359-714-163,,"[620, 714]",side_chain,completed_topology,,False

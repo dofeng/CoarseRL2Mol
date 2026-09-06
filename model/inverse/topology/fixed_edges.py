@@ -26,3 +26,4 @@ def nodes_have_fixed_edge(left: _NodeV3, right: _NodeV3) -> bool:
         and left_id
         in {int(value) for value in list(getattr(right, "hop1_ids", []) or [])}
     )
+

@@ -1,0 +1,286 @@
+{
+  "summary": {
+    "cycle_rows": 8,
+    "applied_cycle_count": 7,
+    "accepted_cycle_count": 7,
+    "history_retention": "latest_outer_cycle_compact_rows_only",
+    "outer_cycles_with_stage3": [
+      4
+    ],
+    "last_stop_reason": "stage3_complete",
+    "accepted_spectrum_cycle_count": 0,
+    "generation_count": 21,
+    "final_generation_internal_physical_conversion_count": 0,
+    "final_generation_internal_ring_count": 0,
+    "remaining_resource_counts": {
+      "11": 2,
+      "23": 0,
+      "22": 0,
+      "10": 30,
+      "12": 12,
+      "13": 3,
+      "24": 0
+    },
+    "generation_metrics": [
+      {
+        "generation_id": 4000000,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000001,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000002,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000003,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000004,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000005,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000006,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000007,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000008,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000009,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000010,
+        "internal_physical_conversion_count": 1,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000011,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000012,
+        "internal_physical_conversion_count": 4,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000013,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000014,
+        "internal_physical_conversion_count": 2,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000015,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000016,
+        "internal_physical_conversion_count": 3,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000017,
+        "internal_physical_conversion_count": 2,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000018,
+        "internal_physical_conversion_count": 1,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000019,
+        "internal_physical_conversion_count": 1,
+        "internal_ring_count": 0
+      },
+      {
+        "generation_id": 4000020,
+        "internal_physical_conversion_count": 0,
+        "internal_ring_count": 0
+      }
+    ]
+  },
+  "cycles": [
+    {
+      "outer_cycle": 4,
+      "cycle": 14,
+      "phase": "external_topology_assembly",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 20,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.5240344405174255,
+      "primary_adjustment_count": 1,
+      "physical_conversion_count": 4,
+      "h_compensation_count": 0,
+      "parity_balance_count": 2,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 4,
+      "cycle": 15,
+      "phase": "internal_topology",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 20,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.5007539987564087,
+      "primary_adjustment_count": 2,
+      "physical_conversion_count": 2,
+      "h_compensation_count": 0,
+      "parity_balance_count": 0,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 4,
+      "cycle": 16,
+      "phase": "external_topology_assembly",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 20,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.4853392243385315,
+      "primary_adjustment_count": 1,
+      "physical_conversion_count": 8,
+      "h_compensation_count": 4,
+      "parity_balance_count": 2,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 4,
+      "cycle": 17,
+      "phase": "internal_topology",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 20,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.5423719882965088,
+      "primary_adjustment_count": 3,
+      "physical_conversion_count": 5,
+      "h_compensation_count": 0,
+      "parity_balance_count": 2,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 4,
+      "cycle": 18,
+      "phase": "internal_topology",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 20,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.5021394491195679,
+      "primary_adjustment_count": 2,
+      "physical_conversion_count": 2,
+      "h_compensation_count": 0,
+      "parity_balance_count": 0,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 4,
+      "cycle": 19,
+      "phase": "internal_topology",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 20,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.48952221870422363,
+      "primary_adjustment_count": 1,
+      "physical_conversion_count": 3,
+      "h_compensation_count": 0,
+      "parity_balance_count": 2,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 4,
+      "cycle": 20,
+      "phase": "internal_topology",
+      "applied": true,
+      "stage3_stop_reason": "accepted",
+      "accepted_cycles_total": 20,
+      "accepted_state_retained": true,
+      "rebuild_valid": true,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "valid_topology_histogram_fresh_rebuild",
+      "layer2_r2": 0.49250948429107666,
+      "primary_adjustment_count": 1,
+      "physical_conversion_count": 3,
+      "h_compensation_count": 0,
+      "parity_balance_count": 2,
+      "fresh_rebuild": true
+    },
+    {
+      "outer_cycle": 4,
+      "cycle": 21,
+      "phase": "complete",
+      "applied": false,
+      "stage3_stop_reason": "stage3_complete",
+      "accepted_cycles_total": 20,
+      "accepted_state_retained": true,
+      "rebuild_valid": false,
+      "blocked_reason": "",
+      "accepted": true,
+      "acceptance_reason": "stage3_complete",
+      "layer2_r2": null,
+      "primary_adjustment_count": 0,
+      "physical_conversion_count": 0,
+      "h_compensation_count": 0,
+      "parity_balance_count": 0,
+      "fresh_rebuild": false
+    }
+  ]
+}

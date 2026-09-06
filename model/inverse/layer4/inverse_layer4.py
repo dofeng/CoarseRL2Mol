@@ -39,7 +39,7 @@ from .inverse_layer4_block_c import (
 
 class Layer4Adjuster:
 
-    def __init__(self,
+    def __init__(self, 
                  device: torch.device = None,
                  layer0_estimator: Optional[Layer0Estimator] = None,
                  su_common_ranges_path: Optional[str] = None,
@@ -48,7 +48,7 @@ class Layer4Adjuster:
         self.E_SU = E_SU.to(self.device)
         self.layer0_estimator = layer0_estimator
         self.fixed_partition_meta: Dict[str, Any] = {}
-
+        
         if su_common_ranges_path is None:
             default_common = Z_LIBRARY_DIR / 'su_nmr_common_range_filtered.csv'
             self.su_common_ranges_path = str(default_common) if default_common.exists() else None
@@ -822,7 +822,7 @@ class Layer4Adjuster:
     # ========================================================================
     # 分阶段调整接口
     # ========================================================================
-
+    
     def _estimate_aliphatic_upper_bound(self,
                                         S_target: Optional[torch.Tensor],
                                         E_target: Optional[torch.Tensor]) -> Optional[int]:
@@ -1504,7 +1504,7 @@ class Layer4Adjuster:
                        **kwargs) -> Tuple[torch.Tensor, List[Dict], Dict]:
         """
         Layer4 阶段路由入口。
-
+        
         Args:
             H: SU直方图 [33]
             ppm: PPM轴
@@ -1519,7 +1519,7 @@ class Layer4Adjuster:
             **kwargs:
                 各阶段附加参数。
                 阶段结果是否采纳由调用侧决定；Layer4 这里只负责生成候选 H 与诊断信息。
-
+        
         Returns:
             H_adjusted: 调整后的SU直方图
             moves: 调整记录
@@ -1530,7 +1530,7 @@ class Layer4Adjuster:
             print(f"\n{'='*80}")
             print(f"Layer4 [{stage.upper()}阶段] 调整")
             print(f"{'='*80}")
-
+        
         H_input = torch.clamp(H, min=0).long().clone().cpu()
         H_work = H.clone()
         moves = []
@@ -1543,7 +1543,7 @@ class Layer4Adjuster:
             except Exception:
                 pass
         region_bounds = self._estimate_aliphatic_region_bounds(S_target, E_target)
-
+        
         # 1. 执行对应阶段的调整
         if stage == 'block_a':
             H_work, moves, meta = self.adjust_block_a_carbonyl_anchor(
@@ -1744,4 +1744,4 @@ class Layer4Adjuster:
             spectrum_min_r2_gain=float(spectrum_min_r2_gain),
             verbose=bool(verbose),
         )
-
+    

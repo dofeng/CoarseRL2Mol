@@ -1,0 +1,440 @@
+{
+  "phase": "flex",
+  "done": true,
+  "placed_units": 60,
+  "phase_units_total": 25,
+  "contracts_done": 51,
+  "contracts_total": 51,
+  "components": 1,
+  "score": 848.0,
+  "rigid_components_total": 20,
+  "backbone_topology_units": 18,
+  "backbone_contracts": 37,
+  "interior_topology_units": 7,
+  "interior_contracts": 14,
+  "backbone_contracts_done": 37,
+  "backbone_complete": true,
+  "interior_contracts_done": 14,
+  "interior_complete": true,
+  "planned_internal_closures": 14,
+  "planning_errors": [],
+  "explored_geometry_states": 1544,
+  "topology_reembedding_used": false,
+  "global_orientation_rotation": 1,
+  "coordinate_aspect": {
+    "q_span": 39,
+    "r_span": 36,
+    "q_over_r": 1.0833333333333333,
+    "min_q_over_r": 0.8,
+    "max_q_over_r": 2.0,
+    "valid": true,
+    "violation": 0.0,
+    "total_span": 75,
+    "x_span": 33.77499074759314,
+    "y_span": 33.5,
+    "width_over_height": 1.008208679032631,
+    "rotated_90_width_over_height": 0.9918581547616638
+  },
+  "slot_geometry": {
+    "mode": "search_time_physical_su13_selection",
+    "boundary_site_assignments": {
+      "115": 37,
+      "116": 38,
+      "121": 39,
+      "180": 107,
+      "181": 270,
+      "182": 195,
+      "183": 276,
+      "111": 109,
+      "112": 286,
+      "178": 234,
+      "179": 120,
+      "184": 111,
+      "185": 119,
+      "186": 196,
+      "187": 52,
+      "188": 44,
+      "189": 89,
+      "190": 110,
+      "191": 56,
+      "192": 284,
+      "193": 58,
+      "194": 47,
+      "195": 95,
+      "196": 225,
+      "197": 62,
+      "117": 117,
+      "119": 99,
+      "118": 83,
+      "124": 66,
+      "170": 84,
+      "171": 103,
+      "174": 124,
+      "175": 105,
+      "223": 285,
+      "224": 40,
+      "225": 85,
+      "226": 41,
+      "227": 128,
+      "228": 280,
+      "109": 46,
+      "110": 114,
+      "114": 197,
+      "120": 226,
+      "172": 205,
+      "173": 75,
+      "176": 275,
+      "177": 199,
+      "108": 43,
+      "139": 77,
+      "229": 45,
+      "230": 303
+    }
+  },
+  "plan": {
+    "anchor_rigid_component_unit_ids": [
+      "aromatic:30"
+    ],
+    "rigid_components": [
+      [
+        "aromatic:0",
+        "aromatic:1"
+      ],
+      [
+        "aromatic:2",
+        "aromatic:3"
+      ],
+      [
+        "aromatic:4",
+        "aromatic:5"
+      ],
+      [
+        "aromatic:6",
+        "aromatic:7"
+      ],
+      [
+        "aromatic:8",
+        "aromatic:9"
+      ],
+      [
+        "aromatic:10",
+        "aromatic:11"
+      ],
+      [
+        "aromatic:12",
+        "aromatic:13"
+      ],
+      [
+        "aromatic:14",
+        "aromatic:15"
+      ],
+      [
+        "aromatic:16",
+        "aromatic:17"
+      ],
+      [
+        "aromatic:18",
+        "aromatic:19"
+      ],
+      [
+        "aromatic:20",
+        "aromatic:21"
+      ],
+      [
+        "aromatic:22",
+        "aromatic:23"
+      ],
+      [
+        "aromatic:24",
+        "aromatic:25"
+      ],
+      [
+        "aromatic:26",
+        "aromatic:27"
+      ],
+      [
+        "aromatic:28",
+        "aromatic:29"
+      ],
+      [
+        "aromatic:30"
+      ],
+      [
+        "aromatic:31"
+      ],
+      [
+        "aromatic:32"
+      ],
+      [
+        "aromatic:33"
+      ],
+      [
+        "aromatic:34"
+      ]
+    ],
+    "backbone_topology_unit_ids": [
+      "topology:6",
+      "topology:12",
+      "topology:13",
+      "topology:2",
+      "topology:11",
+      "topology:14",
+      "topology:15",
+      "topology:16",
+      "topology:17",
+      "topology:18",
+      "topology:19",
+      "topology:20",
+      "topology:4",
+      "topology:5",
+      "topology:7",
+      "topology:9",
+      "topology:137",
+      "topology:138"
+    ],
+    "backbone_contract_ids": [
+      "flex:6:115-503",
+      "flex:6:116-504",
+      "flex:6:121-0",
+      "flex:12:180-443",
+      "flex:12:181-444",
+      "flex:13:182-446",
+      "flex:13:183-447",
+      "flex:2:111-18",
+      "flex:2:112-19",
+      "flex:11:178-439",
+      "flex:11:179-441",
+      "flex:14:184-448",
+      "flex:14:185-449",
+      "flex:15:186-450",
+      "flex:15:187-451",
+      "flex:16:188-452",
+      "flex:16:189-453",
+      "flex:17:190-454",
+      "flex:17:191-455",
+      "flex:18:192-456",
+      "flex:18:193-457",
+      "flex:19:194-458",
+      "flex:19:195-459",
+      "flex:20:196-460",
+      "flex:20:197-461",
+      "flex:4:117-28",
+      "flex:4:119-29",
+      "flex:5:118-32",
+      "flex:5:124-31",
+      "flex:7:170-434",
+      "flex:7:171-435",
+      "flex:9:174-436",
+      "flex:9:175-437",
+      "flex:137:223-489",
+      "flex:137:224-491",
+      "flex:138:225-492",
+      "flex:138:226-494"
+    ],
+    "backbone_steps": [
+      {
+        "topology_unit_id": "topology:6",
+        "attachment_contract_id": "flex:6:115-503",
+        "merge_contract_ids": [
+          "flex:6:116-504",
+          "flex:6:121-0"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:12",
+        "attachment_contract_id": "flex:12:180-443",
+        "merge_contract_ids": [
+          "flex:12:181-444"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:13",
+        "attachment_contract_id": "flex:13:182-446",
+        "merge_contract_ids": [
+          "flex:13:183-447"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:2",
+        "attachment_contract_id": "flex:2:111-18",
+        "merge_contract_ids": [
+          "flex:2:112-19"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:11",
+        "attachment_contract_id": "flex:11:178-439",
+        "merge_contract_ids": [
+          "flex:11:179-441"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:14",
+        "attachment_contract_id": "flex:14:184-448",
+        "merge_contract_ids": [
+          "flex:14:185-449"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:15",
+        "attachment_contract_id": "flex:15:186-450",
+        "merge_contract_ids": [
+          "flex:15:187-451"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:16",
+        "attachment_contract_id": "flex:16:188-452",
+        "merge_contract_ids": [
+          "flex:16:189-453"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:17",
+        "attachment_contract_id": "flex:17:190-454",
+        "merge_contract_ids": [
+          "flex:17:191-455"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:18",
+        "attachment_contract_id": "flex:18:192-456",
+        "merge_contract_ids": [
+          "flex:18:193-457"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:19",
+        "attachment_contract_id": "flex:19:194-458",
+        "merge_contract_ids": [
+          "flex:19:195-459"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:20",
+        "attachment_contract_id": "flex:20:196-460",
+        "merge_contract_ids": [
+          "flex:20:197-461"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:4",
+        "attachment_contract_id": "flex:4:117-28",
+        "merge_contract_ids": [
+          "flex:4:119-29"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:5",
+        "attachment_contract_id": "flex:5:118-32",
+        "merge_contract_ids": [
+          "flex:5:124-31"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:7",
+        "attachment_contract_id": "flex:7:170-434",
+        "merge_contract_ids": [
+          "flex:7:171-435"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:9",
+        "attachment_contract_id": "flex:9:174-436",
+        "merge_contract_ids": [
+          "flex:9:175-437"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:137",
+        "attachment_contract_id": "flex:137:223-489",
+        "merge_contract_ids": [
+          "flex:137:224-491"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:138",
+        "attachment_contract_id": "flex:138:225-492",
+        "merge_contract_ids": [
+          "flex:138:226-494"
+        ]
+      }
+    ],
+    "interior_topology_unit_ids": [
+      "topology:139",
+      "topology:1",
+      "topology:3",
+      "topology:8",
+      "topology:10",
+      "topology:0",
+      "topology:140"
+    ],
+    "interior_contract_ids": [
+      "flex:139:227-495",
+      "flex:139:228-497",
+      "flex:1:109-16",
+      "flex:1:110-17",
+      "flex:3:114-21",
+      "flex:3:120-27",
+      "flex:8:172-442",
+      "flex:8:173-23",
+      "flex:10:176-445",
+      "flex:10:177-25",
+      "flex:0:108-15",
+      "flex:0:139-15",
+      "flex:140:229-498",
+      "flex:140:230-498"
+    ],
+    "interior_steps": [
+      {
+        "topology_unit_id": "topology:139",
+        "attachment_contract_id": "flex:139:227-495",
+        "closure_contract_ids": [
+          "flex:139:228-497"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:1",
+        "attachment_contract_id": "flex:1:109-16",
+        "closure_contract_ids": [
+          "flex:1:110-17"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:3",
+        "attachment_contract_id": "flex:3:114-21",
+        "closure_contract_ids": [
+          "flex:3:120-27"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:8",
+        "attachment_contract_id": "flex:8:172-442",
+        "closure_contract_ids": [
+          "flex:8:173-23"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:10",
+        "attachment_contract_id": "flex:10:176-445",
+        "closure_contract_ids": [
+          "flex:10:177-25"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:0",
+        "attachment_contract_id": "flex:0:108-15",
+        "closure_contract_ids": [
+          "flex:0:139-15"
+        ]
+      },
+      {
+        "topology_unit_id": "topology:140",
+        "attachment_contract_id": "flex:140:229-498",
+        "closure_contract_ids": [
+          "flex:140:230-498"
+        ]
+      }
+    ]
+  }
+}

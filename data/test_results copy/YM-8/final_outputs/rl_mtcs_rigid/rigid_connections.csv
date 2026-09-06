@@ -1,0 +1,16 @@
+step,contract_id,source_unit_id,source_node_id,source_port_id,target_unit_id,target_node_id,target_port_id,move_component_unit_id,component_rotation,component_translation_q,component_translation_r,source_rotation,source_translation_q,source_translation_r,reported_moved_node_count,actual_moved_node_count,source_q,source_r,target_q,target_r,direction_q,direction_r,hex_neighbor,component_count_after_step,rigid_contracts_done_after_step
+1,rigid:6:151-152,aromatic:12,151,aromatic:12:rigid:151:152,aromatic:13,152,aromatic:13:rigid:152:151,aromatic:12,3,105,-3,0,0,0,6,6,58,-2,59,-1,1,1,True,34,1
+2,rigid:7:153-154,aromatic:14,153,aromatic:14:rigid:153:154,aromatic:15,154,aromatic:15:rigid:154:153,aromatic:14,3,153,-3,0,0,0,6,6,82,-2,83,-1,1,1,True,33,2
+3,rigid:8:155-156,aromatic:16,155,aromatic:16:rigid:155:156,aromatic:17,156,aromatic:17:rigid:156:155,aromatic:16,3,201,-3,0,0,0,6,6,106,-2,107,-1,1,1,True,32,3
+4,rigid:9:157-158,aromatic:18,157,aromatic:18:rigid:157:158,aromatic:19,158,aromatic:19:rigid:158:157,aromatic:18,3,249,-3,0,0,0,6,6,130,-2,131,-1,1,1,True,31,4
+5,rigid:10:159-160,aromatic:20,159,aromatic:20:rigid:159:160,aromatic:21,160,aromatic:21:rigid:160:159,aromatic:20,3,321,-3,0,0,0,6,6,166,-2,167,-1,1,1,True,30,5
+6,rigid:11:161-162,aromatic:22,161,aromatic:22:rigid:161:162,aromatic:23,162,aromatic:23:rigid:162:161,aromatic:22,3,369,-3,0,0,0,6,6,190,-2,191,-1,1,1,True,29,6
+7,rigid:12:163-164,aromatic:24,163,aromatic:24:rigid:163:164,aromatic:25,164,aromatic:25:rigid:164:163,aromatic:24,3,417,-3,0,0,0,6,6,214,-2,215,-1,1,1,True,28,7
+8,rigid:13:165-166,aromatic:26,165,aromatic:26:rigid:165:166,aromatic:27,166,aromatic:27:rigid:166:165,aromatic:26,3,465,-3,0,0,0,6,6,238,-2,239,-1,1,1,True,27,8
+9,rigid:14:167-168,aromatic:28,167,aromatic:28:rigid:167:168,aromatic:29,168,aromatic:29:rigid:168:167,aromatic:28,3,513,-3,0,0,0,6,6,262,-2,263,-1,1,1,True,26,9
+10,rigid:5:149-150,aromatic:10,149,aromatic:10:rigid:149:150,aromatic:11,150,aromatic:11:rigid:150:149,aromatic:10,3,57,-3,0,0,0,6,6,34,-2,35,-1,1,1,True,25,10
+11,rigid:3:145-146,aromatic:7,146,aromatic:7:rigid:146:145,aromatic:6,145,aromatic:6:rigid:145:146,aromatic:7,3,753,-3,0,0,0,6,6,370,-2,371,-1,1,1,True,24,11
+12,rigid:4:147-148,aromatic:8,147,aromatic:8:rigid:147:148,aromatic:9,148,aromatic:9:rigid:148:147,aromatic:8,3,801,-3,0,0,0,6,6,406,-2,407,-1,1,1,True,23,12
+13,rigid:1:141-142,aromatic:2,141,aromatic:2:rigid:141:142,aromatic:3,142,aromatic:3:rigid:142:141,aromatic:2,3,413,-5,0,0,0,14,14,272,-3,273,-2,1,1,True,22,13
+14,rigid:2:143-144,aromatic:4,143,aromatic:4:rigid:143:144,aromatic:5,144,aromatic:5:rigid:144:143,aromatic:4,3,705,-3,0,0,0,14,14,358,-2,359,-1,1,1,True,21,14
+15,rigid:0:140-169,aromatic:0,140,aromatic:0:rigid:140:169,aromatic:1,169,aromatic:1:rigid:169:140,aromatic:0,3,7,-4,0,0,0,16,16,-4,-3,-3,-2,1,1,True,20,15

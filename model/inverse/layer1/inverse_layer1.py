@@ -1239,7 +1239,7 @@ class Layer1Assigner:
             return ordered
         random.shuffle(ordered)
         return ordered
-
+    
     def _histogram_from_nodes(self, nodes: List[_NodeV3]) -> torch.Tensor:
         """从节点列表构建SU直方图"""
         H = torch.zeros(NUM_SU_TYPES, dtype=torch.float, device=self.device)
@@ -2679,8 +2679,8 @@ class Layer1Assigner:
         if len(errors) > len(shown):
             print(f"    [{prefix}] ... 其余 {len(errors) - len(shown)} 条省略")
 
-    def validate_graph_consistency(self, nodes: List[_NodeV3],
-                                    H: torch.Tensor,
+    def validate_graph_consistency(self, nodes: List[_NodeV3], 
+                                    H: torch.Tensor, 
                                     E_target: Optional[torch.Tensor] = None,
                                     verbose: bool = False) -> Tuple[bool, List[str]]:
         """Compatibility wrapper for the pure Layer1 graph validator."""
@@ -2692,7 +2692,7 @@ class Layer1Assigner:
         )
     # Layer1: 1-hop分配辅助方法
     # ========================================================================
-
+    
     def _initialize_node_pool(
         self,
         H_init: torch.Tensor,
@@ -2705,7 +2705,7 @@ class Layer1Assigner:
         special_degree_meta = self._get_special_degree_meta(H_init)
         special_partition_meta = self._get_special_partition_meta(H_init)
         special_anchor_mode_meta = self._get_special_anchor_mode_meta(H_init)
-
+        
         for su_type in range(NUM_SU_TYPES):
             count = int(H_init[su_type].item())
             degree_sequence = self._build_special_degree_sequence(int(su_type), int(count), special_degree_meta)
@@ -2748,7 +2748,7 @@ class Layer1Assigner:
                 )
                 nodes.append(node)
                 global_id += 1
-
+        
         if identity_seed_nodes is None:
             return nodes
 
@@ -2805,10 +2805,10 @@ class Layer1Assigner:
         """
         node1 = nodes[id1]
         node2 = nodes[id2]
-
+        
         if id1 == id2:
             return False
-
+        
         if id2 in node1.hop1_ids or id1 in node2.hop1_ids:
             return False
         if not self._can_add_hop1_connection(nodes, node1, node2):
@@ -2830,7 +2830,7 @@ class Layer1Assigner:
         # 添加互为1-hop（SU类型计数）
         node1.hop1_su[node2.su_type] += 1
         node2.hop1_su[node1.su_type] += 1
-
+        
         # 记录全局ID（用于追踪具体连接）
         node1.hop1_ids.append(id2)
         node2.hop1_ids.append(id1)
@@ -2942,7 +2942,7 @@ class Layer1Assigner:
 
     def _can_add_hop1_connection_uncached(self, nodes: List[_NodeV3], node1: _NodeV3, node2: _NodeV3) -> bool:
         """检查在 node1 和 node2 之间添加1-hop连接是否满足双向 per-port 规则
-
+        
         对两侧分别检查：将新邻居加入当前邻居列表后，是否仍可分配到端口中。
         """
         if node1.global_id == node2.global_id:
@@ -3039,7 +3039,7 @@ class Layer1Assigner:
             ids = list(self._node_ids_by_su.get(int(su_type), []))
             return [nodes[int(i)] for i in ids]
         return [n for n in nodes if n.su_type == su_type]
-
+    
     def _choose_weighted_candidate(self,
                                    center: _NodeV3,
                                    candidates: List[_NodeV3],
@@ -3110,11 +3110,11 @@ class Layer1Assigner:
             choose_pos = int(center.global_id) % len(window)
             return filtered[int(window[int(choose_pos)])]
         return random.choices(filtered, weights=weights, k=1)[0]
-
+    
     # ========================================================================
     # Layer1: 固定连接分配方法（a-f）
     # ========================================================================
-
+    
     def _assign_fixed_halogen_X(self, nodes: List[_NodeV3]):
         """a) 32号X -> 8号/21号"""
         owner_ids, target_ids_all, edge_pairs = self._build_exact_halogen_fixed_edges(nodes)
@@ -3385,7 +3385,7 @@ class Layer1Assigner:
             check_amine=False,
             check_halogen=False,
         )
-
+    
     def _assign_fixed_amine_N(self, nodes: List[_NodeV3]):
         """c) 0号氨基端、27号 -> 6号/20号"""
         work_nodes = copy.deepcopy(nodes)
@@ -3477,7 +3477,7 @@ class Layer1Assigner:
             check_amine=True,
             check_halogen=False,
         )
-
+    
     def _assign_fixed_ether_O(self, nodes: List[_NodeV3]):
         """d) 2号醚端、28号、29号 -> 5号/19号
         """
@@ -3493,10 +3493,10 @@ class Layer1Assigner:
             check_amine=False,
             check_halogen=False,
         )
-
+    
     def _assign_fixed_carbonyl(self, nodes: List[_NodeV3]):
         """e) Assign only the mandatory carbonyl neighbor of every SU9.
-
+        
         核心规则：每个SU9的port3={0,1,2,3}，必须恰好有一个羰基邻居。
         普通羰基端口由全局补全求解器统一处理，不能在固定阶段提前
         消耗 SU23/24/25 等资源。
@@ -3506,7 +3506,7 @@ class Layer1Assigner:
         su2_nodes = self._get_nodes_by_su_type(nodes, 2)
         su3_nodes = self._get_nodes_by_su_type(nodes, 3)
         su9_nodes = [n for n in self._get_nodes_by_su_type(nodes, 9) if n.remaining_hop1_slots() > 0]
-
+        
         # ---- 阶段1：先给每个0/1/2/3尽量分一个9号 ----
         first_round = self._canonical_node_order(
             list(su0_nodes) + list(su1_nodes) + list(su2_nodes) + list(su3_nodes),
@@ -3715,7 +3715,7 @@ class Layer1Assigner:
         su14_nodes = self._get_nodes_by_su_type(nodes, 14)
         su15_nodes = self._get_nodes_by_su_type(nodes, 15)
         su16_nodes = self._get_nodes_by_su_type(nodes, 16)
-
+        
         # SU16 是只能和 SU15 配对的端基，不能参与 SU16-SU16。
         # 先完成这类强约束配对，再处理其余双键节点，避免普通贪心
         # 先消耗掉 SU15 后遗留孤立 SU16。
@@ -3771,11 +3771,11 @@ class Layer1Assigner:
             self._add_bidirectional_hop1(
                 nodes, node1.global_id, partner.global_id, lock=True
             )
-
+        
         # 三键配对 (17, 18) - 17的不饱和端连接度=1，18的连接度=1
         su17_nodes = self._get_nodes_by_su_type(nodes, 17)
         su18_nodes = list(self._get_nodes_by_su_type(nodes, 18))
-
+        
         # 先17-18配对
         for n17 in su17_nodes:
             if su18_nodes and n17.remaining_hop1_slots() > 0:
@@ -3789,13 +3789,13 @@ class Layer1Assigner:
                     self._add_bidirectional_hop1(
                         nodes, n17.global_id, n18.global_id, lock=True
                     )
-
+        
         # 如果还有剩余的17且port2未填充（即没有17/18邻居），才做17-17配对
         # SU17端口规则: [{芳香}, {17, 18}]，port2只能放17或18
         # 已有SU18邻居的SU17的port2已满，剩余槽位是port1(芳香)，不能再放17
         remaining_17_no_triple = [
-            n for n in su17_nodes
-            if n.remaining_hop1_slots() > 0
+            n for n in su17_nodes 
+            if n.remaining_hop1_slots() > 0 
             and 18 not in n.hop1_su and 17 not in n.hop1_su
         ]
         while len(remaining_17_no_triple) >= 2:
@@ -3830,7 +3830,7 @@ class Layer1Assigner:
                 "[Unsaturated Fixed Assign] fixed-role matching incomplete: "
                 + str(invalid_unsaturated[:8])
             )
-
+    
     def _assign_fixed_su10_external_roles(self, nodes: List[_NodeV3]) -> None:
         """Assign the strict one-to-one SU10 self-pair role."""
         self_nodes = self._canonical_node_order(
@@ -4314,11 +4314,11 @@ class Layer1Assigner:
                 print("\n" + "=" * 60)
                 print(f"Layer1: 单图精炼 ({len(nodes)}个节点)")
                 print("=" * 60)
-
+    
         check_t0 = time.perf_counter()
         is_valid, errors = self.validate_graph_consistency(
-            nodes=nodes,
-            H=H_init,
+            nodes=nodes, 
+            H=H_init, 
             E_target=E_target,
             verbose=False
         )

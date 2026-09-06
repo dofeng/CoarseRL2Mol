@@ -572,7 +572,10 @@ def make_product(
                     rendered_node_ids.add(int(raw_value))
     fixed_source_node_ids = sorted(
         int(value)
-        for value in _fixed_source_ids_from_views(source_views)
+        for value in _fixed_source_ids_from_views(
+            source_views,
+            assembler=assembler,
+        )
         if int(value) in rendered_node_ids
     )
     # Branches can render fixed nodes that are intentionally absent from
@@ -2614,11 +2617,55 @@ def assemble_remaining_b_d_as_side(
         if finalize_with_closure(assembler, 
             view,
             product_kind="side_chain",
+            # B-like fragments already have an aromatic fixed end.  Closing
+            # the other side as a side chain must use F2 = [23, 22] so the
+            # materialized product ends in a terminal unit.  F1 is reserved
+            # for B-like flex-chain closure.
             closure_mode="F2",
             branch_donors=branch_donors,
         ):
             progress_made = True
     return progress_made
+
+
+def _pending_mainline_closure_mode(
+    contract: Dict[str, Any],
+    view: AssemblyFragmentView,
+    *,
+    default: str = "F1",
+) -> str:
+    """Resolve the operator for a single-end pending contract.
+
+    The pending contract may be a residual record copied from the fragment's
+    flex-oriented open slot.  B-like fragments are dual-use: F1 closes them as
+    flex chains, while side-chain fallback must use F2 to create a terminal
+    endpoint.  Therefore target-role semantics override a stale F1 slot for
+    B-like side-chain retries.
+    """
+
+    target_role = str(dict(contract or {}).get("target_role", "") or "")
+    pending_kind = str(
+        dict(contract or {}).get("diagnostics", {}).get(
+            "public_pending_kind", ""
+        )
+        or ""
+    )
+    if target_role == "side_chain" and (
+        pending_kind == "b_like_open"
+        or view_has_flex_reconcile_role(None, view, "b_like_open")
+    ):
+        return "F2"
+    for raw_slot in list(dict(contract or {}).get("mainline_slots", []) or []):
+        kind = str(dict(raw_slot or {}).get("kind", "") or "")
+        if kind in {"F1", "F2"}:
+            return kind
+    if pending_kind == "b_like_open" or view_has_flex_reconcile_role(
+        None, view, "b_like_open"
+    ):
+        return "F1"
+    if str(getattr(view, "class_type", "")) in {"25_AB"}:
+        return "F2"
+    return str(default) if str(default) in {"F1", "F2"} else "F1"
 
 
 def flex_bounds_enforced(assembler: Any) -> bool:
@@ -3168,7 +3215,11 @@ def retry_ready_pending_contracts(
                     assembler,
                     candidate,
                     product_kind="side_chain",
-                    closure_mode="F2",
+                    closure_mode=_pending_mainline_closure_mode(
+                        contract,
+                        candidate,
+                        default="F1",
+                    ),
                     branch_donors=branch_donors,
                 )
             else:
@@ -3353,6 +3404,51 @@ def record_remaining_external_pending(
             ).items()
             if int(value) > 0
         }
+        if (
+            not (resource_backed_ring_pending or mandatory_ring_pending)
+            and materialization_failure.get("attempted_mainline_slots")
+        ):
+            mainline_slots_override = [
+                dict(item or {})
+                for item in list(
+                    materialization_failure.get("attempted_mainline_slots", [])
+                    or []
+                )
+            ]
+        elif (
+            str(pending_kind) == "b_like_open"
+            and pending_module.pending_target_role(
+                assembler,
+                str(pending_kind),
+                [view],
+            ) == "side_chain"
+        ):
+            side = "left" if bool(getattr(view, "open_left", False)) else "right"
+            mainline_slots_override = attempt_mainline_slots(
+                assembler,
+                view,
+                [(str(side), "F2")],
+            )
+        elif (
+            str(pending_kind) == "d_like_open"
+            and pending_module.pending_target_role(
+                assembler,
+                str(pending_kind),
+                [view],
+            ) == "side_chain"
+        ):
+            attempts: List[Tuple[str, str]] = []
+            if bool(getattr(view, "open_left", False)):
+                attempts.append(("left", "F1"))
+            if bool(getattr(view, "open_right", False)):
+                attempts.append(("right", "F2"))
+            mainline_slots_override = attempt_mainline_slots(
+                assembler,
+                view,
+                attempts,
+            ) if attempts else None
+        else:
+            mainline_slots_override = None
         pending_module.record_pending(assembler, 
             unit_id=int(view.fragment_id),
             pending_kind=str(pending_kind),
@@ -3383,18 +3479,5 @@ def record_remaining_external_pending(
                 if materialization_failure
                 else None
             ),
-            mainline_slots_override=(
-                [
-                    dict(item or {})
-                    for item in list(
-                        materialization_failure.get("attempted_mainline_slots", [])
-                        or []
-                    )
-                ]
-                if (
-                    not (resource_backed_ring_pending or mandatory_ring_pending)
-                    and materialization_failure.get("attempted_mainline_slots")
-                )
-                else None
-            ),
+            mainline_slots_override=mainline_slots_override,
         )

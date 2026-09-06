@@ -56,7 +56,7 @@ def build_external_assembly_result(
         for product in list(self.products or [])
         for fragment_id in list(getattr(product, "source_fragment_ids", []) or [])
     }
-    ownership_module.invalidate_pending_identity(self,
+    ownership_module.invalidate_pending_identity(self, 
         fragment_ids=completed_product_fragment_ids,
         claimed_node_ids=completed_product_node_ids,
     )

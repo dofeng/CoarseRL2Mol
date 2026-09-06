@@ -340,7 +340,7 @@ def preflight_branch_donor(assembler: Any, view: AssemblyFragmentView) -> bool:
             if int(node_id) in owner_map
         ),
     }
-    conflict = candidate_identity_conflict(assembler,
+    conflict = candidate_identity_conflict(assembler, 
         rendered_node_ids=route_ids,
         source_fragment_ids=source_fragment_ids,
     )
@@ -423,7 +423,7 @@ def preflight_branch_result(
             for value in list(getattr(assembler, "recycled_node_ids", set()) or set())
         }
     )
-    conflict = candidate_identity_conflict(assembler,
+    conflict = candidate_identity_conflict(assembler, 
         rendered_node_ids=route_ids,
         source_fragment_ids=source_fragment_ids,
     )
@@ -498,13 +498,13 @@ def commit_product(
         int(value) for value in list(product.fixed_source_node_ids or [])
     }
     rendered_source_ids = set(rendered_node_ids)
-    identity_conflict = candidate_identity_conflict(assembler,
+    identity_conflict = candidate_identity_conflict(assembler, 
         rendered_node_ids=rendered_source_ids,
         source_fragment_ids=product.source_fragment_ids,
     )
     if identity_conflict is not None:
         failure_reason = str(identity_conflict.get("reason", "candidate_identity_invalid"))
-        _record_invalid_topology_attempt(assembler,
+        _record_invalid_topology_attempt(assembler, 
             product_kind=str(product.product_kind),
             actual_topology_su=str(product.actual_topology_su),
             actual_topology_gid=str(product.actual_topology_gid),
@@ -512,7 +512,7 @@ def commit_product(
             validation_reason=failure_reason,
             diagnostics={"candidate_identity": dict(identity_conflict)},
         )
-        remember_commit_failure(assembler,
+        remember_commit_failure(assembler, 
             product,
             reason=failure_reason,
             allocator_snapshot=allocator_snapshot,
@@ -538,7 +538,7 @@ def commit_product(
             "raw_su24_requires_ring_materialization:"
             f"{captured_raw_su24_ids}"
         )
-        _record_invalid_topology_attempt(assembler,
+        _record_invalid_topology_attempt(assembler, 
             product_kind=str(product.product_kind),
             actual_topology_su=str(product.actual_topology_su),
             actual_topology_gid=str(product.actual_topology_gid),
@@ -546,7 +546,7 @@ def commit_product(
             validation_reason=str(failure_reason),
             diagnostics={"raw_su24_node_ids": captured_raw_su24_ids},
         )
-        remember_commit_failure(assembler,
+        remember_commit_failure(assembler, 
             product,
             reason=str(failure_reason),
             allocator_snapshot=allocator_snapshot,
@@ -561,7 +561,7 @@ def commit_product(
         if allocator_snapshot is not None
         else {}
     )
-    candidate_identity = build_candidate_identity(assembler,
+    candidate_identity = build_candidate_identity(assembler, 
         product,
         transaction_claims=transaction_claims,
     )
@@ -583,7 +583,7 @@ def commit_product(
             "rendered_node_without_transaction_ownership:"
             f"{unauthorized_rendered_ids}"
         )
-        _record_invalid_topology_attempt(assembler,
+        _record_invalid_topology_attempt(assembler, 
             product_kind=str(product.product_kind),
             actual_topology_su=str(product.actual_topology_su),
             actual_topology_gid=str(product.actual_topology_gid),
@@ -600,7 +600,7 @@ def commit_product(
                 },
             },
         )
-        remember_commit_failure(assembler,
+        remember_commit_failure(assembler, 
             product,
             reason=str(failure_reason),
             allocator_snapshot=allocator_snapshot,
@@ -626,7 +626,7 @@ def commit_product(
     )
     if cross_fragment_ids:
         failure_reason = f"cross_fragment_node_capture:{cross_fragment_ids}"
-        _record_invalid_topology_attempt(assembler,
+        _record_invalid_topology_attempt(assembler, 
             product_kind=str(product.product_kind),
             actual_topology_su=str(product.actual_topology_su),
             actual_topology_gid=str(product.actual_topology_gid),
@@ -640,7 +640,7 @@ def commit_product(
                 },
             },
         )
-        remember_commit_failure(assembler,
+        remember_commit_failure(assembler, 
             product,
             reason=str(failure_reason),
             allocator_snapshot=allocator_snapshot,
@@ -662,7 +662,7 @@ def commit_product(
             if missing_fixed_ids
             else f"duplicate_rendered_node_ids:{duplicate_rendered_ids}"
         )
-        _record_invalid_topology_attempt(assembler,
+        _record_invalid_topology_attempt(assembler, 
             product_kind=str(product.product_kind),
             actual_topology_su=str(product.actual_topology_su),
             actual_topology_gid=str(product.actual_topology_gid),
@@ -673,7 +673,7 @@ def commit_product(
                 "rendered_node_ids": sorted(rendered_source_ids),
             },
         )
-        remember_commit_failure(assembler,
+        remember_commit_failure(assembler, 
             product,
             reason=str(failure_reason),
             allocator_snapshot=allocator_snapshot,
@@ -711,7 +711,7 @@ def commit_product(
         )
         if claim_specific(int(su_key), int(node_id)) is not None:
             continue
-        _record_invalid_topology_attempt(assembler,
+        _record_invalid_topology_attempt(assembler, 
             product_kind=str(product.product_kind),
             actual_topology_su=str(product.actual_topology_su),
             actual_topology_gid=str(product.actual_topology_gid),
@@ -719,7 +719,7 @@ def commit_product(
             validation_reason=f"rendered_resource_claim_failed:{int(node_id)}",
             diagnostics={"node_id": int(node_id), "su_type": int(su_key)},
         )
-        remember_commit_failure(assembler,
+        remember_commit_failure(assembler, 
             product,
             reason=f"rendered_resource_claim_failed:{int(node_id)}",
             allocator_snapshot=allocator_snapshot,
@@ -805,7 +805,7 @@ def commit_product(
             owned_node_ids=rendered_source_ids,
         )
         if ring_reason is not None:
-            _record_invalid_topology_attempt(assembler,
+            _record_invalid_topology_attempt(assembler, 
                 product_kind=str(product.product_kind),
                 actual_topology_su=str(product.actual_topology_su),
                 actual_topology_gid=str(product.actual_topology_gid),
@@ -813,7 +813,7 @@ def commit_product(
                 validation_reason=str(ring_reason),
                 diagnostics={"ring_template_kind": str(ring_contract.ring_kind)},
             )
-            remember_commit_failure(assembler,
+            remember_commit_failure(assembler, 
                 product,
                 reason=str(ring_reason),
                 allocator_snapshot=allocator_snapshot,
@@ -866,7 +866,7 @@ def commit_product(
             "node_ids": list(flattened_rendered_node_ids),
         }
         record_product_ownership_conflict(assembler, conflict)
-        remember_commit_failure(assembler,
+        remember_commit_failure(assembler, 
             product,
             reason="duplicate_node_within_product",
             allocator_snapshot=allocator_snapshot,
@@ -892,7 +892,7 @@ def commit_product(
                 int(assembler.product_owner_by_node_id[node_id]) for node_id in overlaps
             }),
         })
-        remember_commit_failure(assembler,
+        remember_commit_failure(assembler, 
             product,
             reason=f"duplicate_topology_ownership:{overlaps}",
             allocator_snapshot=allocator_snapshot,
@@ -985,7 +985,7 @@ def commit_product(
             if transaction_claim_mismatch
             else "rendered_product_ownership_mismatch"
         )
-        _record_invalid_topology_attempt(assembler,
+        _record_invalid_topology_attempt(assembler, 
             product_kind=str(product.product_kind),
             actual_topology_su=str(product.actual_topology_su),
             actual_topology_gid=str(product.actual_topology_gid),
@@ -1002,7 +1002,7 @@ def commit_product(
                 "owned_without_render": list(identity_unrendered),
             },
         )
-        remember_commit_failure(assembler,
+        remember_commit_failure(assembler, 
             product,
             reason=str(failure_reason),
             allocator_snapshot=allocator_snapshot,
@@ -1516,7 +1516,7 @@ def mark_fragments_completed(assembler: Any, fragment_ids: Iterable[int]) -> Non
             else []
         )
     }
-    invalidate_pending_identity(assembler,
+    invalidate_pending_identity(assembler, 
         fragment_ids=completed_fragment_ids,
         claimed_node_ids=used_node_ids,
     )
@@ -1536,7 +1536,7 @@ def drop_pending_overlapping_product(
     }
     if not owned_node_ids:
         return
-    invalidate_pending_identity(assembler,
+    invalidate_pending_identity(assembler, 
         fragment_ids=list(getattr(product, "source_fragment_ids", []) or []),
         claimed_node_ids=owned_node_ids,
     )

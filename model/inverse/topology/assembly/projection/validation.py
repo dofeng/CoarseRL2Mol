@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from .....shared.inverse_common import _NodeV3
 from ...classification.classification_models import TopologyFragment
 from ...classification.classification_tokens import normalize_subtype
 from ...fixed_edges import nodes_have_fixed_edge as _nodes_have_fixed_edge
+from ...resources.types import PHYSICAL_TOPOLOGY_RESOURCE_TYPES
 from ..core.fragment import AssemblyFragmentView
 from ..state.iteration_ledger import normalize_slot
 from ..core.models import BranchStub
@@ -95,6 +96,61 @@ def view_render_route_node_ids(view: AssemblyFragmentView) -> Set[int]:
         )
     )
     return routed
+
+
+def foreign_fixed_node_ids_for_projection(
+    fragment: TopologyFragment,
+    view: AssemblyFragmentView,
+    *,
+    fixed_node_owner_by_id: Optional[Dict[int, int]] = None,
+    nodes_by_id: Optional[Dict[int, _NodeV3]] = None,
+) -> Dict[int, int]:
+    """Return fixed nodes rendered by ``view`` but owned by another fragment.
+
+    Generic SU11/SU22/SU23/SU24 nodes without a classification owner are
+    allocator resources and are intentionally allowed as projection context.
+    Once classification assigns an owner, however, the node is fixed physical
+    topology and cannot be silently pulled into a different fragment's route.
+    This check belongs at projection time; waiting for product commit leaves a
+    malformed pending contract behind and obscures the real source fragment.
+    """
+
+    owner_map = {
+        int(node_id): int(owner)
+        for node_id, owner in dict(fixed_node_owner_by_id or {}).items()
+    }
+    if not owner_map:
+        return {}
+    fragment_id = int(fragment.fragment_id)
+    routed = view_render_route_node_ids(view)
+    claimed = {
+        int(value)
+        for value in list(
+            fragment.claimed_node_ids or fragment.source_node_ids or []
+        )
+    }
+    context = {
+        int(value) for value in list(fragment.context_node_ids or [])
+    }
+    foreign: Dict[int, int] = {}
+    for node_id in sorted(routed | claimed):
+        owner = owner_map.get(int(node_id))
+        if owner is None or int(owner) == fragment_id:
+            continue
+        # A resource node may appear as unowned context and is rebound by the
+        # allocator later.  An owned resource node is still fixed and must not
+        # cross fragment boundaries.
+        node = dict(nodes_by_id or {}).get(int(node_id))
+        su_type = int(getattr(node, "su_type", -1)) if node is not None else -1
+        if int(node_id) in context and su_type in set(
+            PHYSICAL_TOPOLOGY_RESOURCE_TYPES
+        ):
+            # The owner map is authoritative: this branch is only reachable
+            # for legacy snapshots that retained a stale context owner.
+            # Keep it visible as a conflict rather than silently rebinding it.
+            pass
+        foreign[int(node_id)] = int(owner)
+    return foreign
 
 
 def canonical_view_render_node_ids(view: AssemblyFragmentView) -> Set[int]:
@@ -280,6 +336,9 @@ def route_unrendered_claimed_fixed_components(
 def validate_fragment_view_projection(
     fragment: TopologyFragment,
     view: AssemblyFragmentView,
+    *,
+    fixed_node_owner_by_id: Optional[Dict[int, int]] = None,
+    nodes_by_id: Optional[Dict[int, _NodeV3]] = None,
 ) -> None:
     claimed = {
         int(value)
@@ -293,6 +352,22 @@ def validate_fragment_view_projection(
     }
     routed = view_render_route_node_ids(view)
     errors: List[str] = []
+    foreign_fixed = foreign_fixed_node_ids_for_projection(
+        fragment,
+        view,
+        fixed_node_owner_by_id=fixed_node_owner_by_id,
+        nodes_by_id=nodes_by_id,
+    )
+    if foreign_fixed:
+        errors.append(
+            "foreign_fixed_node_owner:"
+            + str(
+                [
+                    [int(node_id), int(owner)]
+                    for node_id, owner in sorted(foreign_fixed.items())
+                ]
+            )
+        )
     overlap = sorted(claimed & context)
     if overlap:
         errors.append(f"claimed_context_overlap:{overlap}")
@@ -330,6 +405,10 @@ def validate_fragment_view_projection(
             None if value is None else int(value)
             for value in list(view.main_node_ids or [])
         ],
+        "foreign_fixed_node_owner": {
+            str(int(node_id)): int(owner)
+            for node_id, owner in sorted(foreign_fixed.items())
+        },
         "raw_su24_role": str(
             dict(fragment.evidence or {}).get("raw_su24_role", "") or ""
         ),
