@@ -649,7 +649,7 @@ def upper_path_priority(
 ) -> Tuple[int, int, int, int]:
     class_type = str(getattr(view, "class_type", ""))
     span = view_ring_backbone_span(assembler, view, skeleton_kind="upper_lower")
-    if class_type == "24_CD_N_24_CD":
+    if class_type in {"24_AB_N_24_AB", "24_CD_N_24_CD"}:
         class_rank = 0
     elif class_type == "24_CD_N" and int(span) <= 1:
         class_rank = 1

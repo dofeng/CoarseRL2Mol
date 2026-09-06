@@ -1692,11 +1692,10 @@ def project_like24_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
         )
         open_left = class_type == "24_CD_N_24_CD" or not has_left_anchor
         open_right = class_type in {"24_AB_N_24_CD", "24_CD_N_24_CD"} or not has_right_anchor
-        preferred = (
-            "flex_chain"
-            if class_type == "24_AB_N_24_AB"
-            else "ring_candidate"
-        )
+        # Pair bridges are open dual-use fragments.  They are tried as their
+        # contract-defined ring path first, then released to side-chain
+        # closure; the class name must not force an explicit flex product.
+        preferred = "ring_candidate"
     else:
         labels = [_node_label(center)]
         node_ids = [center_id]

@@ -55,17 +55,18 @@ DOUBLE_D2_CLASS_TYPES = {"A+", "B+", "C+", "D+", "E+"}
 BASIC_CLASS_TYPES = {"A", "B", "C", "D", "E", "F", "G"}
 FIXED_SIDE_PRIORITY = {"M": 0, "N": 1, "P": 2}
 FLEX_RECONCILE_EXPLICIT_FLEX_CLASSES = {
-    "A", "A+", "24_AB_M", "24_CD_M_FULL", "24_AB_N_24_AB",
+    "A", "A+", "24_AB_M", "24_CD_M_FULL",
 }
 FLEX_RECONCILE_EXPLICIT_SIDE_CLASSES = {"C", "C+", "F", "24_AB_P"}
 FLEX_RECONCILE_B_LIKE_OPEN_CLASSES = {
     "B", "B+", "24_A", "24_B", "24_AB_N", "24_CD_M", "24_AB_N_24_CD", "25_AB",
 }
 FLEX_RECONCILE_D_LIKE_OPEN_CLASSES = {
-    "D", "D+", "24_C", "24_D", "24_CD_N", "24_CD_N_24_CD", "25_CD",
+    "D", "D+", "24_C", "24_D", "24_CD_N", "24_CD_N_24_CD",
+    "24_AB_N_24_AB", "25_CD",
 }
 FLEX_RECONCILE_E_LIKE_OPEN_CLASSES = {"E", "E+", "G", "24_CD_P"}
-FLEX_RANGE_DEMOTABLE_EXPLICIT_CLASSES = {"24_AB_N_24_AB"}
+FLEX_RANGE_DEMOTABLE_EXPLICIT_CLASSES = set()
 FLEX_RECONCILE_FLEX_CHAIN_CLASSES = {
     "A",
     "B",
@@ -78,7 +79,6 @@ FLEX_RECONCILE_FLEX_CHAIN_CLASSES = {
     "24_CD_M",
     "24_CD_N",
     "24_CD_M_FULL",
-    "24_AB_N_24_AB",
     "24_AB_N_24_CD",
     "24_CD_N_24_CD",
     "25_AB",
@@ -557,6 +557,26 @@ def _normalize_fixed_contract_route_from_graph(
 
     normalized["base_path_node_ids"] = list(route_ids)
     normalized["base_path_labels"] = list(route_labels)
+    # A d2 node can be the tail of a mainline fixed route while still having
+    # an unresolved SU23 neighbour.  The H1 label describes the fixed-side
+    # branch contract at that node; it does not close the physical mainline
+    # endpoint.  Preserve the concrete boundary so the fragment normalizer
+    # can expose the required F1 = [23, 11] slot without widening ordinary
+    # branch-only H1 contracts.
+    if str(normalized.get("tail_closure_kind", "")) in {"H1", "H_AFTER_PREFIX"} and route_ids:
+        tail_token = tokens_by_id.get(int(route_ids[-1]))
+        tail_boundary_ids = sorted({
+            int(neighbor.node_id)
+            for neighbor in list(getattr(tail_token, "neighbor_tokens", []) or [])
+            if not bool(neighbor.is_fixed)
+            and int(neighbor.node_id) not in set(visited)
+        }) if tail_token is not None else []
+        normalized["tail_open_boundary_node_ids"] = list(tail_boundary_ids)
+        normalized["tail_open_boundary_su_types"] = sorted({
+            int(tokens_by_id[int(node_id)].su_type)
+            for node_id in tail_boundary_ids
+            if int(node_id) in tokens_by_id
+        })
     return normalized
 
 
@@ -892,9 +912,36 @@ def _finalize_fragment_edge_semantics(
             for value in list(contract.get("base_path_node_ids", []) or [])
             if _safe_int(value, -1) >= 0
         ]
+        tail_labels = [
+            str(value)
+            for value in list(contract.get("base_path_labels", []) or [])
+            if str(value)
+        ]
+        tail_is_d2 = bool(
+            tail_labels
+            and tail_labels[-1] in GENERIC_OPEN_SUBTYPE_LIKE
+        )
+        tail_boundary_su_types = {
+            _safe_int(value, -1)
+            for value in list(contract.get("tail_open_boundary_su_types", []) or [])
+        }
+        # ``H1`` is normally a branch-only closure.  For a mainline fixed
+        # route ending in a d2 unit, however, an unresolved SU23 neighbour is
+        # the remaining physical endpoint and must be materialized as F1.
+        # This is deliberately narrower than treating every H1 as a mainline
+        # slot, which would alter genuine branch-only contracts.
+        h1_d2_open_mainline = bool(
+            uses_mainline
+            and str(contract.get("tail_closure_kind", "")) in {"H1", "H_AFTER_PREFIX"}
+            and tail_is_d2
+            and 23 in tail_boundary_su_types
+        )
         if (
             uses_mainline
-            and str(contract.get("tail_closure_kind", "")) == "OPEN_BOUNDARY"
+            and (
+                str(contract.get("tail_closure_kind", "")) == "OPEN_BOUNDARY"
+                or h1_d2_open_mainline
+            )
             and base_ids
             and int(base_ids[-1]) not in existing_mainline_anchors
         ):
@@ -1292,6 +1339,10 @@ def _flex_reconcile_main_kind_for_fragment(class_type: str) -> str:
 
 
 def _flex_reconcile_preferred_product_type_for_fragment(class_type: str) -> str:
+    # A paired AB bridge is an open, dual-use mainline.  It is ring-first at
+    # Stage3, with a side-chain fallback; it is not an explicit flex product.
+    if str(class_type) == "24_AB_N_24_AB":
+        return "ring_candidate"
     if class_type in FLEX_RECONCILE_FLEX_CHAIN_CLASSES:
         return "flex_chain"
     if class_type in FLEX_RECONCILE_SIDE_CHAIN_CLASSES:
@@ -2831,6 +2882,12 @@ def _like24_ring_path_capabilities(
             side_path_roles.append("terminal_single")
             fused_path_roles.append("outer_anchor_single")
     if class_name == "24_AB_N_24_AB":
+        # The paired AB mainline is an upper/lower path even when neither end
+        # currently carries a fixed aromatic anchor.  Its -23-22 neighbors
+        # stay branch slots and are resolved only after the ring candidate is
+        # selected.  A side-chain route is still exposed separately through
+        # the assembly capability flags.
+        upper_path_roles.append("path_pair")
         if bool(touches_aromatic_anchor):
             side_path_roles.append("terminal_pair")
     if class_name in {"24_C", "24_D", "24_CD_N", "24_CD_M"}:
@@ -3560,7 +3617,7 @@ def _like24_ring_evidence(
         if bool(dict(contract or {}).get("eligible", False))
     }
     flex_allowed = bool(
-        str(class_type) in {"24_AB_M", "24_CD_M", "24_CD_M_FULL", "24_AB_N_24_AB"}
+        str(class_type) in {"24_AB_M", "24_CD_M", "24_CD_M_FULL"}
         or (
             str(class_type) in {"24_AB_N", "24_CD_N"}
             and str(preferred_fixed_role) == "mainline"
@@ -3570,7 +3627,7 @@ def _like24_ring_evidence(
         str(class_type) in {
             "24_A", "24_B", "24_C", "24_D",
             "24_AB_M", "24_AB_N", "24_AB_P", "24_CD_M", "24_CD_N", "24_CD_P",
-            "24_AB_N_24_CD", "24_CD_N_24_CD",
+            "24_AB_N_24_AB", "24_AB_N_24_CD", "24_CD_N_24_CD",
         }
     )
     for contract in fixed_connection_contracts:
@@ -3669,8 +3726,15 @@ def _like24_bridge_ring_evidence(
         or "11" in str(getattr(right_fragment, "topology_template", ""))
     )
     if class_type == "24_AB_N_24_AB":
-        # This paired form is an explicit flexible chain, not a ring segment.
-        allowed = []
+        # The two AB-N halves form an open pair bridge.  Its two centers are
+        # the upper/lower ring path (the -23-22 H stubs remain independent
+        # branches), and the same open path may fall back to a side chain.
+        # Do not classify the pair by its historical name as an explicit flex
+        # product: product preference and legal assembly capabilities differ.
+        allowed.append("upper_lower")
+        slots.append("upper_lower_pair_core")
+        slot_profiles.append("upper_lower_pair_core_segment")
+        pair_core_eligible = True
     elif class_type == "24_AB_N_24_CD":
         allowed.append("side")
         slots.extend(["side_anchor_core_pair"])
@@ -3713,6 +3777,18 @@ def _like24_bridge_ring_evidence(
         "fused_ring_plan": {},
     }
     bridgehead_kind = "substitute_14_pair" if bridgehead_role == "fused_bridgehead_substitute_pair" else "none"
+    ring_priority_summary: Dict[str, int] = {}
+    for skeleton_kind in sorted({str(item) for item in allowed}):
+        if skeleton_kind == "side":
+            ring_priority_summary["side_ring_plan"] = (
+                12 if class_type == "24_AB_N_24_CD" else 5
+            )
+        elif skeleton_kind == "upper_lower":
+            ring_priority_summary["upper_lower_ring_plan"] = 5
+        elif skeleton_kind == "fused":
+            ring_priority_summary["fused_ring_plan"] = (
+                0 if bridgehead_role == "fused_bridgehead_substitute_pair" else 18
+            )
     return {
         "required_branch_kinds_by_anchor": {},
         "required_branch_closures_by_anchor_in_ring": {"side": {}, "upper_lower": {}, "fused": {}},
@@ -3798,15 +3874,15 @@ def _like24_bridge_ring_evidence(
                 render_policy={"suppress_generic_open": True},
             ),
             "upper_lower_ring_plan": _make_ring_contract(
-                eligible=class_type == "24_CD_N_24_CD",
+                eligible=class_type in {"24_AB_N_24_AB", "24_CD_N_24_CD"},
                 priority=5,
-                slot_roles=["upper_lower_core", "upper_lower_pair_core"] if class_type == "24_CD_N_24_CD" else [],
-                slot_coverage=["core_segment"] if class_type == "24_CD_N_24_CD" else [],
-                slot_coverage_mode="pair_core" if class_type == "24_CD_N_24_CD" else "single_slot",
-                required_real_like24_slots=["core_segment"] if class_type == "24_CD_N_24_CD" else [],
+                slot_roles=["upper_lower_core", "upper_lower_pair_core"] if class_type in {"24_AB_N_24_AB", "24_CD_N_24_CD"} else [],
+                slot_coverage=["core_segment"] if class_type in {"24_AB_N_24_AB", "24_CD_N_24_CD"} else [],
+                slot_coverage_mode="pair_core" if class_type in {"24_AB_N_24_AB", "24_CD_N_24_CD"} else "single_slot",
+                required_real_like24_slots=["core_segment"] if class_type in {"24_AB_N_24_AB", "24_CD_N_24_CD"} else [],
                 required_branch_kinds_by_slot=branch_kinds_by_slot["upper_lower_ring_plan"],
-                optional_pool23_slots=["left_bridge", "right_bridge"] if class_type == "24_CD_N_24_CD" else [],
-                optional_pool24_slots=["core_segment"] if class_type == "24_CD_N_24_CD" else [],
+                optional_pool23_slots=["left_bridge", "right_bridge"] if class_type in {"24_AB_N_24_AB", "24_CD_N_24_CD"} else [],
+                optional_pool24_slots=["core_segment"] if class_type in {"24_AB_N_24_AB", "24_CD_N_24_CD"} else [],
                 fixed_connector_position="dual",
                 render_policy={"suppress_generic_open": True},
             ),
@@ -3849,10 +3925,13 @@ def _like24_bridge_ring_evidence(
             ),
         },
         "ring_allowed": bool(allowed),
-        "side_allowed": bool(class_type != "24_AB_N_24_AB"),
+        # Every open pair bridge has a legal side-chain fallback.  The H
+        # closures on the two centers are branch contracts, not extra
+        # mainline endpoints.
+        "side_allowed": True,
         "assembly_capabilities": {
-            "flex_allowed": bool(class_type == "24_AB_N_24_AB"),
-            "side_allowed": bool(class_type != "24_AB_N_24_AB"),
+            "flex_allowed": False,
+            "side_allowed": True,
             "ring_allowed": bool(allowed),
             "ring_roles_by_skeleton": {
                 f"{skeleton}_ring_plan": {
@@ -3869,12 +3948,13 @@ def _like24_bridge_ring_evidence(
                 f"{skeleton}_ring_plan": 2
                 for skeleton in allowed
             },
+            # Keep the summary authoritative: ineligible ring contracts must
+            # not appear as selectable priorities (e.g. AB-AB has no side
+            # ring contract, although it does have a side-chain fallback).
             "ring_priority": {
-                "side_ring_plan": 12 if class_type == "24_AB_N_24_CD" else 5,
-                **(
-                    {"upper_lower_ring_plan": 5, "fused_ring_plan": 18}
-                    if class_type == "24_CD_N_24_CD" else {}
-                ),
+                str(key): int(value)
+                for key, value in dict(ring_priority_summary or {}).items()
+                if int(value) >= 0
             },
             "fixed_connection_role": "dual",
         },

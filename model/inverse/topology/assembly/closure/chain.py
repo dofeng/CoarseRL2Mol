@@ -804,6 +804,94 @@ def open_bridge_token(
     return str(endpoint.bridge_label or endpoint.label), int(endpoint.bridge_node_id)
 
 
+def _d2_endpoint_requires_full_f1(
+    assembler: Any,
+    view: AssemblyFragmentView,
+    *,
+    side: str,
+    closure_mode: str,
+) -> bool:
+    """Whether a d2 fixed-path endpoint still exposes an SU23 boundary.
+
+    Most legacy d2 bridge views represent a terminal context and therefore
+    only need the SU11/SU22 endcap shortcut.  A d2 node at the end of a
+    *mainline* fixed route is different: when its non-fixed SU23 neighbour is
+    still open, F1 must materialize the complete ``[23, 11]`` sequence.
+    """
+    if str(closure_mode) != "F1":
+        return False
+    bridge = open_bridge_token(assembler, view, str(side))
+    if bridge is None or str(bridge[0]) not in {
+        "single19d2",
+        "single20d2",
+        "double19d2",
+        "double20d2",
+        "21d2",
+    }:
+        return False
+    bridge_id = int(bridge[1])
+    for raw_contract in list(getattr(view, "fixed_connection_contracts", []) or []):
+        contract = dict(raw_contract or {})
+        base_ids = [
+            _safe_int(value, -1)
+            for value in list(contract.get("base_path_node_ids", []) or [])
+            if _safe_int(value, -1) >= 0
+        ]
+        roles = {str(value) for value in list(contract.get("role_candidates", []) or [])}
+        fixed_role = str(contract.get("fixed_connection_role", ""))
+        boundary_sus = {
+            _safe_int(value, -1)
+            for value in list(contract.get("tail_open_boundary_su_types", []) or [])
+        }
+        if (
+            base_ids
+            and int(base_ids[-1]) == bridge_id
+            and ("mainline_only" in roles or "mainline_or_branch" in roles or fixed_role == "mainline")
+            and 23 in boundary_sus
+        ):
+            return True
+
+    # Compatibility for views produced before the explicit contract field
+    # existed.  Only an actually non-fixed SU23 neighbour qualifies.
+    bridge_node = dict(getattr(assembler, "nodes_by_id", {}) or {}).get(bridge_id)
+    if bridge_node is None:
+        return False
+    for raw_neighbor_id in list(getattr(bridge_node, "hop1_ids", []) or []):
+        neighbor_id = _safe_int(raw_neighbor_id, -1)
+        neighbor = dict(getattr(assembler, "nodes_by_id", {}) or {}).get(neighbor_id)
+        if (
+            neighbor is not None
+            and int(getattr(neighbor, "su_type", -1)) == 23
+            and not _nodes_have_fixed_edge(bridge_node, neighbor)
+        ):
+            return True
+    return False
+
+
+def _side_closure_modes_for_view(
+    assembler: Any,
+    view: AssemblyFragmentView,
+) -> Tuple[str, str]:
+    """Return side-chain modes for a dual-open view in its physical orientation."""
+    if _d2_endpoint_requires_full_f1(
+        assembler,
+        view,
+        side="right",
+        closure_mode="F1",
+    ):
+        # F2 renders [22, 23] on the left; the open d2 tail needs F1 [23, 11]
+        # on the right, yielding an aromatic-to-terminal side chain.
+        return "F2", "F1"
+    if _d2_endpoint_requires_full_f1(
+        assembler,
+        view,
+        side="left",
+        closure_mode="F1",
+    ):
+        return "F1", "F2"
+    return "F1", "F2"
+
+
 def build_main_closure(
     assembler,
     view: AssemblyFragmentView,
@@ -814,6 +902,23 @@ def build_main_closure(
     bridge = open_bridge_token(assembler, view, side)
     if bridge is not None:
         bridge_label, bridge_id = bridge
+        if _d2_endpoint_requires_full_f1(
+            assembler,
+            view,
+            side=str(side),
+            closure_mode=str(closure_mode),
+        ):
+            closure = resolve_mainline_closure(assembler, str(closure_mode))
+            if closure is None:
+                return None, {
+                    str(key): int(value)
+                    for key, value in minimum_closure_required_counts(str(closure_mode)).items()
+                }
+            labels, node_ids = closure_sequence(assembler, closure, side)
+            return (labels, node_ids), required_counts_from_pool_ids(
+                assembler,
+                closure.pool_node_ids_by_su,
+            )
         if str(bridge_label) in {
             "23",
             "single19d2",
@@ -905,7 +1010,14 @@ def attempt_mainline_slots(
             "double20d2",
             "21d2",
         }:
-            if str(closure_mode) == "F1":
+            if _d2_endpoint_requires_full_f1(
+                assembler,
+                view,
+                side=str(side),
+                closure_mode=str(closure_mode),
+            ):
+                required_sequence = [23, 11]
+            elif str(closure_mode) == "F1":
                 required_sequence = [11]
             elif str(closure_mode) == "F2":
                 required_sequence = [22]
@@ -2600,11 +2712,12 @@ def assemble_remaining_b_d_as_side(
         key=lambda item: (view_flex_reconcile_priority(assembler, item), int(item.fragment_id)),
     )
     for view in d_views:
+        left_mode, right_mode = _side_closure_modes_for_view(assembler, view)
         if finalize_with_two_end_closures(assembler, 
             view,
             product_kind="side_chain",
-            left_mode="F1",
-            right_mode="F2",
+            left_mode=left_mode,
+            right_mode=right_mode,
             branch_donors=branch_donors,
         ):
             progress_made = True
@@ -3200,12 +3313,13 @@ def retry_ready_pending_contracts(
             if pending_kind == "d_like_open" or view_has_flex_reconcile_role(
                 assembler, candidate, "d_like_open"
             ):
+                left_mode, right_mode = _side_closure_modes_for_view(assembler, candidate)
                 assembled = finalize_with_two_end_closures(
                     assembler,
                     candidate,
                     product_kind="side_chain",
-                    left_mode="F1",
-                    right_mode="F2",
+                    left_mode=left_mode,
+                    right_mode=right_mode,
                     branch_donors=branch_donors,
                 )
             elif pending_kind == "b_like_open" or view_has_flex_reconcile_role(
@@ -3438,10 +3552,11 @@ def record_remaining_external_pending(
             ) == "side_chain"
         ):
             attempts: List[Tuple[str, str]] = []
+            left_mode, right_mode = _side_closure_modes_for_view(assembler, view)
             if bool(getattr(view, "open_left", False)):
-                attempts.append(("left", "F1"))
+                attempts.append(("left", str(left_mode)))
             if bool(getattr(view, "open_right", False)):
-                attempts.append(("right", "F2"))
+                attempts.append(("right", str(right_mode)))
             mainline_slots_override = attempt_mainline_slots(
                 assembler,
                 view,

@@ -6,7 +6,7 @@ from .models import ClosureOperatorSpec
 
 
 EXPLICIT_FLEX_CLASSES = {
-    "A", "A+", "24_AB_M", "24_CD_M_FULL", "24_AB_N_24_AB",
+    "A", "A+", "24_AB_M", "24_CD_M_FULL",
 }
 EXPLICIT_SIDE_CLASSES = {"C", "C+", "F", "24_AB_P"}
 B_LIKE_OPEN_CLASSES = {
@@ -14,7 +14,8 @@ B_LIKE_OPEN_CLASSES = {
     "24_AB_N_24_CD", "25_AB",
 }
 D_LIKE_OPEN_CLASSES = {
-    "D", "D+", "24_C", "24_D", "24_CD_N", "24_CD_N_24_CD", "25_CD",
+    "D", "D+", "24_C", "24_D", "24_CD_N", "24_CD_N_24_CD",
+    "24_AB_N_24_AB", "25_CD",
 }
 E_LIKE_OPEN_CLASSES = {"E", "E+", "G", "24_CD_P"}
 RING_ONLY_LIKE24_CLASSES = set()
@@ -22,7 +23,7 @@ CHAIN_MATERIALIZABLE_LIKE24_CLASSES = {"24_AB_M", "24_AB_P", "24_CD_M_FULL"}
 CHAIN_MATERIALIZABLE_OPEN_CLASSES = {
     "B", "B+", "C", "C+", "D", "D+", "E", "E+", "F", "G",
     "24_A", "24_B", "24_C", "24_D", "24_AB_N", "24_CD_M",
-    "24_CD_N", "24_CD_P", "24_AB_N_24_CD", "24_CD_N_24_CD",
+    "24_CD_N", "24_CD_P", "24_AB_N_24_AB", "24_AB_N_24_CD", "24_CD_N_24_CD",
 }
 
 TERMINAL_ENDPOINT_LABELS = {
