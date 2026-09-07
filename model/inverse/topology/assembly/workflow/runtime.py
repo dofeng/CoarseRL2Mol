@@ -289,6 +289,7 @@ class ExternalTopologyAssembler:
         # conversion; aliasing caller nodes here would leak a provisional
         # SU24->SU23 change and make the pending commit disappear.
         applied_recovery_ids: Set[int] = set()
+        applied_resource_change = False
         for raw_group in list(applied_ops or []):
             group = dict(raw_group or {})
             operations: List[Dict[str, Any]] = []
@@ -311,6 +312,12 @@ class ExternalTopologyAssembler:
                 target = operation.get("to_su")
                 if source is None or target is None:
                     continue
+                if int(source) != int(target):
+                    # Accepted conversions change the concrete pool used by
+                    # ring planning.  Even if this operation was already
+                    # mirrored by an idempotent continuation call, any ring
+                    # candidate enumerated before it is now historical.
+                    applied_resource_change = True
                 node_ids = [
                     int(value)
                     for value in list(operation.get("node_ids", []) or [])
@@ -376,6 +383,73 @@ class ExternalTopologyAssembler:
                 if int(dict(item or {}).get("node_id", -1))
                 not in applied_recovery_ids
             ]
+
+        # Ring plans carry concrete SU24/support identities.  Invalidate
+        # their retry state after an accepted conversion so the next pass
+        # enumerates against the live allocator instead of reusing a plan
+        # whose anchor may already belong to another product.  The old state
+        # is retained locally and copied into the pending contract history
+        # below for auditability; it is never used as the current candidate.
+        stale_ring_attempts: Dict[int, Dict[str, Any]] = {}
+        stale_ring_failures: Dict[int, Dict[str, Any]] = {}
+        if applied_resource_change:
+            available_ring_fragment_ids = {
+                int(view.fragment_id)
+                for view in list(getattr(self, "views", []) or [])
+                if bool(getattr(view, "can_ring", False))
+                and str(
+                    self.fragment_state_by_id.get(int(view.fragment_id), "available")
+                ) == "available"
+            }
+            ring_state_ids = (
+                available_ring_fragment_ids
+                | {int(value) for value in dict(self.ring_infeasible_contracts or {})}
+                | {int(value) for value in dict(self.ring_pending_attempts or {})}
+                | {int(value) for value in dict(self.ring_pending_reasons or {})}
+                | {
+                    int(value)
+                    for value in dict(
+                        self.materialization_failure_by_fragment_id or {}
+                    )
+                    if str(
+                        dict(
+                            self.materialization_failure_by_fragment_id.get(
+                                int(value), {}
+                            )
+                            or {}
+                        ).get("attempted_product_kind", "")
+                        or ""
+                    ).startswith("fatty_ring_")
+                }
+            )
+            for fragment_id in sorted(ring_state_ids):
+                prior_attempt = dict(
+                    self.ring_pending_attempts.get(int(fragment_id), {}) or {}
+                )
+                prior_failure = dict(
+                    self.materialization_failure_by_fragment_id.get(
+                        int(fragment_id), {}
+                    )
+                    or {}
+                )
+                if prior_attempt:
+                    stale_ring_attempts[int(fragment_id)] = deepcopy(prior_attempt)
+                if prior_failure:
+                    stale_ring_failures[int(fragment_id)] = deepcopy(prior_failure)
+                self.ring_infeasible_contracts.pop(int(fragment_id), None)
+                self.ring_pending_attempts.pop(int(fragment_id), None)
+                self.ring_pending_reasons.pop(int(fragment_id), None)
+                if str(prior_failure.get("attempted_product_kind", "") or "").startswith(
+                    "fatty_ring_"
+                ):
+                    self.materialization_failure_by_fragment_id.pop(
+                        int(fragment_id), None
+                    )
+            self.ring_exhausted_fragment_ids.difference_update(
+                available_ring_fragment_ids
+            )
+            if ring_state_ids:
+                self.completed_phases.discard("real_like24_ring_assembly")
         # Pending records are mutable continuation state, not immutable
         # diagnostics. Refresh their resource view after every accepted
         # conversion so the next recovery gate sees the allocator's concrete
@@ -470,6 +544,27 @@ class ExternalTopologyAssembler:
                 # It must not win over a fresh retry after the allocator has
                 # been changed by an accepted conversion.
                 diagnostics.pop("materialization_failure", None)
+                if stale_ring_attempts or stale_ring_failures:
+                    fragment_ids = {
+                        int(value)
+                        for value in list(
+                            contract.get("source_fragment_ids", []) or []
+                        )
+                    }
+                    for fragment_id in sorted(fragment_ids):
+                        prior_attempt = stale_ring_attempts.get(int(fragment_id))
+                        prior_failure = stale_ring_failures.get(int(fragment_id))
+                        if not prior_attempt and not prior_failure:
+                            continue
+                        attempt_history = list(
+                            diagnostics.get("attempt_history", []) or []
+                        )
+                        attempt_history.append({
+                            "kind": "pre_adjustment_ring_candidate_state",
+                            "ring_pending_attempts": dict(prior_attempt or {}),
+                            "materialization_failure": dict(prior_failure or {}),
+                        })
+                        diagnostics["attempt_history"] = attempt_history[-16:]
             required = dict(contract.get("required_counts", {}) or {})
             missing = _missing(required)
             contract["available_counts"] = dict(available_counts)

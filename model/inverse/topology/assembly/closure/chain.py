@@ -3603,14 +3603,27 @@ def record_remaining_external_pending(
                 materialization_failure.get("validation_reason", "")
                 or pending_reason
             )
-        if any(
+        existing_pending = any(
             fragment_id
             in {
                 int(value)
                 for value in list(getattr(existing, "source_fragment_ids", []) or [])
             }
             for existing in list(assembler.pending_units or [])
-        ):
+        )
+        # A ring materialization pass may select a different concrete plan
+        # after resources are converted.  Refresh the existing pending row
+        # with that plan's required counts and candidate diagnostics; the old
+        # blanket skip left the first ring contract frozen forever and made
+        # Stage3 stop even when the live allocator could satisfy a retry.
+        ring_pending_refresh = bool(
+            resource_backed_ring_pending
+            or mandatory_ring_pending
+            or str(
+                materialization_failure.get("attempted_product_kind", "") or ""
+            ).startswith("fatty_ring_")
+        )
+        if existing_pending and not ring_pending_refresh:
             continue
         partial = view.partial_render()
         attempted_required_counts = {
