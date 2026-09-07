@@ -257,7 +257,7 @@ def pending_target_role(
     # advertise both capabilities (for example 24_AB_M is flex-preferred
     # but can fall back to a side chain), so do not infer the target from the
     # full capability set and report an artificial ambiguity.
-    if pending_kind_name in {"explicit_side", "e_like_open"}:
+    if pending_kind_name == "explicit_side":
         return "side_chain"
     if pending_kind_name == "explicit_flex":
         return "flex_chain"

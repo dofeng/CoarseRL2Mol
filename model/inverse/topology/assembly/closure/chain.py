@@ -52,7 +52,6 @@ from ..projection.engine import (
     _strip_node_ids_from_path,
 )
 from ..core.rules import (
-    E_LIKE_OPEN_CLASSES,
     MAINLINE_CLOSURE_OPERATOR_SPECS,
     RING_PRODUCT_KIND_TO_TYPE,
     TERMINAL_ENDPOINT_LABELS,
@@ -813,14 +812,31 @@ def _d2_endpoint_requires_full_f1(
 ) -> bool:
     """Whether a d2 fixed-path endpoint still exposes an SU23 boundary.
 
-    Most legacy d2 bridge views represent a terminal context and therefore
-    only need the SU11/SU22 endcap shortcut.  A d2 node at the end of a
-    *mainline* fixed route is different: when its non-fixed SU23 neighbour is
-    still open, F1 must materialize the complete ``[23, 11]`` sequence.
+    A d2 bridge that is already terminal only needs the SU11/SU22 endcap
+    shortcut.  A d2 node at the end of an open mainline route instead needs
+    the complete ``[23, 11]`` sequence recorded by classification.
     """
     if str(closure_mode) != "F1":
         return False
     bridge = open_bridge_token(assembler, view, str(side))
+    # A fixed d2 tail can be projected with only the opposite endpoint marked
+    # open because its boundary is carried by an explicit classification
+    # contract.  Resolve the concrete endpoint so that contract remains
+    # addressable after a fresh Layer1/2 rebuild.
+    if bridge is None:
+        endpoint = view.endpoint(str(side))
+        endpoint_label = str(endpoint.label or "")
+        if (
+            endpoint.node_id is not None
+            and endpoint_label in {
+                "single19d2",
+                "single20d2",
+                "double19d2",
+                "double20d2",
+                "21d2",
+            }
+        ):
+            bridge = (endpoint_label, int(endpoint.node_id))
     if bridge is None or str(bridge[0]) not in {
         "single19d2",
         "single20d2",
@@ -830,6 +846,18 @@ def _d2_endpoint_requires_full_f1(
     }:
         return False
     bridge_id = int(bridge[1])
+    for raw_profile in list(
+        dict(getattr(view, "evidence", {}) or {}).get(
+            "basic_open_endpoints", []
+        )
+        or []
+    ):
+        profile = dict(raw_profile or {})
+        if (
+            _safe_int(profile.get("node_id"), -1) == bridge_id
+            and bool(profile.get("requires_full_f1", False))
+        ):
+            return True
     for raw_contract in list(getattr(view, "fixed_connection_contracts", []) or []):
         contract = dict(raw_contract or {})
         base_ids = [
@@ -847,22 +875,17 @@ def _d2_endpoint_requires_full_f1(
             base_ids
             and int(base_ids[-1]) == bridge_id
             and ("mainline_only" in roles or "mainline_or_branch" in roles or fixed_role == "mainline")
-            and 23 in boundary_sus
-        ):
-            return True
-
-    # Compatibility for views produced before the explicit contract field
-    # existed.  Only an actually non-fixed SU23 neighbour qualifies.
-    bridge_node = dict(getattr(assembler, "nodes_by_id", {}) or {}).get(bridge_id)
-    if bridge_node is None:
-        return False
-    for raw_neighbor_id in list(getattr(bridge_node, "hop1_ids", []) or []):
-        neighbor_id = _safe_int(raw_neighbor_id, -1)
-        neighbor = dict(getattr(assembler, "nodes_by_id", {}) or {}).get(neighbor_id)
-        if (
-            neighbor is not None
-            and int(getattr(neighbor, "su_type", -1)) == 23
-            and not _nodes_have_fixed_edge(bridge_node, neighbor)
+            and (
+                23 in boundary_sus
+                or bool(
+                    list(
+                        contract.get("tail_open_boundary_node_ids", [])
+                        or []
+                    )
+                )
+                or str(contract.get("tail_open_reason", "") or "")
+                == "fixed_branch_d2_requires_H1"
+            )
         ):
             return True
     return False
@@ -1335,13 +1358,10 @@ def pending_kind_for_view(
     if view_has_flex_reconcile_role(assembler, view, "b_like_open"):
         return "b_like_open"
     if is_side_pending_view(assembler, view):
-        return "explicit_side" if str(getattr(view, "preferred_product_type", "")) == "side_chain" else "e_like_open"
-    preferred = str(getattr(view, "preferred_product_type", "") or "")
-    if preferred == "flex_chain":
-        return "explicit_flex"
-    if preferred == "side_chain":
         return "explicit_side"
-    if preferred == "ring_candidate":
+    if bool(getattr(view, "can_flex", False)):
+        return "explicit_flex"
+    if bool(getattr(view, "can_ring", False)):
         return "ring_only_like24"
     return "other"
 
@@ -1350,14 +1370,8 @@ def is_side_pending_view(
     assembler: Any,
     view: Optional[AssemblyFragmentView],
 ) -> bool:
-    if view is None:
-        return False
-    if bool(getattr(view, "can_side", False)):
-        return True
-    return bool(
-        str(getattr(view, "class_type", "")) in E_LIKE_OPEN_CLASSES
-        or str(getattr(view, "preferred_product_type", "")) == "side_chain"
-    )
+    del assembler
+    return bool(view is not None and getattr(view, "can_side", False))
 
 
 def available_remaining_side_views(
@@ -2628,12 +2642,31 @@ def assemble_remaining_external_single_b_closures_for_flex(
             require_materializable=True,
             require_generic_join=False,
         ):
-            if finalize_with_closure(assembler, 
-                view,
-                product_kind="flex_chain",
-                closure_mode="F1",
-                branch_donors=branch_donors,
+            if (
+                _d2_endpoint_requires_full_f1(
+                    assembler, view, side="right", closure_mode="F1"
+                )
+                or _d2_endpoint_requires_full_f1(
+                    assembler, view, side="left", closure_mode="F1"
+                )
             ):
+                assembled = finalize_with_two_end_closures(
+                    assembler,
+                    view,
+                    product_kind="flex_chain",
+                    left_mode="F1",
+                    right_mode="F1",
+                    branch_donors=branch_donors,
+                )
+            else:
+                assembled = finalize_with_closure(
+                    assembler,
+                    view,
+                    product_kind="flex_chain",
+                    closure_mode="F1",
+                    branch_donors=branch_donors,
+                )
+            if assembled:
                 cycle_progress = True
                 break
         if not cycle_progress:
@@ -2727,16 +2760,35 @@ def assemble_remaining_b_d_as_side(
         key=lambda item: (view_flex_reconcile_priority(assembler, item), int(item.fragment_id)),
     )
     for view in b_views:
-        if finalize_with_closure(assembler, 
-            view,
-            product_kind="side_chain",
-            # B-like fragments already have an aromatic fixed end.  Closing
-            # the other side as a side chain must use F2 = [23, 22] so the
-            # materialized product ends in a terminal unit.  F1 is reserved
-            # for B-like flex-chain closure.
-            closure_mode="F2",
-            branch_donors=branch_donors,
+        if (
+            _d2_endpoint_requires_full_f1(
+                assembler, view, side="right", closure_mode="F1"
+            )
+            or _d2_endpoint_requires_full_f1(
+                assembler, view, side="left", closure_mode="F1"
+            )
         ):
+            left_mode, right_mode = _side_closure_modes_for_view(assembler, view)
+            assembled = finalize_with_two_end_closures(
+                assembler,
+                view,
+                product_kind="side_chain",
+                left_mode=left_mode,
+                right_mode=right_mode,
+                branch_donors=branch_donors,
+            )
+        else:
+            # B-like fragments already have an aromatic fixed end.  Closing
+            # the other side as a side chain uses F2 = [23, 22] so the
+            # materialized product ends in a terminal unit.
+            assembled = finalize_with_closure(
+                assembler,
+                view,
+                product_kind="side_chain",
+                closure_mode="F2",
+                branch_donors=branch_donors,
+            )
+        if assembled:
             progress_made = True
     return progress_made
 
@@ -3279,9 +3331,38 @@ def retry_ready_pending_contracts(
             )
         elif target_role == "flex_chain":
             candidate = views[0]
-            if pending_kind == "d_like_open" or view_has_flex_reconcile_role(
-                assembler, candidate, "d_like_open", "double_end_flex_source"
+            if (
+                pending_kind in {"d_like_open"}
+                or view_has_flex_reconcile_role(
+                    assembler, candidate, "d_like_open", "double_end_flex_source"
+                )
             ):
+                assembled = finalize_with_two_end_closures(
+                    assembler,
+                    candidate,
+                    product_kind="flex_chain",
+                    left_mode="F1",
+                    right_mode="F1",
+                    branch_donors=branch_donors,
+                )
+            elif (
+                (
+                    _d2_endpoint_requires_full_f1(
+                        assembler, candidate, side="right", closure_mode="F1"
+                    )
+                    or _d2_endpoint_requires_full_f1(
+                        assembler, candidate, side="left", closure_mode="F1"
+                    )
+                )
+                and bool(
+                    getattr(candidate, "open_left", False)
+                    or getattr(candidate, "open_right", False)
+                )
+            ):
+                # Fresh projections may expose only the left B-like opening
+                # while the fixed single19d2 tail remains externally open.
+                # Treat it as a double-ended flex source rather than closing
+                # only the aromatic left side.
                 assembled = finalize_with_two_end_closures(
                     assembler,
                     candidate,
@@ -3314,6 +3395,33 @@ def retry_ready_pending_contracts(
                 assembler, candidate, "d_like_open"
             ):
                 left_mode, right_mode = _side_closure_modes_for_view(assembler, candidate)
+                assembled = finalize_with_two_end_closures(
+                    assembler,
+                    candidate,
+                    product_kind="side_chain",
+                    left_mode=left_mode,
+                    right_mode=right_mode,
+                    branch_donors=branch_donors,
+                )
+            elif (
+                (
+                    _d2_endpoint_requires_full_f1(
+                        assembler, candidate, side="right", closure_mode="F1"
+                    )
+                    or _d2_endpoint_requires_full_f1(
+                        assembler, candidate, side="left", closure_mode="F1"
+                    )
+                )
+                and bool(
+                    getattr(candidate, "open_left", False)
+                    or getattr(candidate, "open_right", False)
+                )
+            ):
+                # B-like side fallback with a fixed d2 tail requires the
+                # orientation-aware F2/F1 pair (or its reversed F1/F2 form).
+                left_mode, right_mode = _side_closure_modes_for_view(
+                    assembler, candidate
+                )
                 assembled = finalize_with_two_end_closures(
                     assembler,
                     candidate,
@@ -3403,16 +3511,10 @@ def remaining_pending_kind_and_reason(
             return "d_like_open", "remaining_external_halfclosed_open"
         return "b_like_open", "remaining_external_halfclosed_open"
     if is_side_pending_view(assembler, view):
-        if str(getattr(view, "preferred_product_type", "")) == "side_chain":
-            return "explicit_side", "remaining_external_side_open"
-        return "e_like_open", "remaining_external_side_open"
-    if bool(getattr(view, "can_side", False)):
         return "explicit_side", "remaining_external_side_open"
     if bool(getattr(view, "can_flex", False)):
         return "explicit_flex", "remaining_external_halfclosed_open"
-    if str(getattr(view, "preferred_product_type", "")) == "flex_chain":
-        return "explicit_flex", "remaining_external_halfclosed_open"
-    if str(getattr(view, "preferred_product_type", "")) == "ring_candidate":
+    if bool(getattr(view, "can_ring", False)):
         return "ring_only_like24", "remaining_external_halfclosed_open"
     return "other", "remaining_external_halfclosed_open"
 

@@ -1,5 +1,6 @@
 z_library/
 test_results/
+data/test_results copy/
 test_RL/
 __pycache__/
 .vscode/

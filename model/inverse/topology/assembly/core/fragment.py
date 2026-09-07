@@ -6,12 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .models import AssemblyEndpoint, BranchStub
-from .rules import (
-    B_LIKE_OPEN_CLASSES,
-    D_LIKE_OPEN_CLASSES,
-    E_LIKE_OPEN_CLASSES,
-    TERMINAL_ENDPOINT_LABELS,
-)
+from .rules import TERMINAL_ENDPOINT_LABELS
 from ...classification.classification_tokens import AROMATIC_SU_TYPES
 from ...stage3_models import Stage3Serializable, TopologyPathRender
 
@@ -173,14 +168,14 @@ class AssemblyFragmentView(Stage3Serializable):
     def _endpoint_role(self, *, is_open: bool, label: str) -> str:
         if is_open:
             roles = {str(value) for value in list(self.flex_reconcile_roles or [])}
-            if "b_like_open" in roles or str(self.class_type) in B_LIKE_OPEN_CLASSES:
+            if "b_like_open" in roles or str(self.main_kind) == "b_like_open":
                 return "b_like_open_end"
-            if str(self.class_type) in E_LIKE_OPEN_CLASSES:
+            if "e_like_open" in roles or str(self.main_kind) == "e_like_open":
                 return "e_like_open_end"
-            if "d_like_open" in roles or str(self.class_type) in D_LIKE_OPEN_CLASSES:
+            if "d_like_open" in roles or str(self.main_kind) == "d_like_open":
                 return "double_open_end"
             if str(self.family) in {"like24", "like24_secondary", "like24_bridge"}:
-                if str(self.preferred_product_type) == "side_chain":
+                if bool(self.can_side):
                     return "e_like_open_end"
                 if self.open_left and self.open_right:
                     return "double_open_end"

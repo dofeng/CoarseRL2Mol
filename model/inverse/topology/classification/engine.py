@@ -87,6 +87,27 @@ FLEX_RECONCILE_FLEX_CHAIN_CLASSES = {
 FLEX_RECONCILE_SIDE_CHAIN_CLASSES = {"C", "E", "F", "G", "C+", "E+", "24_AB_P", "24_CD_P"}
 PAIRED_LIKE24_CLASS_TYPES = {"24_AB_N_24_AB", "24_AB_N_24_CD", "24_CD_N_24_CD"}
 
+_DEFAULT_ASSEMBLY_CAPABILITIES_BY_FAMILY = {
+    "basic": {
+        "flex": {"A", "B", "D"},
+        "side": {"B", "C", "D", "E", "F", "G"},
+        "ring": {"B", "D"},
+    },
+    "double_d2_combo": {
+        "flex": {"A+", "B+", "D+"},
+        "side": {"B+", "C+", "D+", "E+"},
+        # Double-d2 combinations have mainline closure contracts but no
+        # standard fatty-ring skeleton.  Ring capability belongs to Like24
+        # contracts and must not be inferred from the ``+`` class suffix.
+        "ring": set(),
+    },
+    "su25": {
+        "flex": {"25_AB", "25_CD"},
+        "side": {"25_AB", "25_CD"},
+        "ring": set(),
+    },
+}
+
 GENERIC_OPEN_SUBTYPE_LIKE = {"single19d2", "single20d2", "double19d2", "double20d2"}
 SUPPORT_ONLY_SU_TYPES = {5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 30}
 CLASSIFIABLE_CENTER_SU_TYPES = {0, 1, 2, 3, 4, 14, 15, 16, 18, 19, 20, 21, 24, 25, 27, 28, 29, 31, 32}
@@ -1537,7 +1558,7 @@ def _external_pending_profile(
         pending_kind = "pending_su25"
         pending_reason = "su25_closure_not_materialized"
     elif class_name in FLEX_RECONCILE_EXPLICIT_SIDE_CLASSES or class_name in FLEX_RECONCILE_E_LIKE_OPEN_CLASSES:
-        pending_kind = "explicit_side" if class_name in FLEX_RECONCILE_EXPLICIT_SIDE_CLASSES else "e_like_open"
+        pending_kind = "explicit_side"
         pending_reason = "remaining_external_side_open"
     elif class_name in FLEX_RECONCILE_B_LIKE_OPEN_CLASSES:
         pending_kind = "b_like_open"
@@ -1547,6 +1568,23 @@ def _external_pending_profile(
     return {
         "external_pending_kind": str(pending_kind),
         "external_pending_reason": str(pending_reason),
+    }
+
+
+def _default_assembly_capabilities(
+    *,
+    family: str,
+    class_type: str,
+) -> Optional[Dict[str, Any]]:
+    rules = _DEFAULT_ASSEMBLY_CAPABILITIES_BY_FAMILY.get(str(family))
+    if rules is None:
+        return None
+    class_name = str(class_type)
+    return {
+        "flex_allowed": class_name in set(rules["flex"]),
+        "side_allowed": class_name in set(rules["side"]),
+        "ring_allowed": class_name in set(rules["ring"]),
+        "ring_roles_by_skeleton": {},
     }
 
 
@@ -1624,6 +1662,12 @@ def _augment_fragment_evidence(
 ) -> Dict[str, Any]:
     payload = dict(evidence or {})
     payload.setdefault("fixed_connector_inferred", bool(fixed_connector_inferred))
+    default_capabilities = _default_assembly_capabilities(
+        family=str(family),
+        class_type=str(class_type),
+    )
+    if default_capabilities is not None:
+        payload.setdefault("assembly_capabilities", default_capabilities)
     for key, value in _flex_reconcile_evidence(
         family=str(family),
         class_type=str(class_type),
@@ -4361,9 +4405,6 @@ def _match_like24_fragment(
             "secondary_connector_profiles": connector_profiles,
             "fixed_connection_contracts": contracts,
             "fixed_branch_double_open_flex": bool(not terminal_28_ring_branch),
-            # Preserve the ring-first shape without turning it into a mandatory
-            # ring.  It remains eligible for D-like side closure after failure.
-            "terminal_28_ring_only_branch": False,
             "terminal_28_ring_preferred_branch": bool(terminal_28_ring_branch),
             "ring_branch_capable": bool(ring_branch_kinds),
             "ring_branch_allowed_skeletons": list(ring_branch_kinds),
@@ -4377,6 +4418,15 @@ def _match_like24_fragment(
                 else "two_open_mainline_boundaries_keep_fixed_connection_as_branch"
             ),
         })
+        capabilities = dict(
+            base_fragment.evidence.get("assembly_capabilities", {}) or {}
+        )
+        capabilities.update({
+            "flex_allowed": bool(not terminal_28_ring_branch),
+            "side_allowed": True,
+            "ring_allowed": bool(ring_branch_kinds),
+        })
+        base_fragment.evidence["assembly_capabilities"] = capabilities
         base_fragment.topology_template = "-24(?)-"
         base_fragment.open_slots = ["OPEN", "OPEN"]
         base_fragment.open_mainline_slots = []
@@ -4979,6 +5029,22 @@ def _atomic_pair_fallback_fragment(
                 required_su_sequence=[23, 11],
             ))
         topology_template = "-".join(str(value) for value in su_pair)
+    # ``preferred_product_type`` is only a routing priority.  Atomic pairs
+    # with two open mainline ports (the common D-like 15-15 case) are valid
+    # side-chain sources when they are not selected for the flex window.  The
+    # old fallback emitted no capability facts, so projection interpreted the
+    # flex preference as an exclusive capability and dropped the fragment
+    # from both flex and side materialization.
+    main_kind = _flex_reconcile_main_kind_for_fragment(str(class_type))
+    assembly_capabilities = {
+        "flex_allowed": bool(main_kind in {"d_like_open", "explicit_flex"}),
+        "side_allowed": bool(main_kind in {"d_like_open", "e_like_open"}),
+        # Atomic fallback has no contract-defined ring skeleton.  Ring
+        # eligibility must come from a classified standard form, never from
+        # the pair shape alone.
+        "ring_allowed": False,
+        "ring_roles_by_skeleton": {},
+    }
     evidence = _augment_fragment_evidence(
         family=family,
         class_type=class_type,
@@ -4992,6 +5058,7 @@ def _atomic_pair_fallback_fragment(
             "atomic_group_id": int(group.get("group_id", node_ids[0])),
             "atomic_group_node_ids": list(node_ids),
             "atomic_group_su_pair": list(su_pair),
+            "assembly_capabilities": assembly_capabilities,
         },
     )
     return TopologyFragment(
@@ -5019,6 +5086,7 @@ def _atomic_pair_fallback_fragment(
 
 def _basic_open_endpoint_profiles(
     fragment: TopologyFragment,
+    tokens_by_id: Dict[int, ClassificationToken],
 ) -> List[Dict[str, Any]]:
     """Build the owned/context endpoint contract for a basic fragment."""
     if str(fragment.family) != "basic":
@@ -5095,6 +5163,17 @@ def _basic_open_endpoint_profiles(
             or ""
         )
         owned_literal = bool(node_id >= 0 and node_id in claimed)
+        endpoint_token = tokens_by_id.get(int(node_id)) if node_id >= 0 else None
+        open_boundary_node_ids = sorted({
+            int(neighbor.node_id)
+            for neighbor in list(
+                getattr(endpoint_token, "neighbor_tokens", []) or []
+            )
+            if int(neighbor.su_type) == 23
+            and not _tokens_have_fixed_edge(
+                int(node_id), int(neighbor.node_id), tokens_by_id
+            )
+        })
         profiles.append({
             "side": str(side),
             "node_id": None if node_id < 0 else int(node_id),
@@ -5103,6 +5182,8 @@ def _basic_open_endpoint_profiles(
             "is_fixed": bool(token_payload.get("is_fixed", False)),
             "owned_literal": bool(owned_literal),
             "context_only": bool(node_id >= 0 and node_id in context and not owned_literal),
+            "open_boundary_node_ids": open_boundary_node_ids,
+            "requires_full_f1": bool(open_boundary_node_ids),
         })
     return profiles
 
@@ -5120,7 +5201,11 @@ def _basic_open_endpoint_slots(
         owned_literal = bool(profile.get("owned_literal", False))
         required = (
             [11]
-            if owned_literal and label in BASIC_CAP_ONLY_BRIDGE_SUBTYPES
+            if (
+                owned_literal
+                and label in BASIC_CAP_ONLY_BRIDGE_SUBTYPES
+                and not bool(profile.get("requires_full_f1", False))
+            )
             else [23, 11]
         )
         anchor_node_id = (
@@ -5141,7 +5226,10 @@ def _basic_open_endpoint_slots(
     return slots
 
 
-def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment:
+def _normalize_fragment_contract(
+    fragment: TopologyFragment,
+    tokens_by_id: Dict[int, ClassificationToken],
+) -> TopologyFragment:
     original_source = sorted({int(value) for value in list(fragment.source_node_ids or [])})
     claimed = sorted({int(value) for value in list(fragment.claimed_node_ids or original_source)})
     fragment.context_node_ids = sorted(
@@ -5168,7 +5256,7 @@ def _normalize_fragment_contract(fragment: TopologyFragment) -> TopologyFragment
             if ref.node_id is not None
         ]
     if str(fragment.family) == "basic":
-        endpoint_profiles = _basic_open_endpoint_profiles(fragment)
+        endpoint_profiles = _basic_open_endpoint_profiles(fragment, tokens_by_id)
         fragment.evidence["basic_open_endpoints"] = [
             dict(item or {}) for item in endpoint_profiles
         ]
@@ -5600,7 +5688,9 @@ def classify_topology_units(
                 fragment,
                 tokens_by_id,
             )
-        normalized_fragments.append(_normalize_fragment_contract(fragment))
+        normalized_fragments.append(
+            _normalize_fragment_contract(fragment, tokens_by_id)
+        )
     fragments = normalized_fragments
     edge_semantics_audit_errors: List[Dict[str, Any]] = []
     for fragment in fragments:

@@ -418,6 +418,44 @@ def _canonical_labels_for_class(class_type: str, fallback: Sequence[str]) -> Lis
     return labels if labels else list(fallback or [])
 
 
+def _assembly_capabilities(
+    fragment: TopologyFragment,
+    evidence: Dict[str, Any],
+    *,
+    has_ring_contract: bool,
+) -> Tuple[bool, bool, bool]:
+    capabilities = dict(evidence.get("assembly_capabilities", {}) or {})
+    required_keys = {"flex_allowed", "side_allowed", "ring_allowed"}
+    missing_keys = sorted(required_keys - set(capabilities))
+    if missing_keys:
+        raise ValueError(
+            f"fragment {int(fragment.fragment_id)} assembly_capabilities "
+            f"missing keys: {missing_keys}"
+        )
+    can_flex = bool(capabilities["flex_allowed"])
+    can_side = bool(capabilities["side_allowed"])
+    can_ring = bool(capabilities["ring_allowed"])
+    if can_ring and not bool(has_ring_contract):
+        raise ValueError(
+            f"fragment {int(fragment.fragment_id)} enables ring assembly "
+            "without a contract-defined ring role"
+        )
+    return can_flex, can_side, can_ring
+
+
+def _target_roles(
+    *,
+    can_flex: bool,
+    can_side: bool,
+    can_ring: bool,
+) -> List[str]:
+    return sorted({
+        *(["flex_chain"] if can_flex else []),
+        *(["side_chain"] if can_side else []),
+        *(["fatty_ring"] if can_ring else []),
+    })
+
+
 def _dict_label(token: Dict[str, Any]) -> str:
     return str(token.get("subtype") or token.get("su_type") or "")
 
@@ -535,7 +573,7 @@ def _should_materialize_bridge_literal(view: "AssemblyFragmentView", bridge_labe
         "21d2",
     }:
         return bool(
-            getattr(view, "preferred_product_type", "") == "side_chain"
+            bool(getattr(view, "can_side", False))
             or any(
                 role in {
                     "b_like_open",
@@ -1075,19 +1113,11 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
     ring_anchor_profile = {"left_aromatic": _is_aromatic_label(str(labels[0] if labels else "")), "right_aromatic": _is_aromatic_label(str(labels[-1] if labels else ""))}
     flex_reconcile_roles = _flex_reconcile_roles_from_evidence(fragment)
     flex_reconcile_priority = _flex_reconcile_priority_from_evidence(fragment)
-    capability_evidence = dict(
-        dict(view_evidence or {}).get("assembly_capabilities", {}) or {}
+    can_flex, can_side, can_ring = _assembly_capabilities(
+        fragment,
+        view_evidence,
+        has_ring_contract=bool(ring_roles),
     )
-    # Product preference is an ordering hint; explicit classification
-    # capabilities preserve legal flex/side/ring fallback routes.
-    can_flex = bool(capability_evidence.get(
-        "flex_allowed",
-        ("flex_preferred" in set(flex_reconcile_roles)) or preferred == "flex_chain",
-    ))
-    can_side = bool(capability_evidence.get(
-        "side_allowed", preferred == "side_chain" or class_type in {"B", "D"}
-    ))
-    can_ring = bool(capability_evidence.get("ring_allowed", bool(ring_roles))) and bool(ring_roles)
     branch_anchor_index = (
         list(node_ids).index(int(center.global_id))
         if int(center.global_id) in set(int(value) for value in node_ids)
@@ -1143,11 +1173,11 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
         can_flex=can_flex,
         can_side=can_side,
         can_ring=can_ring,
-        target_roles=sorted({
-            *(["flex_chain"] if can_flex else []),
-            *(["side_chain"] if can_side else []),
-            *(["fatty_ring"] if can_ring else []),
-        }),
+        target_roles=_target_roles(
+            can_flex=can_flex,
+            can_side=can_side,
+            can_ring=can_ring,
+        ),
         evidence=view_evidence,
         diagnostics={
             "source_fragment_family": str(fragment.family),
@@ -1244,17 +1274,11 @@ def _project_double_d2_fragment(fragment: TopologyFragment, nodes_by_id: Dict[in
     main_kind = _main_kind_for_class(class_type)
     flex_reconcile_roles = _flex_reconcile_roles_from_evidence(fragment)
     flex_reconcile_priority = _flex_reconcile_priority_from_evidence(fragment)
-    capability_evidence = dict(evidence.get("assembly_capabilities", {}) or {})
-    # Product preference is an ordering hint; explicit classification
-    # capabilities preserve legal flex/side/ring fallback routes.
-    can_flex = bool(capability_evidence.get(
-        "flex_allowed", preferred == "flex_chain" or class_type in {"C+"}
-    ))
-    can_side = bool(capability_evidence.get(
-        "side_allowed",
-        preferred == "side_chain" or class_type in {"B+", "D+", "E+"},
-    ))
-    can_ring = bool(capability_evidence.get("ring_allowed", bool(ring_roles))) and bool(ring_roles)
+    can_flex, can_side, can_ring = _assembly_capabilities(
+        fragment,
+        evidence,
+        has_ring_contract=bool(ring_roles),
+    )
     return AssemblyFragmentView(
         unit_id=int(fragment.fragment_id),
         fragment_id=int(fragment.fragment_id),
@@ -1290,11 +1314,11 @@ def _project_double_d2_fragment(fragment: TopologyFragment, nodes_by_id: Dict[in
         can_flex=can_flex,
         can_side=can_side,
         can_ring=can_ring,
-        target_roles=sorted({
-            *(["flex_chain"] if can_flex else []),
-            *(["side_chain"] if can_side else []),
-            *(["fatty_ring"] if can_ring else []),
-        }),
+        target_roles=_target_roles(
+            can_flex=can_flex,
+            can_side=can_side,
+            can_ring=can_ring,
+        ),
         evidence=evidence,
         diagnostics={"connector_profiles": profiles},
     )
@@ -1465,10 +1489,7 @@ def project_like24_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
         evidence.get("fixed_branch_double_open_flex", False)
     )
     terminal_28_ring_preferred_branch = bool(
-        evidence.get(
-            "terminal_28_ring_preferred_branch",
-            evidence.get("terminal_28_ring_only_branch", False),
-        )
+        evidence.get("terminal_28_ring_preferred_branch", False)
     )
     labels: List[str] = []
     node_ids: List[int] = []
@@ -1868,26 +1889,17 @@ def project_like24_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
         str(kind): [str(item) for item in list(values or [])]
         for kind, values in dict(evidence.get("ring_path_capabilities", {}) or {}).items()
     }
-    # Contract eligibility is the authoritative ring standard.  The flat
-    # ``ring_allowed_skeletons`` field is retained as a compatibility fallback
-    # for older classifier payloads, but must not widen an explicit contract.
+    # Contract eligibility is the authoritative Like24 ring standard.
     ring_contracts = {
         str(key): dict(value or {})
         for key, value in dict(evidence.get("ring_contracts", {}) or {}).items()
     }
-    if ring_contracts:
-        allowed_ring_kinds = {
-            _skeleton_allowed_name(str(kind))
-            for kind, contract in ring_contracts.items()
-            if bool(dict(contract or {}).get("eligible", False))
-            and _skeleton_allowed_name(str(kind)) in {"side", "upper_lower", "fused"}
-        }
-    else:
-        allowed_ring_kinds = {
-            str(kind)
-            for kind in list(evidence.get("ring_allowed_skeletons", []) or [])
-            if str(kind) in {"side", "upper_lower", "fused"}
-        }
+    allowed_ring_kinds = {
+        _skeleton_allowed_name(str(kind))
+        for kind, contract in ring_contracts.items()
+        if bool(dict(contract or {}).get("eligible", False))
+        and _skeleton_allowed_name(str(kind)) in {"side", "upper_lower", "fused"}
+    }
     ordered_backbone = _ordered_ring_backbone_map(
         labels=labels,
         node_ids=node_ids,
@@ -2051,29 +2063,12 @@ def project_like24_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
                     f"like24_mainline_contract_anchor_invalid:{int(fragment.fragment_id)}:"
                     f"{int(slot.anchor_node_id)}"
                 )
-    assembly_capabilities = dict(evidence.get("assembly_capabilities", {}) or {})
-    legacy_can_flex = bool(
-        "flex_preferred" in set(flex_reconcile_roles)
-        or preferred == "flex_chain"
+    can_flex, can_side, can_ring = _assembly_capabilities(
+        fragment,
+        evidence,
+        has_ring_contract=bool(ring_roles),
     )
-    legacy_can_side = bool(preferred == "side_chain")
-    legacy_can_ring = bool(ring_roles) and not str(
-        evidence.get("ring_block_reason", "")
-    )
-    can_flex = bool(
-        assembly_capabilities.get("flex_allowed", legacy_can_flex)
-        or fixed_branch_double_open_flex
-    )
-    can_side = bool(
-        assembly_capabilities.get(
-            "side_allowed",
-            evidence.get("side_allowed", legacy_can_side),
-        )
-    )
-    can_ring = bool(
-        assembly_capabilities.get("ring_allowed", legacy_can_ring)
-        and not str(evidence.get("ring_block_reason", ""))
-    )
+    can_ring = bool(can_ring and not str(evidence.get("ring_block_reason", "")))
 
     return AssemblyFragmentView(
         unit_id=int(fragment.fragment_id),
@@ -2120,11 +2115,11 @@ def project_like24_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
         can_flex=bool(can_flex),
         can_side=bool(can_side),
         can_ring=bool(can_ring),
-        target_roles=sorted({
-            *(["flex_chain"] if can_flex else []),
-            *(["side_chain"] if can_side else []),
-            *(["fatty_ring"] if can_ring else []),
-        }),
+        target_roles=_target_roles(
+            can_flex=can_flex,
+            can_side=can_side,
+            can_ring=can_ring,
+        ),
         evidence=evidence,
         diagnostics={
             "connector_profiles": profiles,
@@ -2185,6 +2180,11 @@ def _project_su25_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _N
     main_kind = _main_kind_for_class(str(fragment.class_type))
     flex_reconcile_roles = _flex_reconcile_roles_from_evidence(fragment)
     flex_reconcile_priority = _flex_reconcile_priority_from_evidence(fragment)
+    can_flex, can_side, can_ring = _assembly_capabilities(
+        fragment,
+        dict(fragment.evidence or {}),
+        has_ring_contract=False,
+    )
     branch_anchor_index = (
         list(node_ids).index(int(center.global_id))
         if int(center.global_id) in set(int(value) for value in node_ids)
@@ -2233,10 +2233,14 @@ def _project_su25_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _N
         ring_template_roles=ring_template_roles,
         flex_reconcile_roles=flex_reconcile_roles,
         flex_reconcile_priority=int(flex_reconcile_priority),
-        can_flex=True,
-        can_side=True,
-        can_ring=False,
-        target_roles=["flex_chain", "side_chain"],
+        can_flex=can_flex,
+        can_side=can_side,
+        can_ring=can_ring,
+        target_roles=_target_roles(
+            can_flex=can_flex,
+            can_side=can_side,
+            can_ring=can_ring,
+        ),
         evidence=dict(fragment.evidence or {}),
         diagnostics={
             "real_mainline_support_node_ids": [
@@ -2305,6 +2309,29 @@ def _project_atomic_fallback_fragment(
         preferred = "flex_chain"
         flex_roles = ["explicit_flex", "flex_preferred"]
 
+    # Capabilities are facts emitted by classification.  The preferred route
+    # only controls ordering: an open D-like atomic pair remains eligible for
+    # side-chain closure after flex selection/ring probing has passed over it.
+    ring_roles = [
+        str(role)
+        for role in list(dict(fragment.evidence or {}).get("ring_roles", []) or [])
+        if str(role)
+    ]
+    ring_path_capabilities = {
+        str(kind): [str(value) for value in list(values or []) if str(value)]
+        for kind, values in dict(
+            fragment.evidence or {}
+        ).get("ring_path_capabilities", {}).items()
+    }
+    can_flex, can_side, can_ring = _assembly_capabilities(
+        fragment,
+        dict(fragment.evidence or {}),
+        has_ring_contract=bool(ring_roles),
+    )
+    flex_priority = _safe_int(
+        dict(fragment.evidence or {}).get("flex_reconcile_priority"),
+        50,
+    )
     primary_anchor = min(unresolved_branch_kinds_by_anchor, default=max(0, len(node_ids) // 2))
     return AssemblyFragmentView(
         unit_id=int(fragment.fragment_id),
@@ -2327,12 +2354,22 @@ def _project_atomic_fallback_fragment(
         unresolved_branch_kinds_by_anchor=unresolved_branch_kinds_by_anchor,
         main_kind=str(main_kind),
         preferred_product_type=str(preferred),
+        ring_roles=ring_roles,
+        ring_backbone_labels={},
+        ring_backbone_node_ids={},
+        ring_backbone_kind={},
+        ring_backbone_span={},
+        ring_template_roles=ring_path_capabilities,
         flex_reconcile_roles=list(flex_roles),
-        flex_reconcile_priority=50,
-        can_flex=bool(preferred == "flex_chain"),
-        can_side=bool(preferred == "side_chain"),
-        can_ring=bool(str(fragment.family) == "like24_unsaturated_pair"),
-        target_roles=[str(preferred)],
+        flex_reconcile_priority=int(flex_priority),
+        can_flex=can_flex,
+        can_side=can_side,
+        can_ring=can_ring,
+        target_roles=_target_roles(
+            can_flex=can_flex,
+            can_side=can_side,
+            can_ring=can_ring,
+        ),
         evidence=dict(fragment.evidence or {}),
         diagnostics={"source_fragment_family": str(fragment.family)},
     )

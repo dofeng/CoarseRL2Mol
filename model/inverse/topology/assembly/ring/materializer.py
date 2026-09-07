@@ -24,11 +24,6 @@ from . import planner as ring_planner_module
 from . import search as ring_search_module
 from . import segments as ring_segments_module
 
-from .topology import audit_ring_topology_contract
-
-__all__ = ["audit_ring_topology_contract"]
-
-
 def resolve_ring_candidate_topology(
     assembler,
     plan: RingCandidatePlan,

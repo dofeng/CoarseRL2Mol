@@ -1,6 +1,6 @@
 """Stable public entry points for external Stage3 topology assembly."""
 
-from .engine import (
+from .workflow.runtime import (
     ExternalTopologyAssembler,
     assemble_external_topologies,
 )

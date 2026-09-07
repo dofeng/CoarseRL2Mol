@@ -429,8 +429,17 @@ class ExternalTopologyAssembler:
             if had_accepted_operations:
                 # Preserve the old attempt as history, but never let its
                 # failed claim be interpreted as the current inventory after
-                # concrete SU conversion has been accepted.
+                # concrete SU conversion has been accepted.  A contract has
+                # two layers of diagnostics (the public row and the nested
+                # materialization proof); clearing only claim_trace used to
+                # leave ``branch_pool_shortage`` in the latter and the Stage3
+                # planner consequently treated a now-satisfied contract as a
+                # resource-accounting contradiction.
                 stale_trace = list(diagnostics.get("claim_trace", []) or [])
+                stale_materialization = dict(
+                    diagnostics.get("materialization_failure", {}) or {}
+                )
+                stale_proof = dict(contract.get("proof", {}) or {})
                 if stale_trace or stale_missing:
                     attempt_history = list(
                         diagnostics.get("attempt_history", []) or []
@@ -441,8 +450,26 @@ class ExternalTopologyAssembler:
                         "claim_failure_missing_counts": stale_missing,
                     })
                     diagnostics["attempt_history"] = attempt_history[-16:]
+                if stale_materialization or stale_proof.get("reason"):
+                    attempt_history = list(
+                        diagnostics.get("attempt_history", []) or []
+                    )
+                    attempt_history.append({
+                        "kind": "pre_adjustment_failure_proof",
+                        "reason": str(contract.get("reason", "") or ""),
+                        "failure_domain": str(
+                            contract.get("failure_domain", "") or ""
+                        ),
+                        "proof": stale_proof,
+                        "materialization_failure": stale_materialization,
+                    })
+                    diagnostics["attempt_history"] = attempt_history[-16:]
                 diagnostics["claim_trace"] = []
                 diagnostics["claim_failure_missing_counts"] = {}
+                # The old materialization attempt is historical evidence only.
+                # It must not win over a fresh retry after the allocator has
+                # been changed by an accepted conversion.
+                diagnostics.pop("materialization_failure", None)
             required = dict(contract.get("required_counts", {}) or {})
             missing = _missing(required)
             contract["available_counts"] = dict(available_counts)
@@ -468,14 +495,34 @@ class ExternalTopologyAssembler:
                 # concrete conversion.  The materializer retry below is now
                 # authoritative; do not let the stale failure domain turn a
                 # ready contract back into a resource blocker.
+                contract["reason"] = "continuation_ready"
                 contract["failure_domain"] = ""
                 diagnostics["failure_domain"] = ""
+                diagnostics["missing_counts"] = {}
+                diagnostics["claim_failure_missing_counts"] = {}
+                proof["reason"] = "continuation_ready"
+                proof["failure_domain"] = ""
+                proof["missing_counts"] = {}
+                contract["proof"] = proof
                 contract["continuation_ready"] = True
+                # Fragment-level materialization failures are consulted by
+                # ``record_remaining_external_pending`` when the phase pass
+                # is serialized.  Retain them only in the contract's bounded
+                # attempt history; otherwise an old failure can overwrite the
+                # fresh continuation state after the retry.
+                for fragment_id in list(
+                    contract.get("source_fragment_ids", []) or []
+                ):
+                    self.materialization_failure_by_fragment_id.pop(
+                        int(fragment_id), None
+                    )
             elif missing:
                 contract.pop("continuation_ready", None)
         for pending in list(self.pending_units or []):
             required = dict(getattr(pending, "required_counts", {}) or {})
             missing = _missing(required)
+            old_reason = str(getattr(pending, "reason", "") or "")
+            old_proof = dict(getattr(pending, "infeasibility_proof", {}) or {})
             pending.available_counts = dict(available_counts)
             pending.raw_available_counts = dict(raw_available_counts)
             pending.claimable_available_counts = dict(available_counts)
@@ -490,10 +537,39 @@ class ExternalTopologyAssembler:
                 pending.claim_trace = []
                 pending.infeasibility_proof["claim_trace"] = []
                 if any(
-                    token in str(getattr(pending, "reason", "") or "").lower()
+                    token in old_reason.lower()
                     for token in ("shortage", "resource", "pool")
                 ):
+                    pending.infeasibility_proof.setdefault(
+                        "attempt_history", []
+                    ).append({
+                        "kind": "pre_adjustment_failure_proof",
+                        "reason": old_reason,
+                        "proof": old_proof,
+                    })
+                    pending.reason = "continuation_ready"
                     pending.infeasibility_proof["failure_domain"] = ""
+                    pending.infeasibility_proof["reason"] = "continuation_ready"
+                    pending.infeasibility_proof["missing_counts"] = {}
+                    proof_diagnostics = dict(
+                        pending.infeasibility_proof.get("diagnostics", {}) or {}
+                    )
+                    if proof_diagnostics.get("materialization_failure"):
+                        pending.infeasibility_proof.setdefault(
+                            "attempt_history", []
+                        ).append({
+                            "kind": "pre_adjustment_materialization_failure",
+                            "materialization_failure": dict(
+                                proof_diagnostics.get(
+                                    "materialization_failure", {}
+                                )
+                                or {}
+                            ),
+                        })
+                        proof_diagnostics.pop("materialization_failure", None)
+                        pending.infeasibility_proof["diagnostics"] = (
+                            proof_diagnostics
+                        )
         self.current_H = H.detach().clone() if hasattr(H, "detach") else H
 
     def continue_assembly(self) -> TopologyAssemblyResult:
