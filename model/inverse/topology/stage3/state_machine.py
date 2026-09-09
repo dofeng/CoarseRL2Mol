@@ -2630,6 +2630,19 @@ def _fixed_unsaturated_spectrum_ids(
             int(value)
             for value in list(product.get("fixed_source_node_ids", []) or [])
         )
+        # A completed topology stores resource-backed nodes (including a
+        # fixed SU14/15/16 node used by a ring/side contract) under
+        # ``claimed_resource_ids_by_su`` rather than
+        # ``fixed_source_node_ids``.  They are fixed for the purpose of a
+        # spectrum trial as well.  Pending/provisional products are skipped
+        # above, so this does not expose half-assembled donors.
+        fixed_ids.update(
+            int(value)
+            for values in dict(
+                product.get("claimed_resource_ids_by_su", {}) or {}
+            ).values()
+            for value in list(values or [])
+        )
     # A round-context owner marked completed is also fixed even when the
     # serialized assembly product list is intentionally compact.
     ownership = dict(getattr(context, "ownership_by_node_id", {}) or {})
