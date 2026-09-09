@@ -112,6 +112,11 @@ class Stage3SpectrumCandidate(Stage3Serializable):
     histogram_signature: str = ""
     inverse_signature: str = ""
     operations: List[Dict[str, Any]] = field(default_factory=list)
+    # Optional first-class metadata for spectrum-only paired conversions.  The
+    # individual operations remain in ``operations`` for backwards
+    # compatibility with the existing apply/rebuild path; each pair group
+    # identifies the two operations that must be committed atomically.
+    pair_groups: List[Dict[str, Any]] = field(default_factory=list)
     target_su_types: List[int] = field(default_factory=list)
     predicted_window_gain: float = 0.0
     primary_adjustment_count: int = 0

@@ -2597,6 +2597,67 @@ def _spectrum_trial_node_ids(
     return spectrum_pool
 
 
+def _fixed_unsaturated_spectrum_ids(
+    phase_eval: Any,
+    nodes: Sequence[Any],
+    pool: Dict[int, Sequence[int]],
+) -> Dict[int, List[int]]:
+    """Return only fixed-topology SU14/15/16 nodes for spectrum pair trials.
+
+    These IDs are an authorization view for a candidate trial.  They are not
+    added to the live resource ledger; an accepted trial is materialized by
+    the normal Layer1/Layer2 rebuild path.
+    """
+    node_by_id = {
+        int(getattr(node, "global_id", -1)): node
+        for node in list(nodes or [])
+    }
+    assembly = dict(getattr(phase_eval, "assembly_view", {}) or {})
+    fixed_ids: Set[int] = set()
+    context = getattr(phase_eval, "round_context", None)
+    product_rows = list(assembly.get("products", []) or [])
+    product_rows.extend(
+        product.to_dict() if hasattr(product, "to_dict") else dict(product or {})
+        for product in list(getattr(context, "products", []) or [])
+    )
+    for raw_product in product_rows:
+        product = dict(raw_product or {})
+        if not bool(product.get("closed", False)) or bool(
+            product.get("provisional", False)
+        ):
+            continue
+        fixed_ids.update(
+            int(value)
+            for value in list(product.get("fixed_source_node_ids", []) or [])
+        )
+    # A round-context owner marked completed is also fixed even when the
+    # serialized assembly product list is intentionally compact.
+    ownership = dict(getattr(context, "ownership_by_node_id", {}) or {})
+    fixed_states = {
+        Stage3OwnershipState.FIXED_TOPOLOGY_CORE.value,
+        Stage3OwnershipState.COMPLETED_TOPOLOGY.value,
+    }
+    fixed_ids.update(
+        int(node_id)
+        for node_id, owner in ownership.items()
+        if str(getattr(owner, "state", "") or "") in fixed_states
+    )
+    # Exclude any node still exposed in the current resource pool.  This
+    # protects partially assembled/pending fragments from becoming donors.
+    pooled_ids = {
+        int(value)
+        for values in dict(pool or {}).values()
+        for value in list(values or [])
+    }
+    result: Dict[int, List[int]] = {14: [], 15: [], 16: []}
+    for node_id in sorted(fixed_ids):
+        node = node_by_id.get(int(node_id))
+        su_type = int(getattr(node, "su_type", -1)) if node is not None else -1
+        if su_type in result and int(node_id) not in pooled_ids:
+            result[int(su_type)].append(int(node_id))
+    return result
+
+
 def _ledger_transaction(
     *,
     ledger: Any,
@@ -2975,6 +3036,7 @@ def _finalize_phase_plan(
     h_tolerance: float,
     infeasible_contracts: Optional[List[Dict[str, Any]]] = None,
     stage_diagnostics: Optional[Dict[str, Any]] = None,
+    accounting_aggregate_ids_by_su: Optional[Dict[int, List[int]]] = None,
 ) -> Stage3AdjustmentPlan:
     phase_infeasible_contracts = [
         dict(item or {})
@@ -2985,6 +3047,11 @@ def _finalize_phase_plan(
         for item in list(transactions or [])
         if (
             str(getattr(item, "phase", "") or "") == str(phase)
+            or (
+                str(phase) == "internal_topology"
+                and str(getattr(item, "phase", "") or "")
+                == "residual_resource_self_closure"
+            )
             or (
                 str(phase) == EXTERNAL_STAGE
                 and str(getattr(item, "phase", "") or "") in EXTERNAL_PHASE_NAMES
@@ -3021,7 +3088,11 @@ def _finalize_phase_plan(
                 str(key): int(value) for key, value in required_counts.items()
             },
         })
-    aggregate_ids = _round_resource_ids(phase_eval)
+    aggregate_ids = (
+        deepcopy(accounting_aggregate_ids_by_su)
+        if accounting_aggregate_ids_by_su is not None
+        else _round_resource_ids(phase_eval)
+    )
     committed_claimed_ids = _committed_occupied_ids_by_su(
         transactions,
         aggregate_ids_by_su=aggregate_ids,
@@ -4131,6 +4202,763 @@ def _internal_ledger_invariant_errors(
     return errors
 
 
+def _residual_1122_product_nodes(product: Dict[str, Any], ledger: Any) -> Optional[Dict[int, int]]:
+    """Return the concrete SU11/SU22 IDs of an exact residual 11-22 product."""
+    payload = dict(product or {})
+    role = str(payload.get("product_role", payload.get("target_role", "")) or "")
+    topology = str(
+        payload.get("expected_topology", "")
+        or payload.get("topology_notation", "")
+        or payload.get("actual_topology_su", "")
+        or payload.get("actual_su", "")
+        or ""
+    ).replace(" ", "")
+    claimed: Dict[int, List[int]] = {}
+    for raw_su, raw_ids in dict(payload.get("claimed_resource_ids_by_su", {}) or {}).items():
+        if str(raw_su).lstrip("-").isdigit():
+            claimed[int(raw_su)] = [int(value) for value in list(raw_ids or [])]
+    # Residual products are normally represented by their exact topology and
+    # one claimed node in each resource bucket.  Keep the role/count fallback
+    # for older serialized ledgers that omitted expected_topology.
+    exact_topology = topology in {"11-22", "11/22", "11_22"}
+    try:
+        chain_count = int(payload.get("chain_23_count", -1))
+    except (TypeError, ValueError):
+        chain_count = -1
+    if not exact_topology and not (
+        role == "residual_side_chain" and chain_count == 0
+    ):
+        return None
+    ids11 = list(claimed.get(11, []) or [])
+    ids22 = list(claimed.get(22, []) or [])
+    if len(ids11) != 1 or len(ids22) != 1:
+        # A few legacy products put all nodes in fixed_source_node_ids.  Resolve
+        # those IDs through the live ledger owner type without guessing.
+        owners = dict(getattr(ledger, "ownership_by_node_id", {}) or {})
+        for node_id in list(payload.get("fixed_source_node_ids", []) or []):
+            owner = owners.get(int(node_id))
+            su_type = int(getattr(owner, "su_type", -1)) if owner is not None else -1
+            if su_type == 11:
+                ids11.append(int(node_id))
+            elif su_type == 22:
+                ids22.append(int(node_id))
+    if len(ids11) != 1 or len(ids22) != 1 or ids11[0] == ids22[0]:
+        return None
+    return {11: int(ids11[0]), 22: int(ids22[0])}
+
+
+def _is_exact_residual_1122_product(product: Dict[str, Any]) -> bool:
+    """Recognize an exact residual 11-22 product without resolving node IDs."""
+    payload = dict(product or {})
+    topology = str(
+        payload.get("expected_topology", "")
+        or payload.get("topology_notation", "")
+        or payload.get("actual_topology_su", "")
+        or payload.get("actual_su", "")
+        or ""
+    ).replace(" ", "")
+    if topology in {"11-22", "11/22", "11_22"}:
+        return True
+    role = str(payload.get("product_role", payload.get("target_role", "")) or "")
+    try:
+        chain_count = int(payload.get("chain_23_count", -1))
+    except (TypeError, ValueError):
+        chain_count = -1
+    return bool(role == "residual_side_chain" and chain_count == 0)
+
+
+def _residual_product_identity(
+    product: Dict[str, Any],
+    ledger: Any = None,
+) -> Tuple[Any, ...]:
+    """Return a deterministic identity for one residual product.
+
+    Residual products are observed through several representations during a
+    Stage3 pass.  The live ledger normally contains concrete node IDs, while
+    a few serialized/legacy records only have a product or contract ID.  The
+    node identity is authoritative when available; the textual ID is only a
+    fallback.  This lets the collector deduplicate the same product observed
+    after a conversion without silently merging two products that claim
+    different physical nodes.
+    """
+    payload = dict(product or {})
+    ids_by_su: Optional[Dict[int, int]] = None
+    if ledger is not None:
+        try:
+            ids_by_su = _residual_1122_product_nodes(payload, ledger)
+        except Exception:
+            ids_by_su = None
+    if ids_by_su:
+        return (
+            "nodes",
+            tuple(sorted((int(key), int(value)) for key, value in ids_by_su.items())),
+        )
+    all_ids: List[int] = [
+        int(value)
+        for value in list(payload.get("fixed_source_node_ids", []) or [])
+    ]
+    all_ids.extend(
+        int(value)
+        for values in dict(payload.get("claimed_resource_ids_by_su", {}) or {}).values()
+        for value in list(values or [])
+    )
+    if all_ids:
+        return ("nodes", tuple(sorted(set(all_ids))))
+    product_id = str(payload.get("product_id", "") or "")
+    if product_id:
+        return ("product_id", product_id)
+    return (
+        "contract",
+        int(payload.get("contract_id", -1) or -1),
+        str(
+            payload.get("expected_topology", "")
+            or payload.get("topology_notation", "")
+            or payload.get("actual_topology_su", "")
+            or ""
+        ),
+    )
+
+
+def _residual_product_is_current_stage(product: Dict[str, Any]) -> bool:
+    """Whether a completed product belongs to residual internal assembly."""
+    payload = dict(product or {})
+    role = str(payload.get("product_role", payload.get("target_role", "")) or "")
+    phase = str(payload.get("phase", "") or "")
+    return bool(
+        role.startswith("residual_")
+        or phase == "residual_resource_self_closure"
+        or role == "residual_resource_conversion"
+    )
+
+
+def _release_residual_1122_products(
+    ledger: Any,
+    products: Sequence[Dict[str, Any]],
+) -> Tuple[Any, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Atomically remove excess 11-22 products and return their nodes to pool."""
+    working = deepcopy(ledger)
+    selected = [dict(item or {}) for item in list(products or [])]
+    excess = selected[5:]
+    # Product IDs are provenance, not the physical identity of a residual
+    # product.  During a direct/conversion continuation the same completed
+    # product can be observed more than once, and older serialized products
+    # may not carry a product_id at all.  Select by concrete node identity and
+    # keep the strict node/owner checks below.  This removes the false hard
+    # failure caused by a transient duplicate/missing textual ID while still
+    # rejecting real node overlap or owner conflicts.
+    excess_keys: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    for item in excess:
+        key = _residual_product_identity(item, working)
+        if key in excess_keys:
+            # The collector should already have removed exact duplicates.  A
+            # duplicate physical key here is therefore a malformed selection,
+            # not another product to release.
+            continue
+        excess_keys[key] = item
+    if not excess_keys:
+        return working, [], []
+    released: List[Dict[str, Any]] = []
+    kept_products: List[Dict[str, Any]] = []
+    owners = dict(getattr(working, "ownership_by_node_id", {}) or {})
+    seen_nodes: Set[int] = set()
+    released_keys: Set[Tuple[Any, ...]] = set()
+    released_product_id_by_key: Dict[Tuple[Any, ...], str] = {}
+    used_product_ids = {
+        str(dict(raw or {}).get("product_id", "") or "")
+        for raw in list(getattr(working, "completed_products", []) or [])
+        if str(dict(raw or {}).get("product_id", "") or "")
+    }
+    product_id_counts = Counter(
+        str(dict(raw or {}).get("product_id", "") or "")
+        for raw in list(getattr(working, "completed_products", []) or [])
+        if str(dict(raw or {}).get("product_id", "") or "")
+    )
+    assigned_release_product_ids: Set[str] = set()
+    for raw in list(getattr(working, "completed_products", []) or []):
+        product = dict(raw or {})
+        product_key = _residual_product_identity(product, working)
+        if product_key not in excess_keys:
+            kept_products.append(product)
+            continue
+        if product_key in released_keys:
+            # The same canonical product may be present twice in a legacy
+            # completed_products list.  Keep one physical claim only.
+            continue
+        ids_by_su = _residual_1122_product_nodes(product, working)
+        if not ids_by_su:
+            product_id = str(product.get("product_id", "") or "")
+            raise ValueError(
+                f"residual_1122_product_node_resolution_failed:{product_id}"
+            )
+        source_product_id = str(product.get("product_id", "") or "")
+        # The physical node pair is authoritative.  Some serialized residual
+        # products predate ``product_id`` and therefore carry an empty text
+        # ID, while their ownership records still have the product ID that
+        # was assigned when the pair was committed.  Adopt that ID only when
+        # both owners agree; different non-empty owner IDs are a genuine
+        # cross-product ownership conflict and must remain a hard failure.
+        owner_product_ids = {
+            str(
+                getattr(owners.get(int(node_id)), "owner_product_id", "")
+                or ""
+            )
+            for node_id in ids_by_su.values()
+            if str(
+                getattr(owners.get(int(node_id)), "owner_product_id", "")
+                or ""
+            )
+        }
+        if len(owner_product_ids) > 1:
+            raise ValueError(
+                "residual_1122_owner_product_conflict:"
+                f"{source_product_id or '<missing>'}:"
+                f"{int(ids_by_su[11])}:{int(ids_by_su[22])}:"
+                f"{sorted(owner_product_ids)}"
+            )
+        if not source_product_id and owner_product_ids:
+            source_product_id = next(iter(owner_product_ids))
+        product_id = source_product_id
+        if any(int(node_id) in seen_nodes for node_id in ids_by_su.values()):
+            raise ValueError(
+                f"residual_1122_product_node_overlap:{product_id}"
+            )
+        seen_nodes.update(int(node_id) for node_id in ids_by_su.values())
+        # Product text IDs are provenance only and may collide with a kept
+        # product after owner-ID normalization.  Never export the same ID for
+        # two physical products in the release diagnostics; fall back to a
+        # deterministic node-based ID in that case.
+        if (
+            not product_id
+            or product_id in assigned_release_product_ids
+            or (
+                product_id in used_product_ids
+                and (
+                    not source_product_id
+                    or product_id != str(product.get("product_id", "") or "")
+                    or int(product_id_counts.get(product_id, 0)) > 1
+                )
+            )
+        ):
+            contract_id = int(product.get("contract_id", -1) or -1)
+            product_id = (
+                f"residual:1122:{contract_id}:"
+                f"{int(ids_by_su[11])}:{int(ids_by_su[22])}"
+            )
+            suffix = 1
+            base_product_id = product_id
+            while product_id in used_product_ids:
+                product_id = f"{base_product_id}:{suffix}"
+                suffix += 1
+        used_product_ids.add(product_id)
+        assigned_release_product_ids.add(product_id)
+        released.append({
+            "product_id": product_id,
+            "contract_id": int(product.get("contract_id", -1) or -1),
+            "node_ids_by_su": {str(key): int(value) for key, value in ids_by_su.items()},
+        })
+        released_keys.add(product_key)
+        released_product_id_by_key[product_key] = product_id
+        for su_type, node_id in ids_by_su.items():
+            for bucket in working.available_ids_by_su.values():
+                while int(node_id) in bucket:
+                    bucket.remove(int(node_id))
+            owner = owners.get(int(node_id))
+            if owner is None:
+                raise ValueError(
+                    f"residual_1122_owner_missing:{product_id}:{node_id}"
+                )
+            owner_product_id = str(
+                getattr(owner, "owner_product_id", "") or ""
+            )
+            if (
+                owner_product_id
+                and source_product_id
+                and owner_product_id != source_product_id
+            ):
+                raise ValueError(
+                    "residual_1122_owner_product_conflict:"
+                    f"{source_product_id or product_id}:{node_id}:{owner_product_id}"
+                )
+            if int(getattr(owner, "su_type", -1)) != int(su_type):
+                raise ValueError(
+                    "residual_1122_owner_su_mismatch:"
+                    f"{product_id}:{node_id}:{su_type}:"
+                    f"{getattr(owner, 'su_type', -1)}"
+                )
+            owner.su_type = int(su_type)
+            owner.state = Stage3OwnershipState.REMAINING_CLOSURE_RESOURCE.value
+            owner.owner_fragment_id = None
+            owner.owner_contract_id = None
+            owner.owner_product_id = ""
+            owner.owner_slot_id = ""
+            owner.role = Stage3OwnershipState.REMAINING_CLOSURE_RESOURCE.value
+            owner.reason = "released_excess_residual_1122"
+            working.available_ids_by_su.setdefault(int(su_type), []).append(int(node_id))
+    if released_keys != set(excess_keys):
+        raise ValueError("residual_1122_excess_product_not_in_completed_products")
+    working.completed_products = kept_products
+    for su_type, values in list(working.available_ids_by_su.items()):
+        working.available_ids_by_su[int(su_type)] = sorted({int(value) for value in values})
+    resolved_excess: List[Dict[str, Any]] = []
+    for item in excess:
+        item_key = _residual_product_identity(item, ledger)
+        if item_key in released_keys:
+            normalized = dict(item or {})
+            normalized["product_id"] = str(
+                released_product_id_by_key.get(item_key, normalized.get("product_id", ""))
+                or ""
+            )
+            resolved_excess.append(normalized)
+    return working, released, resolved_excess
+
+
+def _residual_1122_reclassification_failure(
+    *,
+    phase_eval: Any,
+    iteration_ledger: Any,
+    transactions: Sequence[TopologyResourceTransaction],
+    h_tolerance: float,
+    reason: str,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Stage3AdjustmentPlan:
+    """Return a non-mutating failure plan for an atomic 11-22 transaction."""
+    proof = {
+        "phase": "internal_topology",
+        "reason": str(reason),
+        "atomic_rollback": True,
+        **dict(diagnostics or {}),
+    }
+    return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+        ok=False,
+        reason="phase_resource_infeasible",
+        blocked_reason=str(reason),
+        phase="internal_topology",
+        plan_kind="residual_1122_reclassification_invalid",
+        active_subphase="residual_resource_self_closure",
+        phase_result=Stage3PhaseResult(
+            active_phase="internal_topology",
+            phase_completed=False,
+            rebuild_required=False,
+            transactions=list(transactions or []),
+            stop_reason="phase_resource_infeasible",
+            infeasibility_proof=proof,
+        ),
+        diagnostics={
+            "plan_kind": "residual_1122_reclassification_invalid",
+            **proof,
+        },
+        runtime={
+            **_runtime_with_pool(
+                phase_eval,
+                iteration_ledger.available_ids_by_su,
+            ),
+            # A failed atomic trial always exposes the original live ledger;
+            # the released deepcopy must never cross the plan boundary.
+            "iteration_topology_ledger": iteration_ledger,
+        },
+    ), h_tolerance)
+
+
+def _build_residual_1122_reclassification_plan(
+    *,
+    phase_eval: Any,
+    H: torch.Tensor,
+    H_work: torch.Tensor,
+    iteration_ledger: Any,
+    residual_products: Sequence[Dict[str, Any]],
+    groups: Sequence[Any],
+    transactions: Sequence[TopologyResourceTransaction],
+    initial_pool: Dict[int, List[int]],
+    cursor: int,
+    E_target: Any,
+    h_tolerance: float,
+    special_degree_meta: Optional[Dict[str, Any]],
+    max_primary_adjustments: Optional[int] = None,
+) -> Optional[Stage3AdjustmentPlan]:
+    # The internal planner can observe the same product through multiple
+    # continuation steps.  Canonicalize by concrete node identity before
+    # counting, otherwise one physical 11-22 may be counted several times and
+    # the release phase will report a spurious product-ID conflict.
+    all_exact_products: List[Dict[str, Any]] = []
+    seen_product_keys: Set[Tuple[Any, ...]] = set()
+    for raw_item in list(residual_products or []):
+        item = dict(raw_item or {})
+        if not _is_exact_residual_1122_product(item):
+            continue
+        key = _residual_product_identity(item, iteration_ledger)
+        if key in seen_product_keys:
+            continue
+        seen_product_keys.add(key)
+        all_exact_products.append(item)
+    exact_products = [
+        item for item in all_exact_products
+        if _residual_1122_product_nodes(item, iteration_ledger)
+    ]
+    if len(all_exact_products) <= 5:
+        return None
+    if len(exact_products) != len(all_exact_products):
+        unresolved = [
+            str(item.get("product_id", "") or "")
+            for item in all_exact_products
+            if item not in exact_products
+        ]
+        return _residual_1122_reclassification_failure(
+            phase_eval=phase_eval,
+            iteration_ledger=iteration_ledger,
+            transactions=transactions,
+            h_tolerance=h_tolerance,
+            reason="residual_1122_node_resolution_failed",
+            diagnostics={
+                "residual_1122_count_before": len(all_exact_products),
+                "residual_1122_preserved_count": 5,
+                "unresolved_product_ids": unresolved,
+            },
+        )
+    total_excess_count = max(0, len(exact_products) - 5)
+    # A complete 11-22 pair always consumes two physical primary operations.
+    # This cap belongs to the post-assembly reclassification batch itself; it
+    # must not be reduced by ordinary internal assembly conversions that were
+    # needed to finish the residual pass.
+    if max_primary_adjustments is None:
+        max_reclass_pairs = total_excess_count
+    else:
+        max_reclass_pairs = max(0, int(max_primary_adjustments)) // 2
+    selected_excess_count = min(total_excess_count, max_reclass_pairs)
+    if selected_excess_count <= 0:
+        return _residual_1122_reclassification_failure(
+            phase_eval=phase_eval,
+            iteration_ledger=iteration_ledger,
+            transactions=transactions,
+            h_tolerance=h_tolerance,
+            reason="residual_1122_reclassification_budget_exhausted",
+            diagnostics={
+                "residual_1122_count_before": len(exact_products),
+                "residual_1122_preserved_count": 5,
+                "residual_1122_excess_count": total_excess_count,
+                "reclassification_pair_limit": int(max_reclass_pairs),
+                "required_primary_adjustments": int(2 * total_excess_count),
+                "scheduled_primary_adjustments": 0,
+                "remaining_primary_adjustments": max(
+                    0, int(max_primary_adjustments or 0)
+                ),
+                "remaining_excess_after_batch": total_excess_count,
+            },
+        )
+    # Release only the pairs that fit this batch.  Any remaining excess is
+    # intentionally left in the old generation and will be reconsidered after
+    # the fresh Layer1/2 rebuild requested below.
+    selected_products = exact_products[:5 + selected_excess_count]
+    try:
+        released_ledger, released_rows, resolved_excess = _release_residual_1122_products(
+            iteration_ledger,
+            selected_products,
+        )
+    except (TypeError, ValueError) as exc:
+        return _residual_1122_reclassification_failure(
+            phase_eval=phase_eval,
+            iteration_ledger=iteration_ledger,
+            transactions=transactions,
+            h_tolerance=h_tolerance,
+            reason="residual_1122_release_invariant_failed",
+            diagnostics={
+                "error": str(exc),
+                "residual_1122_count_before": len(exact_products),
+                "residual_1122_preserved_count": 5,
+                "residual_1122_excess_count": total_excess_count,
+            },
+        )
+    if not released_rows:
+        return _residual_1122_reclassification_failure(
+            phase_eval=phase_eval,
+            iteration_ledger=iteration_ledger,
+            transactions=transactions,
+            h_tolerance=h_tolerance,
+            reason="residual_1122_release_empty",
+            diagnostics={
+                "residual_1122_count_before": len(exact_products),
+                "residual_1122_preserved_count": 5,
+                "residual_1122_excess_count": total_excess_count,
+            },
+        )
+    required_reclassification_ops = 2 * len(released_rows)
+    if max_primary_adjustments is not None and required_reclassification_ops > max(
+        0, int(max_primary_adjustments)
+    ):
+        # This should only be reachable if the release list was malformed or
+        # changed concurrently; keep it as an atomic guard.
+        return _residual_1122_reclassification_failure(
+            phase_eval=phase_eval,
+            iteration_ledger=iteration_ledger,
+            transactions=transactions,
+            h_tolerance=h_tolerance,
+            reason="residual_1122_reclassification_budget_exhausted",
+            diagnostics={
+                "residual_1122_count_before": len(exact_products),
+                "residual_1122_preserved_count": 5,
+                "residual_1122_excess_count": total_excess_count,
+                "scheduled_excess_count": len(released_rows),
+                "required_primary_adjustments": required_reclassification_ops,
+                "remaining_primary_adjustments": max(0, int(max_primary_adjustments)),
+            },
+        )
+    reclass_groups: List[AtomicAdjustmentGroup] = []
+    reclass_operations: List[Dict[str, Any]] = []
+    H_reclassified = H_work.detach().clone().long()
+    # The excess product nodes are deliberately released immediately before
+    # this atomic histogram transaction. Include them in the transaction's
+    # authorized donor pool so histogram preflight can validate their real IDs.
+    reclass_initial_pool = deepcopy(initial_pool)
+    for row in released_rows:
+        for raw_su, raw_node_id in dict(row.get("node_ids_by_su", {}) or {}).items():
+            su_type = int(raw_su)
+            reclass_initial_pool.setdefault(su_type, []).append(int(raw_node_id))
+    reclass_initial_pool = {
+        int(key): sorted({int(value) for value in values})
+        for key, values in reclass_initial_pool.items()
+    }
+    reclass_contract_ids = {
+        int(item.get("contract_id", -1) or -1)
+        for item in released_rows
+        if int(item.get("contract_id", -1) or -1) >= 0
+    }
+    reclass_node_ids = {
+        int(raw_node_id)
+        for item in released_rows
+        for raw_node_id in dict(item.get("node_ids_by_su", {}) or {}).values()
+    }
+    for row in released_rows:
+        ids_by_su = dict(row.get("node_ids_by_su", {}) or {})
+        node11 = int(ids_by_su.get("11", -1))
+        node22 = int(ids_by_su.get("22", -1))
+        if node11 < 0 or node22 < 0 or node11 == node22:
+            return _residual_1122_reclassification_failure(
+                phase_eval=phase_eval,
+                iteration_ledger=iteration_ledger,
+                transactions=transactions,
+                h_tolerance=h_tolerance,
+                reason="residual_1122_reclassification_node_invalid",
+                diagnostics={
+                    "product_id": str(row.get("product_id", "") or ""),
+                    "node_ids_by_su": dict(ids_by_su),
+                },
+            )
+        for from_su, to_su, node_id in ((11, 12, node11), (22, 13, node22)):
+            op = HistogramConversion(
+                from_su=int(from_su),
+                to_su=int(to_su),
+                count=1,
+                node_ids=[int(node_id)],
+                reason="residual_1122_reclassification",
+            )
+            next_H = apply_conversions_to_H(H_reclassified, [op])
+            if next_H is None:
+                return _residual_1122_reclassification_failure(
+                    phase_eval=phase_eval,
+                    iteration_ledger=iteration_ledger,
+                    transactions=transactions,
+                    h_tolerance=h_tolerance,
+                    reason="residual_1122_reclassification_histogram_underflow",
+                    diagnostics={
+                        "product_id": str(row.get("product_id", "") or ""),
+                        "from_su": int(from_su),
+                        "to_su": int(to_su),
+                        "node_id": int(node_id),
+                    },
+                )
+            reclass_groups.append(AtomicAdjustmentGroup(
+                primary_op=op,
+                combined_delta={int(from_su): -1, int(to_su): 1},
+                h_before=_h_total(H_reclassified, special_degree_meta),
+                h_after_primary=_h_total(next_H, special_degree_meta),
+                h_after_final=_h_total(next_H, special_degree_meta),
+                scoring_diagnostics={
+                    "plan_kind": "residual_1122_reclassification",
+                    "source_product_id": str(row.get("product_id", "") or ""),
+                },
+            ))
+            reclass_operations.append({
+                "from_su": int(from_su),
+                "to_su": int(to_su),
+                "node_id": int(node_id),
+                "product_id": str(row.get("product_id", "") or ""),
+            })
+            H_reclassified = next_H
+    all_groups = list(groups or []) + reclass_groups
+    ledger_after = _ledger_after_histogram_conversions(
+        released_ledger,
+        HistogramAdjustmentPlan(
+            phase="internal_topology",
+            groups=reclass_groups,
+            primary_adjustment_count=len(reclass_operations),
+            physical_conversion_count=len(reclass_operations),
+            H_before=H_work.detach().clone(),
+            H_after=H_reclassified.detach().clone(),
+            accounting_diagnostics={"mode": "residual_1122_reclassification"},
+        ),
+    )
+    invariant_errors = _internal_ledger_invariant_errors(
+        ledger=ledger_after,
+        H=H_reclassified,
+    )
+    if invariant_errors:
+        return _residual_1122_reclassification_failure(
+            phase_eval=phase_eval,
+            iteration_ledger=iteration_ledger,
+            transactions=transactions,
+            h_tolerance=h_tolerance,
+            reason="residual_1122_reclassification_ledger_invariant_failed",
+            diagnostics={
+                "residual_1122_count_before": len(exact_products),
+                "residual_1122_preserved_count": 5,
+                "residual_1122_excess_count": len(resolved_excess),
+                "residual_1122_reclassified_count": len(resolved_excess),
+                "residual_1122_deferred_count": max(
+                    0, total_excess_count - len(resolved_excess)
+                ),
+                "resource_invariant_errors": list(invariant_errors),
+            },
+        )
+    kept_transactions = [
+        item for item in list(transactions or [])
+        if (
+            int(getattr(item, "contract_id", -1) or -1) not in reclass_contract_ids
+            and not reclass_node_ids.intersection({
+                int(value)
+                for value in (
+                    list(getattr(item, "source_node_ids", []) or [])
+                    + list(getattr(item, "product_node_ids", []) or [])
+                    + [
+                        int(node_id)
+                        for values in dict(
+                            getattr(item, "claimed_resource_ids", {}) or {}
+                        ).values()
+                        for node_id in list(values or [])
+                    ]
+                )
+            })
+        )
+    ]
+    reclass_transaction = TopologyResourceTransaction(
+        phase="internal_topology",
+        contract_id=-3_000_000 - len(reclass_operations),
+        target_role="residual_1122_reclassification",
+        converted_node_ids=[int(item["node_id"]) for item in reclass_operations],
+        conversion_path=[dict(item) for item in reclass_operations],
+        h_before=_h_total(H_work, special_degree_meta),
+        h_after_primary=_h_total(H_reclassified, special_degree_meta),
+        h_after=_h_total(H_reclassified, special_degree_meta),
+        commit_scope="physical_histogram",
+        transaction_origin="residual_1122_reclassification",
+        committed=True,
+    )
+    # The round context's aggregate pool contains only resources that were
+    # still available at the start of this internal phase.  Excess 11-22
+    # products were completed products at that point, so their IDs are absent
+    # from that pool even though this atomic plan releases them first.  Add
+    # the concrete original IDs explicitly; accounting then sees the full
+    # partition (released -> converted) instead of reporting unknown/missing
+    # resources.
+    accounting_aggregate_ids = _round_resource_ids(phase_eval)
+    released_id_set = {
+        int(raw_node_id)
+        for row in released_rows
+        for raw_node_id in dict(row.get("node_ids_by_su", {}) or {}).values()
+    }
+    for raw_su, values in list(accounting_aggregate_ids.items()):
+        accounting_aggregate_ids[int(raw_su)] = [
+            int(value) for value in values
+            if int(value) not in released_id_set
+        ]
+    for row in released_rows:
+        ids_by_su = dict(row.get("node_ids_by_su", {}) or {})
+        for raw_su, raw_node_id in ids_by_su.items():
+            accounting_aggregate_ids.setdefault(int(raw_su), []).append(
+                int(raw_node_id)
+            )
+    accounting_aggregate_ids = {
+        int(key): sorted({int(value) for value in values})
+        for key, values in accounting_aggregate_ids.items()
+    }
+    result = _finalize_phase_plan(
+        phase_eval=phase_eval,
+        phase="internal_topology",
+        H_before=H,
+        H_after=H_reclassified,
+        initial_pool=reclass_initial_pool,
+        final_pool=ledger_after.available_ids_by_su,
+        groups=all_groups,
+        transactions=[*kept_transactions, reclass_transaction],
+        rotation_before=int(cursor),
+        rotation_after=int(cursor),
+        h_tolerance=h_tolerance,
+        accounting_aggregate_ids_by_su=accounting_aggregate_ids,
+        stage_diagnostics={
+            "internal_stage_completed": False,
+            "residual_1122_count_before": len(exact_products),
+            "residual_1122_preserved_count": 5,
+            "residual_1122_excess_count": total_excess_count,
+            "residual_1122_reclassified_count": len(resolved_excess),
+            "residual_1122_deferred_count": max(
+                0, total_excess_count - len(resolved_excess)
+            ),
+            "reclassification_pair_limit": int(max_reclass_pairs),
+            "required_primary_adjustments": int(2 * total_excess_count),
+            "scheduled_primary_adjustments": int(required_reclassification_ops),
+            "reclassified_product_ids": [
+                str(item.get("product_id", "") or "") for item in resolved_excess
+            ],
+            "reclassified_node_ids_by_source_su": {
+                str(su): [
+                    int(item.get("node_ids_by_su", {}).get(str(su), -1))
+                    for item in released_rows
+                ]
+                for su in (11, 22)
+            },
+            "reclassification_operations": list(reclass_operations),
+            "h_delta": int(_h_total(H_reclassified, special_degree_meta) - _h_total(H_work, special_degree_meta)),
+            "restart_stage3_after_rebuild": True,
+            "plan_kind": "residual_1122_reclassification",
+            "reason": "stage3_rebuild_required",
+        },
+    )
+    if not bool(getattr(result, "ok", False)):
+        # Accounting/partition failures are hard atomic failures.  Do not
+        # relabel them as a successful rebuild boundary and do not expose the
+        # released deepcopy as the live ledger.
+        result.diagnostics = {
+            **dict(getattr(result, "diagnostics", {}) or {}),
+            "plan_kind": "residual_1122_reclassification_invalid",
+            "reason": "residual_1122_reclassification_accounting_failed",
+            "residual_1122_count_before": len(all_exact_products),
+            "residual_1122_preserved_count": 5,
+            "residual_1122_excess_count": len(resolved_excess),
+            "restart_stage3_after_rebuild": False,
+        }
+        result.runtime["iteration_topology_ledger"] = iteration_ledger
+        return result
+    result.plan_kind = "residual_1122_reclassification"
+    result.reason = "stage3_rebuild_required"
+    result.active_subphase = "residual_resource_self_closure"
+    result.phase_result.rebuild_required = True
+    result.phase_result.phase_completed = False
+    result.runtime["iteration_topology_ledger"] = ledger_after
+    result.diagnostics.update({
+        "plan_kind": "residual_1122_reclassification",
+        "reason": "stage3_rebuild_required",
+        "residual_1122_pair_count": len(resolved_excess),
+        "residual_1122_count_before": len(exact_products),
+        "residual_1122_preserved_count": 5,
+        "residual_1122_excess_count": total_excess_count,
+        "residual_1122_reclassified_count": len(resolved_excess),
+        "residual_1122_deferred_count": max(
+            0, total_excess_count - len(resolved_excess)
+        ),
+        "reclassification_pair_limit": int(max_reclass_pairs),
+        "residual_1122_excess_products": list(resolved_excess),
+    })
+    return result
+
+
 def _plan_internal_topology_stage(
     *,
     phase_eval: Any,
@@ -4154,6 +4982,30 @@ def _plan_internal_topology_stage(
     groups: List[Any] = []
     transactions = list(initial_transactions or [])
     residual_products: List[Dict[str, Any]] = []
+    # ``completed_products`` is cumulative across continuation attempts.  Keep
+    # the product identities that existed when this internal generation
+    # started, then collect only newly materialized residual products.  This
+    # prevents one product from being counted once per planner attempt.
+    residual_product_keys: Set[Tuple[Any, ...]] = set()
+    initial_residual_product_keys: Set[Tuple[Any, ...]] = {
+        _residual_product_identity(dict(item or {}), iteration_ledger)
+        for item in list(iteration_ledger.completed_products or [])
+        if _residual_product_is_current_stage(dict(item or {}))
+    }
+
+    def collect_new_residual_products(current_ledger: Any) -> None:
+        for raw_product in list(
+            getattr(current_ledger, "completed_products", []) or []
+        ):
+            product = dict(raw_product or {})
+            if not _residual_product_is_current_stage(product):
+                continue
+            key = _residual_product_identity(product, current_ledger)
+            if key in initial_residual_product_keys or key in residual_product_keys:
+                continue
+            residual_product_keys.add(key)
+            residual_products.append(product)
+
     residual_attempts: List[Dict[str, Any]] = []
     residual_attempt_count = 0
     cursor = int(su11_rotation_index)
@@ -4236,8 +5088,7 @@ def _plan_internal_topology_stage(
         if mode == "direct":
             iteration_ledger = next_product["ledger"]
             transactions.append(next_product["transaction"])
-            if list(iteration_ledger.completed_products or []):
-                residual_products.append(dict(iteration_ledger.completed_products[-1] or {}))
+            collect_new_residual_products(iteration_ledger)
             if str(next_product.get("product_role", "")) == "residual_flex_chain":
                 remaining_flex_capacity = max(0, remaining_flex_capacity - 1)
             residual_contract_id += 1
@@ -4266,8 +5117,7 @@ def _plan_internal_topology_stage(
         groups.extend(list(histogram.groups or []))
         cursor = int(histogram.su11_rotation_index_after)
         transactions.extend(list(conversion_plan.phase_result.transactions or []))
-        if list(iteration_ledger.completed_products or []):
-            residual_products.append(dict(iteration_ledger.completed_products[-1] or {}))
+        collect_new_residual_products(iteration_ledger)
         if str(next_product.get("product_role", "")) == "residual_flex_chain":
             remaining_flex_capacity = max(0, remaining_flex_capacity - 1)
         residual_contract_id += 1
@@ -4276,6 +5126,9 @@ def _plan_internal_topology_stage(
     invariant_errors = _internal_ledger_invariant_errors(
         ledger=iteration_ledger,
         H=H_work,
+    )
+    remaining_closure_final = _remaining_closure_ids_by_su(
+        iteration_ledger.available_ids_by_su
     )
     preserved_unassembled_su24_ids = sorted(
         int(value)
@@ -4287,10 +5140,18 @@ def _plan_internal_topology_stage(
             or []
         )
     )
+    tolerated_final = _tolerated_remaining_closure_ids(
+        iteration_ledger.available_ids_by_su,
+        remaining_flex_goal=0,
+        recycled_resource_ids=recycled_resource_ids,
+    )
+    internal_stage_completed = bool(
+        (not remaining_closure_final or bool(tolerated_final))
+        and not preserved_unassembled_su24_ids
+    )
     diagnostics = {
-        "internal_stage_completed": bool(
-            not remaining_closure and not preserved_unassembled_su24_ids
-        ),
+        "internal_stage_completed": internal_stage_completed,
+        "residual_stage_completed": internal_stage_completed,
         "internal_stop_subphase": str(stop_subphase),
         "internal_conversion_budget": int(budget),
         "internal_physical_conversion_count": _physical_conversion_count(groups),
@@ -4309,6 +5170,10 @@ def _plan_internal_topology_stage(
         # therefore block the terminal completion state below.
         "su24_remaining_count": len(preserved_unassembled_su24_ids),
         "preserved_unassembled_su24_ids": preserved_unassembled_su24_ids,
+        "remaining_closure_ids_by_su": {
+            str(key): list(values)
+            for key, values in remaining_closure_final.items()
+        },
         "internal_residual_attempt_count": int(residual_attempt_count),
         "internal_residual_attempts": list(residual_attempts),
         "committed_residual_products": list(residual_products),
@@ -4318,6 +5183,38 @@ def _plan_internal_topology_stage(
         },
         "resource_invariant_errors": list(invariant_errors),
     }
+    # Do not stop while building the sixth product.  The complete residual
+    # pass above is authoritative; only then cap exact 11-22 products and
+    # prepare one atomic reclassification/rebuild transaction.
+    reclassification_plan = None
+    if not invariant_errors and internal_stage_completed:
+        reclassification_plan = _build_residual_1122_reclassification_plan(
+            phase_eval=phase_eval,
+            H=H,
+            H_work=H_work,
+            iteration_ledger=iteration_ledger,
+            residual_products=residual_products,
+            groups=groups,
+            transactions=transactions,
+            initial_pool=initial_pool,
+            cursor=cursor,
+            E_target=E_target,
+            h_tolerance=h_tolerance,
+            special_degree_meta=special_degree_meta,
+            # ``internal_max_primary_adjustments`` is the independent cap for
+            # the post-assembly 11-22 -> 12-13 pair batch.  Do not pass the
+            # ordinary residual-conversion remainder here: direct residual
+            # products intentionally finish first, and reclassification then
+            # gets its own complete pair budget.
+            max_primary_adjustments=budget,
+        )
+    if reclassification_plan is not None:
+        reclassification_plan.diagnostics = {
+            **dict(getattr(reclassification_plan, "diagnostics", {}) or {}),
+            "internal_residual_product_count": len(residual_products),
+            "resource_invariant_errors": [],
+        }
+        return reclassification_plan
     if invariant_errors:
         proof = {
             "phase": "internal_topology",
@@ -4399,6 +5296,47 @@ def _plan_internal_topology_stage(
                 "stage3_phase": "internal_topology",
                 **diagnostics,
             },
+            runtime={
+                **_runtime_with_pool(
+                    phase_eval,
+                    iteration_ledger.available_ids_by_su,
+                ),
+                "iteration_topology_ledger": iteration_ledger,
+            },
+        ), h_tolerance)
+
+    if not internal_stage_completed:
+        diagnostics["internal_stage_completed"] = False
+        diagnostics["residual_stage_completed"] = False
+        proof = {
+            "phase": "internal_topology",
+            "reason": "internal_residual_assembly_incomplete",
+            "remaining_closure_ids_by_su": {
+                str(key): list(values)
+                for key, values in remaining_closure_final.items()
+            },
+            "internal_conversion_budget": int(budget),
+            "internal_physical_conversion_count": _physical_conversion_count(groups),
+            "internal_conversion_budget_remaining": max(
+                0, budget - _physical_conversion_count(groups)
+            ),
+        }
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+            ok=False,
+            reason="phase_resource_infeasible",
+            blocked_reason=str(proof["reason"]),
+            phase="internal_topology",
+            plan_kind="internal_residual_assembly_incomplete",
+            active_subphase=str(stop_subphase),
+            phase_result=Stage3PhaseResult(
+                active_phase="internal_topology",
+                phase_completed=False,
+                rebuild_required=False,
+                transactions=transactions,
+                stop_reason="phase_resource_infeasible",
+                infeasibility_proof=proof,
+            ),
+            diagnostics={"stage3_phase": "internal_topology", **diagnostics},
             runtime={
                 **_runtime_with_pool(
                     phase_eval,
@@ -5487,6 +6425,11 @@ def plan_stage3_state_machine(
                 int(su_type): list(pool.get(int(su_type), []) or [])
                 for su_type in (12, 13)
             },
+            temporary_unsaturated_ids_by_su=_fixed_unsaturated_spectrum_ids(
+                phase_eval,
+                nodes,
+                pool,
+            ),
             candidate_limit=int(spectrum_candidate_limit),
             max_primary_adjustments=int(spectrum_max_primary_adjustments),
             max_h_compensation_ops=0,
