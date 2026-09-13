@@ -35,6 +35,7 @@ from .models import (
     UnitEdge,
     UnitNode,
     UnitPort,
+    HeteroAromaticRequest,
 )
 from .state import HexAssemblyState
 
@@ -298,8 +299,15 @@ class _AromaticPlanner:
         self.x, self.y, self.z, self.m, self.n, self.p, self.q = [int(v) for v in bridgeheads]
         self.remaining12 = int(counts.get(12, 0))
         self.remaining12 += self.remaining12 % 2
-        self.remaining13 = float(sum(counts.get(su, 0) for su in (5, 6, 7, 8, 9, 10, 11, 13)))
-        self.remaining13 += 1.5 * float(counts.get(26, 0)) + 2.0 * float(counts.get(30, 0))
+        # During staging every final hetero atom occupies one SU13 slot.  A
+        # five-membered heteroaromatic ring needs one additional temporary
+        # SU13 slot because two adjacent staging carbons collapse into one
+        # final N/S node.  Keep this accounting integral so the template
+        # cardinality matches the actual staging graph.
+        ordinary13 = int(sum(counts.get(su, 0) for su in (5, 6, 7, 8, 9, 10, 11, 13)))
+        n26 = int(counts.get(26, 0))
+        n30 = int(counts.get(30, 0))
+        self.remaining13 = float(ordinary13 + n26 + n30)
         self.max12to13 = 4
         self.max13to12 = max(0, 2 - (self.remaining12 - int(counts.get(12, 0))))
         self.used12to13 = 0
@@ -1204,9 +1212,16 @@ def _assign_aromatic_nodes(
     if len(shared_nodes) > len(shared_slots):
         raise InverseInputError("more SU12 nodes than fused aromatic bridgehead slots")
     while len(shared_nodes) < len(shared_slots):
-        if not nonshared_nodes:
+        eligible_shared_fill = [
+            node_id for node_id in nonshared_nodes
+            if nodes[node_id].su_type not in {26, 30}
+            and nodes[node_id].su_name != "synthetic_staging_13"
+        ]
+        if not eligible_shared_fill:
             raise InverseInputError("cannot fill all fused aromatic bridgehead slots")
-        shared_nodes.append(nonshared_nodes.pop())
+        selected_fill = eligible_shared_fill[-1]
+        nonshared_nodes.remove(selected_fill)
+        shared_nodes.append(selected_fill)
     for node_id, slot in zip(shared_nodes, shared_slots):
         assignment[node_id] = slot
         used_slots.add(slot)
@@ -1233,8 +1248,30 @@ def build_csv_inverse_input(
     topology_specs_csv: str | Path,
 ) -> InverseAssemblyInput:
     nodes = load_node_rows(nodes_csv)
+    original_node_count = len(nodes)
     topology_rows = load_topology_rows(topology_specs_csv)
     counts = Counter(row.su_type for row in nodes.values())
+    n26 = sum(1 for row in nodes.values() if row.su_type == 26)
+    n30 = sum(1 for row in nodes.values() if row.su_type == 30)
+    n26_five = n26 // 3
+    hetero_five_targets = [
+        node_id for node_id, row in sorted(nodes.items()) if row.su_type == 26
+    ][:n26_five]
+    hetero_five_targets.extend(
+        node_id for node_id, row in sorted(nodes.items()) if row.su_type == 30
+    )
+    synthetic_by_target: Dict[int, int] = {}
+    next_synthetic = -1000000
+    for target_id in hetero_five_targets:
+        while next_synthetic in nodes:
+            next_synthetic -= 1
+        synthetic_by_target[int(target_id)] = int(next_synthetic)
+        nodes[int(next_synthetic)] = NodeRow(
+            node_id=int(next_synthetic), su_type=13, su_name="synthetic_staging_13",
+            hop1_ids=(), template_key="",
+        )
+        next_synthetic -= 1
+    counts[13] += len(synthetic_by_target)
     bridgeheads = _bridgehead_counts(nodes)
     kinds = _AromaticPlanner(counts, bridgeheads).plan()
     if not kinds:
@@ -1288,6 +1325,7 @@ def build_csv_inverse_input(
             node_id
             for node_id in excluded_aromatic_ids
             if nodes[node_id].su_type != 13
+            or node_id in synthetic_by_target.values()
             or node_id in topology_referenced_ids
             or node_id in rigid_endpoint_ids
         )
@@ -1306,6 +1344,77 @@ def build_csv_inverse_input(
         rigid_pairs,
         aromatic_ids=aromatic_ids,
     )
+
+    # Stage each five-membered request as two adjacent, non-bridgehead SU13
+    # sites.  The inverse CSV identifies the final target GID, but does not
+    # identify a physical aromatic slot; this deterministic permutation makes
+    # the pair available to the final substitution search while preserving
+    # every GID and every unit's ownership.
+    protected_ids = {int(node_id) for pair in rigid_pairs for node_id in pair}
+    reserved_ids = set(int(value) for value in synthetic_by_target) | {
+        int(value) for value in synthetic_by_target.values()
+    }
+    slot_to_node = {slot: int(node_id) for node_id, slot in assignment.items()}
+    for target_id, synthetic_id in synthetic_by_target.items():
+        target_id, synthetic_id = int(target_id), int(synthetic_id)
+        target_slot = assignment.get(target_id)
+        synthetic_slot = assignment.get(synthetic_id)
+        if target_slot is None or synthetic_slot is None:
+            raise InverseInputError(
+                f"five-member staging IDs are not assigned: {target_id}, {synthetic_id}"
+            )
+        candidate_pairs: List[Tuple[Tuple[int, int], Tuple[int, int]]] = []
+        for cluster_index, template in enumerate(templates):
+            for left, right in template.edges:
+                if template.shared[left] or template.shared[right]:
+                    continue
+                slot_left, slot_right = (cluster_index, left), (cluster_index, right)
+                occupants = {
+                    slot_to_node.get(slot_left, -1), slot_to_node.get(slot_right, -1)
+                }
+                if occupants & protected_ids:
+                    continue
+                if occupants & (reserved_ids - {target_id, synthetic_id}):
+                    continue
+                candidate_pairs.append((slot_left, slot_right))
+        if not candidate_pairs:
+            raise InverseInputError(
+                f"no adjacent aromatic SU13 staging slots for five-member request {target_id}"
+            )
+        pair = min(
+            candidate_pairs,
+            key=lambda value: (
+                -sum(slot in value for slot in (target_slot, synthetic_slot)),
+                value[0][0], value[0][1], value[1][1],
+            ),
+        )
+        slot_a, slot_b = pair
+        if {
+            target_slot, synthetic_slot
+        } == {slot_a, slot_b}:
+            continue
+        # Remove both requested IDs, capture the occupants displaced from the
+        # destination pair, then refill the vacated source slots.
+        old_slots = {target_slot, synthetic_slot}
+        displaced = [
+            slot_to_node[slot]
+            for slot in (slot_a, slot_b)
+            if slot_to_node.get(slot, -1) not in {target_id, synthetic_id}
+        ]
+        for slot, node_id in list(slot_to_node.items()):
+            if node_id in {target_id, synthetic_id}:
+                slot_to_node.pop(slot, None)
+        slot_to_node[slot_a] = target_id
+        slot_to_node[slot_b] = synthetic_id
+        empty_slots = sorted(old_slots - {slot_a, slot_b})
+        if len(empty_slots) != len(displaced):
+            raise InverseInputError(
+                f"invalid staging permutation for five-member request {target_id}"
+            )
+        for slot, node_id in zip(empty_slots, displaced):
+            slot_to_node[slot] = node_id
+        assignment = {int(node_id): slot for slot, node_id in slot_to_node.items()}
+        protected_ids.update({target_id, synthetic_id})
 
     topology_boundaries = assignment_info["boundary_by_product"]
     topology_phases = assignment_info["phases"]
@@ -1499,12 +1608,30 @@ def build_csv_inverse_input(
         contracts=tuple(contracts),
         node_su_types=tuple(sorted(su_by_id.items())),
         ownership=tuple(sorted(ownership.items())),
+        hetero_requests=tuple(
+            HeteroAromaticRequest(
+                target_su=int(nodes[target_id].su_type),
+                ring_size=5,
+                target_node_id=int(target_id),
+                synthetic_node_id=int(synthetic_id),
+                hop1_ids=tuple(nodes[target_id].hop1_ids),
+            )
+            for target_id, synthetic_id in sorted(synthetic_by_target.items())
+        ) + tuple(
+            HeteroAromaticRequest(26, 6, int(node_id), hop1_ids=tuple(row.hop1_ids))
+            for node_id, row in sorted(nodes.items())
+            if row.su_type == 26 and int(node_id) not in synthetic_by_target
+        ) + tuple(
+            HeteroAromaticRequest(30, 6, int(node_id), hop1_ids=tuple(row.hop1_ids))
+            for node_id, row in sorted(nodes.items())
+            if row.su_type == 30 and int(node_id) not in synthetic_by_target
+        ),
         diagnostics=tuple(sorted((
             ("initializer", "inverse_csv_pair"),
             ("nodes_csv", str(Path(nodes_csv))),
             ("topology_specs_csv", str(Path(topology_specs_csv))),
             ("node_count", str(len(su_by_id))),
-            ("source_node_count", str(len(nodes))),
+            ("source_node_count", str(original_node_count)),
             ("assembly_node_count", str(len(su_by_id))),
             (
                 "excluded_surplus_aromatic_node_ids",
@@ -1512,6 +1639,11 @@ def build_csv_inverse_input(
             ),
             ("aromatic_unit_count", str(len(aromatic_units))),
             ("topology_unit_count", str(len(topology_units))),
+            ("su26_total", str(n26)),
+            ("su26_five_member_count", str(n26_five)),
+            ("su26_six_member_count", str(n26 - n26_five)),
+            ("su30_five_member_count", str(n30)),
+            ("synthetic_staging_node_ids", ",".join(str(value) for value in sorted(synthetic_by_target.values()))),
             ("rigid_contract_count", str(sum(c.kind == "rigid" for c in contracts))),
             ("flex_contract_count", str(sum(c.kind == "flex" for c in contracts))),
             ("side_contract_count", str(sum(c.kind == "side" for c in contracts))),
@@ -1606,6 +1738,37 @@ def _extract_aromatic_units(payload: Any) -> List[Any]:
             if found:
                 return found
     return []
+
+
+def _extract_hetero_requests(payload: Any) -> Tuple[HeteroAromaticRequest, ...]:
+    """Read optional final-substitution requests from an inverse export."""
+    root = _dict(payload)
+    values = root.get("hetero_requests", root.get("heteroaromatic_requests", []))
+    if not values:
+        for key in ("external_assembly", "assembly_view", "assembly"):
+            nested = _dict(root.get(key))
+            values = nested.get("hetero_requests", nested.get("heteroaromatic_requests", []))
+            if values:
+                break
+    if isinstance(values, Mapping):
+        values = list(values.values())
+    result: List[HeteroAromaticRequest] = []
+    for value in list(values or []):
+        row = _dict(value)
+        target_su = _int(row.get("target_su", row.get("su_type", -1)))
+        ring_size = _int(row.get("ring_size", row.get("ring", 6)))
+        target_node_id = _int(row.get("target_node_id", row.get("node_id", -1)))
+        synthetic = row.get("synthetic_node_id")
+        synthetic_id = None if synthetic in (None, "", -1, "-1") else _int(synthetic)
+        hop1 = tuple(_int(item) for item in list(row.get("hop1_ids", []) or []))
+        if target_su not in {26, 30} or ring_size not in {5, 6} or target_node_id < 0:
+            continue
+        if ring_size == 5 and synthetic_id is None:
+            # A materialized JSON final state has no synthetic staging node;
+            # such a request is already complete and need not be replayed.
+            continue
+        result.append(HeteroAromaticRequest(target_su, ring_size, target_node_id, synthetic_id, hop1))
+    return tuple(result)
 
 
 def _extract_nodes(payload: Any) -> Dict[int, Dict[str, Any]]:
@@ -2043,15 +2206,18 @@ def build_inverse_input(payload: Any) -> InverseAssemblyInput:
         for unit in units
         for node in unit.nodes
     }
+    hetero_requests = _extract_hetero_requests(payload)
     return InverseAssemblyInput(
         units=tuple(units),
         contracts=tuple(contracts),
         node_su_types=tuple(sorted(node_su.items())),
         ownership=tuple(sorted(by_node.items())),
+        hetero_requests=hetero_requests,
         diagnostics=tuple(sorted((str(k), str(v)) for k, v in {
             "unit_count": len(units),
             "contract_count": len(contracts),
             "aromatic_unit_count": sum(1 for unit in units if unit.phase == "aromatic"),
+            "hetero_request_count": len(hetero_requests),
         }.items())),
     )
 
@@ -2202,7 +2368,8 @@ def initialize(
             "initializer": "inverse_csv_pair" if csv_mode else "inverse_topology_units",
             "allocation": False,
             "conversion": False,
-            "substitution": False,
+            "substitution": bool(problem.hetero_requests),
+            "hetero_request_count": len(problem.hetero_requests),
             "aromatic_unit_count": len(aromatic_units),
             "topology_unit_count": len(topology_units),
             "external_contract_count": len(problem.contracts),

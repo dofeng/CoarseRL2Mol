@@ -56,7 +56,13 @@ def _reference_node_color(su: int):
 
 
 def _cart(axial, scale: float = 1.0):
-    return axial_to_cartesian(axial, scale)
+    # Final 5-membered substitutions may use mean (half-grid) coordinates.
+    q, r = float(axial[0]), float(axial[1])
+    import math
+    return (
+        float(scale) * math.sqrt(3.0) * 0.5 * q,
+        float(scale) * (r - 0.5 * q),
+    )
 
 
 def _write_json(value: Any, path: Path) -> None:
@@ -94,7 +100,9 @@ def save_state_png(
         else None
     )
     positions = {
-        int(node_id): _cart(axial, scale=EDGE_LENGTH)
+        int(node_id): _cart(
+            state.final_node_positions.get(int(node_id), axial), scale=EDGE_LENGTH
+        )
         for node_id, axial in state.node_axial.items()
         if visible is None or int(node_id) in visible
     }
@@ -207,15 +215,21 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
         writer = csv.writer(handle)
         writer.writerow([
             "node_id", "su_type", "planned_su_type", "unit_id",
-            "q", "r", "x", "y",
+            "q", "r", "final_q", "final_r", "x", "y",
         ])
         for node_id, axial in sorted(state.node_axial.items()):
-            x, y = _cart(axial)
+            final_position = state.final_node_positions.get(
+                int(node_id), (float(axial[0]), float(axial[1]))
+            )
+            x, y = _cart(final_position)
             writer.writerow([
                 int(node_id), int(su_map.get(int(node_id), -1)),
                 int(planned_su_map.get(int(node_id), -1)),
                 ownership.get(int(node_id), ""),
-                int(axial[0]), int(axial[1]), f"{x:.6f}", f"{y:.6f}",
+                int(axial[0]), int(axial[1]),
+                f"{state.final_node_positions.get(int(node_id), (float(axial[0]), float(axial[1])))[0]:.6f}",
+                f"{state.final_node_positions.get(int(node_id), (float(axial[0]), float(axial[1])))[1]:.6f}",
+                f"{x:.6f}", f"{y:.6f}",
             ])
     with (directory / "final_edges.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)

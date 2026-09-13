@@ -7,7 +7,8 @@ from importlib import import_module
 from types import ModuleType
 
 from .input import initialize, initialize_from_inverse
-from .models import AssemblyConfig, MCTSConfig
+from .models import AssemblyConfig, MCTSConfig, HeteroAromaticRequest
+from .substitution import run_substitution_stage
 
 # Local notebooks and older tests imported implementation modules directly.
 # Keep those imports working while the public API moves to the ten-file layout.
@@ -82,9 +83,11 @@ __all__ = [
     "initialize_from_inverse",
     "AssemblyConfig",
     "MCTSConfig",
+    "HeteroAromaticRequest",
     "MCTSRunner",
     "assemble_from_csv",
     "assemble_from_inverse",
     "run_flex_mcts",
     "run_side_mcts",
+    "run_substitution_stage",
 ]

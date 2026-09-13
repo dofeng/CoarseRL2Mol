@@ -60,6 +60,9 @@ class AssemblyConfig:
     nmr_weight: float = 1.0
     geometry_weight: float = 0.05
     contact_weight: float = 0.02
+    substitution_beam_width: int = 4
+    substitution_candidate_k: int = 32
+    substitution_nmr_weight: float = 1.0
 
     def __post_init__(self) -> None:
         self.rigid_iterations = max(1, int(self.rigid_iterations))
@@ -71,6 +74,9 @@ class AssemblyConfig:
         self.nmr_weight = max(0.0, float(self.nmr_weight))
         self.geometry_weight = max(0.0, float(self.geometry_weight))
         self.contact_weight = max(0.0, float(self.contact_weight))
+        self.substitution_beam_width = max(1, int(self.substitution_beam_width))
+        self.substitution_candidate_k = max(1, int(self.substitution_candidate_k))
+        self.substitution_nmr_weight = max(0.0, float(self.substitution_nmr_weight))
 
     @property
     def iterations(self) -> int:
@@ -123,6 +129,9 @@ class MCTSConfig:
     nmr_weight: float = 1.0
     geometry_weight: float = 0.05
     contact_weight: float = 0.02
+    substitution_beam_width: int = 4
+    substitution_candidate_k: int = 32
+    substitution_nmr_weight: float = 1.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -136,6 +145,9 @@ class MCTSConfig:
         self.nmr_weight = max(0.0, float(self.nmr_weight))
         self.geometry_weight = max(0.0, float(self.geometry_weight))
         self.contact_weight = max(0.0, float(self.contact_weight))
+        self.substitution_beam_width = max(1, int(self.substitution_beam_width))
+        self.substitution_candidate_k = max(1, int(self.substitution_candidate_k))
+        self.substitution_nmr_weight = max(0.0, float(self.substitution_nmr_weight))
 
 
 
@@ -166,6 +178,22 @@ class UnitPort:
     required_su_types: Tuple[int, ...] = ()
     used: bool = False
     metadata: Tuple[Tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class HeteroAromaticRequest:
+    """A final aromatic hetero-atom substitution request.
+
+    ``ring_size`` is the ring represented by the final atom: six-membered
+    requests replace one staging SU13, while five-membered requests collapse
+    two adjacent staging SU13 sites into one SU26/SU30 node.
+    """
+
+    target_su: int
+    ring_size: int
+    target_node_id: int
+    synthetic_node_id: Optional[int] = None
+    hop1_ids: Tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -221,6 +249,7 @@ class InverseAssemblyInput:
     ownership: Tuple[Tuple[int, str], ...]
     diagnostics: Tuple[Tuple[str, str], ...] = ()
     source_kind: InputSourceKind = InputSourceKind.INVERSE_JSON
+    hetero_requests: Tuple[HeteroAromaticRequest, ...] = ()
 
     def node_map(self) -> Dict[int, int]:
         return {int(node_id): int(su) for node_id, su in self.node_su_types}

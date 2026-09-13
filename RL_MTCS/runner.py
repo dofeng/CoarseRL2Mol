@@ -26,6 +26,7 @@ from .rigid import (
 from .output import export_final_state
 from .flex import run_planned_flex_search
 from .side import run_planned_side_search
+from .substitution import run_substitution_stage
 from .geometry import HEX_DIRECTIONS
 from .output import save_state_png
 
@@ -78,7 +79,7 @@ def _candidate_from_result(result: SearchResult) -> BeamCandidate:
 
 
 class MCTSRunner:
-    """Run inverse topology placement: rigid -> flex -> side."""
+    """Run inverse topology placement: rigid -> flex -> side -> substitution."""
 
     def __init__(
         self,
@@ -211,6 +212,26 @@ class MCTSRunner:
         self._write_stage_output(payload, output_dir, "side")
         return payload
 
+    def run_substitution_stage(self, side_result: Dict[str, Any], output_dir: Optional[str] = None) -> Dict[str, Any]:
+        state = self._state_from_result(side_result)
+        final_state, summary = run_substitution_stage(
+            state,
+            nmr_scorer=self.nmr_scorer,
+            candidate_k=int(getattr(self.config, "substitution_candidate_k", 32)),
+            beam_width=int(getattr(self.config, "substitution_beam_width", 4)),
+            nmr_weight=float(getattr(self.config, "substitution_nmr_weight", 1.0)),
+        )
+        payload = {
+            "state": final_state,
+            "best_candidate": BeamCandidate(final_state, 0.0, [], summary),
+            "beam_candidates": [BeamCandidate(final_state, 0.0, [], summary)],
+            "summaries": [summary],
+            "result": summary,
+            "molecule": final_state.to_dict(),
+        }
+        self._write_stage_output(payload, output_dir, "substitution")
+        return payload
+
     def run_all_stages(self, output_dir: Optional[str] = None) -> Dict[str, Any]:
         # CSV runs are user-facing exports.  Keep their artefacts beside the
         # inverse CSV pair even when the caller does not provide ``--output``.
@@ -229,7 +250,12 @@ class MCTSRunner:
         side = self.run_side_stage(flex, str(base / "side") if base else None)
         if not side["result"].get("done", False):
             return self._failed_result("side", side)
-        final_state = side["state"]
+        substitution = self.run_substitution_stage(
+            side, str(base / "substitution") if base else None
+        )
+        if not substitution["result"].get("complete", False):
+            return self._failed_result("substitution", substitution)
+        final_state = substitution["state"]
         outputs = export_final_state(final_state, base) if base else {}
         nmr_result: Dict[str, Any] = {"enabled": False}
         if self.nmr_scorer is not None:
@@ -249,14 +275,15 @@ class MCTSRunner:
         result = {
             "ok": complete,
             "status": "complete" if complete else "incomplete",
-            "stage": "side",
+            "stage": "substitution",
             "init": self.init_data["diagnostics"],
             "rigid": rigid["result"],
             "flex": flex["result"],
             "side": side["result"],
+            "substitution": substitution["result"],
             "nmr": nmr_result,
-            "best_candidate": side["best_candidate"],
-            "beam_candidates": side["beam_candidates"],
+            "best_candidate": substitution["best_candidate"],
+            "beam_candidates": substitution["beam_candidates"],
             "molecule": final_state.to_dict(),
             "audit": audit,
             "outputs": outputs,
@@ -273,6 +300,7 @@ class MCTSRunner:
             "stage": str(stage),
             "best_candidate": payload.get("best_candidate"),
             "beam_candidates": payload.get("beam_candidates", []),
+            "result": payload.get("result", {}),
             "molecule": state.to_dict() if isinstance(state, HexAssemblyState) else {},
             "audit": state.audit() if isinstance(state, HexAssemblyState) else {},
         }
@@ -1115,6 +1143,9 @@ def main() -> Dict[str, Any]:
     parser.add_argument("--candidate-k", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=128)
     parser.add_argument("--beam-width", type=int, default=1)
+    parser.add_argument("--substitution-beam-width", type=int, default=4)
+    parser.add_argument("--substitution-candidate-k", type=int, default=32)
+    parser.add_argument("--substitution-nmr-weight", type=float, default=1.0)
     parser.add_argument("--c-puct", type=float, default=1.414)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output", type=str, default=None)
@@ -1137,6 +1168,9 @@ def main() -> Dict[str, Any]:
                 side_max_steps=args.max_steps,
                 c_puct=args.c_puct,
                 seed=args.seed,
+                substitution_beam_width=args.substitution_beam_width,
+                substitution_candidate_k=args.substitution_candidate_k,
+                substitution_nmr_weight=args.substitution_nmr_weight,
             ),
         ).run_all_stages(args.output)
     elif args.stage == "init":
@@ -1168,6 +1202,26 @@ def main() -> Dict[str, Any]:
             c_puct=args.c_puct,
             seed=args.seed,
         )
+    elif args.stage == "all":
+        result = MCTSRunner(
+            args.nodes_csv,
+            config=MCTSConfig(
+                iterations=args.rigid_iterations,
+                flex_iterations=args.flex_iterations,
+                side_iterations=args.side_iterations,
+                candidate_k=args.candidate_k,
+                beam_width=args.beam_width,
+                rigid_max_steps=args.max_steps,
+                flex_max_steps=args.max_steps,
+                side_max_steps=args.max_steps,
+                c_puct=args.c_puct,
+                seed=args.seed,
+                substitution_beam_width=args.substitution_beam_width,
+                substitution_candidate_k=args.substitution_candidate_k,
+                substitution_nmr_weight=args.substitution_nmr_weight,
+            ),
+            topology_specs_csv=args.topology_specs_csv,
+        ).run_all_stages(args.output)
     else:
         result = run_side_mcts(
             args.nodes_csv,

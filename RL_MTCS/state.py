@@ -71,6 +71,10 @@ class HexAssemblyState:
     problem: InverseAssemblyInput
     placements: Dict[str, UnitPlacement] = field(default_factory=dict)
     node_axial: Dict[int, Axial] = field(default_factory=dict)
+    # Final aromatic substitutions may place a merged atom at a half-grid
+    # coordinate.  Keep the integer staging coordinates above for placement
+    # and store the final continuous coordinates separately.
+    final_node_positions: Dict[int, Tuple[float, float]] = field(default_factory=dict)
     occupied_axial: Dict[Axial, int] = field(default_factory=dict)
     edges: List[AssemblyEdge] = field(default_factory=list)
     used_ports: Set[str] = field(default_factory=set)
@@ -80,6 +84,8 @@ class HexAssemblyState:
     current_su_types: Dict[int, int] = field(default_factory=dict)
     stage: str = "aromatic"
     action_history: List[Dict[str, Any]] = field(default_factory=list)
+    substitution_relaxed_edges: Set[frozenset[int]] = field(default_factory=set)
+    substitution_relaxed_contracts: Set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self._units = {unit.unit_id: unit for unit in self.problem.units}
@@ -94,11 +100,17 @@ class HexAssemblyState:
                 for unit in self.problem.units
                 for node in unit.nodes
             }
+        if not self.final_node_positions:
+            self.final_node_positions = {
+                int(node_id): (float(axial[0]), float(axial[1]))
+                for node_id, axial in self.node_axial.items()
+            }
 
     def clone(self) -> "HexAssemblyState":
         new = HexAssemblyState(problem=self.problem)
         new.placements = dict(self.placements)
         new.node_axial = dict(self.node_axial)
+        new.final_node_positions = dict(self.final_node_positions)
         new.occupied_axial = dict(self.occupied_axial)
         new.edges = list(self.edges)
         new.used_ports = set(self.used_ports)
@@ -108,6 +120,8 @@ class HexAssemblyState:
         new.current_su_types = dict(self.current_su_types)
         new.stage = str(self.stage)
         new.action_history = copy.deepcopy(self.action_history)
+        new.substitution_relaxed_edges = set(self.substitution_relaxed_edges)
+        new.substitution_relaxed_contracts = set(self.substitution_relaxed_contracts)
         return new
 
     def component_unit_ids(self, unit_id: str) -> Set[str]:
@@ -261,6 +275,7 @@ class HexAssemblyState:
             )
             self.node_axial[node_id] = axial
             self.occupied_axial[axial] = node_id
+            self.final_node_positions[node_id] = (float(axial[0]), float(axial[1]))
         self.edges = [
             AssemblyEdge(
                 edge.source_node_id,
@@ -380,6 +395,8 @@ class HexAssemblyState:
         source: Axial,
         target: Axial,
     ) -> bool:
+        if frozenset((int(source_node_id), int(target_node_id))) in self.substitution_relaxed_edges:
+            return True
         delta = (int(target[0]) - int(source[0]), int(target[1]) - int(source[1]))
         if delta not in HEX_DIRECTIONS:
             return False
@@ -550,6 +567,7 @@ class HexAssemblyState:
         for node_id, axial in coordinates.items():
             self.node_axial[int(node_id)] = axial
             self.occupied_axial[axial] = int(node_id)
+            self.final_node_positions[int(node_id)] = (float(axial[0]), float(axial[1]))
         for edge in unit.internal_edges:
             if int(edge.source_node_id) not in coordinates or int(edge.target_node_id) not in coordinates:
                 continue
@@ -884,6 +902,7 @@ class HexAssemblyState:
             for node_id, coord in assigned.items():
                 self.node_axial[node_id] = coord
                 self.occupied_axial[coord] = node_id
+                self.final_node_positions[node_id] = (float(coord[0]), float(coord[1]))
             self.edges = [
                 AssemblyEdge(
                     edge.source_node_id,
@@ -912,6 +931,7 @@ class HexAssemblyState:
     def _restore(self, snapshot: "HexAssemblyState") -> None:
         self.placements = dict(snapshot.placements)
         self.node_axial = dict(snapshot.node_axial)
+        self.final_node_positions = dict(snapshot.final_node_positions)
         self.occupied_axial = dict(snapshot.occupied_axial)
         self.edges = list(snapshot.edges)
         self.used_ports = set(snapshot.used_ports)
@@ -923,6 +943,8 @@ class HexAssemblyState:
         self.current_su_types = dict(snapshot.current_su_types)
         self.stage = str(snapshot.stage)
         self.action_history = copy.deepcopy(snapshot.action_history)
+        self.substitution_relaxed_edges = set(snapshot.substitution_relaxed_edges)
+        self.substitution_relaxed_contracts = set(snapshot.substitution_relaxed_contracts)
 
     def component_count(self) -> int:
         parent: Dict[int, int] = {int(node_id): int(node_id) for node_id in self.node_axial}
@@ -962,7 +984,78 @@ class HexAssemblyState:
             and not self.audit_topology_conformation_errors()
             and not self.audit_port_direction_errors()
             and not self.audit_unintended_contacts()
+            and not self.audit_substitution_errors()
         )
+
+    def audit_substitution_errors(self) -> List[Dict[str, Any]]:
+        """Validate the bookkeeping of the final SU26/SU30 pass.
+
+        Five-membered replacements deliberately keep an integer staging
+        coordinate for lattice audits and expose the physical mean coordinate
+        through ``final_node_positions``.  This audit verifies that the two
+        source sites were actually collapsed, the target label is present, and
+        no final coordinates collide.
+        """
+        errors: List[Dict[str, Any]] = []
+        current = self.current_su_types
+        for action in self.action_history:
+            if action.get("kind") != "substitution":
+                continue
+            target_su = int(action.get("target_su", -1))
+            ring_size = int(action.get("ring_size", 0))
+            if ring_size == 6:
+                site_ids = [int(value) for value in action.get("site_ids", [])]
+                if len(site_ids) != 1 or site_ids[0] not in self.node_axial:
+                    errors.append({"reason": "six_member_site_missing", "site_ids": site_ids})
+                elif int(current.get(site_ids[0], -1)) != target_su:
+                    errors.append({"reason": "six_member_label_mismatch", "site_id": site_ids[0], "expected": target_su, "actual": current.get(site_ids[0])})
+                continue
+            if ring_size != 5:
+                continue
+            source_ids = [int(value) for value in action.get("site_ids", [])]
+            representative = int(action.get("representative_node_id", -1))
+            removed = int(action.get("removed_node_id", -1))
+            if len(source_ids) != 2 or representative not in source_ids or removed not in source_ids:
+                errors.append({"reason": "five_member_source_metadata_invalid", "site_ids": source_ids})
+                continue
+            if representative not in self.node_axial:
+                errors.append({"reason": "five_member_representative_missing", "node_id": representative})
+            if removed in self.node_axial or removed in current:
+                errors.append({"reason": "five_member_removed_site_present", "node_id": removed})
+            if int(current.get(representative, -1)) != target_su:
+                errors.append({"reason": "five_member_label_mismatch", "node_id": representative, "expected": target_su, "actual": current.get(representative)})
+            expected = action.get("mean_position")
+            actual = self.final_node_positions.get(representative)
+            if expected is None or actual is None or len(expected) < 2 or any(abs(float(expected[i]) - float(actual[i])) > 1e-9 for i in (0, 1)):
+                errors.append({"reason": "five_member_mean_position_mismatch", "node_id": representative, "expected": expected, "actual": actual})
+            source_positions = action.get("source_positions")
+            if isinstance(source_positions, (list, tuple)) and len(source_positions) == 2 and all(isinstance(value, (list, tuple)) and len(value) >= 2 for value in source_positions):
+                mean = (
+                    (float(source_positions[0][0]) + float(source_positions[1][0])) / 2.0,
+                    (float(source_positions[0][1]) + float(source_positions[1][1])) / 2.0,
+                )
+                if actual is None or any(abs(mean[i] - float(actual[i])) > 1e-9 for i in (0, 1)):
+                    errors.append({"reason": "five_member_source_mean_mismatch", "node_id": representative, "expected": list(mean), "actual": actual})
+            bonded = {
+                frozenset((int(edge.source_node_id), int(edge.target_node_id)))
+                for edge in self.edges
+            }
+            if frozenset(source_ids) in bonded:
+                errors.append({"reason": "five_member_source_edge_present", "site_ids": source_ids})
+        positions: Dict[Tuple[float, float], List[int]] = {}
+        for node_id in self.node_axial:
+            position = self.final_node_positions.get(int(node_id))
+            if position is None:
+                continue
+            key = (round(float(position[0]), 9), round(float(position[1]), 9))
+            positions.setdefault(key, []).append(int(node_id))
+        for position, node_ids in positions.items():
+            if len(node_ids) > 1:
+                errors.append({"reason": "duplicate_final_positions", "position": list(position), "node_ids": sorted(node_ids)})
+        for pair in self.substitution_relaxed_edges:
+            if any(int(node_id) not in self.node_axial for node_id in pair):
+                errors.append({"reason": "relaxed_edge_endpoint_missing", "edge": sorted(int(node_id) for node_id in pair)})
+        return errors
 
     def audit_geometry_errors(self) -> List[Dict[str, Any]]:
         errors: List[Dict[str, Any]] = []
@@ -1018,6 +1111,8 @@ class HexAssemblyState:
         errors: List[Dict[str, Any]] = []
         for contract in self.problem.contracts:
             if str(contract.contract_id) not in self.satisfied_contracts:
+                continue
+            if str(contract.contract_id) in self.substitution_relaxed_contracts:
                 continue
             source = self.node_axial.get(int(contract.source_node_id))
             target = self.node_axial.get(int(contract.target_node_id))
@@ -1115,6 +1210,7 @@ class HexAssemblyState:
                 placement.reflection,
             ) for unit_id, placement in self.placements.items())),
             tuple(sorted((node_id, axial) for node_id, axial in self.node_axial.items())),
+            tuple(sorted((node_id, position) for node_id, position in self.final_node_positions.items())),
             tuple(sorted((edge.source_node_id, edge.target_node_id, edge.kind, edge.contract_id) for edge in self.edges)),
             tuple(sorted(self.used_ports)),
             tuple(sorted(self.satisfied_contracts)),
@@ -1123,6 +1219,8 @@ class HexAssemblyState:
             )),
             tuple(sorted(self.reembedded_units)),
             tuple(sorted(self.current_su_types.items())),
+            tuple(sorted(tuple(sorted(pair)) for pair in self.substitution_relaxed_edges)),
+            tuple(sorted(self.substitution_relaxed_contracts)),
         )
 
     def audit(self) -> Dict[str, Any]:
@@ -1137,6 +1235,7 @@ class HexAssemblyState:
         conformation_errors = self.audit_topology_conformation_errors()
         port_direction_errors = self.audit_port_direction_errors()
         unintended_contacts = self.audit_unintended_contacts()
+        substitution_errors = self.audit_substitution_errors()
         return {
             "complete": bool(self.is_complete()),
             "stage": str(self.stage),
@@ -1155,6 +1254,8 @@ class HexAssemblyState:
             "port_directions_valid": not port_direction_errors,
             "unintended_contacts": unintended_contacts,
             "nonbonded_contacts_valid": not unintended_contacts,
+            "substitution_errors": substitution_errors,
+            "substitution_valid": not substitution_errors,
             "allowed_unbonded_contacts": sorted(
                 sorted(pair) for pair in self.allowed_unbonded_contacts
             ),
@@ -1164,6 +1265,7 @@ class HexAssemblyState:
                 or conformation_errors
                 or port_direction_errors
                 or unintended_contacts
+                or substitution_errors
             ),
             "component_count": self.component_count(),
             "edge_count": len(self.edges),
@@ -1172,6 +1274,8 @@ class HexAssemblyState:
                 for action in self.action_history
                 if action.get("geometry_fallback") and action.get("contract_id")
             ),
+            "substitution_relaxed_edge_count": len(self.substitution_relaxed_edges),
+            "substitution_relaxed_contract_ids": sorted(self.substitution_relaxed_contracts),
         }
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1205,6 +1309,9 @@ class HexAssemblyState:
                         self.problem.node_map().get(int(node_id), -1)
                     ),
                     "axial": [int(axial[0]), int(axial[1])],
+                    "final_position": list(self.final_node_positions.get(
+                        int(node_id), (float(axial[0]), float(axial[1]))
+                    )),
                     "unit_id": ownership.get(int(node_id), ""),
                     "role": node_role(int(node_id)),
                 }
@@ -1425,6 +1532,7 @@ def relabel_aromatic_sites(
         for node_id, axial in coordinates.items():
             rebuilt.node_axial[int(node_id)] = axial
             rebuilt.occupied_axial[axial] = int(node_id)
+            rebuilt.final_node_positions[int(node_id)] = (float(axial[0]), float(axial[1]))
         for edge in unit.internal_edges:
             left, right = int(edge.source_node_id), int(edge.target_node_id)
             rebuilt._append_edge(
