@@ -838,6 +838,13 @@ class Stage3PhaseResult(Stage3Serializable):
     phase_completed: bool = False
     rebuild_required: bool = False
     primary_adjustment_count: int = 0
+    # Internal topology has two independent physical-conversion budgets:
+    # ordinary residual assembly and the post-assembly 11-22 reclassification
+    # batch.  Keep the aggregate count above for generic callers, but expose
+    # the two accounting domains explicitly so they are never rendered as a
+    # single ``ordinary + reclassification / one_budget`` value.
+    ordinary_internal_primary_adjustment_count: int = 0
+    residual_1122_reclassification_primary_adjustment_count: int = 0
     h_compensation_count: int = 0
     parity_balance_count: int = 0
     symbolic_topology_count: int = 0
@@ -896,6 +903,8 @@ class HistogramAdjustmentPlan(Stage3Serializable):
     phase: str = ""
     groups: List[AtomicAdjustmentGroup] = field(default_factory=list)
     primary_adjustment_count: int = 0
+    ordinary_internal_primary_adjustment_count: int = 0
+    residual_1122_reclassification_primary_adjustment_count: int = 0
     physical_conversion_count: int = 0
     parity_balance_op: Optional[HistogramConversion] = None
     port_role_balance_op: Optional[HistogramConversion] = None
@@ -979,10 +988,20 @@ class Stage3WorkflowCycleRecord(Stage3Serializable):
     accepted: bool = False
     acceptance_reason: str = ""
     primary_adjustment_count: int = 0
+    ordinary_internal_primary_adjustment_count: int = 0
+    residual_1122_reclassification_primary_adjustment_count: int = 0
     physical_conversion_count: int = 0
     h_compensation_count: int = 0
     parity_balance_count: int = 0
     fresh_rebuild: bool = False
+    # Spectrum trial accounting is generation-local.  A candidate (including
+    # a two-node pair) consumes one trial, while primary_adjustment_count
+    # continues to report the number of physical node conversions.
+    spectrum_trial_count: int = 0
+    spectrum_max_candidate_trials: int = 0
+    spectrum_candidate_batches: int = 0
+    spectrum_cap_reached: bool = False
+    spectrum_stop_reason: str = ""
 
 
 @dataclass

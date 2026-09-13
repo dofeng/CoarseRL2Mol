@@ -1054,6 +1054,9 @@ class Layer1Assigner:
         self.device = device
         self.E_SU = E_SU_tensor.to(device) if E_SU_tensor is not None else E_SU.to(device)
         self.deterministic = bool(deterministic)
+        # Effective aromatic response used only by spectrum reconstruction;
+        # graph/topology assignment remains unchanged.
+        self.aromatic_response_scale: float = 1.0
         self._current_E_target: Optional[torch.Tensor] = None
         self.layer0_estimator = layer0_estimator
         self._hop1_adjuster: Optional[Hop1Adjuster] = None
@@ -1105,6 +1108,7 @@ class Layer1Assigner:
             exact_hop1_required_centers=set(self._carbon_su_set),
             carbon_su_set=set(self._carbon_su_set),
             device=self.device,
+            aromatic_response_scale=float(self.aromatic_response_scale),
         )
         median_index = self._hop1_adjuster.get_exact_hop1_median_index()
         signatures = {

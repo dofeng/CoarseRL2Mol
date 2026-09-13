@@ -91,6 +91,8 @@ class _Stage3CycleConsoleReporter:
         self.phases: List[str] = []
         self.attempts = 0
         self.primary_count = 0
+        self.ordinary_internal_primary_count = 0
+        self.residual_1122_reclassification_primary_count = 0
         self.compensation_count = 0
         self.recovery_count = 0
         self.primary_paths: Counter[str] = Counter()
@@ -99,6 +101,7 @@ class _Stage3CycleConsoleReporter:
         self.spectrum_trials = 0
         self.spectrum_eligible = 0
         self.summary_emitted = False
+        self.external_status_emitted = False
 
     def begin(
         self,
@@ -107,12 +110,15 @@ class _Stage3CycleConsoleReporter:
         attempt: int,
         phase: str,
         external_used: int,
+        external_diagnostics: Optional[Dict[str, Any]] = None,
     ) -> None:
         if self.cycle != int(cycle):
             self.cycle = int(cycle)
             self.phases = []
             self.attempts = 0
             self.primary_count = 0
+            self.ordinary_internal_primary_count = 0
+            self.residual_1122_reclassification_primary_count = 0
             self.compensation_count = 0
             self.recovery_count = 0
             self.primary_paths = Counter()
@@ -121,6 +127,7 @@ class _Stage3CycleConsoleReporter:
             self.spectrum_trials = 0
             self.spectrum_eligible = 0
             self.summary_emitted = False
+            self.external_status_emitted = False
             budget = (
                 f" external_budget={self.external_budget_used}/{self.external_limit}"
                 if str(phase).startswith("external")
@@ -128,6 +135,27 @@ class _Stage3CycleConsoleReporter:
             )
             print(
                 f"\n[Stage3 Cycle {int(cycle)}] phase={str(phase or 'unknown')}{budget}",
+                flush=True,
+            )
+        # The planner may complete all external contracts directly and then
+        # return a spectrum candidate plan.  Report that transition explicitly
+        # so the first visible phase is not mistaken for skipped topology.
+        diagnostics = dict(external_diagnostics or {})
+        phase_name = str(phase or "")
+        if (
+            phase_name == "remaining_pool_spectrum_rebalance"
+            and bool(diagnostics.get("external_stage_completed", False))
+            and not self.external_status_emitted
+        ):
+            self.external_status_emitted = True
+            print(
+                "[Stage3 External] directly_materialized="
+                f"{int(diagnostics.get('external_directly_completed', 0) or 0)} "
+                "completed_after_conversion="
+                f"{int(diagnostics.get('external_completed_after_conversion', 0) or 0)} "
+                "blocked="
+                f"{int(diagnostics.get('external_blocked', 0) or 0)} "
+                "next_phase=remaining_pool_spectrum_rebalance",
                 flush=True,
             )
         if str(phase or "") and str(phase) not in self.phases:
@@ -146,6 +174,16 @@ class _Stage3CycleConsoleReporter:
     ) -> None:
         if histogram_plan is None:
             return
+        phase = str(getattr(histogram_plan, "phase", "") or "")
+        internal_phase = phase == "internal_topology"
+        if internal_phase:
+            ordinary_count, reclassification_count = _histogram_internal_primary_counts(
+                histogram_plan
+            )
+            self.ordinary_internal_primary_count += int(ordinary_count)
+            self.residual_1122_reclassification_primary_count += int(
+                reclassification_count
+            )
         for group in list(getattr(histogram_plan, "groups", []) or []):
             op = getattr(group, "primary_op", None)
             if op is not None:
@@ -211,7 +249,12 @@ class _Stage3CycleConsoleReporter:
         ):
             budget = f"{self.external_budget_used}/{self.external_limit}"
         elif "internal_topology" in self.phases:
-            budget = f"{self.primary_count}/{self.internal_limit}"
+            budget = (
+                f"ordinary={self.ordinary_internal_primary_count}/"
+                f"{self.internal_limit} "
+                f"residual_1122={self.residual_1122_reclassification_primary_count}/"
+                f"{self.internal_limit} total={self.primary_count}"
+            )
         elif "flex_range_reconciliation" in self.phases:
             budget = f"{self.primary_count}/{self.flex_limit}"
         else:
@@ -835,12 +878,23 @@ def _update_generation_metrics(
             "generation_id": int(generation_id),
             "internal_physical_conversion_count": 0,
             "internal_ring_count": 0,
+            "ordinary_internal_primary_adjustment_count": 0,
+            "residual_1122_reclassification_primary_adjustment_count": 0,
         })
     metrics[-1]["internal_physical_conversion_count"] = int(
         diagnostics.get("internal_physical_conversion_count", 0) or 0
     )
     metrics[-1]["internal_ring_count"] = int(
         diagnostics.get("internal_ring_count", 0) or 0
+    )
+    metrics[-1]["ordinary_internal_primary_adjustment_count"] = int(
+        diagnostics.get("ordinary_internal_primary_adjustment_count", 0) or 0
+    )
+    metrics[-1]["residual_1122_reclassification_primary_adjustment_count"] = int(
+        diagnostics.get(
+            "residual_1122_reclassification_primary_adjustment_count", 0
+        )
+        or 0
     )
     if len(metrics) > _MAX_RETAINED_GENERATION_SIGNATURES:
         del metrics[:-_MAX_RETAINED_GENERATION_SIGNATURES]
@@ -1084,6 +1138,39 @@ def _print_stage3_plan_summary(
             )
             for group in groups
         )
+    if phase == "internal_topology":
+        # Prefer concrete group provenance over the dataclass defaults.  A
+        # plan built by an older caller may expose both fields as zero while
+        # its groups still contain ordinary and reclassification operations;
+        # conversely, a compact serialized plan may have no groups at all and
+        # must fall back to the explicit diagnostics.
+        ordinary_count, residual_count = _histogram_internal_primary_counts(
+            histogram_plan
+        )
+        if histogram_plan is None or (ordinary_count == 0 and residual_count == 0):
+            ordinary_count = int(
+                plan_diagnostics.get(
+                    "ordinary_internal_primary_adjustment_count", 0
+                )
+                or 0
+            )
+            residual_count = int(
+                plan_diagnostics.get(
+                    "residual_1122_reclassification_primary_adjustment_count",
+                    0,
+                )
+                or 0
+            )
+        if ordinary_count or residual_count:
+            primary_label = (
+                f"ordinary={ordinary_count}/{int(internal_limit)} "
+                f"residual_1122={residual_count}/{int(internal_limit)} "
+                f"total={primary_count}"
+            )
+        else:
+            primary_label = f"ordinary={primary_count}/{int(internal_limit)}"
+    else:
+        primary_label = str(primary_count)
     external_status = ""
     if phase.startswith("external"):
         external_used_after = min(
@@ -1107,7 +1194,7 @@ def _print_stage3_plan_summary(
         f"attempt={int(attempt_number)} phase={phase or 'unknown'} "
         f"kind={str(getattr(plan, 'plan_kind', '') or '')} "
         f"reason={str(getattr(plan, 'reason', '') or '')} "
-        f"primary={primary_count} compensation={int(compensation_count)}"
+        f"primary={primary_label} compensation={int(compensation_count)}"
         f"{external_status}{conversion_status}",
         flush=True,
     )
@@ -1255,6 +1342,76 @@ def _histogram_parity_balance_count(histogram_plan: Any) -> int:
         getattr(histogram_plan, field, None) is not None
         for field in ("parity_balance_op", "port_role_balance_op")
     )
+
+
+def _histogram_internal_primary_counts(histogram_plan: Any) -> Tuple[int, int]:
+    """Return ordinary/reclassification internal primary counts.
+
+    New plans carry the two values explicitly.  The group-level fallback is
+    retained for plans created by older callers or for an in-memory plan that
+    predates the accounting fields; it is deliberately limited to the
+    ``internal_topology`` phase.
+    """
+    if histogram_plan is None:
+        return 0, 0
+    phase = str(getattr(histogram_plan, "phase", "") or "")
+    if phase != "internal_topology":
+        return 0, 0
+    explicit_ordinary = int(
+        getattr(histogram_plan, "ordinary_internal_primary_adjustment_count", 0)
+        or 0
+    )
+    explicit_reclassification = int(
+        getattr(
+            histogram_plan,
+            "residual_1122_reclassification_primary_adjustment_count",
+            0,
+        )
+        or 0
+    )
+    ordinary = 0
+    reclassification = 0
+    for group in list(getattr(histogram_plan, "groups", []) or []):
+        primary = getattr(group, "primary_op", None)
+        if primary is None:
+            continue
+        count = _console_conversion_count(primary)
+        kind = str(
+            dict(getattr(group, "scoring_diagnostics", {}) or {}).get(
+                "plan_kind", ""
+            )
+            or ""
+        )
+        if kind == "residual_1122_reclassification":
+            reclassification += int(count)
+        else:
+            ordinary += int(count)
+    # Group provenance is authoritative whenever groups are present.  This
+    # also handles ordinary-only or reclassification-only plans where one of
+    # the explicit fields is legitimately zero.  Explicit fields are a
+    # fallback for compact/serialized plans that no longer carry groups.
+    if ordinary or reclassification:
+        return max(0, ordinary), max(0, reclassification)
+    return max(0, explicit_ordinary), max(0, explicit_reclassification)
+
+
+def _cycle_internal_accounting_fields(histogram_plan: Any) -> Dict[str, int]:
+    """Return serializable internal budget fields for a cycle record.
+
+    Cycle records are emitted from several success, retry, and rollback
+    boundaries.  Keeping this small adapter at the reporting boundary makes
+    it impossible for one of those paths to silently drop the ordinary vs.
+    residual-11/22 split.
+    """
+    ordinary, reclassification = _histogram_internal_primary_counts(
+        histogram_plan
+    )
+    return {
+        "ordinary_internal_primary_adjustment_count": int(ordinary),
+        "residual_1122_reclassification_primary_adjustment_count": int(
+            reclassification
+        ),
+    }
 
 
 def _primary_conversion_node_ids(histogram_plan: Any) -> List[int]:
@@ -2934,7 +3091,9 @@ def run_block_c_resource_adjustment_loop_impl(
     )
     adjuster._h_tolerance = h_tolerance
     outer_cycle = int(kwargs.pop("outer_cycle", 0))
-    iteration_offset = max(0, int(kwargs.pop("iteration_offset", 0)))
+    # Kept in the accepted call shape for replay compatibility, but deliberately
+    # ignored: Stage3 cycle numbering is local to each Outer Cycle invocation.
+    kwargs.pop("iteration_offset", None)
     enable_post_external_spectrum = bool(kwargs.pop("enable_post_external_spectrum", True))
     spectrum_active_through_cycle = int(
         kwargs.pop(
@@ -2947,6 +3106,9 @@ def run_block_c_resource_adjustment_loop_impl(
             "block_c_resource.spectrum_active_through_cycle must be >= 0"
         )
     spectrum_candidate_limit = int(kwargs.pop("spectrum_candidate_limit", 8))
+    spectrum_max_candidate_trials = max(
+        0, int(kwargs.pop("spectrum_max_candidate_trials", 4))
+    )
     spectrum_max_primary_adjustments = int(kwargs.pop("spectrum_max_primary_adjustments", 10))
     spectrum_min_r2_gain = float(kwargs.pop("spectrum_min_r2_gain", 0.0005))
     verbose = bool(kwargs.pop("verbose", False))
@@ -3011,9 +3173,18 @@ def run_block_c_resource_adjustment_loop_impl(
         "generation_id": int(graph_generation),
         "internal_physical_conversion_count": 0,
         "internal_ring_count": 0,
+        "ordinary_internal_primary_adjustment_count": 0,
+        "residual_1122_reclassification_primary_adjustment_count": 0,
     }]
     spectrum_rebalance_finalized = False
     spectrum_finalized_on_cycle: Optional[int] = None
+    # Candidate rebuild accounting is scoped to the current Layer1/2 graph.
+    # It is reset only when a fresh rebuild starts a new Stage3 generation,
+    # and never inherited by another Outer Cycle invocation.
+    spectrum_trial_count = 0
+    spectrum_candidate_batches = 0
+    spectrum_cap_reached = False
+    spectrum_stop_reason = ""
 
     # ``cycle_idx`` counts complete Stage3 generations.  A generation may
     # require several planner/materialization attempts while its live
@@ -3027,18 +3198,29 @@ def run_block_c_resource_adjustment_loop_impl(
         attempt_idx += 1
         if generation_cycle_number is None:
             cycle_idx += 1
-            generation_cycle_number = int(iteration_offset) + int(cycle_idx)
+            # Stage3 cycle numbers are local to this invocation.  Every Outer
+            # Cycle creates an independent Stage3 generation and must restart
+            # both the cycle counter and the spectrum cutoff from Cycle 1.
+            # ``iteration_offset`` is retained only as a legacy call-shape
+            # parameter; it must never affect routing or spectrum enablement.
+            generation_cycle_number = int(cycle_idx)
             generation_attempt_number = 0
+            spectrum_trial_count = 0
+            spectrum_candidate_batches = 0
+            spectrum_cap_reached = False
+            spectrum_stop_reason = ""
         generation_attempt_number += 1
         cycle_number = int(generation_cycle_number)
         attempt_number = int(generation_attempt_number)
         spectrum_enabled_this_cycle = bool(
             enable_post_external_spectrum
             and cycle_number <= spectrum_active_through_cycle
+            and not spectrum_cap_reached
+            and spectrum_trial_count < spectrum_max_candidate_trials
         )
         if (
             enable_post_external_spectrum
-            and not spectrum_enabled_this_cycle
+            and cycle_number > spectrum_active_through_cycle
             and not spectrum_rebalance_finalized
         ):
             spectrum_rebalance_finalized = True
@@ -3108,7 +3290,11 @@ def run_block_c_resource_adjustment_loop_impl(
             difference_spectrum=dict(diff_current or {}),
             enable_post_external_spectrum=bool(spectrum_enabled_this_cycle),
             progress_phase=progress_phase,
-            spectrum_candidate_limit=int(spectrum_candidate_limit),
+            spectrum_candidate_limit=int(min(
+                max(0, spectrum_candidate_limit),
+                max(0, spectrum_max_candidate_trials - spectrum_trial_count),
+            )),
+            spectrum_max_candidate_trials=int(spectrum_max_candidate_trials),
             spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
             rejected_spectrum_histogram_signatures=sorted(
                 set(rejected_spectrum_histogram_signatures)
@@ -3143,6 +3329,7 @@ def run_block_c_resource_adjustment_loop_impl(
             attempt=attempt_number,
             phase=initial_plan_phase,
             external_used=external_primary_adjustments_used,
+            external_diagnostics=dict(getattr(plan, "diagnostics", {}) or {}),
         )
         progress_phase = _progress_phase_after_plan(plan, progress_phase)
         _update_generation_metrics(
@@ -3163,6 +3350,16 @@ def run_block_c_resource_adjustment_loop_impl(
                 external_limit=external_primary_limit,
             )
         if str(getattr(plan, "reason", "") or "") == "stage3_spectrum_candidates_ready":
+            spectrum_candidate_batches += 1
+            batch_candidates = list(getattr(plan, "spectrum_candidates", []) or [])
+            if verbose:
+                print(
+                    "[Spectrum Candidate Batch] "
+                    f"generation={generation_id} batch={spectrum_candidate_batches} "
+                    f"requested={len(batch_candidates)} "
+                    f"trial_count={spectrum_trial_count}/{spectrum_max_candidate_trials}",
+                    flush=True,
+                )
             # The one-generation inverse guard has now been consumed by the
             # candidate generator.  A newly accepted bundle installs the next
             # guard below; rejected/no-op generations carry no stale filter.
@@ -3204,7 +3401,13 @@ def run_block_c_resource_adjustment_loop_impl(
                 )
             evaluated_candidates: List[Dict[str, Any]] = []
             best_accepted_option: Optional[Tuple[Any, ...]] = None
-            for candidate in list(getattr(plan, "spectrum_candidates", []) or []):
+            for candidate in batch_candidates:
+                # The generation cap counts complete Layer1/2 candidate
+                # rebuilds.  Do not start another rebuild once the remaining
+                # quota has been consumed, even if a stale plan contains more
+                # candidates than the effective planner limit.
+                if spectrum_trial_count >= spectrum_max_candidate_trials:
+                    break
                 if callable(context_restore_fn):
                     context_restore_fn(deepcopy(spectrum_context_before))
                 candidate_diagnostics = dict(getattr(candidate, "diagnostics", {}) or {})
@@ -3330,6 +3533,8 @@ def run_block_c_resource_adjustment_loop_impl(
                         )
                     continue
                 candidate_context = None
+                spectrum_trial_count += 1
+                record["spectrum_trial_index"] = int(spectrum_trial_count)
                 try:
                     cand_nodes, cand_H, cand_diff, cand_r2 = rebuild_fn(
                         H_seed=candidate_H,
@@ -3569,6 +3774,10 @@ def run_block_c_resource_adjustment_loop_impl(
                 _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                     cycle=cycle_number,
                     phase="remaining_pool_spectrum_rebalance",
+                    # Spectrum candidates are not internal histogram plans.
+                    # ``histogram_plan`` is intentionally unavailable in this
+                    # branch, so emit zero internal-budget counters explicitly.
+                    **_cycle_internal_accounting_fields(None),
                     applied=True,
                     stop_reason="accepted",
                     accepted_state_retained=True,
@@ -3581,6 +3790,15 @@ def run_block_c_resource_adjustment_loop_impl(
                         list(selected_parity.get("applied_operations", []) or [])
                     ),
                     fresh_rebuild=True,
+                    spectrum_trial_count=int(spectrum_trial_count),
+                    spectrum_max_candidate_trials=int(
+                        spectrum_max_candidate_trials
+                    ),
+                    spectrum_candidate_batches=int(
+                        spectrum_candidate_batches
+                    ),
+                    spectrum_cap_reached=False,
+                    spectrum_stop_reason="accepted_candidate",
                 ))
                 if verbose:
                     print(
@@ -3604,6 +3822,8 @@ def run_block_c_resource_adjustment_loop_impl(
                     "generation_id": int(graph_generation),
                     "internal_physical_conversion_count": 0,
                     "internal_ring_count": 0,
+                    "ordinary_internal_primary_adjustment_count": 0,
+                    "residual_1122_reclassification_primary_adjustment_count": 0,
                 })
                 if len(generation_metrics) > _MAX_RETAINED_GENERATION_SIGNATURES:
                     del generation_metrics[:-_MAX_RETAINED_GENERATION_SIGNATURES]
@@ -3612,89 +3832,72 @@ def run_block_c_resource_adjustment_loop_impl(
             console_reporter.record_spectrum_trials(evaluated_candidates)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(spectrum_context_before))
-            plan = adjuster.plan_topology_resource_adjustments(
-                H=H_current.detach().clone(),
-                nodes=list(nodes_current or []),
-                S_target=S_target,
-                E_target=E_target,
-                    flex_max_primary_adjustments=flex_primary_limit,
-                    external_max_primary_adjustments=external_primary_limit,
-                    external_primary_adjustments_used=int(
-                        external_primary_adjustments_used
+            if not baseline_valid:
+                spectrum_cap_reached = False
+                spectrum_stop_reason = "layer2_baseline_unavailable"
+            if (
+                spectrum_trial_count >= spectrum_max_candidate_trials
+                or not baseline_valid
+            ):
+                if not spectrum_stop_reason:
+                    spectrum_stop_reason = "candidate_trial_cap_reached_no_gain"
+                spectrum_cap_reached = bool(
+                    spectrum_trial_count >= spectrum_max_candidate_trials
+                )
+                plan.diagnostics = {
+                    **dict(getattr(plan, "diagnostics", {}) or {}),
+                    "spectrum_trial_count": int(spectrum_trial_count),
+                    "spectrum_max_candidate_trials": int(
+                        spectrum_max_candidate_trials
                     ),
-                    internal_max_primary_adjustments=internal_primary_limit,
-                max_h_compensation_ops_per_adjustment=compensation_limit,
-                residual_flex_preferred_23=residual_flex_preferred_23,
-                residual_flex_min_23=residual_flex_min_23,
-                residual_side_preferred_23=residual_side_preferred_23,
-                residual_side_min_23=residual_side_min_23,
-                h_tolerance=h_tolerance,
-                generation_id=int(generation_id),
-                difference_spectrum=dict(diff_current or {}),
-                enable_post_external_spectrum=bool(spectrum_enabled_this_cycle),
-                progress_phase=Stage3ProgressPhase.SPECTRUM_REBALANCE,
-                spectrum_candidate_limit=int(spectrum_candidate_limit),
-                spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
-                rejected_spectrum_histogram_signatures=sorted(
-                    set(rejected_spectrum_histogram_signatures)
-                    | persistent_histogram_signatures
-                ),
-                rejected_spectrum_bundle_signatures=sorted(
-                    set(rejected_spectrum_bundle_signatures)
-                    | set(spectrum_memory_entry["bundle_signatures"])
-                ),
-                forbidden_spectrum_inverse_signatures=sorted(
-                    set(forbidden_spectrum_inverse_signatures)
-                    | set(spectrum_memory_entry["rejected_inverse_signatures"])
-                ),
-                forbidden_resource_conversion_signatures=sorted(
-                    rejected_resource_conversion_signatures
-                ),
-            )
-            progress_phase = _progress_phase_after_plan(plan, progress_phase)
-            _update_generation_metrics(
-                generation_metrics,
-                generation_id=generation_id,
-                plan=plan,
-            )
-            plan.diagnostics["rejected_spectrum_candidates"] = evaluated_candidates
-            plan.diagnostics["spectrum_rebalance_rolled_back"] = True
-            plan.diagnostics["spectrum_layer2_baseline"] = {
-                "valid": bool(baseline_valid),
-                "reason": str(baseline_reason),
-                "source_stage": str(baseline_source),
-                "spectral_contract": str(baseline_contract),
-                "r2": float(baseline_r2),
-            }
-            replanned_phase = str(
-                getattr(plan, "phase", "")
-                or dict(getattr(plan, "diagnostics", {}) or {}).get(
-                    "stage3_phase", ""
-                )
-            )
-            console_reporter.begin(
-                cycle=cycle_number,
-                attempt=attempt_number,
-                phase=replanned_phase,
-                external_used=external_primary_adjustments_used,
-            )
-            if verbose:
-                _print_stage3_plan_summary(
-                    cycle_number,
-                    plan,
-                    H_current,
-                    E_target,
-                    special_degree_meta=special_degree_meta,
-                    verbose=True,
-                    attempt_number=attempt_number,
-                    external_used_before=external_primary_adjustments_used,
-                    external_limit=external_primary_limit,
-                )
-            if str(getattr(plan, "reason", "") or "") == "stage3_spectrum_candidates_ready":
-                # The replanner produced another candidate batch. Re-enter the
-                # normal spectrum-evaluation path instead of treating this
-                # intermediate plan as a histogram-application stop condition.
+                    "spectrum_candidate_batches": int(
+                        spectrum_candidate_batches
+                    ),
+                    "spectrum_cap_reached": bool(spectrum_cap_reached),
+                    "spectrum_stop_reason": str(spectrum_stop_reason),
+                    "rejected_spectrum_candidates": list(
+                        evaluated_candidates
+                    ),
+                    "spectrum_rebalance_rolled_back": True,
+                }
+                _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+                    cycle=cycle_number,
+                    phase="remaining_pool_spectrum_rebalance",
+                    **_cycle_internal_accounting_fields(None),
+                    applied=False,
+                    stop_reason=str(spectrum_stop_reason),
+                    accepted_state_retained=True,
+                    rebuild_valid=False,
+                    accepted=False,
+                    acceptance_reason=str(spectrum_stop_reason),
+                    spectrum_trial_count=int(spectrum_trial_count),
+                    spectrum_max_candidate_trials=int(
+                        spectrum_max_candidate_trials
+                    ),
+                    spectrum_candidate_batches=int(
+                        spectrum_candidate_batches
+                    ),
+                    spectrum_cap_reached=bool(spectrum_cap_reached),
+                    spectrum_stop_reason=str(spectrum_stop_reason),
+                ))
+                progress_phase = Stage3ProgressPhase.INTERNAL_TOPOLOGY
+                if verbose:
+                    print(
+                        "[Spectrum Cap Reached] "
+                        f"generation={generation_id} "
+                        f"trial_count={spectrum_trial_count}/"
+                        f"{spectrum_max_candidate_trials} "
+                        f"batches={spectrum_candidate_batches}; "
+                        "continuing internal_topology",
+                        flush=True,
+                    )
                 continue
+            # The failed batch has already restored the Layer2 baseline.  Let
+            # the main loop request the next bounded batch; replanning here
+            # used to create an unevaluated intermediate plan and could repeat
+            # the same expensive search without advancing the trial counter.
+            progress_phase = Stage3ProgressPhase.SPECTRUM_REBALANCE
+            continue
         elif bool(
             dict(getattr(plan, "diagnostics", {}) or {}).get(
                 "spectrum_stage_evaluated", False
@@ -3847,6 +4050,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
+                **_cycle_internal_accounting_fields(histogram_plan),
                 applied=False,
                 stop_reason=stop_reason,
                 accepted_state_retained=True,
@@ -3883,6 +4087,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
+                **_cycle_internal_accounting_fields(histogram_plan),
                 applied=False,
                 stop_reason="phase_resource_infeasible",
                 accepted_state_retained=True,
@@ -3932,6 +4137,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
+                **_cycle_internal_accounting_fields(histogram_plan),
                 applied=False,
                 stop_reason=stop_reason,
                 accepted_state_retained=True,
@@ -4031,6 +4237,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
+                **_cycle_internal_accounting_fields(histogram_plan),
                 applied=False,
                 stop_reason="pre_rebuild_port_feasibility_failed",
                 accepted_state_retained=True,
@@ -4173,6 +4380,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                         cycle=cycle_number,
                         phase="external_topology",
+                        **_cycle_internal_accounting_fields(histogram_plan),
                         applied=False,
                         stop_reason=stop_reason,
                         accepted_state_retained=True,
@@ -4199,6 +4407,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                         cycle=cycle_number,
                         phase="external_topology",
+                        **_cycle_internal_accounting_fields(histogram_plan),
                         applied=True,
                         stop_reason=stop_reason,
                         accepted_state_retained=True,
@@ -4247,6 +4456,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                         cycle=cycle_number,
                         phase="external_topology",
+                        **_cycle_internal_accounting_fields(histogram_plan),
                         applied=True,
                         stop_reason=stop_reason,
                         accepted_state_retained=True,
@@ -4265,6 +4475,8 @@ def run_block_c_resource_adjustment_loop_impl(
                     "generation_id": int(graph_generation),
                     "internal_physical_conversion_count": 0,
                     "internal_ring_count": 0,
+                    "ordinary_internal_primary_adjustment_count": 0,
+                    "residual_1122_reclassification_primary_adjustment_count": 0,
                 })
                 if len(generation_metrics) > _MAX_RETAINED_GENERATION_SIGNATURES:
                     del generation_metrics[:-_MAX_RETAINED_GENERATION_SIGNATURES]
@@ -4295,6 +4507,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                     cycle=cycle_number,
                     phase="external_topology",
+                    **_cycle_internal_accounting_fields(histogram_plan),
                     applied=True,
                     stop_reason="external_generation_fresh_rebuild_accepted",
                     accepted_state_retained=True,
@@ -4338,6 +4551,19 @@ def run_block_c_resource_adjustment_loop_impl(
                 "internal_ring_count": int(
                     complete_diagnostics.get("internal_ring_count", 0) or 0
                 ),
+                "ordinary_internal_primary_adjustment_count": int(
+                    complete_diagnostics.get(
+                        "ordinary_internal_primary_adjustment_count", 0
+                    )
+                    or 0
+                ),
+                "residual_1122_reclassification_primary_adjustment_count": int(
+                    complete_diagnostics.get(
+                        "residual_1122_reclassification_primary_adjustment_count",
+                        0,
+                    )
+                    or 0
+                ),
                 "remaining_resource_counts": {
                     str(key): len(list(values or []))
                     for key, values in dict(
@@ -4364,6 +4590,15 @@ def run_block_c_resource_adjustment_loop_impl(
                         else "disabled_by_config"
                     ),
                 },
+                "spectrum_trial_count": int(spectrum_trial_count),
+                "spectrum_max_candidate_trials": int(
+                    spectrum_max_candidate_trials
+                ),
+                "spectrum_candidate_batches": int(
+                    spectrum_candidate_batches
+                ),
+                "spectrum_cap_reached": bool(spectrum_cap_reached),
+                "spectrum_stop_reason": str(spectrum_stop_reason),
                 "phase_result": dict(
                     _compact_stage3_plan_dict(plan).get("phase_result", {}) or {}
                 ),
@@ -4376,6 +4611,19 @@ def run_block_c_resource_adjustment_loop_impl(
                 accepted_state_retained=True,
                 accepted=True,
                 acceptance_reason=stop_reason,
+                ordinary_internal_primary_adjustment_count=int(
+                    complete_diagnostics.get(
+                        "ordinary_internal_primary_adjustment_count", 0
+                    )
+                    or 0
+                ),
+                residual_1122_reclassification_primary_adjustment_count=int(
+                    complete_diagnostics.get(
+                        "residual_1122_reclassification_primary_adjustment_count",
+                        0,
+                    )
+                    or 0
+                ),
             ))
             return Stage3WorkflowResult(
                 nodes=nodes_current,
@@ -4407,6 +4655,15 @@ def run_block_c_resource_adjustment_loop_impl(
                     "spectrum_active_through_cycle": int(
                         spectrum_active_through_cycle
                     ),
+                    "spectrum_trial_count": int(spectrum_trial_count),
+                    "spectrum_max_candidate_trials": int(
+                        spectrum_max_candidate_trials
+                    ),
+                    "spectrum_candidate_batches": int(
+                        spectrum_candidate_batches
+                    ),
+                    "spectrum_cap_reached": bool(spectrum_cap_reached),
+                    "spectrum_stop_reason": str(spectrum_stop_reason),
                     "completion_snapshot": completion_snapshot,
                     "tolerated_remaining_ids_by_su": dict(
                         complete_diagnostics.get(
@@ -4513,6 +4770,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
+                **_cycle_internal_accounting_fields(histogram_plan),
                 applied=False,
                 stop_reason=stop_reason,
                 accepted_state_retained=True,
@@ -4613,6 +4871,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
+                **_cycle_internal_accounting_fields(histogram_plan),
                 applied=True,
                 stop_reason=(
                     "recovery_applied_continuation"
@@ -4645,6 +4904,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
+                **_cycle_internal_accounting_fields(histogram_plan),
                 applied=True,
                 stop_reason=stop_reason,
                 accepted_state_retained=True,
@@ -4700,6 +4960,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
+                **_cycle_internal_accounting_fields(histogram_plan),
                 applied=True,
                 stop_reason=stop_reason,
                 accepted_state_retained=True,
@@ -4737,6 +4998,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
+                **_cycle_internal_accounting_fields(histogram_plan),
                 applied=True,
                 stop_reason=f"layer12_rebuild_invalid:{valid_reason}",
                 accepted_state_retained=True,
@@ -4780,6 +5042,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
+                **_cycle_internal_accounting_fields(histogram_plan),
                 applied=True,
                 stop_reason=f"layer12_rebuild_invalid:{valid_reason}",
                 accepted_state_retained=True,
@@ -4844,6 +5107,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
+                **_cycle_internal_accounting_fields(histogram_plan),
                 applied=True,
                 stop_reason=cycle_reason,
                 accepted_state_retained=True,
@@ -4885,6 +5149,8 @@ def run_block_c_resource_adjustment_loop_impl(
             "generation_id": int(graph_generation),
             "internal_physical_conversion_count": 0,
             "internal_ring_count": 0,
+            "ordinary_internal_primary_adjustment_count": 0,
+            "residual_1122_reclassification_primary_adjustment_count": 0,
         })
         if len(generation_metrics) > _MAX_RETAINED_GENERATION_SIGNATURES:
             del generation_metrics[:-_MAX_RETAINED_GENERATION_SIGNATURES]
@@ -4911,6 +5177,7 @@ def run_block_c_resource_adjustment_loop_impl(
         _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
             cycle=cycle_number,
             phase=phase,
+            **_cycle_internal_accounting_fields(histogram_plan),
             applied=True,
             stop_reason="accepted",
             accepted_state_retained=True,
@@ -4976,6 +5243,11 @@ def run_block_c_resource_adjustment_loop_impl(
         "infeasibility_proof": terminal_proof,
         "products": [dict(item or {}) for item in terminal_products],
         "pending_contracts": [dict(item or {}) for item in terminal_pending],
+        "spectrum_trial_count": int(spectrum_trial_count),
+        "spectrum_max_candidate_trials": int(spectrum_max_candidate_trials),
+        "spectrum_candidate_batches": int(spectrum_candidate_batches),
+        "spectrum_cap_reached": bool(spectrum_cap_reached),
+        "spectrum_stop_reason": str(spectrum_stop_reason),
         "plan": _compact_stage3_plan_dict(plan),
     }
     return Stage3WorkflowResult(
@@ -5005,6 +5277,13 @@ def run_block_c_resource_adjustment_loop_impl(
             "spectrum_rebalance_finalized": bool(spectrum_rebalance_finalized),
             "spectrum_finalized_on_cycle": spectrum_finalized_on_cycle,
             "spectrum_active_through_cycle": int(spectrum_active_through_cycle),
+            "spectrum_trial_count": int(spectrum_trial_count),
+            "spectrum_max_candidate_trials": int(
+                spectrum_max_candidate_trials
+            ),
+            "spectrum_candidate_batches": int(spectrum_candidate_batches),
+            "spectrum_cap_reached": bool(spectrum_cap_reached),
+            "spectrum_stop_reason": str(spectrum_stop_reason),
             "external_primary_adjustments_total": int(
                 external_primary_adjustments_total
             ),

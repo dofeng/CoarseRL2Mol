@@ -12,6 +12,7 @@ from ...shared.inverse_common import (
     _NodeV3,
     evaluate_spectrum_reconstruction,
     lorentzian_spectrum,
+    reconstruction_peak_scale,
 )
 
 
@@ -24,6 +25,8 @@ class Layer3Estimator:
         self.device = device
         self.vae = vae_model
         self.lib_path = lib_path
+        # Effective aromatic response used only in reconstructed spectra.
+        self.aromatic_response_scale: float = 1.0
         self._template_cache: Optional[Dict] = None
         self.last_diagnostics: Dict[str, object] = {}
 
@@ -217,10 +220,18 @@ class Layer3Estimator:
         return int(matches[0].item())
 
     @staticmethod
-    def _peak(mu: float, ppm_axis: torch.Tensor) -> torch.Tensor:
+    def _peak(
+        mu: float,
+        ppm_axis: torch.Tensor,
+        peak_scale: float = 1.0,
+    ) -> torch.Tensor:
         return lorentzian_spectrum(
             torch.tensor([float(mu)], dtype=torch.float, device=ppm_axis.device),
-            torch.ones(1, dtype=torch.float, device=ppm_axis.device),
+            torch.tensor(
+                [float(peak_scale)],
+                dtype=torch.float,
+                device=ppm_axis.device,
+            ),
             ppm_axis,
             hwhm=1.0,
         )
@@ -237,7 +248,14 @@ class Layer3Estimator:
             mu = float(getattr(node, 'mu', 0.0))
             if not np.isfinite(mu) or mu <= 0.0:
                 continue
-            peak = self._peak(mu, ppm_axis)
+            peak = self._peak(
+                mu,
+                ppm_axis,
+                peak_scale=reconstruction_peak_scale(
+                    su_type,
+                    self.aromatic_response_scale,
+                ),
+            )
             peak_cache[int(node.global_id)] = peak
             recon = recon + peak
         return recon, peak_cache
@@ -444,7 +462,14 @@ class Layer3Estimator:
                         if not (float(coarse_lo) <= float(mu_candidate) <= float(coarse_hi)):
                             continue
 
-                        peak_candidate = self._peak(mu_candidate, ppm_axis)
+                        peak_candidate = self._peak(
+                            mu_candidate,
+                            ppm_axis,
+                            peak_scale=reconstruction_peak_scale(
+                                int(node.su_type),
+                                self.aromatic_response_scale,
+                            ),
+                        )
                         recon_candidate = recon - old_peak + peak_candidate
                         eval_candidate = evaluate_spectrum_reconstruction(
                             target,

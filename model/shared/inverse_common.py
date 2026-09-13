@@ -22,6 +22,11 @@ SU_AROMATIC = [5, 6, 7, 8, 9, 10, 11, 12, 13]
 SU_UNSATURATED = [14, 15, 16, 17, 18] 
 SU_ALIPHATIC = [19, 20, 21, 22, 23, 24, 25] 
 
+# Effective spectral response groups.  These are deliberately kept separate
+# from the structural/topology classification: the response coefficient is
+# applied only while constructing a reconstructed spectrum.
+AROMATIC_SU_TYPES = frozenset(int(value) for value in SU_AROMATIC)
+
 # PPM分段定义
 PPM_SEGMENTS = {
     'carbonyl': (160.0, 240.0),  
@@ -30,6 +35,86 @@ PPM_SEGMENTS = {
     'ordinary_aliphatic': (0.0, 50.0),
     'oxygenated_aliphatic': (50.0, 100.0),
 }
+
+
+def compute_aromatic_area_fraction(
+    spectrum: torch.Tensor,
+    ppm_axis: torch.Tensor = PPM_AXIS,
+) -> float:
+    """Return the target-spectrum aromatic-area fraction.
+
+    The target spectrum is not modified.  The fraction is used only to choose
+    the effective response of aromatic structure-unit peaks in reconstructed
+    spectra.  The project convention is the 90--160 ppm area divided by the
+    complete 0.1--240 ppm area.
+    """
+    try:
+        values = spectrum.detach().cpu().float().flatten()
+    except Exception:
+        values = torch.as_tensor(spectrum, dtype=torch.float).flatten()
+    try:
+        axis = ppm_axis.detach().cpu().float().flatten()
+    except Exception:
+        axis = torch.as_tensor(ppm_axis, dtype=torch.float).flatten()
+    n = min(int(values.numel()), int(axis.numel()))
+    if n <= 0:
+        return 0.0
+    values = values[:n]
+    axis = axis[:n]
+    finite = torch.isfinite(values) & torch.isfinite(axis)
+    if not bool(finite.any()):
+        return 0.0
+    values = values[finite]
+    axis = axis[finite]
+    if int(axis.numel()) <= 1:
+        return 0.0
+    # The input spectra are non-negative after preprocessing.  Clamping here
+    # makes the area ratio robust to tiny interpolation/baseline negatives
+    # without changing the target tensor itself.
+    values = torch.clamp(values, min=0.0)
+    order = torch.argsort(axis)
+    axis = axis[order]
+    values = values[order]
+    step = torch.median(torch.diff(axis)).item()
+    if not np.isfinite(step) or float(step) <= 0.0:
+        step = float(PPM_STEP)
+    total = float(values.sum().item()) * float(step)
+    if total <= 1e-12:
+        return 0.0
+    aromatic = float(
+        values[(axis >= 90.0) & (axis <= 160.0)].sum().item()
+    ) * float(step)
+    return float(max(0.0, min(1.0, aromatic / total)))
+
+
+def aromatic_response_scale_from_fraction(aromatic_fraction: float) -> float:
+    """Map aromatic area fraction to the configured reconstruction response."""
+    value = float(aromatic_fraction)
+    if not np.isfinite(value):
+        value = 0.0
+    if value < 0.72:
+        return 1.00
+    if value < 0.75:
+        return 0.98
+    if value < 0.78:
+        return 0.96
+    if value < 0.82:
+        return 0.94
+    return 0.92
+
+
+def reconstruction_peak_scale(
+    su_type: int,
+    aromatic_response_scale: float = 1.0,
+) -> float:
+    """Return the effective peak multiplier for one structure unit."""
+    try:
+        scale = float(aromatic_response_scale)
+    except Exception:
+        scale = 1.0
+    if not np.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
+    return float(scale if int(su_type) in AROMATIC_SU_TYPES else 1.0)
 
 SPECIAL_DEGREE_PRIORS: Dict[int, Dict[int, float]] = {
     19: {1: 0.35, 2: 0.60, 3: 0.05},
@@ -1227,7 +1312,8 @@ def reconstruct_from_mu_pi(mus: Sequence[float],
                            hwhm: float,
                            intensity_scale: float,
                            device: str | torch.device,
-                           unit_peak_intensity: bool = False) -> torch.Tensor:
+                           unit_peak_intensity: bool = False,
+                           peak_scales: Optional[Sequence[float]] = None) -> torch.Tensor:
     if not mus:
         return torch.zeros_like(ppm_axis, dtype=torch.float, device=ppm_axis.device)
 
@@ -1238,6 +1324,19 @@ def reconstruct_from_mu_pi(mus: Sequence[float],
         pi_t = torch.tensor(list(pis), dtype=torch.float, device=device)
     if (not bool(unit_peak_intensity)) and float(intensity_scale) != 1.0:
         pi_t = pi_t * float(intensity_scale)
+    if peak_scales is not None:
+        if torch.is_tensor(peak_scales):
+            scales_t = peak_scales.detach().to(device=device, dtype=torch.float).flatten()
+        else:
+            scales_t = torch.tensor(list(peak_scales), dtype=torch.float, device=device)
+        if int(scales_t.numel()) != int(mu_t.numel()):
+            raise ValueError(
+                "peak_scales must contain one value per reconstructed peak: "
+                f"peaks={int(mu_t.numel())}, scales={int(scales_t.numel())}"
+            )
+        if not bool(torch.isfinite(scales_t).all()) or bool((scales_t <= 0.0).any()):
+            raise ValueError("peak_scales must be finite and strictly positive")
+        pi_t = pi_t * scales_t
     return lorentzian_spectrum(mu_t, pi_t, ppm_axis, hwhm=float(hwhm))
 
 
@@ -1248,7 +1347,8 @@ def evaluate_mu_pi_assignments(S_target: torch.Tensor,
                                hwhm: float,
                                intensity_scale: float,
                                device: str | torch.device,
-                               unit_peak_intensity: bool = False) -> Dict[str, Any]:
+                               unit_peak_intensity: bool = False,
+                               peak_scales: Optional[Sequence[float]] = None) -> Dict[str, Any]:
     if not mus:
         return {
             'S_target': S_target,
@@ -1267,6 +1367,7 @@ def evaluate_mu_pi_assignments(S_target: torch.Tensor,
         intensity_scale=float(intensity_scale),
         device=device,
         unit_peak_intensity=bool(unit_peak_intensity),
+        peak_scales=peak_scales,
     )
     eval_info = evaluate_spectrum_reconstruction(
         S_target,

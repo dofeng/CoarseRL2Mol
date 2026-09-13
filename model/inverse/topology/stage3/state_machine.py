@@ -3125,13 +3125,101 @@ def _finalize_phase_plan(
         if int(value) > 0
     }
     demand_before: Dict[int, int] = {}
+    try:
+        finalized_primary_count = _external_primary_node_count(groups)
+    except ValueError as exc:
+        # Do not let a malformed atomic batch crash Block C.  In normal
+        # operation this is prevented by the residual 11-22 deferral above;
+        # this guard is the final boundary for stale/legacy plans that still
+        # contain a repeated concrete donor.  The live context is untouched
+        # and the caller receives an auditable infeasible plan that can be
+        # rolled back or retried after a fresh generation rebuild.
+        overlap = _primary_conversion_node_overlap(groups)
+        proof = {
+            "phase": str(phase),
+            "reason": "primary_conversion_reuses_concrete_node_id",
+            "error": str(exc),
+            "duplicate_primary_node_ids": {
+                str(key): list(value)
+                for key, value in sorted(overlap.items())
+            },
+            "atomic_rollback": True,
+        }
+        safe_histogram = HistogramAdjustmentPlan(
+            phase=str(phase),
+            groups=[],
+            primary_adjustment_count=0,
+            physical_conversion_count=0,
+            H_before=H_before.detach().clone(),
+            H_after=H_before.detach().clone(),
+            accounting_diagnostics={
+                "invalid_batch": True,
+                "invalid_batch_proof": dict(proof),
+            },
+        )
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+            ok=False,
+            reason="phase_resource_infeasible",
+            blocked_reason="primary_conversion_reuses_concrete_node_id",
+            phase=str(phase),
+            plan_kind="stage3_duplicate_primary_conversion_node",
+            active_subphase=str(phase),
+            histogram_adjustment_plan=safe_histogram,
+            phase_result=Stage3PhaseResult(
+                active_phase=str(phase),
+                phase_completed=False,
+                rebuild_required=False,
+                primary_adjustment_count=0,
+                ordinary_internal_primary_adjustment_count=0,
+                residual_1122_reclassification_primary_adjustment_count=0,
+                transactions=list(transactions or []),
+                stop_reason="phase_resource_infeasible",
+                infeasibility_proof=proof,
+            ),
+            diagnostics={
+                "stage3_phase": str(phase),
+                "sequential_single_topology": True,
+                "atomic_rollback": True,
+                **proof,
+            },
+            runtime={
+                **_runtime_with_pool(phase_eval, final_pool),
+                "iteration_topology_ledger": getattr(
+                    phase_eval, "iteration_topology_ledger", None
+                ),
+            },
+        ), h_tolerance)
+    if str(phase) == "internal_topology":
+        ordinary_internal_primary_count, residual_1122_primary_count = (
+            _internal_primary_adjustment_counts(groups, stage_diagnostics)
+        )
+        # Keep the aggregate count for generic consumers, while exposing the
+        # two independent internal budget domains to Block C/reporting.
+        stage_diagnostics = {
+            **dict(stage_diagnostics or {}),
+            "ordinary_internal_primary_adjustment_count": int(
+                ordinary_internal_primary_count
+            ),
+            "residual_1122_reclassification_primary_adjustment_count": int(
+                residual_1122_primary_count
+            ),
+        }
+    else:
+        ordinary_internal_primary_count = 0
+        residual_1122_primary_count = 0
     histogram = HistogramAdjustmentPlan(
         phase=str(phase),
         groups=list(groups),
         # External budget accounting is per concrete primary node, not per
         # histogram group.  This keeps finalized multi-node batches aligned
         # with the incremental planner and the Block-C budget gate.
-        primary_adjustment_count=_external_primary_node_count(groups),
+        primary_adjustment_count=int(finalized_primary_count),
+        ordinary_internal_primary_adjustment_count=int(
+            ordinary_internal_primary_count
+        ),
+        residual_1122_reclassification_primary_adjustment_count=int(
+            residual_1122_primary_count
+        ),
         physical_conversion_count=sum(
             (2 if group.primary_op.via_su is not None else 1)
             + sum(2 if op.via_su is not None else 1 for op in list(group.h_compensation_ops or []))
@@ -3159,7 +3247,15 @@ def _finalize_phase_plan(
         protected_resource_counts=_phase_protected_resource_counts(phase_eval),
         accounting_diagnostics=_merge_released_resource_diagnostics(
             phase_eval,
-            accounting,
+            {
+                **dict(accounting or {}),
+                "ordinary_internal_primary_adjustment_count": int(
+                    ordinary_internal_primary_count
+                ),
+                "residual_1122_reclassification_primary_adjustment_count": int(
+                    residual_1122_primary_count
+                ),
+            },
         ),
         demand_before=dict(demand_before),
         demand_after=dict(demand_before),
@@ -3302,6 +3398,18 @@ def _finalize_phase_plan(
             phase_completed=False,
             rebuild_required=False,
             primary_adjustment_count=int(histogram.primary_adjustment_count),
+            ordinary_internal_primary_adjustment_count=int(
+                getattr(histogram, "ordinary_internal_primary_adjustment_count", 0)
+                or 0
+            ),
+            residual_1122_reclassification_primary_adjustment_count=int(
+                getattr(
+                    histogram,
+                    "residual_1122_reclassification_primary_adjustment_count",
+                    0,
+                )
+                or 0
+            ),
             h_compensation_count=_h_compensation_count(histogram.groups),
             symbolic_topology_count=sum(1 for item in transactions if bool(item.committed)),
             transactions=list(transactions),
@@ -3360,6 +3468,18 @@ def _finalize_phase_plan(
         phase_completed=bool(stage_completed),
         rebuild_required=bool(external_budget_boundary or not external_phase),
         primary_adjustment_count=int(histogram.primary_adjustment_count),
+        ordinary_internal_primary_adjustment_count=int(
+            getattr(histogram, "ordinary_internal_primary_adjustment_count", 0)
+            or 0
+        ),
+        residual_1122_reclassification_primary_adjustment_count=int(
+            getattr(
+                histogram,
+                "residual_1122_reclassification_primary_adjustment_count",
+                0,
+            )
+            or 0
+        ),
         h_compensation_count=_h_compensation_count(histogram.groups),
         symbolic_topology_count=sum(1 for item in transactions if bool(item.committed)),
         transactions=list(transactions),
@@ -3721,6 +3841,18 @@ def _transaction_plan(
         phase_completed=False,
         rebuild_required=bool(plan.ok and not external_continuation),
         primary_adjustment_count=int(histogram.primary_adjustment_count),
+        ordinary_internal_primary_adjustment_count=int(
+            getattr(histogram, "ordinary_internal_primary_adjustment_count", 0)
+            or 0
+        ),
+        residual_1122_reclassification_primary_adjustment_count=int(
+            getattr(
+                histogram,
+                "residual_1122_reclassification_primary_adjustment_count",
+                0,
+            )
+            or 0
+        ),
         h_compensation_count=_h_compensation_count(histogram.groups),
         symbolic_topology_count=(
             1 if requires_rebuild and bool(reserve_contract_after_conversion) else 0
@@ -3774,8 +3906,15 @@ def _physical_conversion_count(groups: Sequence[Any]) -> int:
     )
 
 
-def _external_primary_node_count(groups: Sequence[Any]) -> int:
-    """Count concrete primary conversion nodes, excluding compensation ops."""
+def _concrete_primary_node_count(groups: Sequence[Any]) -> int:
+    """Count concrete primary donor nodes, excluding compensation operations.
+
+    ``HistogramConversion.via_su`` describes an intermediate chemical route;
+    it is not an additional physical donor node.  Both external and internal
+    budgets are therefore charged from the concrete ``node_ids`` attached to
+    primary operations.  Keeping this helper independent of phase avoids
+    accidentally charging H-compensation or a via-route twice.
+    """
     node_ids: List[int] = []
     for group in list(groups or []):
         primary = getattr(group, "primary_op", None)
@@ -3794,6 +3933,97 @@ def _external_primary_node_count(groups: Sequence[Any]) -> int:
     if len(node_ids) != len(set(node_ids)):
         raise ValueError("primary_conversion_reuses_concrete_node_id")
     return len(node_ids)
+
+
+def _external_primary_node_count(groups: Sequence[Any]) -> int:
+    """Backward-compatible name for external concrete-node accounting."""
+    return _concrete_primary_node_count(groups)
+
+
+def _primary_conversion_node_overlap(groups: Sequence[Any]) -> Dict[int, List[int]]:
+    """Return concrete node IDs reused by more than one primary operation.
+
+    A histogram plan is applied atomically, so a concrete node may not be the
+    primary donor of two operations in the same plan.  Keeping this audit
+    separate from ``_external_primary_node_count`` lets callers turn an
+    invalid batch into an actionable plan diagnostic instead of losing the
+    whole Stage3 workflow to an uncaught ``ValueError``.
+    """
+    occurrences: Dict[int, List[int]] = {}
+    for group_index, group in enumerate(list(groups or [])):
+        primary = getattr(group, "primary_op", None)
+        if primary is None:
+            continue
+        for node_id in list(getattr(primary, "node_ids", []) or []):
+            occurrences.setdefault(int(node_id), []).append(int(group_index))
+    return {
+        int(node_id): list(group_indexes)
+        for node_id, group_indexes in occurrences.items()
+        if len(group_indexes) > 1
+    }
+
+
+def _internal_primary_adjustment_counts(
+    groups: Sequence[Any],
+    stage_diagnostics: Optional[Dict[str, Any]] = None,
+) -> Tuple[int, int]:
+    """Return ordinary and residual-11/22 primary counts separately.
+
+    ``primary_adjustment_count`` remains the aggregate number of concrete
+    primary donor nodes for generic callers.  Internal topology has two
+    independent budget domains, however: ordinary residual assembly and the
+    post-assembly ``11-22 -> 12-13`` batch.  A reclassification group is
+    marked at creation time in ``scoring_diagnostics``; explicit diagnostics
+    are preferred when a caller has already computed the counts.
+    """
+    diagnostics = dict(stage_diagnostics or {})
+    explicit_ordinary = diagnostics.get(
+        "ordinary_internal_primary_adjustment_count",
+        None,
+    )
+    explicit_reclass = diagnostics.get(
+        "residual_1122_reclassification_primary_adjustment_count",
+        None,
+    )
+    # Group provenance is authoritative whenever a plan carries groups.  The
+    # dataclass fields default to zero, so consulting them first would erase a
+    # real ordinary/reclassification split on plans produced by an older
+    # caller or on a plan whose diagnostics were assembled before its groups.
+    ordinary = 0
+    reclassification = 0
+    has_group_provenance = False
+    for group in list(groups or []):
+        primary = getattr(group, "primary_op", None)
+        if primary is None:
+            continue
+        count = len(list(getattr(primary, "node_ids", []) or []))
+        if count <= 0:
+            count = max(0, int(getattr(primary, "count", 0) or 0))
+        if count > 0:
+            has_group_provenance = True
+        group_kind = str(
+            dict(getattr(group, "scoring_diagnostics", {}) or {}).get(
+                "plan_kind",
+                "",
+            )
+            or ""
+        )
+        if group_kind == "residual_1122_reclassification":
+            reclassification += int(count)
+        else:
+            ordinary += int(count)
+    if has_group_provenance:
+        return int(ordinary), int(reclassification)
+    # Treat the explicit pair as atomic when the plan is compact/serialized
+    # and no primary groups remain.  A partially populated diagnostics
+    # dictionary must not silently turn the missing side into zero and erase
+    # the available count for the other budget domain.
+    if explicit_ordinary is not None and explicit_reclass is not None:
+        return (
+            max(0, int(explicit_ordinary or 0)),
+            max(0, int(explicit_reclass or 0)),
+        )
+    return int(ordinary), int(reclassification)
 
 
 def _internal_conversion_is_allowed(histogram: Any) -> bool:
@@ -4661,6 +4891,95 @@ def _build_residual_1122_reclassification_plan(
     # intentionally left in the old generation and will be reconsidered after
     # the fresh Layer1/2 rebuild requested below.
     selected_products = exact_products[:5 + selected_excess_count]
+
+    # A conversion batch is atomic at the concrete-node level.  If an
+    # ordinary residual conversion in this generation created a node that is
+    # now part of an excess 11-22 product, adding the follow-up 22->13 (or
+    # 11->12) operation to the same histogram would reuse that node twice:
+    # e.g. 11->22 and then 22->13.  ``apply_histogram_adjustment_plan``
+    # intentionally rejects such a non-contiguous batch.  Defer the
+    # reclassification until the ordinary conversion boundary has rebuilt
+    # Layer1/2; the next generation then sees the materialized 11-22 product
+    # with no preceding conversion in the same plan.
+    group_node_ids: Set[int] = set()
+    for group in list(groups or []):
+        for op in [
+            getattr(group, "primary_op", None),
+            *list(getattr(group, "h_compensation_ops", []) or []),
+        ]:
+            if op is None:
+                continue
+            group_node_ids.update(
+                int(value)
+                for value in list(getattr(op, "node_ids", []) or [])
+            )
+    overlap_rows: List[Dict[str, Any]] = []
+    for item in list(selected_products[5:] or []):
+        ids_by_su = _residual_1122_product_nodes(item, iteration_ledger)
+        if not ids_by_su:
+            continue
+        overlap = sorted(
+            int(node_id)
+            for node_id in ids_by_su.values()
+            if int(node_id) in group_node_ids
+        )
+        if overlap:
+            overlap_rows.append({
+                "product_id": str(item.get("product_id", "") or ""),
+                "node_ids_by_su": {
+                    str(key): int(value)
+                    for key, value in ids_by_su.items()
+                },
+                "overlap_node_ids": overlap,
+            })
+    if overlap_rows:
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+            ok=False,
+            reason="residual_1122_reclassification_deferred",
+            blocked_reason=(
+                "residual_1122_reclassification_overlaps_current_conversion_batch"
+            ),
+            phase="internal_topology",
+            plan_kind="residual_1122_reclassification_deferred",
+            active_subphase="residual_resource_self_closure",
+            phase_result=Stage3PhaseResult(
+                active_phase="internal_topology",
+                phase_completed=False,
+                rebuild_required=False,
+                transactions=list(transactions or []),
+                stop_reason="residual_1122_reclassification_deferred",
+                infeasibility_proof={
+                    "reason": (
+                        "residual_1122_reclassification_overlaps_current_conversion_batch"
+                    ),
+                    "atomic_rollback": True,
+                    "rebuild_before_reclassification": True,
+                    "overlap_rows": list(overlap_rows),
+                },
+            ),
+            diagnostics={
+                "plan_kind": "residual_1122_reclassification_deferred",
+                "reason": (
+                    "residual_1122_reclassification_overlaps_current_conversion_batch"
+                ),
+                "residual_1122_count_before": len(exact_products),
+                "residual_1122_preserved_count": 5,
+                "residual_1122_excess_count": total_excess_count,
+                "residual_1122_reclassified_count": 0,
+                "residual_1122_deferred_count": total_excess_count,
+                "reclassification_pair_limit": int(max_reclass_pairs),
+                "scheduled_primary_adjustments": 0,
+                "overlap_rows": list(overlap_rows),
+                "restart_stage3_after_rebuild": True,
+            },
+            runtime={
+                **_runtime_with_pool(
+                    phase_eval,
+                    iteration_ledger.available_ids_by_su,
+                ),
+                "iteration_topology_ledger": iteration_ledger,
+            },
+        ), h_tolerance)
     try:
         released_ledger, released_rows, resolved_excess = _release_residual_1122_products(
             iteration_ledger,
@@ -5110,7 +5429,11 @@ def _plan_internal_topology_stage(
             break
         conversion_plan = next_product["plan"]
         histogram = conversion_plan.histogram_adjustment_plan
-        step_count = _physical_conversion_count(
+        # The ordinary internal budget is charged per concrete primary donor
+        # node.  ``_physical_conversion_count`` also expands ``via_su`` and
+        # compensation operations, which is a separate diagnostic measure and
+        # must never consume this budget.
+        step_count = _concrete_primary_node_count(
             list(getattr(histogram, "groups", []) or [])
         )
         if (
@@ -5134,7 +5457,7 @@ def _plan_internal_topology_stage(
         if str(next_product.get("product_role", "")) == "residual_flex_chain":
             remaining_flex_capacity = max(0, remaining_flex_capacity - 1)
         residual_contract_id += 1
-        remaining_budget = budget - _physical_conversion_count(groups)
+        remaining_budget = budget - _concrete_primary_node_count(groups)
 
     invariant_errors = _internal_ledger_invariant_errors(
         ledger=iteration_ledger,
@@ -5162,17 +5485,24 @@ def _plan_internal_topology_stage(
         (not remaining_closure_final or bool(tolerated_final))
         and not preserved_unassembled_su24_ids
     )
+    ordinary_internal_count, residual_reclassification_count = (
+        _internal_primary_adjustment_counts(groups)
+    )
     diagnostics = {
         "internal_stage_completed": internal_stage_completed,
         "residual_stage_completed": internal_stage_completed,
         "internal_stop_subphase": str(stop_subphase),
         "internal_conversion_budget": int(budget),
         "internal_physical_conversion_count": _physical_conversion_count(groups),
+        "ordinary_internal_primary_adjustment_count": int(ordinary_internal_count),
+        "residual_1122_reclassification_primary_adjustment_count": int(
+            residual_reclassification_count
+        ),
         "internal_conversion_budget_remaining": max(
-            0, budget - _physical_conversion_count(groups)
+            0, budget - ordinary_internal_count
         ),
         "internal_budget_exhausted": bool(
-            _physical_conversion_count(groups) >= budget and bool(groups)
+            ordinary_internal_count >= budget and bool(groups)
         ),
         "internal_ring_count": 0,
         "internal_residual_product_count": len(residual_products),
@@ -5222,12 +5552,31 @@ def _plan_internal_topology_stage(
             max_primary_adjustments=budget,
         )
     if reclassification_plan is not None:
-        reclassification_plan.diagnostics = {
-            **dict(getattr(reclassification_plan, "diagnostics", {}) or {}),
-            "internal_residual_product_count": len(residual_products),
-            "resource_invariant_errors": [],
-        }
-        return reclassification_plan
+        # If an excess product uses a node converted earlier in this same
+        # histogram batch, the reclassification helper deliberately returns a
+        # deferred sentinel.  Keep the ordinary internal conversion groups,
+        # rebuild Layer1/2 first, and let the next generation perform the
+        # 11-22 -> 12-13 transaction on materialized nodes.  Returning the
+        # sentinel itself would incorrectly terminate the workflow as an
+        # infeasible phase and discard the valid ordinary conversion batch.
+        if str(getattr(reclassification_plan, "plan_kind", "") or "") == (
+            "residual_1122_reclassification_deferred"
+        ):
+            diagnostics.update({
+                **dict(getattr(reclassification_plan, "diagnostics", {}) or {}),
+                "internal_residual_product_count": len(residual_products),
+                "residual_1122_reclassification_deferred": True,
+                "internal_stage_completed": False,
+                "residual_stage_completed": False,
+                "resource_invariant_errors": [],
+            })
+        else:
+            reclassification_plan.diagnostics = {
+                **dict(getattr(reclassification_plan, "diagnostics", {}) or {}),
+                "internal_residual_product_count": len(residual_products),
+                "resource_invariant_errors": [],
+            }
+            return reclassification_plan
     if invariant_errors:
         proof = {
             "phase": "internal_topology",
@@ -5274,6 +5623,18 @@ def _plan_internal_topology_stage(
         result.active_subphase = str(stop_subphase)
         result.phase_result.active_phase = "internal_topology"
         result.phase_result.phase_completed = False
+        if bool(diagnostics.get("residual_1122_reclassification_deferred", False)):
+            result.plan_kind = (
+                "residual_1122_assembly_rebuild_before_reclassification"
+            )
+            result.reason = "stage3_rebuild_required"
+            result.diagnostics.update({
+                "plan_kind": result.plan_kind,
+                "reason": (
+                    "residual_1122_reclassification_overlaps_current_conversion_batch"
+                ),
+                "restart_stage3_after_rebuild": True,
+            })
         return result
 
     if preserved_unassembled_su24_ids:
@@ -5330,8 +5691,14 @@ def _plan_internal_topology_stage(
             },
             "internal_conversion_budget": int(budget),
             "internal_physical_conversion_count": _physical_conversion_count(groups),
+            "ordinary_internal_primary_adjustment_count": int(
+                ordinary_internal_count
+            ),
+            "residual_1122_reclassification_primary_adjustment_count": int(
+                residual_reclassification_count
+            ),
             "internal_conversion_budget_remaining": max(
-                0, budget - _physical_conversion_count(groups)
+                0, budget - ordinary_internal_count
             ),
         }
         return _annotate_h_soft_rule(Stage3AdjustmentPlan(
@@ -5396,6 +5763,7 @@ def plan_stage3_state_machine(
     enable_post_external_spectrum: bool = True,
     progress_phase: Stage3ProgressPhase = Stage3ProgressPhase.FLEX_RECONCILIATION,
     spectrum_candidate_limit: int = 8,
+    spectrum_max_candidate_trials: int = 4,
     spectrum_max_primary_adjustments: int = 10,
     spectrum_profile_stats: Optional[Dict[int, Dict[str, Any]]] = None,
     spectrum_hop1_template_options: Optional[Dict[int, Any]] = None,
@@ -5422,6 +5790,7 @@ def plan_stage3_state_machine(
     external_max_primary_adjustments = max(0, int(external_max_primary_adjustments))
     external_primary_adjustments_used = max(0, int(external_primary_adjustments_used))
     internal_max_primary_adjustments = max(0, int(internal_max_primary_adjustments))
+    spectrum_max_candidate_trials = max(0, int(spectrum_max_candidate_trials))
     if H is None:
         histogram_size = max(
             40,
@@ -6426,6 +6795,7 @@ def plan_stage3_state_machine(
             Stage3ProgressPhase.SPECTRUM_REBALANCE,
         }
         and bool(enable_post_external_spectrum)
+        and int(spectrum_max_candidate_trials) > 0
     ):
         spectrum_candidates, spectrum_audit = generate_spectrum_candidates(
             H=H_work,
@@ -6443,7 +6813,10 @@ def plan_stage3_state_machine(
                 nodes,
                 pool,
             ),
-            candidate_limit=int(spectrum_candidate_limit),
+            candidate_limit=min(
+                max(0, int(spectrum_candidate_limit)),
+                max(0, int(spectrum_max_candidate_trials)),
+            ),
             max_primary_adjustments=int(spectrum_max_primary_adjustments),
             max_h_compensation_ops=0,
             rejected_histogram_signatures=rejected_spectrum_histogram_signatures,
@@ -6452,6 +6825,13 @@ def plan_stage3_state_machine(
             E_target=E_target,
             special_degree_meta=special_degree_meta,
             flex_audit=dict(getattr(phase_eval, "flex_audit", {}) or {}),
+            aromatic_response_scale=float(
+                dict(difference_spectrum or {}).get(
+                    "aromatic_response_scale",
+                    1.0,
+                )
+                or 1.0
+            ),
         )
         spectrum_audit = dict(spectrum_audit or {})
         spectrum_audit["forbidden_inverse_signature_count"] = len(
@@ -6481,6 +6861,9 @@ def plan_stage3_state_machine(
                     "completed_phases": list(completed_phases),
                     "spectrum_audit": dict(spectrum_audit or {}),
                     "spectrum_stage_evaluated": True,
+                    "spectrum_max_candidate_trials": int(
+                        spectrum_max_candidate_trials
+                    ),
                     "external_products_are_round_local": True,
                     **dict(external_diagnostics),
                 },

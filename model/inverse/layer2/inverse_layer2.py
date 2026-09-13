@@ -11,6 +11,7 @@ from ...shared.inverse_common import (
     _NodeV3, compute_segment_r2, reconstruct_from_mu_pi,
     visualize_spectrum_comparison, evaluate_spectrum_reconstruction,
     multiset_from_counter, multiset_l1_distance, multiset_diff_nodes,
+    reconstruction_peak_scale,
 )
 
 # ============================================================================
@@ -38,6 +39,8 @@ class Layer2Estimator:
             lib_path: 子图库路径
         """
         self.device = device or torch.device('cpu')
+        # Effective aromatic response used only in reconstructed spectra.
+        self.aromatic_response_scale: float = 1.0
         self.E_SU = E_SU.to(self.device)
         self._carbon_su_set = {
             int(i)
@@ -380,7 +383,14 @@ class Layer2Estimator:
                 if validation_error:
                     continue
                 template_mu = float(candidate['template_mu'])
-                peak = self._unit_peak(template_mu, ppm_axis)
+                peak = self._unit_peak(
+                    template_mu,
+                    ppm_axis,
+                    peak_scale=reconstruction_peak_scale(
+                        int(node.su_type),
+                        self.aromatic_response_scale,
+                    ),
+                )
                 candidate_residual = current_residual - peak[:eval_size]
                 candidate_sse = float(torch.sum(candidate_residual * candidate_residual).item())
                 negative_overshoot = float(
@@ -858,9 +868,16 @@ class Layer2Estimator:
         return None
 
     @staticmethod
-    def _unit_peak(mu: float, ppm_axis: torch.Tensor, hwhm: float = 1.0) -> torch.Tensor:
+    def _unit_peak(
+        mu: float,
+        ppm_axis: torch.Tensor,
+        hwhm: float = 1.0,
+        *,
+        peak_scale: float = 1.0,
+    ) -> torch.Tensor:
         hwhm_sq = float(hwhm) ** 2
-        return hwhm_sq / ((ppm_axis - float(mu)) ** 2 + hwhm_sq)
+        peak = hwhm_sq / ((ppm_axis - float(mu)) ** 2 + hwhm_sq)
+        return peak * float(peak_scale)
     
     # ========================================================================
     # 谱图重建
@@ -873,6 +890,7 @@ class Layer2Estimator:
         
         mus = []
         pis = []
+        peak_scales = []
         
         for n in nodes:
             # 只处理含碳的SU
@@ -884,6 +902,12 @@ class Layer2Estimator:
                 continue
             mus.append(mu)
             pis.append(1.0)
+            peak_scales.append(
+                reconstruction_peak_scale(
+                    int(n.su_type),
+                    self.aromatic_response_scale,
+                )
+            )
         
         return reconstruct_from_mu_pi(
             mus=mus,
@@ -893,6 +917,7 @@ class Layer2Estimator:
             intensity_scale=1.0,
             device=device,
             unit_peak_intensity=True,
+            peak_scales=peak_scales,
         )
 
     def _build_match_detail_rows(self, nodes: List[_NodeV3]) -> List[Dict[str, object]]:

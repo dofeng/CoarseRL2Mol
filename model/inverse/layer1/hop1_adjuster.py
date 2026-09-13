@@ -23,6 +23,7 @@ try:
         save_spectrum_comparison,
         save_spectrum_figure,
         terminal_neighbor_count,
+        reconstruction_peak_scale,
     )
 except ImportError:
     from model.paths import Z_LIBRARY_DIR
@@ -40,6 +41,7 @@ except ImportError:
         save_spectrum_comparison,
         save_spectrum_figure,
         terminal_neighbor_count,
+        reconstruction_peak_scale,
     )
 
 def _normalize_hop1_tuple(values: Sequence[int]) -> Tuple[int, ...]:
@@ -172,8 +174,10 @@ class Hop1Adjuster:
                  exact_hop1_required_centers: Optional[Set[int]] = None,
                  carbon_su_set: Optional[Set[int]] = None,
                  device: str | torch.device = 'cpu',
-                 strict_swap_branch_limit: int = 12):
+                 strict_swap_branch_limit: int = 12,
+                 aromatic_response_scale: float = 1.0):
         self.device = device
+        self.aromatic_response_scale = float(aromatic_response_scale)
         self.carbon_su_set = set(int(x) for x in set(carbon_su_set or set()))
         self.template_lib_path = str(template_lib_path) if template_lib_path else None
         self.library_index = self._load_template_library_index(self.template_lib_path)
@@ -383,6 +387,7 @@ class Hop1Adjuster:
         su_names = [name for name, _definition in SU_DEFS]
         mus: List[float] = []
         pis: List[float] = []
+        peak_scales: List[float] = []
         rows: List[Dict[str, object]] = []
         matched_count = 0
         carbon_count = 0
@@ -403,6 +408,12 @@ class Hop1Adjuster:
                 if mu is not None:
                     mus.append(float(mu))
                     pis.append(1.0)
+                    peak_scales.append(
+                        reconstruction_peak_scale(
+                            center_su,
+                            self.aromatic_response_scale,
+                        )
+                    )
             rows.append({
                 'global_id': int(node.global_id),
                 'center_su_idx': center_su,
@@ -425,6 +436,7 @@ class Hop1Adjuster:
             'rows': rows,
             'mus': mus,
             'pis': pis,
+            'peak_scales': peak_scales,
             'matched_count': matched_count,
             'carbon_count': carbon_count,
         }
@@ -462,6 +474,7 @@ class Hop1Adjuster:
             intensity_scale=1.0,
             device=self.device,
             unit_peak_intensity=True,
+            peak_scales=peak_data['peak_scales'],
         ))
         return snapshot
 
@@ -1294,11 +1307,16 @@ class Hop1Adjuster:
         return True
 
     @staticmethod
-    def _unit_peak(ppm: np.ndarray, mu: Optional[float]) -> np.ndarray:
+    def _unit_peak(
+        ppm: np.ndarray,
+        mu: Optional[float],
+        *,
+        peak_scale: float = 1.0,
+    ) -> np.ndarray:
         if mu is None:
             return np.zeros_like(ppm, dtype=np.float64)
         delta = np.asarray(ppm, dtype=np.float64) - float(mu)
-        return 1.0 / (delta * delta + 1.0)
+        return float(peak_scale) / (delta * delta + 1.0)
 
     @staticmethod
     def _region_abs_error(diff: np.ndarray, mask: np.ndarray) -> float:
@@ -1442,6 +1460,10 @@ class Hop1Adjuster:
 
         for region_name, region_min, region_max in self.REGION_ORDER:
             region_state = self._capture_topology_state(nodes)
+            nodes_by_global_id = {
+                int(getattr(item, 'global_id', -1)): item
+                for item in nodes
+            }
             batch_before = self.build_eval_snapshot(nodes, S_target)
             batch_before_r2 = float(batch_before.get('r2', 0.0))
             recon = batch_before['S_recon'].detach().cpu().numpy().astype(np.float64)
@@ -1576,8 +1598,29 @@ class Hop1Adjuster:
                             for affected_id in result.get('affected_nodes', []):
                                 old_mu = dict(old_assignments.get(int(affected_id), {}) or {}).get('mu')
                                 new_mu = dict(new_assignments.get(int(affected_id), {}) or {}).get('mu')
-                                recon -= self._unit_peak(ppm, old_mu)
-                                recon += self._unit_peak(ppm, new_mu)
+                                affected_node = nodes_by_global_id.get(
+                                    int(affected_id)
+                                )
+                                affected_su = int(
+                                    getattr(affected_node, 'su_type', -1)
+                                    if affected_node is not None else -1
+                                )
+                                recon -= self._unit_peak(
+                                    ppm,
+                                    old_mu,
+                                    peak_scale=reconstruction_peak_scale(
+                                        affected_su,
+                                        self.aromatic_response_scale,
+                                    ),
+                                )
+                                recon += self._unit_peak(
+                                    ppm,
+                                    new_mu,
+                                    peak_scale=reconstruction_peak_scale(
+                                        affected_su,
+                                        self.aromatic_response_scale,
+                                    ),
+                                )
                             assignments = new_assignments
                             diff = target - recon
                             tentative_moves += 1

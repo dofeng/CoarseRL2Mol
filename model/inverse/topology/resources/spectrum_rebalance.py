@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from ....shared.coarse_graph import get_su_ppm_range
+from ....shared.inverse_common import reconstruction_peak_scale
 from .conversion_scoring import evaluate_flex_impact
 from .histogram import _h_total
 from .profiles import MIN_STAGE3_AROMATIC_RESOURCE_COUNT
@@ -975,9 +976,20 @@ def _spectrum_profile_weights(
     return normalized
 
 
-def _lorentzian_peak(ppm: np.ndarray, mu: float, hwhm: float = 1.0) -> np.ndarray:
+def _lorentzian_peak(
+    ppm: np.ndarray,
+    mu: float,
+    hwhm: float = 1.0,
+    *,
+    su_type: Optional[int] = None,
+    aromatic_response_scale: float = 1.0,
+) -> np.ndarray:
     hwhm_sq = float(hwhm) ** 2
-    return hwhm_sq / ((ppm - float(mu)) ** 2 + hwhm_sq)
+    amplitude = reconstruction_peak_scale(
+        int(su_type) if su_type is not None else -1,
+        aromatic_response_scale,
+    )
+    return float(amplitude) * hwhm_sq / ((ppm - float(mu)) ** 2 + hwhm_sq)
 
 
 def _profile_support_at_mu(profile: Dict[str, float], mu: float) -> float:
@@ -1455,6 +1467,7 @@ def _pair_direction_evidence(
     target_pair: Optional[Sequence[Dict[str, Any]]] = None,
     source_local_surplus: Optional[Sequence[float]] = None,
     target_local_deficit: Optional[Sequence[float]] = None,
+    aromatic_response_scale: float = 1.0,
 ) -> Dict[str, Any]:
     """Return diagnostic direction evidence for one pair rule.
 
@@ -1506,13 +1519,23 @@ def _pair_direction_evidence(
             local_source = [float(value) for value in source_local_surplus]
         else:
             for row in list(source_pair or []):
-                peak = _lorentzian_peak(grid, float(row.get("mu", 0.0)))
+                peak = _lorentzian_peak(
+                    grid,
+                    float(row.get("mu", 0.0)),
+                    su_type=int(row.get("su_type", -1)),
+                    aromatic_response_scale=aromatic_response_scale,
+                )
                 local_source.append(float(np.dot(peak, negative) * step))
         if target_local_deficit is not None:
             local_target = [float(value) for value in target_local_deficit]
         else:
             for row in list(target_pair or []):
-                peak = _lorentzian_peak(grid, float(row.get("mu_median", 0.0)))
+                peak = _lorentzian_peak(
+                    grid,
+                    float(row.get("mu_median", 0.0)),
+                    su_type=int(row.get("su_type", -1)),
+                    aromatic_response_scale=aromatic_response_scale,
+                )
                 local_target.append(float(np.dot(peak, positive) * step))
     pair_source_evidence = float(sum(local_source))
     pair_target_evidence = float(sum(local_target))
@@ -1578,9 +1601,15 @@ def _pair_donor_sort_key(
     *,
     ppm: np.ndarray,
     diff: np.ndarray,
+    aromatic_response_scale: float = 1.0,
 ) -> Tuple[float, float, int]:
     """Rank concrete donors by local negative-lobe evidence, deterministically."""
-    peak = _lorentzian_peak(ppm, float(row.get("mu", 0.0)))
+    peak = _lorentzian_peak(
+        ppm,
+        float(row.get("mu", 0.0)),
+        su_type=int(row.get("su_type", -1)),
+        aromatic_response_scale=aromatic_response_scale,
+    )
     step = _difference_ppm_step(ppm) if ppm.size == diff.size else 1.0
     negative = np.maximum(-diff, 0.0)
     surplus = float(np.dot(peak, negative) * step)
@@ -1646,6 +1675,7 @@ def _generate_spectrum_pair_candidates(
     rejected_histogram_signatures: Iterable[str],
     rejected_bundle_signatures: Iterable[str],
     aliphatic_audit: Optional[Dict[str, Any]] = None,
+    aromatic_response_scale: float = 1.0,
 ) -> Tuple[List[Stage3SpectrumCandidate], Dict[str, Any]]:
     """Generate only the explicitly allowed 2-node unsaturated pair bundles."""
     donor_rows_by_su: Dict[int, List[Dict[str, Any]]] = {}
@@ -1660,13 +1690,19 @@ def _generate_spectrum_pair_candidates(
             item,
             ppm=ppm,
             diff=_array(difference_spectrum.get("diff")),
+            aromatic_response_scale=aromatic_response_scale,
         ))
 
     # Index peaks by the physical node id, never by ``id(row)``.  Pair rows
     # are deliberately copied by the combination helpers, so Python object
     # identity is not stable across the generator.
     donor_peaks_by_node_id = {
-        int(row["node_id"]): _lorentzian_peak(ppm, float(row["mu"]))
+        int(row["node_id"]): _lorentzian_peak(
+            ppm,
+            float(row["mu"]),
+            su_type=int(row.get("su_type", -1)),
+            aromatic_response_scale=aromatic_response_scale,
+        )
         for rows in donor_rows_by_su.values()
         for row in rows
     }
@@ -1681,6 +1717,8 @@ def _generate_spectrum_pair_candidates(
         (int(su_type), int(index)): _lorentzian_peak(
             ppm,
             float(row["mu_median"]),
+            su_type=int(su_type),
+            aromatic_response_scale=aromatic_response_scale,
         )
         for su_type, indexed_rows in target_rows_indexed.items()
         for index, row in indexed_rows
@@ -1711,7 +1749,12 @@ def _generate_spectrum_pair_candidates(
         if int(row.get("su_type", -1)) in SPECTRUM_RESOURCE_TYPES
     ]
     atomic_donor_peaks = np.stack([
-        _lorentzian_peak(ppm, float(row["mu"]))
+        _lorentzian_peak(
+            ppm,
+            float(row["mu"]),
+            su_type=int(row.get("su_type", -1)),
+            aromatic_response_scale=aromatic_response_scale,
+        )
         for row in atomic_donor_rows
     ]) if atomic_donor_rows else np.empty((0, int(ppm.size)), dtype=np.float64)
     atomic_target_rows = [
@@ -1720,7 +1763,12 @@ def _generate_spectrum_pair_candidates(
         for row in list(target_rows_by_su.get(int(su_type), []) or [])
     ]
     atomic_target_peaks = np.stack([
-        _lorentzian_peak(ppm, float(row["mu_median"]))
+        _lorentzian_peak(
+            ppm,
+            float(row["mu_median"]),
+            su_type=int(row.get("su_type", -1)),
+            aromatic_response_scale=aromatic_response_scale,
+        )
         for row in atomic_target_rows
     ]) if atomic_target_rows else np.empty((0, int(ppm.size)), dtype=np.float64)
     rejected_hist = {str(value) for value in list(rejected_histogram_signatures or [])}
@@ -1790,6 +1838,7 @@ def _generate_spectrum_pair_candidates(
                             target_local_cache[(int(target_types[0]), int(target_index_0))],
                             target_local_cache[(int(target_types[1]), int(target_index_1))],
                         ],
+                        aromatic_response_scale=aromatic_response_scale,
                     )
                     if not bool(evidence.get("valid", False)):
                         attempts.append({
@@ -2087,6 +2136,7 @@ def generate_spectrum_candidates(
     special_degree_meta: Optional[Dict[str, Any]] = None,
     flex_audit: Optional[Dict[str, Any]] = None,
     temporary_unsaturated_ids_by_su: Optional[Dict[int, Sequence[int]]] = None,
+    aromatic_response_scale: float = 1.0,
 ) -> Tuple[List[Stage3SpectrumCandidate], Dict[str, Any]]:
     del special_degree_meta, flex_audit, max_h_compensation_ops
     data = dict(difference_spectrum or {})
@@ -2234,7 +2284,12 @@ def generate_spectrum_candidates(
             },
         }
     donor_peaks = np.stack([
-        _lorentzian_peak(ppm, float(row["mu"]))
+        _lorentzian_peak(
+            ppm,
+            float(row["mu"]),
+            su_type=int(row.get("su_type", -1)),
+            aromatic_response_scale=aromatic_response_scale,
+        )
         for row in donor_rows
     ])
     donor_peak_norms = np.sum(donor_peaks * donor_peaks, axis=1)
@@ -2257,7 +2312,12 @@ def generate_spectrum_candidates(
             if int(su_type) in unsaturated_options
         })
     target_peaks = np.stack([
-        _lorentzian_peak(ppm, float(row["mu_median"]))
+        _lorentzian_peak(
+            ppm,
+            float(row["mu_median"]),
+            su_type=int(row.get("su_type", -1)),
+            aromatic_response_scale=aromatic_response_scale,
+        )
         for row in target_rows
     ])
     target_peak_norms = np.sum(target_peaks * target_peaks, axis=1)
@@ -2305,6 +2365,7 @@ def generate_spectrum_candidates(
             rejected_histogram_signatures=rejected,
             rejected_bundle_signatures=rejected_bundles,
             aliphatic_audit=aliphatic_audit,
+            aromatic_response_scale=aromatic_response_scale,
         )
 
     baseline_score_state = _atomic_score_state(

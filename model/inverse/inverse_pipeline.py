@@ -28,6 +28,9 @@ from ..shared.inverse_common import (
     get_effective_hist_element_vector,
     get_effective_nodes_element_vector,
     get_node_degree_hint,
+    compute_aromatic_area_fraction,
+    aromatic_response_scale_from_fraction,
+    reconstruction_peak_scale,
 )
 from .layer0.inverse_layer0 import Layer0Estimator
 from .layer1.inverse_layer1 import Layer1Assigner
@@ -71,6 +74,11 @@ class InversePipelineV3:
         self.s2n = s2n_model.to(device).eval()
         self.vae = vae_model.to(device).eval()
         self.device = device
+        # Chosen once from the target spectrum and applied only to all
+        # structure-derived reconstructed spectra.  The target spectrum and
+        # topology/resource rules remain untouched.
+        self.aromatic_area_fraction: float = 0.0
+        self.aromatic_response_scale: float = 1.0
         self.default_template_lib_path: Optional[str] = None
         if isinstance(templates, (str, Path)):
             self.default_template_lib_path = str(Path(templates))
@@ -119,6 +127,19 @@ class InversePipelineV3:
         self._final_stage3_terminal_diagnostics: Dict[str, Any] = {}
         self._final_stage3_snapshot_node_ids: List[int] = []
         self._final_stage3_snapshot_authoritative: bool = False
+
+    def _set_aromatic_reconstruction_scale(self, S_target: torch.Tensor) -> None:
+        """Configure the shared aromatic peak response for this inference run."""
+        fraction = compute_aromatic_area_fraction(S_target, ppm_axis=PPM_AXIS)
+        scale = aromatic_response_scale_from_fraction(fraction)
+        self.aromatic_area_fraction = float(fraction)
+        self.aromatic_response_scale = float(scale)
+        self.layer1_assigner.aromatic_response_scale = float(scale)
+        hop1_adjuster = getattr(self.layer1_assigner, '_hop1_adjuster', None)
+        if hop1_adjuster is not None:
+            hop1_adjuster.aromatic_response_scale = float(scale)
+        self.layer2_estimator.aromatic_response_scale = float(scale)
+        self.layer3_estimator.aromatic_response_scale = float(scale)
 
     @staticmethod
     def _merge_stage_config(defaults: Dict[str, Any],
@@ -613,6 +634,20 @@ class InversePipelineV3:
         ).to(self.device)
         with open(snapshot_path / 'current_diff.json', 'r', encoding='utf-8') as handle:
             current_diff = dict(json.load(handle) or {})
+        # Recompute the Layer2 baseline under the current reconstruction
+        # response.  Older snapshots may have been written before aromatic
+        # response metadata existed; the target remains unchanged.
+        self._set_aromatic_reconstruction_scale(S_target)
+        stored_diff_contract = {
+            key: current_diff[key]
+            for key in ('source_stage', 'spectral_contract', 'mode')
+            if key in current_diff
+        }
+        current_diff = self._compute_difference_spectrum_from_nodes_mu(
+            nodes,
+            S_target,
+        )
+        current_diff.update(stored_diff_contract)
         with open(
             snapshot_path / 'fixed_partition_meta.json', 'r', encoding='utf-8'
         ) as handle:
@@ -658,6 +693,7 @@ class InversePipelineV3:
             'enable_post_external_spectrum',
             'spectrum_active_through_cycle',
             'spectrum_candidate_limit',
+            'spectrum_max_candidate_trials',
             'spectrum_max_primary_adjustments',
             'spectrum_min_r2_gain',
             'verbose',
@@ -718,6 +754,7 @@ class InversePipelineV3:
             enable_post_external_spectrum=bool(resource_cfg.get('enable_post_external_spectrum', True)),
             spectrum_active_through_cycle=int(resource_cfg.get('spectrum_active_through_cycle', 20)),
             spectrum_candidate_limit=int(resource_cfg.get('spectrum_candidate_limit', 8)),
+            spectrum_max_candidate_trials=int(resource_cfg.get('spectrum_max_candidate_trials', 4)),
             spectrum_max_primary_adjustments=int(resource_cfg.get('spectrum_max_primary_adjustments', 10)),
             spectrum_min_r2_gain=float(resource_cfg.get('spectrum_min_r2_gain', 0.0005)),
             verbose=bool(resource_cfg.get('verbose', False)),
@@ -2590,6 +2627,7 @@ class InversePipelineV3:
                                              enable_post_external_spectrum: bool = True,
                                              spectrum_active_through_cycle: int = 20,
                                              spectrum_candidate_limit: int = 8,
+                                             spectrum_max_candidate_trials: int = 4,
                                              spectrum_max_primary_adjustments: int = 10,
                                              spectrum_min_r2_gain: float = 0.0005,
                                              verbose: bool = False,
@@ -2667,11 +2705,15 @@ class InversePipelineV3:
             residual_side_min_23=int(residual_side_min_23),
             h_tolerance=float(h_tolerance),
             outer_cycle=int(outer_idx) + 1,
-            iteration_offset=max(0, int(iteration_offset)),
+            # Stage3 cycle numbers are local to this Outer Cycle.  Keep the
+            # legacy argument in the helper signature, but never propagate a
+            # cross-Outer-Cycle offset into the workflow.
+            iteration_offset=0,
             difference_spectrum=dict(current_diff or {}),
             enable_post_external_spectrum=bool(enable_post_external_spectrum),
             spectrum_active_through_cycle=int(spectrum_active_through_cycle),
             spectrum_candidate_limit=int(spectrum_candidate_limit),
+            spectrum_max_candidate_trials=int(spectrum_max_candidate_trials),
             spectrum_max_primary_adjustments=int(spectrum_max_primary_adjustments),
             spectrum_min_r2_gain=float(spectrum_min_r2_gain),
             verbose=bool(verbose),
@@ -2731,6 +2773,19 @@ class InversePipelineV3:
                 'internal_physical_conversion_count': int(
                     raw_completion.get('internal_physical_conversion_count', 0) or 0
                 ),
+                'ordinary_internal_primary_adjustment_count': int(
+                    raw_completion.get(
+                        'ordinary_internal_primary_adjustment_count', 0
+                    )
+                    or 0
+                ),
+                'residual_1122_reclassification_primary_adjustment_count': int(
+                    raw_completion.get(
+                        'residual_1122_reclassification_primary_adjustment_count',
+                        0,
+                    )
+                    or 0
+                ),
                 'internal_ring_count': int(
                     raw_completion.get('internal_ring_count', 0) or 0
                 ),
@@ -2743,6 +2798,19 @@ class InversePipelineV3:
                         'internal_physical_conversion_count': int(
                             dict(item or {}).get(
                                 'internal_physical_conversion_count', 0
+                            )
+                            or 0
+                        ),
+                        'ordinary_internal_primary_adjustment_count': int(
+                            dict(item or {}).get(
+                                'ordinary_internal_primary_adjustment_count', 0
+                            )
+                            or 0
+                        ),
+                        'residual_1122_reclassification_primary_adjustment_count': int(
+                            dict(item or {}).get(
+                                'residual_1122_reclassification_primary_adjustment_count',
+                                0,
                             )
                             or 0
                         ),
@@ -2945,6 +3013,32 @@ class InversePipelineV3:
                     'primary_adjustment_count': int(
                         dict(item or {}).get('primary_adjustment_count', 0) or 0
                     ),
+                    'ordinary_internal_primary_adjustment_count': int(
+                        dict(item or {}).get(
+                            'ordinary_internal_primary_adjustment_count', 0
+                        ) or 0
+                    ),
+                    'residual_1122_reclassification_primary_adjustment_count': int(
+                        dict(item or {}).get(
+                            'residual_1122_reclassification_primary_adjustment_count',
+                            0,
+                        ) or 0
+                    ),
+                    'spectrum_trial_count': int(
+                        dict(item or {}).get('spectrum_trial_count', 0) or 0
+                    ),
+                    'spectrum_max_candidate_trials': int(
+                        dict(item or {}).get('spectrum_max_candidate_trials', 0) or 0
+                    ),
+                    'spectrum_candidate_batches': int(
+                        dict(item or {}).get('spectrum_candidate_batches', 0) or 0
+                    ),
+                    'spectrum_cap_reached': bool(
+                        dict(item or {}).get('spectrum_cap_reached', False)
+                    ),
+                    'spectrum_stop_reason': str(
+                        dict(item or {}).get('spectrum_stop_reason', '') or ''
+                    ),
                     'physical_conversion_count': int(
                         dict(item or {}).get('physical_conversion_count', 0) or 0
                     ),
@@ -2974,6 +3068,13 @@ class InversePipelineV3:
                 'acceptance_reason': '',
                 'layer2_r2': '',
                 'primary_adjustment_count': 0,
+                'ordinary_internal_primary_adjustment_count': 0,
+                'residual_1122_reclassification_primary_adjustment_count': 0,
+                'spectrum_trial_count': 0,
+                'spectrum_max_candidate_trials': 0,
+                'spectrum_candidate_batches': 0,
+                'spectrum_cap_reached': False,
+                'spectrum_stop_reason': '',
                 'physical_conversion_count': 0,
                 'h_compensation_count': 0,
                 'parity_balance_count': 0,
@@ -2995,7 +3096,13 @@ class InversePipelineV3:
             'outer_cycle', 'cycle', 'phase', 'applied', 'stage3_stop_reason',
             'accepted_cycles_total', 'accepted_state_retained', 'rebuild_valid',
             'blocked_reason', 'accepted', 'acceptance_reason', 'layer2_r2',
-            'primary_adjustment_count', 'physical_conversion_count', 'h_compensation_count',
+            'primary_adjustment_count',
+            'ordinary_internal_primary_adjustment_count',
+            'residual_1122_reclassification_primary_adjustment_count',
+            'spectrum_trial_count', 'spectrum_max_candidate_trials',
+            'spectrum_candidate_batches', 'spectrum_cap_reached',
+            'spectrum_stop_reason',
+            'physical_conversion_count', 'h_compensation_count',
             'parity_balance_count', 'fresh_rebuild',
         ]
         compact_cycle_rows = [
@@ -3044,6 +3151,18 @@ class InversePipelineV3:
                 )
                 or 0
             ),
+            'final_generation_ordinary_internal_primary_adjustment_count': int(
+                completion_snapshot.get(
+                    'ordinary_internal_primary_adjustment_count', 0
+                )
+                or 0
+            ),
+            'final_generation_residual_1122_reclassification_primary_adjustment_count': int(
+                completion_snapshot.get(
+                    'residual_1122_reclassification_primary_adjustment_count', 0
+                )
+                or 0
+            ),
             'final_generation_internal_ring_count': int(
                 completion_snapshot.get('internal_ring_count', 0) or 0
             ),
@@ -3059,6 +3178,19 @@ class InversePipelineV3:
                     'internal_physical_conversion_count': int(
                         dict(item or {}).get(
                             'internal_physical_conversion_count', 0
+                        )
+                        or 0
+                    ),
+                    'ordinary_internal_primary_adjustment_count': int(
+                        dict(item or {}).get(
+                            'ordinary_internal_primary_adjustment_count', 0
+                        )
+                        or 0
+                    ),
+                    'residual_1122_reclassification_primary_adjustment_count': int(
+                        dict(item or {}).get(
+                            'residual_1122_reclassification_primary_adjustment_count',
+                            0,
                         )
                         or 0
                     ),
@@ -3147,6 +3279,17 @@ class InversePipelineV3:
         self._final_stage3_snapshot_authoritative = False
         self.layer4_adjuster._spectrum_search_memory = {}
 
+        # Select the response once from the unmodified target spectrum.  Every
+        # subsequent structure reconstruction uses this scalar, while the
+        # target tensor itself remains unchanged.
+        self._set_aromatic_reconstruction_scale(S_target)
+        print(
+            f"[Aromatic reconstruction response] fraction="
+            f"{self.aromatic_area_fraction:.4f} "
+            f"scale={self.aromatic_response_scale:.2f}",
+            flush=True,
+        )
+
         layer1_runtime_cfg, layer3_runtime_cfg = self._build_layer_runtime_configs(
             layer1_config=layer1_config,
             layer3_config=layer3_config,
@@ -3203,6 +3346,7 @@ class InversePipelineV3:
                 'enable_post_external_spectrum': True,
                 'spectrum_active_through_cycle': 20,
                 'spectrum_candidate_limit': 8,
+                'spectrum_max_candidate_trials': 4,
                 'spectrum_max_primary_adjustments': 10,
                 'spectrum_min_r2_gain': 0.0005,
                 'verbose': False,
@@ -3245,6 +3389,7 @@ class InversePipelineV3:
             'enable_post_external_spectrum',
             'spectrum_active_through_cycle',
             'spectrum_candidate_limit',
+            'spectrum_max_candidate_trials',
             'spectrum_max_primary_adjustments',
             'spectrum_min_r2_gain',
             'verbose',
@@ -3734,6 +3879,7 @@ class InversePipelineV3:
                         enable_post_external_spectrum=bool(resource_cfg.get('enable_post_external_spectrum', True)),
                         spectrum_active_through_cycle=spectrum_active_through_cycle,
                         spectrum_candidate_limit=int(resource_cfg.get('spectrum_candidate_limit', 8)),
+                        spectrum_max_candidate_trials=int(resource_cfg.get('spectrum_max_candidate_trials', 4)),
                         spectrum_max_primary_adjustments=int(resource_cfg.get('spectrum_max_primary_adjustments', 10)),
                         spectrum_min_r2_gain=float(resource_cfg.get('spectrum_min_r2_gain', 0.0005)),
                         verbose=bool(resource_cfg.get('verbose', False)),
@@ -4065,6 +4211,11 @@ class InversePipelineV3:
             'ppm': ppm_eval.detach().cpu().numpy(),
             'diff': difference,
             'r2': float(evaluation.get('r2', 0.0)),
+            'aromatic_area_fraction': float(self.aromatic_area_fraction),
+            'aromatic_response_scale': float(self.aromatic_response_scale),
+            'aromatic_su_types': [5, 6, 7, 8, 9, 10, 11, 12, 13],
+            'target_spectrum_scaled': False,
+            'reconstruction_aromatic_peaks_scaled': True,
         }
 
     def _histogram_from_nodes(self, nodes: List[_NodeV3]) -> torch.Tensor:
@@ -4094,6 +4245,7 @@ class InversePipelineV3:
         """Run Layer0/1/2 once with the fixed inverse spectral contract."""
         started = time.perf_counter()
         target = S_target.to(self.device).flatten()
+        self._set_aromatic_reconstruction_scale(target)
         elements = E_target.to(self.device).flatten()
         layer1_runtime_config, _layer3_config = self._build_layer_runtime_configs(
             layer1_config=layer1_config,
@@ -4145,6 +4297,10 @@ class InversePipelineV3:
         eval_lib_path: Optional[str] = None,
         layer1_config: Optional[Dict[str, Any]] = None,
     ) -> List[_NodeV3]:
+        # Keep direct Layer1 entry points on the same reconstruction contract
+        # as ``infer``: the target is read-only, while aromatic response is
+        # applied only to structure-derived spectra.
+        self._set_aromatic_reconstruction_scale(S_target)
         runtime_config, _layer3_config = self._build_layer_runtime_configs(
             layer1_config=layer1_config,
         )
@@ -4193,6 +4349,7 @@ class InversePipelineV3:
         3. 保存模板center_z并使用模板center_mu
         4. NMR谱图重建和评估
         """
+        self._set_aromatic_reconstruction_scale(S_target)
         lib_path = lib_path or self.default_template_lib_path
         if lib_path:
             try:
@@ -4248,6 +4405,7 @@ class InversePipelineV3:
         2. 候选池扩展：增加多样性采样
         3. 早停机制：R²达标提前终止
         """
+        self._set_aromatic_reconstruction_scale(S_target)
         return self.layer3_adjust_templates_impl(
             nodes=nodes,
             S_target=S_target,
@@ -5281,6 +5439,7 @@ class InversePipelineV3:
 
         mus = []
         pis = []
+        peak_scales = []
         for n in nodes:
             try:
                 center_su = int(n.su_type)
@@ -5301,12 +5460,23 @@ class InversePipelineV3:
                 continue
             mus.append(float(mu))
             pis.append(1.0)
+            peak_scales.append(
+                reconstruction_peak_scale(
+                    center_su,
+                    self.aromatic_response_scale,
+                )
+            )
 
         if not mus:
             return torch.zeros_like(ppm_axis)
 
         mu_t = torch.tensor(mus, dtype=torch.float, device=device)
         pi_t = torch.tensor(pis, dtype=torch.float, device=device)
+        pi_t = pi_t * torch.tensor(
+            peak_scales,
+            dtype=torch.float,
+            device=device,
+        )
         return lorentzian_spectrum(mu_t, pi_t, ppm_axis, hwhm=1.0)
 
 # ============================================================================
