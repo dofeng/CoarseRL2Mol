@@ -193,6 +193,32 @@ class HexAssemblyState:
             for axial, node_id in self.occupied_axial.items()
             if int(node_id) not in component_nodes
         }
+        # CSV initialization places every aromatic unit in a temporary
+        # staging pose before the rigid pass.  Those disconnected poses are
+        # not physical obstacles: only the component on the other side of
+        # the contract may constrain a proposed rigid transform.  Build that
+        # stationary map from the authoritative node coordinates rather than
+        # from ``occupied_axial`` (which may intentionally contain the
+        # staging objects for visualization/backward compatibility).
+        if str(self.stage) == "rigid" and allowed_contact is not None:
+            contact_nodes = {int(value) for value in allowed_contact}
+            stationary_contact_nodes = contact_nodes - component_nodes
+            if stationary_contact_nodes:
+                ownership = self.problem.ownership_map()
+                stationary_units = {
+                    ownership.get(int(node_id), "")
+                    for node_id in stationary_contact_nodes
+                    if ownership.get(int(node_id), "")
+                }
+                relevant_nodes: Set[int] = set()
+                for unit_id in stationary_units:
+                    relevant_nodes.update(self.component_node_ids(unit_id))
+                stationary = {
+                    self.node_axial[int(node_id)]: int(node_id)
+                    for node_id in relevant_nodes
+                    if int(node_id) not in component_nodes
+                    and int(node_id) in self.node_axial
+                }
         for node_id, axial in transformed.items():
             if axial in stationary:
                 return False, f"component_axial_collision:{axial}:{stationary[axial]}:{node_id}"
@@ -238,6 +264,22 @@ class HexAssemblyState:
             return False
         component_units = self.component_unit_ids(unit_id)
         component_nodes = self.component_node_ids(unit_id)
+        rigid_relevant_nodes: Optional[Set[int]] = None
+        if str(self.stage) == "rigid" and allowed_contact is not None:
+            contact_nodes = {int(value) for value in allowed_contact}
+            stationary_contact_nodes = contact_nodes - component_nodes
+            if stationary_contact_nodes:
+                ownership = self.problem.ownership_map()
+                stationary_units = {
+                    ownership.get(int(node_id), "")
+                    for node_id in stationary_contact_nodes
+                    if ownership.get(int(node_id), "")
+                }
+                rigid_relevant_nodes = set(component_nodes)
+                for stationary_unit in stationary_units:
+                    rigid_relevant_nodes.update(
+                        self.component_node_ids(stationary_unit)
+                    )
         self.allowed_unbonded_contacts = {
             pair for pair in self.allowed_unbonded_contacts
             if pair.isdisjoint(component_nodes) or pair <= component_nodes
@@ -276,6 +318,15 @@ class HexAssemblyState:
             self.node_axial[node_id] = axial
             self.occupied_axial[axial] = node_id
             self.final_node_positions[node_id] = (float(axial[0]), float(axial[1]))
+        if rigid_relevant_nodes is not None:
+            # Keep only the active contract neighbourhood in the occupancy
+            # index.  Other aromatic components remain available through
+            # ``node_axial`` but cannot block the next rigid search step.
+            self.occupied_axial = {
+                self.node_axial[int(node_id)]: int(node_id)
+                for node_id in rigid_relevant_nodes
+                if int(node_id) in self.node_axial
+            }
         self.edges = [
             AssemblyEdge(
                 edge.source_node_id,

@@ -955,6 +955,13 @@ def _place_topology_outcomes(
                     trial, contracts, "fixed_flex_topology_placement"
                 ):
                     continue
+                # ``allow_unbonded_neighbors`` is needed while probing a
+                # multi-port topology, but only the exact SU25 contacts are
+                # legal exceptions.  Reject any other close cross-unit pair
+                # before it reaches relabel/replay, where final SU labels make
+                # the same defect visible to the geometry audit.
+                if trial.audit_unintended_contacts():
+                    continue
                 signature = trial.state_signature()
                 if signature in seen:
                     continue
@@ -1142,6 +1149,8 @@ def _move_component_outcomes(
                 if not _force_contracts(
                     trial, contracts, "fixed_flex_component_merge"
                 ):
+                    continue
+                if trial.audit_unintended_contacts():
                     continue
                 signature = trial.state_signature()
                 if signature in seen:
@@ -1811,6 +1820,8 @@ def _backbone_site_outcomes(
                                     row_node,
                                     assignments[row_boundary],
                                 )
+                            if anchored.audit_unintended_contacts():
+                                continue
                             partial.append((anchored, assignments, selected_sites, []))
 
                         for group, component_index in zip(
@@ -1918,6 +1929,8 @@ def _backbone_site_outcomes(
                                                         item_node,
                                                         group_assignments[item_boundary],
                                                     )
+                                                if moved.audit_unintended_contacts():
+                                                    continue
                                                 next_partial.append((
                                                     moved,
                                                     {**assignments, **group_assignments},

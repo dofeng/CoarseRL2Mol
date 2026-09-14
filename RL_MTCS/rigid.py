@@ -13,8 +13,7 @@ from .geometry import (
     axial_add,
     axial_distance,
     axial_neg,
-    rotate_axial,
-    transform_direction,
+    transform_axial,
 )
 from .state import HexAssemblyState
 from .models import ExternalContract, TopologyUnit, UnitPort
@@ -147,41 +146,46 @@ class TopologyPlacementStage:
         actions: List[Dict[str, Any]] = []
         target_direction = self.state.global_port_direction(target_unit.unit_id, target_port)
         directions = [target_direction] if target_direction is not None else list(HEX_DIRECTIONS)
-        for rotation in range(6):
-            source_direction = self.state.global_port_direction(source_unit.unit_id, source_port, rotation=rotation)
-            for direction in directions:
-                if direction is None:
-                    continue
-                direction = tuple(int(value) for value in direction)
-                if source_direction is not None and source_direction != axial_neg(direction):
-                    continue
-                source_target = axial_add(target_axial, direction)
-                source_local = self.state.global_node_axial(
-                    source_unit.unit_id,
-                    int(source_port.node_id),
-                    rotation=rotation,
-                    translation=(0, 0),
-                )
-                translation = (source_target[0] - source_local[0], source_target[1] - source_local[1])
-                ok, _reason = self.state.can_place(
-                    source_unit.unit_id,
-                    rotation,
-                    translation,
-                    allowed_contact=(int(source_port.node_id), int(target_port.node_id)),
-                )
-                if not ok:
-                    continue
-                actions.append(self._make_action(
-                    source_unit,
-                    source_port,
-                    target_unit,
-                    target_port,
-                    contract=contract,
-                    source_rotation=rotation,
-                    source_translation=translation,
-                ))
-                if len(actions) >= 12:
-                    return actions
+        for reflection in (False, True):
+            for rotation in range(6):
+                source_direction = self.state.global_port_direction(source_unit.unit_id, source_port, rotation=rotation, reflection=reflection)
+                for direction in directions:
+                    if direction is None:
+                        continue
+                    direction = tuple(int(value) for value in direction)
+                    if source_direction is not None and source_direction != axial_neg(direction):
+                        continue
+                    source_target = axial_add(target_axial, direction)
+                    source_local = self.state.global_node_axial(
+                        source_unit.unit_id,
+                        int(source_port.node_id),
+                        rotation=rotation,
+                        translation=(0, 0),
+                        reflection=reflection,
+                    )
+                    translation = (source_target[0] - source_local[0], source_target[1] - source_local[1])
+                    ok, _reason = self.state.can_place(
+                        source_unit.unit_id,
+                        rotation,
+                        translation,
+                        allowed_contact=(int(source_port.node_id), int(target_port.node_id)),
+                        reflection=reflection,
+                    )
+                    if not ok:
+                        continue
+                    action = self._make_action(
+                        source_unit,
+                        source_port,
+                        target_unit,
+                        target_port,
+                        contract=contract,
+                        source_rotation=rotation,
+                        source_translation=translation,
+                    )
+                    action["source_reflection"] = bool(reflection)
+                    actions.append(action)
+                    if len(actions) >= 12:
+                        return actions
         return actions
 
     def _component_transform_candidates(
@@ -206,47 +210,52 @@ class TopologyPlacementStage:
         directions = [stationary_direction] if stationary_direction is not None else list(HEX_DIRECTIONS)
         component_nodes = self.state.component_node_ids(movable_unit.unit_id)
         actions: List[Dict[str, Any]] = []
-        for rotation in range(6):
-            transformed_direction = (
-                transform_direction(movable_direction, rotation)
-                if movable_direction is not None else None
-            )
-            rotated_axial = rotate_axial(movable_axial, rotation)
-            for direction in directions:
-                if direction is None:
-                    continue
-                direction = tuple(int(value) for value in direction)
-                if transformed_direction is not None and transformed_direction != axial_neg(direction):
-                    continue
-                desired = axial_add(stationary_axial, direction)
-                translation = (
-                    desired[0] - rotated_axial[0],
-                    desired[1] - rotated_axial[1],
+        for reflection in (False, True):
+            for rotation in range(6):
+                transformed_direction = (
+                    transform_axial(movable_direction, rotation, reflection)
+                    if movable_direction is not None else None
                 )
-                ok, _reason = self.state.can_transform_component(
-                    movable_unit.unit_id,
-                    rotation,
-                    translation,
-                    allowed_contact=(int(movable_port.node_id), int(stationary_port.node_id)),
+                rotated_axial = transform_axial(
+                    movable_axial, rotation, reflection
                 )
-                if not ok:
-                    continue
-                action = self._make_action(
-                    movable_unit,
-                    movable_port,
-                    stationary_unit,
-                    stationary_port,
-                    contract=contract,
-                )
-                action.update({
-                    "move_component_unit_id": movable_unit.unit_id,
-                    "component_rotation": int(rotation),
-                    "component_translation": [int(translation[0]), int(translation[1])],
-                    "moved_node_count": len(component_nodes),
-                })
-                actions.append(action)
-                if len(actions) >= 12:
-                    return actions
+                for direction in directions:
+                    if direction is None:
+                        continue
+                    direction = tuple(int(value) for value in direction)
+                    if transformed_direction is not None and transformed_direction != axial_neg(direction):
+                        continue
+                    desired = axial_add(stationary_axial, direction)
+                    translation = (
+                        desired[0] - rotated_axial[0],
+                        desired[1] - rotated_axial[1],
+                    )
+                    ok, _reason = self.state.can_transform_component(
+                        movable_unit.unit_id,
+                        rotation,
+                        translation,
+                        allowed_contact=(int(movable_port.node_id), int(stationary_port.node_id)),
+                        reflection=reflection,
+                    )
+                    if not ok:
+                        continue
+                    action = self._make_action(
+                        movable_unit,
+                        movable_port,
+                        stationary_unit,
+                        stationary_port,
+                        contract=contract,
+                    )
+                    action.update({
+                        "move_component_unit_id": movable_unit.unit_id,
+                        "component_rotation": int(rotation),
+                        "component_reflection": bool(reflection),
+                        "component_translation": [int(translation[0]), int(translation[1])],
+                        "moved_node_count": len(component_nodes),
+                    })
+                    actions.append(action)
+                    if len(actions) >= 12:
+                        return actions
         return actions
 
     @staticmethod
@@ -463,6 +472,12 @@ class TopologyMCTS:
 
 
 def search_phase(stage: TopologyPlacementStage, *, iterations: int, candidate_k: int, max_steps: int, beam_width: int = 1, c_puct: float = 1.414, seed: Optional[int] = None) -> SearchResult:
+    if str(stage.phase) == "rigid":
+        return _search_rigid_components(
+            stage,
+            candidate_k=int(candidate_k),
+            max_steps=int(max_steps),
+        )
     # Rollouts are only a value estimate.  Scaling their depth with the full
     # phase length makes a CSV with hundreds of contracts needlessly clone a
     # 600-node state tens of thousands of times.  Search itself still honors
@@ -486,6 +501,296 @@ def search_phase(stage: TopologyPlacementStage, *, iterations: int, candidate_k:
         score=float(current.score()),
         action_sequence=actions,
         info={"phase": stage.phase, "result": current.get_result()},
+    )
+
+
+def _rigid_unit_components(
+    state: HexAssemblyState,
+) -> List[Tuple[set[str], List[Any]]]:
+    """Return connected components of the prescribed aromatic rigid graph."""
+    rigid_contracts = [
+        contract for contract in state.problem.contracts
+        if contract.kind == "rigid"
+    ]
+    aromatic_ids = {
+        str(unit.unit_id)
+        for unit in state.problem.units
+        if unit.phase == "aromatic"
+    }
+    adjacency: Dict[str, set[str]] = {
+        unit_id: set() for unit_id in aromatic_ids
+    }
+    for contract in rigid_contracts:
+        left, right = str(contract.source_unit_id), str(contract.target_unit_id)
+        if left in adjacency and right in adjacency:
+            adjacency[left].add(right)
+            adjacency[right].add(left)
+
+    components: List[Tuple[set[str], List[Any]]] = []
+    unseen = set(aromatic_ids)
+    while unseen:
+        root = min(unseen)
+        unseen.remove(root)
+        units = {root}
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            for neighbor in adjacency.get(current, ()):
+                if neighbor in unseen:
+                    unseen.remove(neighbor)
+                    units.add(neighbor)
+                    stack.append(neighbor)
+        contracts = [
+            contract for contract in rigid_contracts
+            if str(contract.source_unit_id) in units
+            and str(contract.target_unit_id) in units
+        ]
+        components.append((units, contracts))
+    components.sort(key=lambda item: min(item[0]))
+    return components
+
+
+def _rigid_boundary_actions(
+    state: HexAssemblyState,
+    contract: Any,
+    active_units: set[str],
+    candidate_k: int,
+) -> List[Dict[str, Any]]:
+    """Enumerate actions that grow ``active_units`` across one rigid edge."""
+    source_unit = state.unit(contract.source_unit_id)
+    target_unit = state.unit(contract.target_unit_id)
+    source_port = _port_for_node(
+        state, source_unit, contract.source_node_id, contract.source_port_id
+    )
+    target_port = _port_for_node(
+        state, target_unit, contract.target_node_id, contract.target_port_id
+    )
+    if source_port is None or target_port is None:
+        return []
+    actions = TopologyPlacementStage(state, "rigid")._candidate_for_pair(
+        source_unit,
+        source_port,
+        target_unit,
+        target_port,
+        contract=contract,
+    )
+    result: List[Dict[str, Any]] = []
+    for action in actions:
+        move_id = str(action.get("move_component_unit_id", ""))
+        if move_id:
+            moved_units = state.component_unit_ids(move_id)
+            # Keep the rooted component fixed while growing the tree.  An
+            # action that moves an already active unit is deferred to cycle
+            # handling and is not a valid tree expansion.
+            if moved_units & set(active_units):
+                continue
+        result.append(action)
+    # Reflection/rotation can produce equivalent actions when a template has
+    # symmetry.  Keep a deterministic bounded set for the recursive solver.
+    return result[: max(1, int(candidate_k))]
+
+
+def _grow_rigid_component(
+    state: HexAssemblyState,
+    units: set[str],
+    contracts: Sequence[Any],
+    root: str,
+    *,
+    candidate_k: int,
+    budget: List[int],
+) -> Optional[HexAssemblyState]:
+    """Backtracking tree growth for one aromatic rigid component."""
+    if budget[0] <= 0:
+        return None
+    active = state.component_unit_ids(root)
+    active &= set(units)
+    pending = [
+        contract for contract in contracts
+        if contract.contract_id not in state.satisfied_contracts
+    ]
+    if not pending:
+        return state
+
+    boundary: List[Tuple[int, Any, List[Dict[str, Any]]]] = []
+    for contract in pending:
+        left, right = str(contract.source_unit_id), str(contract.target_unit_id)
+        left_active, right_active = left in active, right in active
+        if left_active == right_active:
+            continue
+        actions = _rigid_boundary_actions(
+            state, contract, active, candidate_k
+        )
+        boundary.append((len(actions), contract, actions))
+    boundary.sort(key=lambda item: (item[0], str(item[1].contract_id)))
+    # A cyclic rigid specification can leave no unprocessed boundary edge;
+    # only an already-adjacent closure is allowed in that case.
+    if not boundary:
+        for contract in pending:
+            source_unit = state.unit(contract.source_unit_id)
+            target_unit = state.unit(contract.target_unit_id)
+            source_port = _port_for_node(
+                state, source_unit, contract.source_node_id, contract.source_port_id
+            )
+            target_port = _port_for_node(
+                state, target_unit, contract.target_node_id, contract.target_port_id
+            )
+            if source_port is None or target_port is None:
+                continue
+            actions = TopologyPlacementStage(state, "rigid")._candidate_for_pair(
+                source_unit, source_port, target_unit, target_port, contract=contract
+            )
+            for action in actions:
+                if action.get("move_component_unit_id"):
+                    continue
+                budget[0] -= 1
+                trial = state.clone()
+                ok, _reason = trial.connect(copy.deepcopy(action))
+                if ok:
+                    result = _grow_rigid_component(
+                        trial,
+                        units,
+                        contracts,
+                        root,
+                        candidate_k=candidate_k,
+                        budget=budget,
+                    )
+                    if result is not None:
+                        return result
+        return None
+
+    # Prefer the most constrained edge, but try every boundary edge when the
+    # first one leads to a later geometric dead end.
+    for _count, contract, actions in boundary:
+        if not actions:
+            continue
+        for action in actions:
+            if budget[0] <= 0:
+                return None
+            budget[0] -= 1
+            trial = state.clone()
+            ok, _reason = trial.connect(copy.deepcopy(action))
+            if not ok:
+                continue
+            result = _grow_rigid_component(
+                trial,
+                units,
+                contracts,
+                root,
+                candidate_k=candidate_k,
+                budget=budget,
+            )
+            if result is not None:
+                return result
+    return None
+
+
+def _search_rigid_components(
+    stage: TopologyPlacementStage,
+    *,
+    candidate_k: int,
+    max_steps: int,
+) -> SearchResult:
+    """Solve all rigid aromatic components with bounded backtracking."""
+    current = stage.clone().state
+    components = _rigid_unit_components(current)
+    # CSV initialization materializes every aromatic unit in a temporary
+    # staging pose.  A rigid component must nevertheless be solved as a fresh
+    # tree: only its root is initially placed and every other unit is added by
+    # ``connect``.  Keeping all staging placements here makes the solver treat
+    # an unconnected unit as a movable component and can make an otherwise
+    # valid chain geometrically impossible.
+    actions: List[Dict[str, Any]] = []
+    # A small step limit is still useful as a safety valve, but normal CSV
+    # instances need at most one action per rigid contract.
+    budget = [max(256, max(1, int(max_steps)) * 128)]
+    for units, contracts in components:
+        if not contracts:
+            continue
+        # Restore this component's original staging pose, then unplace all
+        # non-root units.  Occupancy is restricted to the root while growing;
+        # already-solved components remain in ``node_axial`` but do not block
+        # this independent rigid solve.
+        roots = sorted(
+            units,
+            key=lambda unit_id: (
+                sum(
+                    1 for contract in contracts
+                    if unit_id in {
+                        str(contract.source_unit_id),
+                        str(contract.target_unit_id),
+                    }
+                ) != 1,
+                unit_id,
+            ),
+        )
+        solved: Optional[HexAssemblyState] = None
+        for root in roots:
+            trial_base = current.clone()
+            for unit_id in units:
+                if unit_id == root:
+                    continue
+                unit_nodes = {
+                    int(node.node_id)
+                    for node in trial_base.unit(unit_id).nodes
+                }
+                trial_base.placements.pop(unit_id, None)
+                for node_id in unit_nodes:
+                    trial_base.node_axial.pop(node_id, None)
+                    trial_base.final_node_positions.pop(node_id, None)
+                    trial_base.occupied_axial = {
+                        axial: occupant
+                        for axial, occupant in trial_base.occupied_axial.items()
+                        if int(occupant) != node_id
+                    }
+            # Keep only the current root in the collision index.  This is
+            # intentionally temporary; the complete occupancy map is rebuilt
+            # after all rigid components have been solved.
+            root_nodes = {
+                int(node.node_id)
+                for node in trial_base.unit(root).nodes
+                if int(node.node_id) in trial_base.node_axial
+            }
+            trial_base.occupied_axial = {
+                axial: int(node_id)
+                for node_id, axial in trial_base.node_axial.items()
+                if int(node_id) in root_nodes
+            }
+            solved = _grow_rigid_component(
+                trial_base,
+                units,
+                contracts,
+                root,
+                candidate_k=max(1, int(candidate_k)),
+                budget=budget,
+            )
+            if solved is not None:
+                break
+        if solved is None:
+            break
+        current = solved
+
+        # Keep the solved component in its own staging region.  The root was
+        # left at its original CSV pose, so no additional translation is
+        # needed; subsequent rigid components are solved with an isolated
+        # occupancy map and cannot collide with it.
+
+    # If a component could not be solved, preserve the partial state and let
+    # the normal stage result report the unsatisfied contracts.  Otherwise all
+    # aromatic units in the rigid graph are now placed.
+
+    # Rebuild the full occupancy index after the staging-aware search.  This
+    # keeps later flex/side stages and exports consistent with node_axial.
+    current.occupied_axial = {
+        axial: int(node_id)
+        for node_id, axial in current.node_axial.items()
+    }
+    actions = copy.deepcopy(current.action_history)
+    result = TopologyPlacementStage(current, "rigid").get_result()
+    return SearchResult(
+        state=current,
+        score=float(TopologyPlacementStage(current, "rigid").score()),
+        action_sequence=actions,
+        info={"phase": "rigid", "result": result},
     )
 
 

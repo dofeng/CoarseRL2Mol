@@ -23,6 +23,7 @@ from .geometry import (
     Axial,
     HEX_DIRECTIONS,
     HEX_VERTEX_OFFSETS,
+    axial_distance,
     axial_to_cartesian,
     valid_hex_directions,
 )
@@ -972,6 +973,70 @@ def _assign_aromatic_nodes(
         cluster_load[left_cluster] += 1
         cluster_load[right_cluster] += 1
         dsu.union(left_cluster, right_cluster)
+
+    # A rigid aromatic unit may expose two (or more) SU10 endpoints.  The
+    # historical allocator picked the first available perimeter sites, which
+    # can put every endpoint on the same side of a fused template.  Such a
+    # placement has no collision-free embedding when the rigid graph is grown
+    # as a chain.  Reassign endpoints within each template to well-separated
+    # exterior slots before flex/side boundaries consume the remaining sites.
+    if spread_flex_slots:
+        for cluster_index, template in enumerate(templates):
+            endpoint_nodes = sorted(
+                int(node_id)
+                for node_id, slot in assignment.items()
+                if int(node_id) in rigid_endpoint_ids
+                and int(slot[0]) == int(cluster_index)
+            )
+            if len(endpoint_nodes) < 2:
+                continue
+            available_slots = [
+                slot for slot in exterior_slots
+                if slot[0] == cluster_index
+                and (slot not in used_slots or slot in {
+                    assignment[node_id] for node_id in endpoint_nodes
+                })
+            ]
+            if len(available_slots) < len(endpoint_nodes):
+                continue
+            old_slots = {assignment[node_id] for node_id in endpoint_nodes}
+            # Select well-separated slots greedily rather than enumerating all
+            # permutations (a large fused template can expose many perimeter
+            # sites).  The first slot is deterministic; each subsequent slot
+            # maximizes its minimum distance to those already selected.
+            remaining = sorted(available_slots)
+            best_slots: List[Tuple[int, int]] = []
+            while remaining and len(best_slots) < len(endpoint_nodes):
+                if not best_slots:
+                    selected = remaining[0]
+                else:
+                    selected = max(
+                        remaining,
+                        key=lambda slot: (
+                            min(
+                                axial_distance(
+                                    template.coords[slot[1]],
+                                    template.coords[other[1]],
+                                )
+                                for other in best_slots
+                            ),
+                            sum(
+                                axial_distance(
+                                    template.coords[slot[1]],
+                                    template.coords[other[1]],
+                                )
+                                for other in best_slots
+                            ),
+                            tuple(slot),
+                        ),
+                    )
+                best_slots.append(selected)
+                remaining.remove(selected)
+            best = tuple(best_slots)
+            used_slots.difference_update(old_slots)
+            for node_id, slot in zip(endpoint_nodes, best):
+                assignment[node_id] = slot
+                used_slots.add(slot)
 
     # Flex products are assigned first so their prescribed bridges connect
     # the rigid components instead of accidentally becoming intra-component
@@ -2291,18 +2356,22 @@ def _place_csv_aromatic_staging(
         raise InverseInputError(
             f"failed to place initial aromatic unit {anchor_id!r}"
         )
-    cursor = 12
+    # Keep staging components well separated.  They are temporary poses used
+    # only to materialize every aromatic unit before the rigid search; a
+    # spacing of 64 is comfortably larger than the largest supported cluster
+    # footprint and prevents one component from masking another candidate.
+    cursor = 64
     for unit in sorted(
         (
             item for item in state.problem.units
             if item.phase == "aromatic" and item.unit_id != anchor_id
         ),
-        key=lambda item: item.unit_id,
+        key=lambda item: int(str(item.unit_id).rsplit(":", 1)[-1]),
     ):
         placed = False
         for _attempt in range(2048):
             translation = (cursor, 0)
-            cursor += 12
+            cursor += 64
             if state.place_unit(unit.unit_id, rotation=0, translation=translation):
                 placed = True
                 break

@@ -92,6 +92,7 @@ class MCTSRunner:
         self.config = config or DEFAULT_CONFIG
         self.init_data = initialize(inverse_result, topology_specs_csv)
         self.initial_state: HexAssemblyState = self.init_data["state"].clone()
+        self.nmr_init_error: Optional[str] = None
         self.nmr_scorer = self._initialize_nmr_scorer()
 
     def _initialize_nmr_scorer(self):
@@ -124,15 +125,23 @@ class MCTSRunner:
             raise InverseInputError(
                 "NMR guidance requires a valid g2s_checkpoint"
             )
-        from model.forward.g2s.rl_mtcs_utils import NMRGuidanceScorer
-        return NMRGuidanceScorer(
-            spectrum_csv=spectrum_csv,
-            elements=elements,
-            model_checkpoint=checkpoint,
-            device=str(getattr(self.config, "nmr_device", "auto")),
-            batch_size=int(getattr(self.config, "nmr_batch_size", 512)),
-            hwhm=float(getattr(self.config, "nmr_hwhm", 1.0)),
-        )
+        try:
+            from model.forward.g2s.rl_mtcs_utils import NMRGuidanceScorer
+            return NMRGuidanceScorer(
+                spectrum_csv=spectrum_csv,
+                elements=elements,
+                model_checkpoint=checkpoint,
+                device=str(getattr(self.config, "nmr_device", "auto")),
+                batch_size=int(getattr(self.config, "nmr_batch_size", 512)),
+                hwhm=float(getattr(self.config, "nmr_hwhm", 1.0)),
+            )
+        except ImportError as exc:
+            # NMR guidance is optional.  The geometry pipeline must remain
+            # usable in lightweight environments where torch (or another G2S
+            # runtime dependency) is not installed; report the reason in the
+            # result instead of failing before the first assembly stage.
+            self.nmr_init_error = str(exc)
+            return None
 
     def _run_phase(self, state: HexAssemblyState, phase: str) -> SearchResult:
         if phase == "rigid":
@@ -258,6 +267,8 @@ class MCTSRunner:
         final_state = substitution["state"]
         outputs = export_final_state(final_state, base) if base else {}
         nmr_result: Dict[str, Any] = {"enabled": False}
+        if self.nmr_init_error:
+            nmr_result["disabled_reason"] = self.nmr_init_error
         if self.nmr_scorer is not None:
             final_nmr_score = self.nmr_scorer.score_state(
                 final_state, stage="final_selection"
