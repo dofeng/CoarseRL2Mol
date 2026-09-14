@@ -1000,39 +1000,66 @@ def _assign_aromatic_nodes(
             if len(available_slots) < len(endpoint_nodes):
                 continue
             old_slots = {assignment[node_id] for node_id in endpoint_nodes}
-            # Select well-separated slots greedily rather than enumerating all
-            # permutations (a large fused template can expose many perimeter
-            # sites).  The first slot is deterministic; each subsequent slot
-            # maximizes its minimum distance to those already selected.
-            remaining = sorted(available_slots)
-            best_slots: List[Tuple[int, int]] = []
-            while remaining and len(best_slots) < len(endpoint_nodes):
-                if not best_slots:
-                    selected = remaining[0]
-                else:
-                    selected = max(
-                        remaining,
-                        key=lambda slot: (
-                            min(
-                                axial_distance(
-                                    template.coords[slot[1]],
-                                    template.coords[other[1]],
-                                )
-                                for other in best_slots
-                            ),
-                            sum(
-                                axial_distance(
-                                    template.coords[slot[1]],
-                                    template.coords[other[1]],
-                                )
-                                for other in best_slots
-                            ),
-                            tuple(slot),
-                        ),
+            # Do not maximize endpoint distance here.  For a linear aromatic
+            # chain that policy deliberately chooses the two opposite sides
+            # of every fused unit, so every rigid contract is propagated in
+            # the same direction and the complete molecule becomes a rod.
+            # Prefer a 120-degree angle between the *outward* port vectors;
+            # after two ports are joined this produces a 60-degree turn in
+            # the backbone while retaining the immutable aromatic topology.
+            # Only the selected slot set affects the pairwise angle objective;
+            # assign its sorted members to the stable endpoint order.  Using
+            # combinations avoids factorial growth on higher-degree units.
+            def slot_angle(left: Tuple[int, int], right: Tuple[int, int]) -> float:
+                left_vec = _cart(_outward_direction(template, left[1]))
+                right_vec = _cart(_outward_direction(template, right[1]))
+                left_norm = math.hypot(*left_vec)
+                right_norm = math.hypot(*right_vec)
+                if left_norm <= 1e-12 or right_norm <= 1e-12:
+                    return 180.0
+                cosine = (
+                    left_vec[0] * right_vec[0]
+                    + left_vec[1] * right_vec[1]
+                ) / (left_norm * right_norm)
+                return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+
+            best: Optional[Tuple[Tuple[int, int], ...]] = None
+            best_rank: Optional[Tuple[Any, ...]] = None
+            for candidate in itertools.combinations(
+                sorted(available_slots), len(endpoint_nodes)
+            ):
+                angles = [
+                    slot_angle(candidate[left], candidate[right])
+                    for left, right in itertools.combinations(
+                        range(len(candidate)), 2
                     )
-                best_slots.append(selected)
-                remaining.remove(selected)
-            best = tuple(best_slots)
+                ]
+                angle_penalty = sum(
+                    abs(angle - 120.0) for angle in angles
+                )
+                distances = [
+                    axial_distance(
+                        template.coords[candidate[left][1]],
+                        template.coords[candidate[right][1]],
+                    )
+                    for left, right in itertools.combinations(
+                        range(len(candidate)), 2
+                    )
+                ]
+                # Angle is the primary objective.  Distance remains a weak
+                # tie-breaker so two equally angled choices do not collapse
+                # onto adjacent slots when a wider pair is available.
+                rank = (
+                    float(angle_penalty),
+                    -float(min(distances) if distances else 0.0),
+                    -float(sum(distances)),
+                    tuple(candidate),
+                )
+                if best_rank is None or rank < best_rank:
+                    best_rank = rank
+                    best = tuple(candidate)
+            if best is None:
+                continue
             used_slots.difference_update(old_slots)
             for node_id, slot in zip(endpoint_nodes, best):
                 assignment[node_id] = slot

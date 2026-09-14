@@ -172,6 +172,41 @@ def coordinate_aspect(axials: Iterable[Axial]) -> dict[str, Any]:
         else math.inf if y_span == 0.0
         else float(x_span) / float(y_span)
     )
+    # The q/r bounding-box ratio is useful for preserving the lattice
+    # convention, but it cannot detect a diagonal ``q ~= r`` needle.  For
+    # example, a long chain along a 60 degree lattice direction can have a
+    # perfectly acceptable q/r ratio while still being almost one
+    # dimensional in the rendered molecule.  Compute the principal axes in
+    # Cartesian space as an additional, rotation-independent shape measure.
+    if len(cartesian) < 2:
+        principal_axis_ratio = 1.0
+        principal_axis_angle = 0.0
+        linearity = 0.0
+        covariance_eigenvalues = (0.0, 0.0)
+    else:
+        mean_x = sum(value[0] for value in cartesian) / len(cartesian)
+        mean_y = sum(value[1] for value in cartesian) / len(cartesian)
+        cov_xx = sum((value[0] - mean_x) ** 2 for value in cartesian) / len(cartesian)
+        cov_xy = sum((value[0] - mean_x) * (value[1] - mean_y) for value in cartesian) / len(cartesian)
+        cov_yy = sum((value[1] - mean_y) ** 2 for value in cartesian) / len(cartesian)
+        discriminant = math.hypot(cov_xx - cov_yy, 2.0 * cov_xy)
+        largest = max(0.0, 0.5 * (cov_xx + cov_yy + discriminant))
+        smallest = max(0.0, 0.5 * (cov_xx + cov_yy - discriminant))
+        if largest <= 1e-12:
+            principal_axis_ratio = 1.0
+            linearity = 0.0
+        elif smallest <= 1e-12:
+            principal_axis_ratio = math.inf
+            linearity = 1.0
+        else:
+            principal_axis_ratio = math.sqrt(largest / smallest)
+            linearity = max(0.0, min(1.0, 1.0 - smallest / largest))
+        principal_axis_angle = 0.5 * math.degrees(
+            math.atan2(2.0 * cov_xy, cov_xx - cov_yy)
+        )
+        covariance_eigenvalues = (float(largest), float(smallest))
+
+    bbox_area = float(x_span * y_span)
     return {
         "q_span": int(q_span),
         "r_span": int(r_span),
@@ -189,6 +224,14 @@ def coordinate_aspect(axials: Iterable[Axial]) -> dict[str, Any]:
             else 0.0 if math.isinf(cartesian_ratio)
             else float(1.0 / cartesian_ratio)
         ),
+        "bbox_area": bbox_area,
+        "principal_axis_ratio": float(principal_axis_ratio),
+        "principal_axis_angle": float(principal_axis_angle),
+        "linearity": float(linearity),
+        "covariance_eigenvalues": [
+            float(covariance_eigenvalues[0]),
+            float(covariance_eigenvalues[1]),
+        ],
     }
 
 
@@ -197,6 +240,8 @@ def state_shape_rank(state: Any) -> Tuple[Any, ...]:
     q_span, r_span = int(shape["q_span"]), int(shape["r_span"])
     return (
         float(shape["violation"]),
+        float(shape["principal_axis_ratio"]),
+        float(shape["linearity"]),
         abs(float(shape["q_over_r"]) - 1.0),
         abs(float(shape["width_over_height"]) - 1.0),
         max(q_span, r_span),

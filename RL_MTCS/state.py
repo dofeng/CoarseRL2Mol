@@ -17,6 +17,7 @@ from .geometry import (
     transform_axial,
     transform_direction,
     aromatic_slot_direction,
+    coordinate_aspect,
     unit_sort_key,
     valid_hex_directions,
 )
@@ -1287,6 +1288,10 @@ class HexAssemblyState:
         port_direction_errors = self.audit_port_direction_errors()
         unintended_contacts = self.audit_unintended_contacts()
         substitution_errors = self.audit_substitution_errors()
+        shape_metrics = coordinate_aspect(self.node_axial.values())
+        shape_warnings = []
+        if float(shape_metrics["principal_axis_ratio"]) > 4.0:
+            shape_warnings.append("excessive_principal_axis_ratio")
         return {
             "complete": bool(self.is_complete()),
             "stage": str(self.stage),
@@ -1307,6 +1312,9 @@ class HexAssemblyState:
             "nonbonded_contacts_valid": not unintended_contacts,
             "substitution_errors": substitution_errors,
             "substitution_valid": not substitution_errors,
+            "shape_metrics": shape_metrics,
+            "shape_valid": not shape_warnings,
+            "shape_warnings": shape_warnings,
             "allowed_unbonded_contacts": sorted(
                 sorted(pair) for pair in self.allowed_unbonded_contacts
             ),

@@ -13,9 +13,11 @@ from .geometry import (
     axial_add,
     axial_distance,
     axial_neg,
+    coordinate_aspect,
     transform_axial,
+    unit_sort_key,
 )
-from .state import HexAssemblyState
+from .state import AssemblyEdge, HexAssemblyState, UnitPlacement
 from .models import ExternalContract, TopologyUnit, UnitPort
 
 
@@ -354,6 +356,9 @@ class TopologyPlacementStage:
             "contracts_done": sum(1 for contract in self.state.problem.contracts if contract.kind == self.phase and contract.contract_id in self.state.satisfied_contracts),
             "contracts_total": sum(1 for contract in self.state.problem.contracts if contract.kind == self.phase),
             "components": self.state.component_count(),
+            "coordinate_aspect": coordinate_aspect(
+                self.state.node_axial.values()
+            ),
             "score": self.score(),
         }
 
@@ -476,6 +481,7 @@ def search_phase(stage: TopologyPlacementStage, *, iterations: int, candidate_k:
         return _search_rigid_components(
             stage,
             candidate_k=int(candidate_k),
+            beam_width=int(beam_width),
             max_steps=int(max_steps),
         )
     # Rollouts are only a value estimate.  Scaling their depth with the full
@@ -684,10 +690,375 @@ def _grow_rigid_component(
     return None
 
 
+def _rigid_component_shape_rank(
+    state: HexAssemblyState,
+    units: Iterable[str],
+) -> Tuple[Any, ...]:
+    """Rank one physical rigid component independently of staging poses."""
+    node_ids = {
+        int(node.node_id)
+        for unit_id in units
+        if state.is_placed(str(unit_id))
+        for node in state.unit(str(unit_id)).nodes
+        if int(node.node_id) in state.node_axial
+    }
+    shape = coordinate_aspect(
+        state.node_axial[node_id] for node_id in node_ids
+    )
+    q_span = int(shape["q_span"])
+    r_span = int(shape["r_span"])
+    return (
+        float(shape["principal_axis_ratio"]),
+        float(shape["linearity"]),
+        max(q_span, r_span),
+        abs(q_span - r_span),
+        int(shape["total_span"]),
+        abs(float(shape["width_over_height"]) - 1.0),
+    )
+
+
+def _rigid_component_signature(
+    state: HexAssemblyState,
+    units: Iterable[str],
+    contracts: Sequence[Any],
+) -> Tuple[Any, ...]:
+    unit_ids = set(str(value) for value in units)
+    contract_ids = {
+        str(contract.contract_id) for contract in contracts
+    }
+    return (
+        tuple(sorted(
+            (
+                unit_id,
+                int(placement.rotation),
+                tuple(placement.translation),
+                bool(placement.reflection),
+            )
+            for unit_id, placement in state.placements.items()
+            if unit_id in unit_ids
+        )),
+        tuple(sorted(contract_ids & state.satisfied_contracts)),
+    )
+
+
+def _rigid_component_beam_rank(
+    state: HexAssemblyState,
+    units: Iterable[str],
+    contracts: Sequence[Any],
+) -> Tuple[Any, ...]:
+    unit_ids = set(str(value) for value in units)
+    contract_ids = {
+        str(contract.contract_id) for contract in contracts
+    }
+    completed = len(contract_ids & state.satisfied_contracts)
+    placed = sum(state.is_placed(unit_id) for unit_id in unit_ids)
+    return (
+        -int(completed),
+        -int(placed),
+        *_rigid_component_shape_rank(state, unit_ids),
+        _rigid_component_signature(state, unit_ids, contracts),
+    )
+
+
+def _grow_rigid_component_beam(
+    state: HexAssemblyState,
+    units: set[str],
+    contracts: Sequence[Any],
+    root: str,
+    *,
+    candidate_k: int,
+    beam_width: int,
+    max_steps: int,
+) -> Optional[HexAssemblyState]:
+    """Search all useful turn/reflection choices for one rigid component.
+
+    The former recursive solver returned the first complete pose.  With
+    symmetric aromatic templates that deterministically selected the same
+    reflection at every junction and produced a long diagonal rod.  A small
+    shape-aware beam is sufficient here because every rigid edge normally has
+    only the two mirror-related placements.
+    """
+    contract_ids = {
+        str(contract.contract_id) for contract in contracts
+    }
+    width = max(4, min(32, max(int(beam_width), int(candidate_k))))
+    beam = [state]
+    complete: List[HexAssemblyState] = []
+    step_budget = max(
+        len(contracts) + 1,
+        min(max(1, int(max_steps)), len(contracts) * 2 + 4),
+    )
+
+    for _step in range(step_budget):
+        expansions: List[HexAssemblyState] = []
+        for candidate in beam:
+            pending = [
+                contract for contract in contracts
+                if str(contract.contract_id)
+                not in candidate.satisfied_contracts
+            ]
+            if not pending:
+                complete.append(candidate)
+                continue
+
+            active = candidate.component_unit_ids(root) & set(units)
+            boundary: List[Tuple[int, str, Any, List[Dict[str, Any]]]] = []
+            for contract in pending:
+                left = str(contract.source_unit_id)
+                right = str(contract.target_unit_id)
+                left_active = left in active
+                right_active = right in active
+                if left_active == right_active:
+                    continue
+                actions = _rigid_boundary_actions(
+                    candidate,
+                    contract,
+                    active,
+                    max(2, int(candidate_k)),
+                )
+                if actions:
+                    boundary.append((
+                        len(actions),
+                        str(contract.contract_id),
+                        contract,
+                        actions,
+                    ))
+
+            if boundary:
+                # Expansion order is deterministic, but retain all equally
+                # constrained boundary choices so a branched component is not
+                # forced into the first serialized contract order.
+                boundary.sort(key=lambda row: (row[0], row[1]))
+                minimum = boundary[0][0]
+                selected_boundaries = [
+                    row for row in boundary if row[0] == minimum
+                ]
+                for _count, _contract_id, _contract, actions in selected_boundaries:
+                    for action in actions:
+                        trial = candidate.clone()
+                        ok, _reason = trial.connect(copy.deepcopy(action))
+                        if ok:
+                            expansions.append(trial)
+                continue
+
+            # All component units can already be active in a cyclic rigid
+            # graph.  Only an adjacent, non-moving closure is legal.
+            for contract in pending:
+                source_unit = candidate.unit(contract.source_unit_id)
+                target_unit = candidate.unit(contract.target_unit_id)
+                source_port = _port_for_node(
+                    candidate,
+                    source_unit,
+                    contract.source_node_id,
+                    contract.source_port_id,
+                )
+                target_port = _port_for_node(
+                    candidate,
+                    target_unit,
+                    contract.target_node_id,
+                    contract.target_port_id,
+                )
+                if source_port is None or target_port is None:
+                    continue
+                actions = TopologyPlacementStage(
+                    candidate, "rigid"
+                )._candidate_for_pair(
+                    source_unit,
+                    source_port,
+                    target_unit,
+                    target_port,
+                    contract=contract,
+                )
+                for action in actions:
+                    if action.get("move_component_unit_id"):
+                        continue
+                    trial = candidate.clone()
+                    ok, _reason = trial.connect(copy.deepcopy(action))
+                    if ok:
+                        expansions.append(trial)
+
+        if complete and not expansions:
+            break
+        if not expansions:
+            break
+
+        unique: Dict[Tuple[Any, ...], HexAssemblyState] = {}
+        for candidate in sorted(
+            expansions,
+            key=lambda value: _rigid_component_beam_rank(
+                value, units, contracts
+            ),
+        ):
+            signature = _rigid_component_signature(
+                candidate, units, contracts
+            )
+            unique.setdefault(signature, candidate)
+            if len(unique) >= width:
+                break
+        beam = list(unique.values())
+
+    complete.extend(
+        candidate for candidate in beam
+        if contract_ids <= candidate.satisfied_contracts
+    )
+    if not complete:
+        return None
+    return min(
+        complete,
+        key=lambda value: (
+            _rigid_component_shape_rank(value, units),
+            _rigid_component_signature(value, units, contracts),
+        ),
+    )
+
+
+def _pack_rigid_components(
+    state: HexAssemblyState,
+    components: Sequence[Tuple[set[str], Sequence[Any]]],
+    *,
+    clearance: int = 3,
+) -> None:
+    """Translate disconnected rigid components into compact staging rows."""
+    records: List[Dict[str, Any]] = []
+    for units, _contracts in components:
+        node_ids = {
+            int(node.node_id)
+            for unit_id in units
+            if state.is_placed(unit_id)
+            for node in state.unit(unit_id).nodes
+            if int(node.node_id) in state.node_axial
+        }
+        if not node_ids:
+            continue
+        q_values = [int(state.node_axial[node_id][0]) for node_id in node_ids]
+        r_values = [int(state.node_axial[node_id][1]) for node_id in node_ids]
+        records.append({
+            "units": set(units),
+            "nodes": node_ids,
+            "min_q": min(q_values),
+            "min_r": min(r_values),
+            "width": max(q_values) - min(q_values) + 1,
+            "height": max(r_values) - min(r_values) + 1,
+        })
+    if not records:
+        return
+
+    gap = max(2, int(clearance))
+    padded_area = sum(
+        (int(record["width"]) + gap) * (int(record["height"]) + gap)
+        for record in records
+    )
+    records.sort(key=lambda record: (
+        -int(record["height"]) * int(record["width"]),
+        -int(record["height"]),
+        tuple(sorted(record["units"], key=unit_sort_key)),
+    ))
+
+    max_width = max(int(record["width"]) for record in records)
+    square_width = int(math.ceil(math.sqrt(float(padded_area))))
+    cumulative_widths: List[int] = []
+    running_width = 0
+    for record in records:
+        running_width += int(record["width"])
+        cumulative_widths.append(running_width + gap * len(cumulative_widths))
+    candidate_widths = sorted({
+        max_width,
+        square_width,
+        int(math.ceil(square_width * 1.25)),
+        int(math.ceil(square_width * 1.5)),
+        *cumulative_widths,
+    })
+
+    def build_layout(target_width: int) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
+        cursor_q = 0
+        cursor_r = 0
+        row_height = 0
+        deltas: List[Tuple[int, int]] = []
+        coordinates: List[Tuple[int, int]] = []
+        for record in records:
+            width = int(record["width"])
+            height = int(record["height"])
+            if cursor_q and cursor_q + width > int(target_width):
+                cursor_q = 0
+                cursor_r += row_height + gap
+                row_height = 0
+            delta = (
+                int(cursor_q - int(record["min_q"])),
+                int(cursor_r - int(record["min_r"])),
+            )
+            deltas.append(delta)
+            coordinates.extend(
+                axial_add(state.node_axial[int(node_id)], delta)
+                for node_id in record["nodes"]
+            )
+            cursor_q += width + gap
+            row_height = max(row_height, height)
+        return deltas, coordinate_aspect(coordinates)
+
+    layout_candidates = [
+        (*build_layout(width), width) for width in candidate_widths
+    ]
+    deltas, _shape, _width = min(
+        layout_candidates,
+        key=lambda item: (
+            float(item[1]["violation"]),
+            float(item[1]["principal_axis_ratio"]),
+            float(item[1]["linearity"]),
+            int(item[1]["total_span"]),
+            int(item[2]),
+        ),
+    )
+
+    for record, delta in zip(records, deltas):
+        for unit_id in record["units"]:
+            placement = state.placements.get(str(unit_id))
+            if placement is None:
+                continue
+            state.placements[str(unit_id)] = UnitPlacement(
+                unit_id=str(unit_id),
+                rotation=int(placement.rotation),
+                translation=axial_add(placement.translation, delta),
+                reflection=bool(placement.reflection),
+            )
+        for node_id in record["nodes"]:
+            state.node_axial[int(node_id)] = axial_add(
+                state.node_axial[int(node_id)], delta
+            )
+            old_position = state.final_node_positions.get(int(node_id))
+            if old_position is None:
+                axial = state.node_axial[int(node_id)]
+                state.final_node_positions[int(node_id)] = (
+                    float(axial[0]), float(axial[1])
+                )
+            else:
+                state.final_node_positions[int(node_id)] = (
+                    float(old_position[0]) + delta[0],
+                    float(old_position[1]) + delta[1],
+                )
+
+    state.occupied_axial = {
+        axial: int(node_id) for node_id, axial in state.node_axial.items()
+    }
+    state.edges = [
+        AssemblyEdge(
+            edge.source_node_id,
+            edge.target_node_id,
+            edge.kind,
+            edge.contract_id,
+            state._edge_direction(
+                state.node_axial[edge.source_node_id],
+                state.node_axial[edge.target_node_id],
+            ),
+        )
+        for edge in state.edges
+    ]
+
+
 def _search_rigid_components(
     stage: TopologyPlacementStage,
     *,
     candidate_k: int,
+    beam_width: int = 4,
     max_steps: int,
 ) -> SearchResult:
     """Solve all rigid aromatic components with bounded backtracking."""
@@ -700,9 +1071,6 @@ def _search_rigid_components(
     # an unconnected unit as a movable component and can make an otherwise
     # valid chain geometrically impossible.
     actions: List[Dict[str, Any]] = []
-    # A small step limit is still useful as a safety valve, but normal CSV
-    # instances need at most one action per rigid contract.
-    budget = [max(256, max(1, int(max_steps)) * 128)]
     for units, contracts in components:
         if not contracts:
             continue
@@ -723,8 +1091,20 @@ def _search_rigid_components(
                 unit_id,
             ),
         )
-        solved: Optional[HexAssemblyState] = None
-        for root in roots:
+        degrees = {
+            unit_id: sum(
+                1 for contract in contracts
+                if unit_id in {
+                    str(contract.source_unit_id),
+                    str(contract.target_unit_id),
+                }
+            )
+            for unit_id in units
+        }
+        leaf_roots = [root for root in roots if degrees[root] <= 1]
+        roots_to_try = leaf_roots or roots
+        solved_candidates: List[HexAssemblyState] = []
+        for root in roots_to_try:
             trial_base = current.clone()
             for unit_id in units:
                 if unit_id == root:
@@ -755,16 +1135,28 @@ def _search_rigid_components(
                 for node_id, axial in trial_base.node_axial.items()
                 if int(node_id) in root_nodes
             }
-            solved = _grow_rigid_component(
+            solved = _grow_rigid_component_beam(
                 trial_base,
                 units,
                 contracts,
                 root,
                 candidate_k=max(1, int(candidate_k)),
-                budget=budget,
+                beam_width=max(1, int(beam_width)),
+                max_steps=max(1, int(max_steps)),
             )
             if solved is not None:
-                break
+                solved_candidates.append(solved)
+        solved = (
+            min(
+                solved_candidates,
+                key=lambda value: (
+                    _rigid_component_shape_rank(value, units),
+                    _rigid_component_signature(value, units, contracts),
+                ),
+            )
+            if solved_candidates
+            else None
+        )
         if solved is None:
             break
         current = solved
@@ -778,12 +1170,10 @@ def _search_rigid_components(
     # the normal stage result report the unsatisfied contracts.  Otherwise all
     # aromatic units in the rigid graph are now placed.
 
-    # Rebuild the full occupancy index after the staging-aware search.  This
-    # keeps later flex/side stages and exports consistent with node_axial.
-    current.occupied_axial = {
-        axial: int(node_id)
-        for node_id, axial in current.node_axial.items()
-    }
+    # Independent components inherit deliberately distant CSV staging roots.
+    # Repack those components for the rigid-only output; the following flex
+    # phase may still translate each complete component as a single body.
+    _pack_rigid_components(current, components)
     actions = copy.deepcopy(current.action_history)
     result = TopologyPlacementStage(current, "rigid").get_result()
     return SearchResult(

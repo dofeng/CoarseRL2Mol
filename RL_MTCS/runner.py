@@ -21,6 +21,8 @@ from .models import InverseInputError, MCTSConfig
 from .rigid import (
     SearchResult,
     TopologyPlacementStage,
+    _pack_rigid_components,
+    _rigid_unit_components,
     search_phase,
 )
 from .output import export_final_state
@@ -415,6 +417,29 @@ def _connection_row(step: int, action: Mapping[str, Any], before, after) -> Dict
     }
 
 
+def _unplace_rigid_replay_unit(state: HexAssemblyState, unit_id: str) -> None:
+    """Mirror the isolated-root setup used by the rigid solver replay.
+
+    CSV initialization keeps every aromatic unit in a distant staging pose.
+    A rigid search action contains the placement for the one unit that was
+    temporarily removed during tree growth.  Remove that unit before
+    replaying the action so ``connect`` can apply the recorded placement
+    instead of treating both endpoints as already placed.
+    """
+    unit_id = str(unit_id)
+    if unit_id not in state.placements:
+        return
+    node_ids = {
+        int(node.node_id) for node in state.unit(unit_id).nodes
+    }
+    state.placements.pop(unit_id, None)
+    for node_id in node_ids:
+        axial = state.node_axial.pop(node_id, None)
+        state.final_node_positions.pop(node_id, None)
+        if axial is not None and state.occupied_axial.get(axial) == node_id:
+            state.occupied_axial.pop(axial, None)
+
+
 def _final_component_rows(state, output_dir: Path) -> tuple[list[Dict[str, Any]], list[str]]:
     """Save one readable image for every final rigid-stage component."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -575,6 +600,19 @@ def run_rigid_mcts(
     replay_errors = []
     for step, action in enumerate(actions, start=1):
         before = replay_state.clone()
+        # Rigid tree actions carry ``source_translation`` for the unplaced
+        # side.  The serialized CSV initializer, unlike the isolated search
+        # base, still has that unit in its staging pose.  Remove only a
+        # singleton source component; cycle-closure actions move a complete
+        # component and are marked with ``move_component_unit_id``.
+        if not action.get("move_component_unit_id"):
+            source_unit_id = str(action.get("source_unit_id", ""))
+            if (
+                source_unit_id in replay_state.placements
+                and len(replay_state.component_unit_ids(source_unit_id)) == 1
+                and action.get("source_translation") is not None
+            ):
+                _unplace_rigid_replay_unit(replay_state, source_unit_id)
         ok, reason = replay_state.connect(copy.deepcopy(action))
         if not ok:
             replay_errors.append(
@@ -600,6 +638,9 @@ def run_rigid_mcts(
         )
         step_pngs.append(str(step_png))
 
+    # Keep the diagnostic replay identical to the production rigid result,
+    # including the compact placement of independently solved components.
+    _pack_rigid_components(replay_state, _rigid_unit_components(replay_state))
     final_state = replay_state
     final_audit = final_state.audit()
     final_png = directory / "rigid_final.png"
