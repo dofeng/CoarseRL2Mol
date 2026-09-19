@@ -17,11 +17,13 @@ from .types import (
     GENERIC_CLOSURE_RESOURCE_TYPES,
 )
 from ..stage3_models import HistogramConversion
+from ....shared.aromatic_plan import su12_transition_diagnostics
 
 
 AROMATIC_TYPES = (12, 13)
-CONVERSION_SCORING_VERSION = "soft_h_flex_balance_v7"
+CONVERSION_SCORING_VERSION = "soft_h_flex_balance_v8"
 INFEASIBLE_SCORE = 1.0e12
+AROMATIC_STAGING_INVALID_PENALTY = 250.0
 
 
 @dataclass(frozen=True)
@@ -294,30 +296,68 @@ def _adjust_bridgehead_info(
 
 def _flex_window_from_H(H: torch.Tensor, bridgehead_info: Tuple[int, ...], explicit_count: int) -> Dict[str, Any]:
     counts = _hist_counts(H)
-    clusters = generate_aromatic_clusters(counts, bridgehead_info=tuple(bridgehead_info or ()))
+    staging_valid = True
+    staging_error = ""
+    staging_projected = False
+    staging_projection_error = ""
+    projected_su12 = int(counts.get(12, 0))
+    try:
+        clusters = generate_aromatic_clusters(
+            counts,
+            bridgehead_info=tuple(bridgehead_info or ()),
+        )
+    except ValueError as exc:
+        # Resource conversion bundles are built one operation at a time. A
+        # prefix can therefore have an odd SU12 count even though a later
+        # compensation operation restores a valid aromatic histogram. Keep
+        # that prefix rankable, but mark it invalid so it cannot be committed.
+        staging_valid = False
+        staging_error = str(exc)
+        clusters = []
+        su12_count = int(counts.get(12, 0))
+        if su12_count % 2:
+            projected_su12 = int(su12_count + 1)
+            projected_counts = dict(counts)
+            projected_counts[12] = int(projected_su12)
+            projected_bridgeheads = list(tuple(bridgehead_info or ()))
+            if len(projected_bridgeheads) >= 7:
+                projected_bridgeheads[6] = int(projected_bridgeheads[6]) + 1
+            try:
+                clusters = generate_aromatic_clusters(
+                    projected_counts,
+                    bridgehead_info=tuple(projected_bridgeheads),
+                )
+                staging_projected = True
+            except ValueError as projection_exc:
+                staging_projection_error = str(projection_exc)
     cluster_count = int(len(clusters))
     rigid10_pairs = max(0, int(counts.get(10, 0)) // 2)
     z_value = int(cluster_count) - int(rigid10_pairs)
     flex_lower = int(z_value + 1)
     flex_upper = int(math.floor(0.8 * float(max(0, int(cluster_count)))))
     if cluster_count <= 0:
-        scenario = "not_applicable"
+        projected_scenario = "not_applicable"
     elif flex_lower > flex_upper:
-        scenario = "invalid"
+        projected_scenario = "invalid"
     elif int(explicit_count) < int(flex_lower):
-        scenario = "below_range"
+        projected_scenario = "below_range"
     elif int(explicit_count) > int(flex_upper):
-        scenario = "above_range"
+        projected_scenario = "above_range"
     else:
-        scenario = "in_range"
-    if scenario in {"not_applicable", "invalid"}:
-        deviation = 0 if scenario == "not_applicable" else int(flex_lower - flex_upper)
+        projected_scenario = "in_range"
+    if projected_scenario in {"not_applicable", "invalid"}:
+        deviation = (
+            0
+            if projected_scenario == "not_applicable"
+            else max(1, int(flex_lower - flex_upper))
+        )
     elif explicit_count < flex_lower:
         deviation = int(flex_lower) - int(explicit_count)
     elif explicit_count > flex_upper:
         deviation = int(explicit_count) - int(flex_upper)
     else:
         deviation = 0
+    scenario = str(projected_scenario) if staging_valid else "invalid"
     return {
         "X": int(cluster_count),
         "Y": int(rigid10_pairs),
@@ -329,6 +369,12 @@ def _flex_window_from_H(H: torch.Tensor, bridgehead_info: Tuple[int, ...], expli
         "minimum_flex_gap": max(0, int(flex_lower) - int(explicit_count)),
         "scenario": str(scenario),
         "deviation": int(deviation),
+        "aromatic_staging_valid": bool(staging_valid),
+        "aromatic_staging_error": str(staging_error),
+        "aromatic_staging_projected": bool(staging_projected),
+        "aromatic_staging_projected_su12": int(projected_su12),
+        "aromatic_staging_projection_error": str(staging_projection_error),
+        "aromatic_staging_projected_scenario": str(projected_scenario),
     }
 
 
@@ -350,6 +396,8 @@ def _flex_transition_penalty(
         penalty -= float(before_deviation - after_deviation) * 120.0
     if str(after.get("scenario", "")) == "invalid":
         penalty += 45.0
+    if not bool(after.get("aromatic_staging_valid", True)):
+        penalty += float(AROMATIC_STAGING_INVALID_PENALTY)
     if int(after.get("maximum_flex_capacity", 0) or 0) < int(before.get("maximum_flex_capacity", 0) or 0):
         penalty += float(int(before["maximum_flex_capacity"]) - int(after["maximum_flex_capacity"])) * 3.0
     if int(after.get("minimum_flex_gap", 0) or 0) > int(before.get("minimum_flex_gap", 0) or 0):
@@ -532,6 +580,39 @@ def score_conversion_bundle(
             feasible=False,
             diagnostics={"reason": "negative_inventory_or_histogram"},
         )
+    # Evaluate the complete bundle as one atomic transition.  A primary
+    # aromatic-donor conversion may temporarily lower the non-bridgehead
+    # denominator, provided that a paired balance operation in the same bundle
+    # restores the final state to the 4:5 limit.
+    su12_diagnostics = su12_transition_diagnostics(context.current_H, H_after)
+    if not bool(su12_diagnostics.get("generation_allowed", True)):
+        # SU12 generation is a hard structural budget.  Keep existing
+        # over-cap states recoverable through 12->13, but never rank a bundle
+        # that increases SU12 beyond the state-local 4:5 cap.
+        return ConversionBundleScore(
+            ops=ops,
+            H_after=H_after,
+            inventory_after=inventory_after,
+            resource_gap_before=gap_before,
+            resource_gap_after=_positive_gap(context.demand, inventory_after),
+            resource_gap_gain=0,
+            h_before=None,
+            h_after=None,
+            h_delta=0.0,
+            h_bound_penalty=INFEASIBLE_SCORE,
+            h_drift_penalty=INFEASIBLE_SCORE,
+            flex_impact=FlexImpact(penalty=INFEASIBLE_SCORE),
+            aromatic_penalty=INFEASIBLE_SCORE,
+            donor_criticality_penalty=INFEASIBLE_SCORE,
+            topology_gain=0.0,
+            operation_penalty=INFEASIBLE_SCORE,
+            total_score=INFEASIBLE_SCORE,
+            feasible=False,
+            diagnostics={
+                "reason": "su12_generation_cap_reached",
+                "su12_cap": dict(su12_diagnostics),
+            },
+        )
     gap_after = _positive_gap(context.demand, inventory_after)
     gap_gain = int(_gap_total(gap_before) - _gap_total(gap_after))
     target_h = _target_h_from_context(context)
@@ -582,6 +663,7 @@ def score_conversion_bundle(
         "operation_penalty": float(operation_penalty),
         "topology_gain": float(topology_gain),
         "total_score": float(total_score),
+        "su12_cap": dict(su12_diagnostics),
     }
     return ConversionBundleScore(
         ops=ops,

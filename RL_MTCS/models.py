@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 
+from model.shared.topology_contract import (
+    MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
+    TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES,
+)
+
 from .geometry import (
     Axial,
     HEX_DIRECTIONS,
@@ -197,6 +202,17 @@ class HeteroAromaticRequest:
 
 
 @dataclass(frozen=True)
+class UnassembledClosureResource:
+    """A bounded Stage3 closure resource intentionally absent from the graph."""
+
+    node_id: int
+    su_type: int
+    state: str = "remaining_closure_resource"
+    hop1_ids: Tuple[int, ...] = ()
+    reason: str = "stage3_tolerated_unassembled_closure_resource"
+
+
+@dataclass(frozen=True)
 class TopologyUnit:
     unit_id: str
     product_type: str
@@ -250,12 +266,22 @@ class InverseAssemblyInput:
     diagnostics: Tuple[Tuple[str, str], ...] = ()
     source_kind: InputSourceKind = InputSourceKind.INVERSE_JSON
     hetero_requests: Tuple[HeteroAromaticRequest, ...] = ()
+    unassembled_closure_resources: Tuple[UnassembledClosureResource, ...] = ()
 
     def node_map(self) -> Dict[int, int]:
         return {int(node_id): int(su) for node_id, su in self.node_su_types}
 
     def ownership_map(self) -> Dict[int, str]:
         return {int(node_id): str(unit_id) for node_id, unit_id in self.ownership}
+
+    def unassembled_resource_map(self) -> Dict[int, int]:
+        return {
+            int(resource.node_id): int(resource.su_type)
+            for resource in self.unassembled_closure_resources
+        }
+
+    def input_node_map(self) -> Dict[int, int]:
+        return {**self.node_map(), **self.unassembled_resource_map()}
 
 
 def build_inverse_input(payload: Any) -> InverseAssemblyInput:

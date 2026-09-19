@@ -12,6 +12,7 @@ import torch
 
 from ....shared.coarse_graph import get_su_ppm_range
 from ....shared.inverse_common import reconstruction_peak_scale
+from ....shared.aromatic_plan import su12_transition_diagnostics
 from .conversion_scoring import evaluate_flex_impact
 from .histogram import _h_total
 from .profiles import MIN_STAGE3_AROMATIC_RESOURCE_COUNT
@@ -784,6 +785,46 @@ def _bundle_delta(operations: Sequence[Dict[str, Any]]) -> Dict[int, int]:
         delta[source] = int(delta.get(source, 0)) - 1
         delta[target] = int(delta.get(target, 0)) + 1
     return {int(key): int(value) for key, value in sorted(delta.items()) if int(value) != 0}
+
+
+def _su12_cap_for_operations(
+    H: torch.Tensor,
+    operations: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Validate every SU12-generating step in a spectrum candidate."""
+    state = torch.clamp(H.detach().cpu(), min=0).long().clone()
+    for raw in list(operations or []):
+        operation = dict(raw or {})
+        source = int(operation.get("from_su", -1))
+        target = int(operation.get("to_su", -1))
+        if not (0 <= source < int(state.numel()) and 0 <= target < int(state.numel())):
+            continue
+        count = max(1, int(operation.get("count", 1) or 1))
+        for _ in range(count):
+            if int(state[source].item()) <= 0:
+                return {
+                    "generation_allowed": False,
+                    "reason": "spectrum_candidate_histogram_underflow",
+                    "from_su": source,
+                    "to_su": target,
+                }
+            before = state.detach().clone()
+            state[source] -= 1
+            state[target] += 1
+            transition = su12_transition_diagnostics(before, state)
+            if not bool(transition.get("generation_allowed", True)):
+                return {
+                    **dict(transition),
+                    "generation_allowed": False,
+                    "reason": "su12_generation_cap_reached",
+                    "from_su": source,
+                    "to_su": target,
+                }
+    return {
+        **dict(su12_transition_diagnostics(H, state)),
+        "generation_allowed": True,
+        "reason": "ok",
+    }
 
 
 def _append_low_h_compensation(
@@ -1990,6 +2031,15 @@ def _generate_spectrum_pair_candidates(
                         )
                         H_state = _histogram_after_operations(H, operations)
                     candidate_H = _histogram_after_operations(H, operations)
+                    su12_cap = _su12_cap_for_operations(H, operations)
+                    if not bool(su12_cap.get("generation_allowed", True)):
+                        attempts.append({
+                            "rule": str(rule_name),
+                            "direction": str(direction),
+                            "reason": "su12_generation_cap_reached",
+                            "su12_cap": dict(su12_cap),
+                        })
+                        continue
                     if (
                         unsaturated_cap is not None
                         and int(candidate_H[14].item())
@@ -2461,6 +2511,9 @@ def generate_spectrum_candidates(
             residual = np.asarray(best_next["_next_residual"], dtype=np.float64)
             H_state = _histogram_after_operations(H, operations)
 
+        su12_cap = _su12_cap_for_operations(H, operations)
+        if not bool(su12_cap.get("generation_allowed", True)):
+            continue
         candidate = _candidate_from_path(
             H=H,
             baseline_diff=diff,
@@ -2587,6 +2640,12 @@ def apply_spectrum_candidate(
     by_id = {int(getattr(node, "global_id", -1)): node for node in nodes_out}
     H_out = torch.clamp(H.detach().cpu(), min=0).long().clone()
     operations = [dict(raw or {}) for raw in list(candidate.operations or [])]
+    su12_cap = _su12_cap_for_operations(H_out, operations)
+    if not bool(su12_cap.get("generation_allowed", True)):
+        return None, None, {
+            "reason": "su12_generation_cap_reached",
+            "su12_cap": dict(su12_cap),
+        }
     pair_groups = [
         dict(group or {})
         for group in list(

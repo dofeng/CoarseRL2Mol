@@ -3757,6 +3757,7 @@ def _like24_bridge_ring_evidence(
     *,
     left_fragment: TopologyFragment,
     right_fragment: TopologyFragment,
+    direct_bridge: bool = False,
 ) -> Dict[str, Any]:
     allowed: List[str] = []
     slots: List[str] = []
@@ -3793,7 +3794,8 @@ def _like24_bridge_ring_evidence(
         left_bridge = str(dict(left_fragment.evidence or {}).get("bridgehead_role", ""))
         right_bridge = str(dict(right_fragment.evidence or {}).get("bridgehead_role", ""))
         if (
-            left_bridge == "fused_bridgehead_substitute_14"
+            bool(direct_bridge)
+            and left_bridge == "fused_bridgehead_substitute_14"
             and right_bridge == "fused_bridgehead_substitute_14"
             and len(left_ids) == 1
             and len(right_ids) == 1
@@ -3883,10 +3885,7 @@ def _like24_bridge_ring_evidence(
         },
         "ring_contracts": {
             "side_ring_plan": _make_ring_contract(
-                eligible=(
-                    class_type in {"24_AB_N_24_CD", "24_CD_N_24_CD"}
-                    and bridgehead_role != "fused_bridgehead_substitute_pair"
-                ),
+                eligible=class_type in {"24_AB_N_24_CD", "24_CD_N_24_CD"},
                 priority=12 if class_type == "24_AB_N_24_CD" else (5 if class_type == "24_CD_N_24_CD" else 25),
                 slot_roles=(
                     ["side_anchor_pair"]
@@ -4732,6 +4731,7 @@ def _match_like24_pair_bridge_fragments(
                         str(rule.get("class_type")),
                         left_fragment=left_fragment,
                         right_fragment=right_fragment,
+                        direct_bridge=True,
                     ),
                 },
             ),

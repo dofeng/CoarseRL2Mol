@@ -284,10 +284,22 @@ class MCTSRunner:
                 outputs.update(self.nmr_scorer.export_outputs(base, final_state))
                 nmr_result["statistics"] = self.nmr_scorer.statistics()
         audit = final_state.audit()
-        complete = bool(final_state.is_complete() and audit.get("complete", False))
+        topology_complete = bool(
+            final_state.is_complete() and audit.get("complete", False)
+        )
+        complete = bool(
+            topology_complete
+            and audit.get("shape_valid", False)
+            and audit.get("side_distribution_valid", False)
+        )
         result = {
             "ok": complete,
-            "status": "complete" if complete else "incomplete",
+            "status": (
+                "complete" if complete
+                else "layout_invalid" if topology_complete
+                else "incomplete"
+            ),
+            "topology_complete": topology_complete,
             "stage": "substitution",
             "init": self.init_data["diagnostics"],
             "rigid": rigid["result"],
@@ -1150,7 +1162,12 @@ def run_side_mcts(
     final_outputs = export_final_state(state, directory)
 
     return {
-        "ok": bool(summary.get("done", False) and audit.get("complete", False)),
+        "ok": bool(
+            summary.get("done", False)
+            and audit.get("complete", False)
+            and audit.get("shape_valid", False)
+            and audit.get("side_distribution_valid", False)
+        ),
         "state": state,
         "rigid": dict(rigid["result"]),
         "flex": dict(flex["result"]),

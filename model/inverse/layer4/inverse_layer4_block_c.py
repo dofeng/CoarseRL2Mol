@@ -18,6 +18,10 @@ from ...shared.inverse_common import (
     SPECIAL_DEGREE_PRIORS,
     normalize_special_degree_meta,
 )
+from ...shared.aromatic_plan import (
+    su12_generation_cap,
+    su12_transition_diagnostics,
+)
 from ..topology import Stage3WorkflowCycleRecord, Stage3WorkflowResult
 from ..topology.resources.histogram import (
     _h_total,
@@ -900,25 +904,6 @@ def _update_generation_metrics(
         del metrics[:-_MAX_RETAINED_GENERATION_SIGNATURES]
 
 
-def _stage3_r2(diff: Optional[Dict[str, Any]], fallback: Any = float("nan")) -> float:
-    try:
-        value = float(dict(diff or {}).get("r2", fallback))
-    except Exception:
-        return float("nan")
-    return value if np.isfinite(value) else float("nan")
-
-
-def _stage3_flex_audit_from_plan(plan: Any) -> Dict[str, Any]:
-    runtime = dict(getattr(plan, "runtime", {}) or {})
-    phase_eval = runtime.get("phase_evaluation")
-    return dict(getattr(phase_eval, "flex_audit", {}) or {})
-
-
-def _histogram_dict(H: torch.Tensor) -> Dict[str, int]:
-    values = torch.clamp(H.detach().cpu(), min=0).long().tolist()
-    return {str(index): int(value) for index, value in enumerate(values) if int(value) != 0}
-
-
 def _resource_gap(inventory: Dict[int, int], demand: Dict[int, int]) -> Dict[str, int]:
     keys = set(int(key) for key in inventory) | set(int(key) for key in demand)
     return {
@@ -1723,13 +1708,15 @@ def _append_stage3_parity_balance(
         }
 
     audit_before = _stage3_port_capacity_diagnostics(H_after, special_degree_meta)
-    if bool(audit_before["port_roles_ok"]):
+    cap_before = su12_generation_cap(H_after)
+    if bool(audit_before["port_roles_ok"]) and bool(cap_before["within_limit"]):
         return True, {
             "enforced": True,
             "reason": "pre_rebuild_ports_balanced",
             "balance_applied": False,
             "before": audit_before,
             "after": audit_before,
+            "su12_cap": dict(cap_before),
         }
 
     remaining, ownership, pool_source = _stage3_balance_resource_view(
@@ -1922,6 +1909,7 @@ def _append_stage3_parity_balance(
     H_balanced = H_after.detach().clone()
     attempted_directions: List[Dict[str, Any]] = []
     balance_ops: List[HistogramConversion] = []
+    cap_recovery_ops: List[HistogramConversion] = []
     phase_eval = dict(getattr(plan, "runtime", {}) or {}).get(
         "phase_evaluation"
     )
@@ -2031,6 +2019,20 @@ def _append_stage3_parity_balance(
                     continue
                 if int(node_types.get(int(node_id), -1)) != int(source):
                     continue
+                candidate_H = H_balanced.detach().clone()
+                candidate_H[int(source)] -= 1
+                candidate_H[int(target)] += 1
+                su12_cap = su12_transition_diagnostics(H_balanced, candidate_H)
+                if not bool(su12_cap.get("generation_allowed", True)):
+                    attempted_directions.append({
+                        "kind": str(kind),
+                        "from_su": int(source),
+                        "to_su": int(target),
+                        "candidate_node_ids": [],
+                        "reason": "su12_generation_cap_reached",
+                        "su12_cap": dict(su12_cap),
+                    })
+                    continue
                 aromatic_donor = int(source) in {12, 13}
                 if not aromatic_donor:
                     owner_state = str(ownership.get(int(node_id), "") or "")
@@ -2089,6 +2091,105 @@ def _append_stage3_parity_balance(
         node_types[int(node_id)] = int(target)
         used_ids.add(int(node_id))
         balance_ops.append(op)
+
+    def _recover_su12_cap() -> bool:
+        """Bring an over-cap boundary histogram back under the 4:5 limit.
+
+        Port balancing and the preceding conversion batch are allowed to
+        reduce an existing SU12 overage one step at a time.  A rebuild,
+        however, requires the final histogram itself to satisfy the cap.
+        Recover the remaining overage here, using only concrete, unused SU12
+        donors from the same boundary inventory.  The operations are stored
+        as ordinary atomic groups so node identity and accounting remain
+        identical to every other physical conversion.
+        """
+        nonlocal H_balanced, audit_before
+        cap = dict(su12_generation_cap(H_balanced))
+        if bool(cap.get("within_limit", True)):
+            return True
+        while not bool(cap.get("within_limit", False)):
+            if int(H_balanced.numel()) <= 13 or int(
+                H_balanced[12].item()
+            ) <= int(MIN_STAGE3_AROMATIC_RESOURCE_COUNT):
+                attempted_directions.append({
+                    "kind": "su12_cap_recovery",
+                    "reason": "aromatic_minimum_preserved",
+                    "su12_cap": dict(cap),
+                })
+                return False
+            candidates = [
+                int(node_id)
+                for node_id in list(remaining.get(12, []) or [])
+                if int(node_id) not in used_ids
+                and int(node_types.get(int(node_id), -1)) == 12
+            ]
+            if not candidates:
+                attempted_directions.append({
+                    "kind": "su12_cap_recovery",
+                    "reason": "real_su12_donor_unavailable",
+                    "su12_cap": dict(cap),
+                })
+                return False
+            node_id = int(min(candidates))
+            candidate = H_balanced.detach().clone()
+            candidate[12] -= 1
+            candidate[13] += 1
+            transition = dict(su12_transition_diagnostics(H_balanced, candidate))
+            if not bool(transition.get("generation_allowed", False)):
+                attempted_directions.append({
+                    "kind": "su12_cap_recovery",
+                    "reason": "su12_recovery_transition_rejected",
+                    "node_id": int(node_id),
+                    "su12_cap": transition,
+                })
+                return False
+            op = HistogramConversion(
+                from_su=12,
+                to_su=13,
+                count=1,
+                reason="pre_rebuild_su12_cap_recovery",
+                node_ids=[int(node_id)],
+            )
+            group = AtomicAdjustmentGroup(
+                primary_op=op,
+                combined_delta={12: -1, 13: 1},
+                h_before=_h_total(H_balanced, special_degree_meta),
+                h_after_primary=_h_total(candidate, special_degree_meta),
+                h_after_final=_h_total(candidate, special_degree_meta),
+                scoring_diagnostics={
+                    "plan_kind": "pre_rebuild_su12_cap_recovery",
+                    "su12_cap_before": cap,
+                    "su12_cap_after": transition,
+                },
+            )
+            working_groups.append(group)
+            groups.append(group)
+            cap_recovery_ops.append(op)
+            H_balanced = candidate
+            remaining[12] = [
+                int(value)
+                for value in list(remaining.get(12, []) or [])
+                if int(value) != int(node_id)
+            ]
+            remaining.setdefault(13, []).append(int(node_id))
+            remaining[13] = sorted(set(remaining[13]))
+            node_types[int(node_id)] = 13
+            used_ids.add(int(node_id))
+            cap = dict(su12_generation_cap(H_balanced))
+        audit_before = _stage3_port_capacity_diagnostics(
+            H_balanced, special_degree_meta
+        )
+        return True
+
+    if not _recover_su12_cap():
+        return False, {
+            "enforced": True,
+            "reason": "su12_generation_cap_recovery_unavailable",
+            "balance_applied": False,
+            "before": audit_before,
+            "su12_cap": dict(su12_generation_cap(H_balanced)),
+            "attempted_directions": attempted_directions,
+        }
 
     # Either 13->12 or 12->13 flips the total degree parity. The cursor only
     # defines which direction is preferred; it must not make the other valid
@@ -2176,19 +2277,46 @@ def _append_stage3_parity_balance(
             reason="pre_rebuild_layer1_port_role_balance",
         )
 
-    if not balance_ops:
+    if not balance_ops and not cap_recovery_ops:
         return True, {
             "enforced": True,
             "reason": "pre_rebuild_ports_balanced",
             "balance_applied": False,
             "before": audit_before,
             "after": audit_before,
+            "su12_cap": dict(su12_generation_cap(H_balanced)),
+        }
+
+    H_before = getattr(working_histogram, "H_before", None)
+    if (
+        groups
+        and isinstance(H_before, torch.Tensor)
+        and torch.equal(
+            torch.clamp(H_before.detach().cpu(), min=0).long(),
+            torch.clamp(H_balanced.detach().cpu(), min=0).long(),
+        )
+    ):
+        return False, {
+            "enforced": True,
+            "reason": "port_balance_cancels_primary_adjustment",
+            "balance_applied": False,
+            "before": audit_before,
+            "after": _stage3_port_capacity_diagnostics(
+                H_balanced,
+                special_degree_meta,
+            ),
+            "attempted_directions": attempted_directions,
+            "rejected_operations": [op.to_dict() for op in balance_ops],
         }
 
     working_histogram.H_after = H_balanced
+    working_histogram.groups = list(working_groups)
     working_histogram.physical_conversion_count = int(
         getattr(working_histogram, "physical_conversion_count", 0) or 0
-    ) + len(balance_ops)
+    ) + len(balance_ops) + len(cap_recovery_ops)
+    working_histogram.primary_adjustment_count = int(
+        getattr(working_histogram, "primary_adjustment_count", 0) or 0
+    ) + len(cap_recovery_ops)
 
     updated_accounting: Dict[str, Any] = {}
     if strict_resource_accounting:
@@ -2322,11 +2450,15 @@ def _append_stage3_parity_balance(
     diagnostics = {
         "enforced": True,
         "reason": "pre_rebuild_ports_balanced",
-        "balance_applied": True,
+        "balance_applied": bool(balance_ops),
+        "su12_cap_recovery_applied": bool(cap_recovery_ops),
         "before": audit_before,
         "after": audit_after,
         "pool_source": pool_source,
         "applied_operations": [op.to_dict() for op in balance_ops],
+        "su12_cap_recovery_operations": [
+            op.to_dict() for op in cap_recovery_ops
+        ],
         "attempted_directions": attempted_directions,
         "fixed_flex_objective": objective_audit,
         "h_after": float(current_h),
@@ -2335,6 +2467,7 @@ def _append_stage3_parity_balance(
             if h_lower is not None and h_upper is not None
             else []
         ),
+        "su12_cap": dict(su12_generation_cap(H_balanced)),
         "next_cursor": int(balance_cursor) + (1 if balance_ops else 0),
     }
     parity_op = getattr(working_histogram, "parity_balance_op", None)
@@ -2402,6 +2535,24 @@ def _apply_deferred_port_balance(
         for node in nodes_out
         if int(getattr(node, "global_id", -1)) >= 0
     }
+    # Boundary SU12-cap recovery is represented as normal histogram groups;
+    # apply those concrete node conversions here because this helper does not
+    # run the generic resource-adjustment applier.
+    for group in list(getattr(balance_histogram, "groups", []) or []):
+        for op in [getattr(group, "primary_op", None)] + list(
+            getattr(group, "h_compensation_ops", []) or []
+        ):
+            if op is None:
+                continue
+            for node_id in list(getattr(op, "node_ids", []) or []):
+                node = nodes_by_id.get(int(node_id))
+                if node is None or int(getattr(node, "su_type", -1)) != int(op.from_su):
+                    return list(nodes or []), H.detach().clone(), {
+                        **dict(diagnostics or {}),
+                        "reason": "su12_cap_recovery_node_identity_unavailable",
+                        "balance_applied": False,
+                    }
+                setattr(node, "su_type", int(op.to_su))
     for field in ("parity_balance_op", "port_role_balance_op"):
         op = getattr(balance_histogram, field, None)
         if op is None:

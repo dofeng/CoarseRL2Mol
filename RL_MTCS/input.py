@@ -12,12 +12,15 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, is_dataclass
 import ast
 import csv
+import hashlib
 import json
 import math
 import itertools
 from pathlib import Path
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+
+from model.shared.aromatic_plan import exact_aromatic_cluster_plan
 
 from .geometry import (
     Axial,
@@ -32,11 +35,14 @@ from .models import (
     InverseAssemblyInput,
     InverseInputError,
     InputSourceKind,
+    MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
     TopologyUnit,
+    TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES,
     UnitEdge,
     UnitNode,
     UnitPort,
     HeteroAromaticRequest,
+    UnassembledClosureResource,
 )
 from .state import HexAssemblyState
 
@@ -57,21 +63,6 @@ AROMATIC_CLUSTER_CENTERS: Dict[str, Tuple[Axial, ...]] = {
     "triphenylene": ((0, 0), (-2, -1), (1, 2), (1, -1)),
     "coronene": ((0, 0), (-1, 1), (1, 2), (2, 1), (1, -1), (-1, -2), (-2, -1)),
 }
-
-CLUSTER_COST = {
-    "coronene": (12, 12),
-    "pyrene": (6, 10),
-    "benzo_pyrene": (8, 12),
-    "perylene": (8, 12),
-    "chrysene": (6, 12),
-    "triphenylene": (6, 12),
-    "tetracene": (6, 12),
-    "phenanthrene": (4, 10),
-    "anthracene": (4, 10),
-    "naphthalene": (2, 8),
-    "benzene": (0, 6),
-}
-
 
 @dataclass(frozen=True)
 class NodeRow:
@@ -132,6 +123,43 @@ def _csv_rows(path: Path) -> List[Dict[str, str]]:
             return [dict(row) for row in csv.DictReader(handle)]
     except OSError as exc:
         raise InverseInputError(f"cannot read inverse CSV: {path}") from exc
+
+
+def _csv_bool(value: object, *, default: bool = False) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return bool(default)
+    return text in {"1", "true", "yes", "y"}
+
+
+def _load_resource_pool_rows(nodes_csv: str | Path) -> Dict[int, Dict[str, Any]]:
+    """Load the inverse resource manifest colocated with the node CSV."""
+    path = Path(nodes_csv).resolve().parent / "final_topology_resource_pool.csv"
+    if not path.is_file():
+        return {}
+    rows = _csv_rows(path)
+    result: Dict[int, Dict[str, Any]] = {}
+    for raw in rows:
+        if str(raw.get("node_id", "")).strip() == "":
+            continue
+        node_id = int(raw["node_id"])
+        if node_id in result:
+            raise InverseInputError(
+                f"duplicate node_id in topology resource pool: {node_id}"
+            )
+        state = str(raw.get("state", "") or "")
+        eligible = _csv_bool(
+            raw.get("completion_tolerated", ""),
+            default=False,
+        )
+        result[node_id] = {
+            "node_id": node_id,
+            "su_type": int(raw.get("su_type", -1)),
+            "state": state,
+            "completion_tolerated": bool(eligible),
+            "tolerance_reason": str(raw.get("tolerance_reason", "") or ""),
+        }
+    return result
 
 
 def load_node_rows(path: str | Path) -> Dict[int, NodeRow]:
@@ -249,131 +277,36 @@ def load_topology_rows(path: str | Path) -> List[Dict[str, object]]:
     return result
 
 
-def _bridgehead_counts(nodes: Mapping[int, NodeRow]) -> Tuple[int, int, int, int, int, int, int]:
-    x = y = z = m = n = p = q = 0
-    pattern = re.compile(r"\((\d+),\s*\(([^)]*)\),\s*\(([^)]*)\)\)")
-    for row in nodes.values():
-        if row.su_type != 12:
-            continue
-        match = pattern.match(row.template_key)
-        if not match:
-            q += 1
-            continue
-        hop1 = [int(value) for value in re.findall(r"\d+", match.group(2))]
-        hop2 = [int(value) for value in re.findall(r"\d+", match.group(3))]
-        count1, count2 = hop1.count(12), hop2.count(12)
-        if len(hop1) == 3 and count1 == 3:
-            x += 1
-        elif count1 == 2 and count2 >= 3:
-            y += 1
-        elif count1 == 2 and count2 == 2:
-            z += 1
-        elif count2 >= 2:
-            m += 1
-        elif count1 == 2 and count2 == 1:
-            n += 1
-        elif count2 == 1:
-            p += 1
-        else:
-            q += 1
-    return x, y, z, m, n, p, q
-
-
 class _AromaticPlanner:
-    """Legacy aromatic-cluster accounting without SU allocation downstream."""
+    """Materialize one exact aromatic plan for CSV fallback inputs.
 
-    DOWNGRADE = {
-        "coronene": ["pyrene", "benzo_pyrene", "perylene", "chrysene", "triphenylene", "tetracene", "phenanthrene", "anthracene", "naphthalene", "benzene"],
-        "pyrene": ["benzo_pyrene", "perylene", "chrysene", "triphenylene", "tetracene", "phenanthrene", "anthracene", "naphthalene", "benzene"],
-        "benzo_pyrene": ["perylene", "chrysene", "triphenylene", "tetracene", "phenanthrene", "anthracene", "naphthalene", "benzene"],
-        "perylene": ["chrysene", "triphenylene", "tetracene", "phenanthrene", "anthracene", "naphthalene", "benzene"],
-        "chrysene": ["triphenylene", "tetracene", "phenanthrene", "anthracene", "naphthalene", "benzene"],
-        "triphenylene": ["tetracene", "phenanthrene", "anthracene", "naphthalene", "benzene"],
-        "tetracene": ["phenanthrene", "anthracene", "naphthalene", "benzene"],
-        "phenanthrene": ["anthracene", "naphthalene", "benzene"],
-        "anthracene": ["naphthalene", "benzene"],
-        "naphthalene": ["benzene"],
-        "benzene": [],
-    }
+    The inverse pipeline normally writes ``final_aromatic_clusters.json`` and
+    RL consumes that file directly.  Older CSV-only callers still need a
+    deterministic fallback, but they must use the same exact planner rather
+    than the removed heuristic/downgrade pass.
+    """
 
-    def __init__(self, counts: Mapping[int, int], bridgeheads: Sequence[int]):
-        self.x, self.y, self.z, self.m, self.n, self.p, self.q = [int(v) for v in bridgeheads]
-        self.remaining12 = int(counts.get(12, 0))
-        self.remaining12 += self.remaining12 % 2
-        # During staging every final hetero atom occupies one SU13 slot.  A
-        # five-membered heteroaromatic ring needs one additional temporary
-        # SU13 slot because two adjacent staging carbons collapse into one
-        # final N/S node.  Keep this accounting integral so the template
-        # cardinality matches the actual staging graph.
-        ordinary13 = int(sum(counts.get(su, 0) for su in (5, 6, 7, 8, 9, 10, 11, 13)))
-        n26 = int(counts.get(26, 0))
-        n30 = int(counts.get(30, 0))
-        self.remaining13 = float(ordinary13 + n26 + n30)
-        self.max12to13 = 4
-        self.max13to12 = max(0, 2 - (self.remaining12 - int(counts.get(12, 0))))
-        self.used12to13 = 0
-        self.used13to12 = 0
-        self.kinds: List[str] = []
-
-    def _conversion(self, need12: int, need13: int) -> Optional[Tuple[int, int]]:
-        choices = []
-        for to13 in range(min(4, self.max12to13 - self.used12to13, self.remaining12) + 1):
-            for to12 in range(min(4, self.max13to12 - self.used13to12, int(self.remaining13)) + 1):
-                if to13 + to12 > 4:
-                    continue
-                if self.remaining12 - to13 + to12 >= need12 and self.remaining13 + to13 - to12 >= need13:
-                    choices.append(((to13 + to12, abs(to13 - to12), to13, to12), (to13, to12)))
-        return min(choices)[1] if choices else None
-
-    def _make(self, kind: str) -> bool:
-        need12, need13 = CLUSTER_COST[kind]
-        conversion = self._conversion(need12, need13)
-        if conversion is None:
-            return False
-        to13, to12 = conversion
-        self.remaining12 += -to13 + to12
-        self.remaining13 += to13 - to12
-        self.used12to13 += to13
-        self.used13to12 += to12
-        self.remaining12 -= need12
-        self.remaining13 -= need13
-        self.kinds.append(kind)
-        return True
-
-    def _downgrade(self, kind: str) -> bool:
-        return any(self._make(candidate) for candidate in self.DOWNGRADE[kind])
+    def __init__(self, counts: Mapping[int, int]):
+        self.counts = {int(key): int(value) for key, value in dict(counts).items()}
+        self.plan_diagnostics: Dict[str, object] = {}
 
     def plan(self) -> List[str]:
-        poly5 = (self.y + 1) // 2
-        poly4 = (self.z + 1) // 2
-        targets = [
-            ("coronene", self.x // 6),
-            ("pyrene", (max(0, self.x - (self.x // 6) * 6) + 1) // 2),
-            ("benzo_pyrene", (poly5 + 1) // 2),
-            ("perylene", poly5 // 2),
-            ("tetracene", self.m // 2),
-            ("chrysene", (2 * poly4 + 2) // 3),
-            ("triphenylene", poly4 - (2 * poly4 + 2) // 3),
-            ("phenanthrene", self.n // 2),
-            ("anthracene", self.p // 2),
-            ("naphthalene", self.q // 2),
-        ]
-        for kind, amount in targets:
-            for _ in range(amount):
-                if not self._make(kind) and not self._downgrade(kind):
-                    break
-        progress = True
-        while progress:
-            progress = any(self._make(kind) for kind in (
-                "tetracene", "chrysene", "triphenylene", "phenanthrene", "anthracene", "naphthalene"
-            ))
-        while self.remaining13 >= 6:
-            self._make("benzene")
-        if 4 <= self.remaining13 < 6:
-            # The legacy initializer permits a final 1-2 site top-up.
-            self.remaining13 = 6
-            self._make("benzene")
-        return list(self.kinds)
+        bridgeheads = int(self.counts.get(12, 0))
+        # The CSV contains final SU26/SU30 nodes, not the temporary duplicated
+        # SU13 staging sites used while the inverse aromatic plan is built.
+        # RL materialization therefore plans against actual CSV node count.
+        staging_non_bridgeheads = int(sum(
+            self.counts.get(su, 0)
+            for su in (5, 6, 7, 8, 9, 10, 11, 13, 26, 30)
+        ))
+        preferred_kinds: List[str] = []
+        exact_plan = exact_aromatic_cluster_plan(
+            int(bridgeheads),
+            int(staging_non_bridgeheads),
+            preferred_kinds=preferred_kinds,
+        )
+        self.plan_diagnostics = dict(exact_plan)
+        return [str(kind) for kind in exact_plan["kinds"]]
 
 
 def _make_cluster_template(kind: str) -> _ClusterTemplate:
@@ -479,18 +412,18 @@ def _rigid_pairs(nodes: Mapping[int, NodeRow]) -> List[Tuple[int, int]]:
 
 def _phase_for_product(product_type: str, boundary_count: int) -> str:
     kind = str(product_type or "").lower()
-    if kind == "flex_chain":
+    # Stage3 exports closed aliphatic rings under the canonical
+    # ``aliphatic_ring`` name, while older snapshots may retain a
+    # ``fatty_ring*`` source name.  They are immutable multi-port topology
+    # units and belong to the flex placement phase, just like bridges.
+    if (
+        kind in {"flex_chain", "bridge", "aliphatic_ring", "fatty_ring"}
+        or kind.startswith("fatty_ring_")
+    ):
         return "flex"
     if kind == "side_chain":
         return "side"
-    if kind == "residual_resource_conversion":
-        return "flex" if boundary_count >= 2 else "side"
     raise InverseInputError(f"unsupported topology product_type: {product_type!r}")
-
-
-def _turn_directions(direction: Axial) -> List[Axial]:
-    index = HEX_VERTEX_OFFSETS.index(direction)
-    return [HEX_VERTEX_OFFSETS[(index - 1) % 6], HEX_VERTEX_OFFSETS[(index + 1) % 6]]
 
 
 def _three_aromatic_hub_layout(
@@ -1335,12 +1268,245 @@ def _assign_aromatic_nodes(
     }
 
 
+def _topology_assignment_info(
+    topology_rows: Sequence[Mapping[str, Any]],
+    aromatic_ids: Set[int],
+    templates: Sequence[_ClusterTemplate],
+) -> Dict[str, object]:
+    boundary_by_product: List[List[int]] = []
+    boundary_ids: Set[int] = set()
+    phases: List[str] = []
+    for raw in topology_rows:
+        parsed = raw["parsed"]
+        assert isinstance(parsed, ParsedTopology)
+        degrees = Counter(node_id for edge in parsed.edges for node_id in edge)
+        boundaries = [
+            int(node_id)
+            for node_id in parsed.nodes
+            if int(node_id) in aromatic_ids and int(degrees[node_id]) == 1
+        ]
+        internal_aromatic = [
+            int(node_id)
+            for node_id in parsed.nodes
+            if int(node_id) in aromatic_ids and int(degrees[node_id]) != 1
+        ]
+        if internal_aromatic:
+            raise InverseInputError(
+                f"topology row {raw['row_index']} contains non-boundary "
+                f"aromatic GIDs: {internal_aromatic}"
+            )
+        boundary_by_product.append(boundaries)
+        boundary_ids.update(boundaries)
+        phases.append(
+            _phase_for_product(
+                str(raw.get("product_type", "")), len(boundaries)
+            )
+        )
+    return {
+        "boundary_ids": boundary_ids,
+        "boundary_by_product": boundary_by_product,
+        "phases": phases,
+        "bridgehead_slot_count": int(sum(
+            sum(bool(value) for value in template.shared)
+            for template in templates
+        )),
+    }
+
+
+def _load_authoritative_aromatic_plan(
+    nodes_csv: str | Path,
+) -> Optional[Dict[str, Any]]:
+    path = Path(nodes_csv).resolve().parent / "final_aromatic_clusters.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise InverseInputError(
+            f"cannot read authoritative aromatic plan {path}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict) or not bool(payload.get("complete", False)):
+        raise InverseInputError(
+            f"authoritative aromatic plan is incomplete: {path}"
+        )
+    if int(payload.get("schema_version", -1)) != 1:
+        raise InverseInputError(
+            "unsupported authoritative aromatic plan schema: "
+            f"{payload.get('schema_version')!r}"
+        )
+    return dict(payload)
+
+
+def _templates_from_authoritative_plan(
+    plan: Mapping[str, Any],
+    nodes: Mapping[int, NodeRow],
+    aromatic_ids: Set[int],
+) -> Tuple[List[_ClusterTemplate], Dict[int, Tuple[int, int]]]:
+    clusters = sorted(
+        [dict(item or {}) for item in list(plan.get("clusters", []) or [])],
+        key=lambda item: int(item.get("cluster_id", -1)),
+    )
+    if not clusters:
+        raise InverseInputError("authoritative aromatic plan has no clusters")
+    templates: List[_ClusterTemplate] = []
+    assignment: Dict[int, Tuple[int, int]] = {}
+    planned_su_by_id: Dict[int, int] = {}
+    for expected_index, cluster in enumerate(clusters):
+        cluster_index = int(cluster.get("cluster_id", -1))
+        if cluster_index != expected_index:
+            raise InverseInputError(
+                "authoritative aromatic cluster IDs must be contiguous: "
+                f"expected={expected_index} actual={cluster_index}"
+            )
+        node_rows = sorted(
+            [dict(item or {}) for item in list(cluster.get("nodes", []) or [])],
+            key=lambda item: int(item.get("slot_index", -1)),
+        )
+        coords = [
+            tuple(int(value) for value in list(item.get("local_axial", []) or []))
+            for item in node_rows
+        ]
+        if any(len(coord) != 2 for coord in coords):
+            raise InverseInputError(
+                f"aromatic cluster {cluster_index} has invalid coordinates"
+            )
+        shared = [
+            (
+                str(item.get("template_bridgehead", False)).strip().lower()
+                in {"1", "true", "yes"}
+            )
+            for item in node_rows
+        ]
+        edges = [
+            tuple(int(value) for value in list(edge or []))
+            for edge in list(cluster.get("edges_by_slot", []) or [])
+        ]
+        invalid_edges = [
+            edge for edge in edges
+            if len(edge) != 2
+            or edge[0] == edge[1]
+            or min(edge) < 0
+            or max(edge) >= len(node_rows)
+        ]
+        if invalid_edges:
+            raise InverseInputError(
+                f"aromatic cluster {cluster_index} has invalid slot edges: "
+                f"{invalid_edges[:6]}"
+            )
+        rings = [
+            tuple(
+                tuple(int(value) for value in list(coord or []))
+                for coord in list(ring or [])
+            )
+            for ring in list(cluster.get("local_rings", []) or [])
+        ]
+        centers = [
+            tuple(int(value) for value in list(center or []))
+            for center in list(cluster.get("ring_centers", []) or [])
+        ]
+        if not centers:
+            centers = [
+                (
+                    int(round(sum(coord[0] for coord in ring) / len(ring))),
+                    int(round(sum(coord[1] for coord in ring) / len(ring))),
+                )
+                for ring in rings
+                if ring
+            ]
+        template = _ClusterTemplate(
+            kind=str(cluster.get("kind", "") or ""),
+            centers=list(centers),
+            coords=list(coords),
+            shared=list(shared),
+            edges=[tuple(sorted(edge)) for edge in edges],
+            rings=list(rings),
+        )
+        if len(template.coords) != len(node_rows):
+            raise InverseInputError(
+                f"aromatic cluster {cluster_index} node/slot mismatch"
+            )
+        templates.append(template)
+        for slot_index, item in enumerate(node_rows):
+            if int(item.get("slot_index", -1)) != slot_index:
+                raise InverseInputError(
+                    f"aromatic cluster {cluster_index} has non-contiguous slots"
+                )
+            node_id = int(item.get("node_id", -1))
+            if node_id in assignment:
+                raise InverseInputError(
+                    f"aromatic GID {node_id} occurs in more than one cluster"
+                )
+            if node_id not in nodes:
+                raise InverseInputError(
+                    f"aromatic plan references missing GID {node_id}"
+                )
+            planned_su = int(item.get("planned_su_type", nodes[node_id].su_type))
+            if int(nodes[node_id].su_type) != planned_su:
+                raise InverseInputError(
+                    f"aromatic plan SU mismatch for GID {node_id}: "
+                    f"plan={planned_su} nodes={nodes[node_id].su_type}"
+                )
+            staging_su = int(item.get(
+                "staging_su_type", 12 if shared[slot_index] else 13
+            ))
+            expected_staging_su = 12 if shared[slot_index] else 13
+            if staging_su != expected_staging_su:
+                raise InverseInputError(
+                    f"aromatic plan staging SU mismatch for GID {node_id}: "
+                    f"staging={staging_su} bridgehead={shared[slot_index]}"
+                )
+            assignment[node_id] = (cluster_index, slot_index)
+            planned_su_by_id[node_id] = planned_su
+
+    if set(assignment) != set(aromatic_ids):
+        raise InverseInputError(
+            "authoritative aromatic plan node coverage mismatch: "
+            f"missing={sorted(aromatic_ids-set(assignment))[:12]} "
+            f"unexpected={sorted(set(assignment)-aromatic_ids)[:12]}"
+        )
+    planned_bridgeheads = {
+        node_id
+        for node_id, (cluster_index, slot_index) in assignment.items()
+        if bool(templates[cluster_index].shared[slot_index])
+    }
+    actual_bridgeheads = {
+        node_id for node_id in aromatic_ids if int(nodes[node_id].su_type) == 12
+    }
+    if planned_bridgeheads != actual_bridgeheads:
+        raise InverseInputError(
+            "authoritative aromatic bridgehead identity mismatch: "
+            f"missing={sorted(actual_bridgeheads-planned_bridgeheads)[:12]} "
+            f"unexpected={sorted(planned_bridgeheads-actual_bridgeheads)[:12]}"
+        )
+    if int(plan.get("cluster_count", len(templates))) != len(templates):
+        raise InverseInputError("authoritative aromatic cluster count mismatch")
+    ring_count = int(sum(len(template.rings) for template in templates))
+    if int(plan.get("ring_count", ring_count)) != ring_count:
+        raise InverseInputError("authoritative aromatic ring count mismatch")
+    if int(plan.get("aromatic_node_count", len(assignment))) != len(assignment):
+        raise InverseInputError("authoritative aromatic node count mismatch")
+    signature_rows = [
+        f"{node_id}:{planned_su_by_id[node_id]}"
+        for node_id in sorted(planned_su_by_id)
+    ]
+    actual_signature = hashlib.sha256(
+        "|".join(signature_rows).encode("utf-8")
+    ).hexdigest()
+    expected_signature = str(plan.get("node_signature", "") or "")
+    if expected_signature and expected_signature != actual_signature:
+        raise InverseInputError(
+            "authoritative aromatic node signature mismatch"
+        )
+    return templates, assignment
+
+
 def build_csv_inverse_input(
     nodes_csv: str | Path,
     topology_specs_csv: str | Path,
 ) -> InverseAssemblyInput:
     nodes = load_node_rows(nodes_csv)
     original_node_count = len(nodes)
+    resource_pool_rows = _load_resource_pool_rows(nodes_csv)
     topology_rows = load_topology_rows(topology_specs_csv)
     counts = Counter(row.su_type for row in nodes.values())
     n26 = sum(1 for row in nodes.values() if row.su_type == 26)
@@ -1364,78 +1530,75 @@ def build_csv_inverse_input(
         )
         next_synthetic -= 1
     counts[13] += len(synthetic_by_target)
-    bridgeheads = _bridgehead_counts(nodes)
-    kinds = _AromaticPlanner(counts, bridgeheads).plan()
-    if not kinds:
-        raise InverseInputError("node CSV does not produce any aromatic cluster")
-    templates = [_make_cluster_template(kind) for kind in kinds]
     rigid_pairs = _rigid_pairs(nodes)
     source_aromatic_ids = {
         node_id for node_id, row in nodes.items()
         if row.su_type in AROMATIC_SU_TYPES
     }
-    ring_slot_count = sum(len(template.coords) for template in templates)
-    surplus_count = len(source_aromatic_ids) - ring_slot_count
-    if surplus_count < 0:
-        raise InverseInputError(
-            f"aromatic templates contain {ring_slot_count} ring sites for "
-            f"{len(source_aromatic_ids)} inverse aromatic nodes"
-        )
-
     excluded_aromatic_ids: Set[int] = set()
-    if surplus_count:
-        # Reproduce the old assignment only to identify which GIDs occupied the
-        # synthetic, non-ring slots.  The real templates below are never
-        # extended, so those coordinates cannot enter the assembly state.
-        provisional_templates = [_make_cluster_template(kind) for kind in kinds]
-        base_lengths = [len(template.coords) for template in provisional_templates]
-        _extend_templates_to_node_count(
-            provisional_templates, len(source_aromatic_ids)
-        )
-        provisional_assignment, _ = _assign_aromatic_nodes(
-            nodes,
-            topology_rows,
-            provisional_templates,
-            rigid_pairs,
-            aromatic_ids=source_aromatic_ids,
-            spread_flex_slots=False,
-        )
-        excluded_aromatic_ids = {
-            node_id
-            for node_id, (cluster_index, slot_index) in provisional_assignment.items()
-            if slot_index >= base_lengths[cluster_index]
-        }
-        topology_referenced_ids = {
-            int(node_id)
-            for row in topology_rows
-            for node_id in row["parsed"].nodes
-        }
-        rigid_endpoint_ids = {
-            int(node_id) for pair in rigid_pairs for node_id in pair
-        }
-        invalid_exclusions = sorted(
-            node_id
-            for node_id in excluded_aromatic_ids
-            if nodes[node_id].su_type != 13
-            or node_id in synthetic_by_target.values()
-            or node_id in topology_referenced_ids
-            or node_id in rigid_endpoint_ids
-        )
-        if len(excluded_aromatic_ids) != surplus_count or invalid_exclusions:
+    authoritative_plan = _load_authoritative_aromatic_plan(nodes_csv)
+    if authoritative_plan is not None:
+        if int(authoritative_plan.get(
+            "source_node_count", original_node_count
+        )) != int(original_node_count):
             raise InverseInputError(
-                "surplus aromatic nodes cannot be safely excluded; "
-                f"expected={surplus_count} identified={sorted(excluded_aromatic_ids)} "
-                f"invalid={invalid_exclusions}"
+                "authoritative aromatic plan source node count mismatch"
+            )
+        if int(authoritative_plan.get(
+            "assembly_node_count", len(nodes)
+        )) != int(len(nodes)):
+            raise InverseInputError(
+                "authoritative aromatic plan assembly node count mismatch"
+            )
+        templates, assignment = _templates_from_authoritative_plan(
+            authoritative_plan,
+            nodes,
+            source_aromatic_ids,
+        )
+        kinds = [str(template.kind) for template in templates]
+        aromatic_ids = set(source_aromatic_ids)
+        assignment_info = _topology_assignment_info(
+            topology_rows,
+            aromatic_ids,
+            templates,
+        )
+    else:
+        kinds = _AromaticPlanner(counts).plan()
+        if not kinds:
+            raise InverseInputError("node CSV does not produce any aromatic cluster")
+        templates = [_make_cluster_template(kind) for kind in kinds]
+        ring_slot_count = sum(len(template.coords) for template in templates)
+        surplus_count = len(source_aromatic_ids) - ring_slot_count
+        if surplus_count < 0:
+            raise InverseInputError(
+                f"aromatic templates contain {ring_slot_count} ring sites for "
+                f"{len(source_aromatic_ids)} inverse aromatic nodes"
+            )
+        if surplus_count:
+            shared_slot_count = sum(
+                sum(bool(value) for value in template.shared)
+                for template in templates
+            )
+            if shared_slot_count != int(counts.get(12, 0)):
+                raise InverseInputError(
+                    "aromatic plan does not cover every SU12 bridgehead: "
+                    f"nodes={int(counts.get(12, 0))} slots={shared_slot_count}"
+                )
+            # Keep the bounded one/two-site staging top-up in the authoritative
+            # aromatic unit.  Dropping the occupant would make the downstream
+            # molecule contain fewer structure units than the inverse result.
+            _extend_templates_to_node_count(
+                templates, len(source_aromatic_ids)
             )
 
-    aromatic_ids = source_aromatic_ids - excluded_aromatic_ids
-    assignment, assignment_info = _assign_aromatic_nodes(
-        nodes,
-        topology_rows,
-        templates,
-        rigid_pairs,
-        aromatic_ids=aromatic_ids,
-    )
+        aromatic_ids = set(source_aromatic_ids)
+        assignment, assignment_info = _assign_aromatic_nodes(
+            nodes,
+            topology_rows,
+            templates,
+            rigid_pairs,
+            aromatic_ids=aromatic_ids,
+        )
 
     # Stage each five-membered request as two adjacent, non-bridgehead SU13
     # sites.  The inverse CSV identifies the final target GID, but does not
@@ -1485,6 +1648,12 @@ def build_csv_inverse_input(
             target_slot, synthetic_slot
         } == {slot_a, slot_b}:
             continue
+        if authoritative_plan is not None:
+            raise InverseInputError(
+                "authoritative aromatic plan does not place five-member "
+                f"staging pair {target_id}/{synthetic_id} on adjacent "
+                "non-bridgehead sites"
+            )
         # Remove both requested IDs, capture the occupants displaced from the
         # destination pair, then refill the vacated source slots.
         old_slots = {target_slot, synthetic_slot}
@@ -1688,17 +1857,111 @@ def build_csv_inverse_input(
             ownership[node_id] = unit_id
 
     expected_ids = set(nodes) - excluded_aromatic_ids
-    if set(ownership) != expected_ids:
+    owned_ids = set(ownership)
+    unexpected_ids = owned_ids - expected_ids
+    if unexpected_ids:
         raise InverseInputError(
-            f"CSV initialization ownership mismatch; missing={sorted(expected_ids-set(ownership))[:12]} "
-            f"unexpected={sorted(set(ownership)-expected_ids)[:12]}"
+            "CSV initialization ownership mismatch; "
+            f"missing={sorted(expected_ids-owned_ids)[:12]} "
+            f"unexpected={sorted(unexpected_ids)[:12]}"
         )
+    missing_ids = expected_ids - owned_ids
+    declared_tolerated_ids = {
+        int(node_id)
+        for node_id, row in resource_pool_rows.items()
+        if str(row.get("state", "")) == "remaining_closure_resource"
+        and bool(row.get("completion_tolerated", False))
+    }
+    # The Stage3 resource ledger is a historical view.  A residual donor can
+    # be re-used by the final aromatic assignment after that ledger was
+    # written, so stale declarations must not override the final ownership
+    # graph.  Only genuinely unowned nodes are completion-tolerated resources.
+    unknown_declared = declared_tolerated_ids - set(nodes)
+    # The final ownership graph is authoritative.  A node which was declared
+    # as a residual in an older Stage3 manifest may have been consumed by the
+    # final aromatic plan; that declaration is stale metadata, not an
+    # ownership conflict.  Only IDs that are absent from the node CSV are
+    # invalid declarations.
+    if unknown_declared:
+        raise InverseInputError(
+            "CSV initialization ownership mismatch; invalid completion-tolerated "
+            "resource manifest; "
+            f"unknown={sorted(unknown_declared)[:12]}"
+        )
+    undeclared_missing = missing_ids - declared_tolerated_ids
+    if undeclared_missing:
+        raise InverseInputError(
+            "CSV initialization ownership mismatch; unowned nodes are not "
+            "declared as completion-tolerated resources; "
+            f"missing={sorted(undeclared_missing)[:12]}"
+        )
+    if len(missing_ids) > MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES:
+        raise InverseInputError(
+            "too many completion-tolerated unassembled closure resources: "
+            f"count={len(missing_ids)} "
+            f"limit={MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES}"
+        )
+    unassembled_resources: List[UnassembledClosureResource] = []
+    for node_id in sorted(missing_ids):
+        node = nodes[int(node_id)]
+        manifest = resource_pool_rows[int(node_id)]
+        if int(manifest.get("su_type", -1)) != int(node.su_type):
+            raise InverseInputError(
+                f"resource-pool SU mismatch for GID {node_id}: "
+                f"nodes={node.su_type} manifest={manifest.get('su_type')}"
+            )
+        if int(node.su_type) not in TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES:
+            raise InverseInputError(
+                "completion-tolerated unassembled resource has unsupported "
+                f"SU type: GID={node_id} SU={node.su_type}"
+            )
+        unassembled_resources.append(UnassembledClosureResource(
+            node_id=int(node_id),
+            su_type=int(node.su_type),
+            state=str(manifest.get("state", "")),
+            hop1_ids=tuple(int(value) for value in node.hop1_ids),
+            reason=str(
+                manifest.get("tolerance_reason", "")
+                or "stage3_tolerated_unassembled_closure_resource"
+            ),
+        ))
+    if authoritative_plan is not None:
+        expected_unassembled = {
+            int(dict(row or {}).get("node_id", -1))
+            for row in list(
+                authoritative_plan.get("unassembled_closure_resources", []) or []
+            )
+        }
+        if expected_unassembled and expected_unassembled != missing_ids:
+            raise InverseInputError(
+                "authoritative aromatic plan unassembled-resource mismatch; "
+                f"plan={sorted(expected_unassembled)} current={sorted(missing_ids)}"
+            )
     units = aromatic_units + topology_units
     contracts.sort(key=lambda item: ({"rigid": 0, "flex": 1, "side": 2}[item.kind], item.contract_id))
+    if authoritative_plan is not None:
+        expected_contracts = list(
+            authoritative_plan.get("aromatic_boundary_contracts", []) or []
+        )
+        actual_contracts = _contract_rows([
+            contract
+            for contract in contracts
+            if str(contract.source_unit_id).startswith("aromatic:")
+            or str(contract.target_unit_id).startswith("aromatic:")
+        ])
+        if expected_contracts and expected_contracts != actual_contracts:
+            raise InverseInputError(
+                "authoritative aromatic boundary contract mismatch; the node, "
+                "topology, and aromatic-plan files are not from one snapshot"
+            )
     return InverseAssemblyInput(
         units=tuple(units),
         contracts=tuple(contracts),
-        node_su_types=tuple(sorted(su_by_id.items())),
+        node_su_types=tuple(sorted(
+            (node_id, su_type)
+            for node_id, su_type in su_by_id.items()
+            if int(node_id) not in missing_ids
+        )),
         ownership=tuple(sorted(ownership.items())),
         hetero_requests=tuple(
             HeteroAromaticRequest(
@@ -1725,6 +1988,12 @@ def build_csv_inverse_input(
             ("node_count", str(len(su_by_id))),
             ("source_node_count", str(original_node_count)),
             ("assembly_node_count", str(len(su_by_id))),
+            ("graph_node_count", str(len(su_by_id) - len(missing_ids))),
+            ("unassembled_closure_resource_count", str(len(missing_ids))),
+            (
+                "unassembled_closure_resource_ids",
+                ",".join(str(value) for value in sorted(missing_ids)),
+            ),
             (
                 "excluded_surplus_aromatic_node_ids",
                 ",".join(str(value) for value in sorted(excluded_aromatic_ids)),
@@ -1740,10 +2009,211 @@ def build_csv_inverse_input(
             ("flex_contract_count", str(sum(c.kind == "flex" for c in contracts))),
             ("side_contract_count", str(sum(c.kind == "side" for c in contracts))),
             ("su25_nodes", ",".join(str(value) for value in sorted(su25_nodes))),
-            ("bridgehead_counts", ",".join(str(value) for value in bridgeheads)),
         ))),
         source_kind=InputSourceKind.CSV_PAIR,
+        unassembled_closure_resources=tuple(unassembled_resources),
     )
+
+
+def serialize_aromatic_plan(
+    problem: InverseAssemblyInput,
+    *,
+    generation_id: int = 0,
+) -> Dict[str, Any]:
+    """Serialize the exact aromatic assignment consumed by RL_MTCS.
+
+    The payload records both the template staging identity (SU12/SU13) and
+    the inverse node's planned final SU identity.  Synthetic negative GIDs
+    are therefore explicit and reproducible for five-membered SU26/SU30
+    substitutions instead of being reconstructed by a second planner.
+    """
+
+    aromatic_units = [unit for unit in problem.units if unit.phase == "aromatic"]
+
+    def cluster_index(unit: TopologyUnit) -> int:
+        match = re.fullmatch(r"aromatic:(\d+)", str(unit.unit_id))
+        if match is None:
+            raise InverseInputError(
+                f"aromatic unit has non-canonical ID: {unit.unit_id!r}"
+            )
+        return int(match.group(1))
+
+    aromatic_units.sort(key=cluster_index)
+    actual_indices = [cluster_index(unit) for unit in aromatic_units]
+    if actual_indices != list(range(len(aromatic_units))):
+        raise InverseInputError(
+            "aromatic unit IDs must be contiguous before serialization: "
+            f"{actual_indices}"
+        )
+
+    planned_su_by_id = problem.node_map()
+    clusters: List[Dict[str, Any]] = []
+    serialized_ids: Set[int] = set()
+    for unit in aromatic_units:
+        index = cluster_index(unit)
+        node_to_slot = {
+            int(node.node_id): int(slot_index)
+            for slot_index, node in enumerate(unit.nodes)
+        }
+        if len(node_to_slot) != len(unit.nodes):
+            raise InverseInputError(
+                f"aromatic unit {unit.unit_id} contains duplicate node IDs"
+            )
+        node_rows: List[Dict[str, Any]] = []
+        for slot_index, node in enumerate(unit.nodes):
+            node_id = int(node.node_id)
+            if node_id in serialized_ids:
+                raise InverseInputError(
+                    f"aromatic GID {node_id} belongs to more than one cluster"
+                )
+            serialized_ids.add(node_id)
+            metadata = {str(key): str(value) for key, value in node.metadata}
+            planned_su = int(metadata.get(
+                "planned_su_type",
+                planned_su_by_id.get(node_id, node.su_type),
+            ))
+            bridgehead_text = str(
+                metadata.get("template_bridgehead", int(node.su_type) == 12)
+            ).strip().lower()
+            template_bridgehead = bridgehead_text in {"1", "true", "yes"}
+            node_rows.append({
+                "slot_index": int(slot_index),
+                "node_id": node_id,
+                "planned_su_type": planned_su,
+                "staging_su_type": int(node.su_type),
+                "local_axial": [
+                    int(node.local_axial[0]), int(node.local_axial[1])
+                ],
+                "template_bridgehead": bool(template_bridgehead),
+            })
+
+        edges_by_slot: List[List[int]] = []
+        internal_edges_by_gid: List[Dict[str, Any]] = []
+        for edge in unit.internal_edges:
+            left = int(edge.source_node_id)
+            right = int(edge.target_node_id)
+            if left not in node_to_slot or right not in node_to_slot:
+                raise InverseInputError(
+                    f"aromatic edge {left}-{right} escapes {unit.unit_id}"
+                )
+            edges_by_slot.append(sorted([
+                int(node_to_slot[left]), int(node_to_slot[right])
+            ]))
+            internal_edges_by_gid.append({
+                "source_node_id": left,
+                "target_node_id": right,
+                "kind": str(edge.kind),
+            })
+        edges_by_slot.sort(key=lambda edge: (edge[0], edge[1]))
+        internal_edges_by_gid.sort(key=lambda edge: (
+            min(edge["source_node_id"], edge["target_node_id"]),
+            max(edge["source_node_id"], edge["target_node_id"]),
+        ))
+
+        local_rings = [
+            [[int(coord[0]), int(coord[1])] for coord in ring]
+            for ring in unit.local_rings
+        ]
+        ring_centers = [
+            [
+                int(round(sum(coord[0] for coord in ring) / len(ring))),
+                int(round(sum(coord[1] for coord in ring) / len(ring))),
+            ]
+            for ring in unit.local_rings
+            if ring
+        ]
+        ports = [{
+            "port_id": str(port.port_id),
+            "node_id": int(port.node_id),
+            "role": str(port.role),
+            "phase": str(port.phase),
+            "direction": (
+                [int(port.direction[0]), int(port.direction[1])]
+                if port.direction is not None else None
+            ),
+            "contract_id": str(port.contract_id),
+            "used": bool(port.used),
+        } for port in unit.ports]
+        ports.sort(key=lambda port: (
+            port["phase"], port["node_id"], port["port_id"]
+        ))
+        clusters.append({
+            "cluster_id": int(index),
+            "unit_id": str(unit.unit_id),
+            "kind": str(unit.product_type),
+            "nodes": node_rows,
+            "edges_by_slot": edges_by_slot,
+            "internal_edges_by_gid": internal_edges_by_gid,
+            "local_rings": local_rings,
+            "ring_centers": ring_centers,
+            "ports": ports,
+        })
+
+    aromatic_contracts = [
+        contract
+        for contract in problem.contracts
+        if str(contract.source_unit_id).startswith("aromatic:")
+        or str(contract.target_unit_id).startswith("aromatic:")
+    ]
+    rigid_contracts = _contract_rows([
+        contract for contract in aromatic_contracts
+        if str(contract.kind) == "rigid"
+    ])
+    boundary_contracts = _contract_rows(aromatic_contracts)
+    hetero_requests = [{
+        "target_su": int(request.target_su),
+        "ring_size": int(request.ring_size),
+        "target_node_id": int(request.target_node_id),
+        "synthetic_node_id": (
+            int(request.synthetic_node_id)
+            if request.synthetic_node_id is not None else None
+        ),
+        "hop1_ids": [int(value) for value in request.hop1_ids],
+    } for request in problem.hetero_requests]
+
+    diagnostics = {str(key): str(value) for key, value in problem.diagnostics}
+    source_node_count = int(diagnostics.get(
+        "source_node_count", len(problem.node_su_types)
+    ))
+    assembly_node_count = int(diagnostics.get(
+        "assembly_node_count", len(problem.node_su_types)
+    ))
+    signature_rows = [
+        f"{node_id}:{planned_su_by_id.get(node_id, -1)}"
+        for node_id in sorted(serialized_ids)
+    ]
+    node_signature = hashlib.sha256(
+        "|".join(signature_rows).encode("utf-8")
+    ).hexdigest()
+    unassembled_resources = [{
+        "node_id": int(resource.node_id),
+        "su_type": int(resource.su_type),
+        "state": str(resource.state),
+        "hop1_ids": [int(value) for value in resource.hop1_ids],
+        "reason": str(resource.reason),
+    } for resource in problem.unassembled_closure_resources]
+    return {
+        "schema_version": 1,
+        "complete": True,
+        "generation_id": int(generation_id),
+        "cluster_count": int(len(clusters)),
+        "ring_count": int(sum(len(unit.local_rings) for unit in aromatic_units)),
+        "source_node_count": source_node_count,
+        "assembly_node_count": assembly_node_count,
+        "aromatic_node_count": int(len(serialized_ids)),
+        "node_signature": node_signature,
+        "clusters": clusters,
+        "rigid_contracts": rigid_contracts,
+        "aromatic_boundary_contracts": boundary_contracts,
+        "hetero_requests": hetero_requests,
+        "unassembled_closure_resources": unassembled_resources,
+        "unassembled_closure_resource_count": len(unassembled_resources),
+        "completion_mode": (
+            "tolerated_unassembled_closure_resources"
+            if unassembled_resources else "strict_all_nodes_assembled"
+        ),
+        "diagnostics": diagnostics,
+    }
 
 
 def _dict(value: Any) -> Dict[str, Any]:
@@ -2457,6 +2927,9 @@ def initialize(
         "contracts": list(problem.contracts),
         "ownership": problem.ownership_map(),
         "node_su_types": problem.node_map(),
+        "unassembled_closure_resources": list(
+            problem.unassembled_closure_resources
+        ),
         "current_node_su_types": state.current_node_map(),
         "anchor_unit_id": anchor_id,
         "state": state,
@@ -2466,6 +2939,14 @@ def initialize(
             "conversion": False,
             "substitution": bool(problem.hetero_requests),
             "hetero_request_count": len(problem.hetero_requests),
+            "unassembled_closure_resource_count": len(
+                problem.unassembled_closure_resources
+            ),
+            "completion_mode": (
+                "tolerated_unassembled_closure_resources"
+                if problem.unassembled_closure_resources
+                else "strict_all_nodes_assembled"
+            ),
             "aromatic_unit_count": len(aromatic_units),
             "topology_unit_count": len(topology_units),
             "external_contract_count": len(problem.contracts),
@@ -2894,6 +3375,7 @@ __all__ = [
     "ParsedTopology",
     "build_csv_inverse_input",
     "build_inverse_input",
+    "serialize_aromatic_plan",
     "initialize",
     "initialize_from_inverse",
     "inspect_csv_initialization",

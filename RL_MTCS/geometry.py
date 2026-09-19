@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Iterable, Tuple
+from collections.abc import Mapping
+from typing import Any, Iterable, Sequence, Tuple
 
 
 Axial = Tuple[int, int]
@@ -235,11 +236,253 @@ def coordinate_aspect(axials: Iterable[Axial]) -> dict[str, Any]:
     }
 
 
+def _coefficient_of_variation(values: Sequence[float]) -> float:
+    """Return a stable coefficient of variation for a finite sample."""
+    if not values:
+        return 0.0
+    mean = sum(float(value) for value in values) / len(values)
+    if mean <= 1e-12:
+        return 0.0
+    variance = sum((float(value) - mean) ** 2 for value in values) / len(values)
+    return float(math.sqrt(max(0.0, variance)) / mean)
+
+
+def _binned_density(points: Sequence[Tuple[float, float]], bins: int) -> float:
+    """Measure coarse spatial unevenness, including empty bounding-box bins."""
+    if len(points) < 2:
+        return 0.0
+    bins = max(2, int(bins))
+    min_x = min(point[0] for point in points)
+    max_x = max(point[0] for point in points)
+    min_y = min(point[1] for point in points)
+    max_y = max(point[1] for point in points)
+    span_x = max(max_x - min_x, 1e-9)
+    span_y = max(max_y - min_y, 1e-9)
+    counts = [0.0] * (bins * bins)
+    for x, y in points:
+        ix = min(bins - 1, int((x - min_x) / span_x * bins))
+        iy = min(bins - 1, int((y - min_y) / span_y * bins))
+        counts[iy * bins + ix] += 1.0
+    return _coefficient_of_variation(counts)
+
+
+def _convex_hull(points: Sequence[Tuple[float, float]]) -> list[Tuple[float, float]]:
+    """Return a monotonic-chain convex hull in counter-clockwise order."""
+    unique = sorted(set((float(x), float(y)) for x, y in points))
+    if len(unique) < 3:
+        return unique
+
+    def cross(origin, left, right):
+        return (
+            (left[0] - origin[0]) * (right[1] - origin[1])
+            - (left[1] - origin[1]) * (right[0] - origin[0])
+        )
+
+    lower = []
+    for point in unique:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper = []
+    for point in reversed(unique):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return lower[:-1] + upper[:-1]
+
+
+def _convex_hull_area(points: Sequence[Tuple[float, float]]) -> float:
+    """Return the Cartesian area of a monotonic-chain convex hull."""
+    hull = _convex_hull(points)
+    if len(hull) < 3:
+        return 0.0
+    return float(abs(sum(
+        hull[index][0] * hull[(index + 1) % len(hull)][1]
+        - hull[(index + 1) % len(hull)][0] * hull[index][1]
+        for index in range(len(hull))
+    )) * 0.5)
+
+
+def _inside_convex_hull(point: Tuple[float, float], hull: Sequence[Tuple[float, float]]) -> bool:
+    if len(hull) < 3:
+        return True
+    signs = []
+    for index, left in enumerate(hull):
+        right = hull[(index + 1) % len(hull)]
+        cross = (
+            (right[0] - left[0]) * (point[1] - left[1])
+            - (right[1] - left[1]) * (point[0] - left[0])
+        )
+        signs.append(cross)
+    return not (any(value > 1e-9 for value in signs) and any(value < -1e-9 for value in signs))
+
+
+def layout_metrics(
+    axials: Iterable[Axial],
+    unit_groups: Iterable[Iterable[Axial]] | Mapping[Any, Iterable[Axial]] | None = None,
+    *,
+    void_threshold: float = 2.5,
+    full: bool = True,
+    include_void: bool = True,
+) -> dict[str, Any]:
+    """Measure compactness and spatial uniformity of a lattice layout.
+
+    ``coordinate_aspect`` remains the inexpensive lattice-shape contract.  The
+    additional metrics detect layouts with an acceptable bounding box but a
+    hollow centre or strongly uneven structural-unit distribution.  ``full``
+    may be disabled during broad search to skip the convex-hull calculation.
+    """
+    values = []
+    seen = set()
+    for value in axials:
+        axial = (int(value[0]), int(value[1]))
+        if axial not in seen:
+            seen.add(axial)
+            values.append(axial)
+    shape = coordinate_aspect(values)
+    cartesian = [axial_to_cartesian(value) for value in values]
+    node_density_cv = _binned_density(cartesian, 4)
+
+    groups = []
+    if unit_groups is not None:
+        source = unit_groups.values() if isinstance(unit_groups, Mapping) else unit_groups
+        for group in source:
+            group_values = [
+                (int(value[0]), int(value[1])) for value in group
+                if (int(value[0]), int(value[1])) in seen
+            ]
+            if group_values:
+                groups.append(group_values)
+    centroid_points = []
+    for group in groups:
+        points = [axial_to_cartesian(value) for value in group]
+        centroid_points.append((
+            sum(value[0] for value in points) / len(points),
+            sum(value[1] for value in points) / len(points),
+        ))
+    unit_density_cv = _binned_density(centroid_points, 3) if centroid_points else 0.0
+
+    largest_void_radius = 0.0
+    large_void_fraction = 0.0
+    if include_void and len(values) >= 3:
+        min_q = min(value[0] for value in values)
+        max_q = max(value[0] for value in values)
+        min_r = min(value[1] for value in values)
+        max_r = max(value[1] for value in values)
+        area = max(0, max_q - min_q + 1) * max(0, max_r - min_r + 1)
+        # Search is performed on small integer lattice boxes.  Very large
+        # boxes are sampled so a pathological candidate cannot dominate run
+        # time; the audit path normally remains below this bound.
+        if full:
+            step = max(1, int(math.ceil(math.sqrt(float(area) / 6000.0))))
+            sample_points = [
+                (q, r)
+                for q in range(min_q, max_q + 1, step)
+                for r in range(min_r, max_r + 1, step)
+            ]
+        else:
+            # A small regular grid is cheap enough for beam search and, unlike
+            # the former five-point probe, detects off-centre cavities.  At
+            # most 49 points are tested regardless of molecule size.
+            q_step = max(1, int(math.ceil(max(1, max_q - min_q) / 6.0)))
+            r_step = max(1, int(math.ceil(max(1, max_r - min_r) / 6.0)))
+            q_samples = list(range(min_q, max_q + 1, q_step))
+            r_samples = list(range(min_r, max_r + 1, r_step))
+            if q_samples[-1] != max_q:
+                q_samples.append(max_q)
+            if r_samples[-1] != max_r:
+                r_samples.append(max_r)
+            sample_points = [
+                (q, r) for q in q_samples[:7] for r in r_samples[:7]
+            ]
+        hull = _convex_hull([axial_to_cartesian(value) for value in values])
+        empty_distances = []
+        for point in sample_points:
+            if point in seen:
+                continue
+            if not _inside_convex_hull(axial_to_cartesian(point), hull):
+                continue
+            nearest = min(axial_distance(point, other) for other in values)
+            empty_distances.append(float(nearest))
+        if empty_distances:
+            largest_void_radius = max(empty_distances)
+            large_void_fraction = sum(
+                distance > float(void_threshold) for distance in empty_distances
+            ) / len(empty_distances)
+
+    hull_area = _convex_hull_area(cartesian) if (full or include_void) else 0.0
+    hull_fill = (
+        min(1.0, len(values) * (math.sqrt(3.0) * 0.5) / hull_area)
+        if hull_area > 1e-12 else 1.0
+    )
+    eigenvalues = shape.get("covariance_eigenvalues", (0.0, 0.0))
+    normalized_radius_of_gyration = (
+        math.sqrt(float(eigenvalues[0] + eigenvalues[1]))
+        / math.sqrt(max(1, len(values)))
+    )
+    principal_ratio = float(shape["principal_axis_ratio"])
+    energy = (
+        2.0 * max(0.0, largest_void_radius - float(void_threshold)) ** 2
+        + 1.5 * float(large_void_fraction)
+        + 1.0 * float(unit_density_cv)
+        + 0.5 * float(node_density_cv)
+        + 0.25 * float(normalized_radius_of_gyration)
+        + 0.20 * max(0.0, principal_ratio - 1.8) ** 2
+        + 0.25 * max(0.0, 0.55 - float(hull_fill)) ** 2
+    )
+    return {
+        **shape,
+        "node_density_cv": float(node_density_cv),
+        "unit_density_cv": float(unit_density_cv),
+        "largest_void_radius": float(largest_void_radius),
+        "large_void_fraction": float(large_void_fraction),
+        "hull_area": float(hull_area),
+        "hull_fill": float(hull_fill),
+        "normalized_radius_of_gyration": float(normalized_radius_of_gyration),
+        "layout_energy": float(energy),
+        "layout_valid": bool(
+            largest_void_radius <= max(float(void_threshold) + 3.0, 8.0)
+            and unit_density_cv <= 1.5
+        ),
+    }
+
+
+def state_layout_metrics(
+    state: Any,
+    *,
+    full: bool = False,
+    include_all: bool = False,
+    include_void: bool = True,
+) -> dict[str, Any]:
+    """Compute metrics for the currently active portion of an assembly state."""
+    occupied = getattr(state, "occupied_axial", {})
+    node_axial = getattr(state, "node_axial", {})
+    values = list(node_axial.values()) if include_all else (
+        list(occupied.keys()) or list(node_axial.values())
+    )
+    ownership = {}
+    problem = getattr(state, "problem", None)
+    if problem is not None and hasattr(problem, "ownership_map"):
+        ownership = problem.ownership_map()
+    groups = {}
+    value_set = {(int(value[0]), int(value[1])) for value in values}
+    for node_id, axial in node_axial.items():
+        axial = (int(axial[0]), int(axial[1]))
+        if axial not in value_set:
+            continue
+        groups.setdefault(ownership.get(int(node_id), int(node_id)), []).append(axial)
+    return layout_metrics(values, groups, full=full, include_void=include_void)
+
+
 def state_shape_rank(state: Any) -> Tuple[Any, ...]:
-    shape = coordinate_aspect(state.occupied_axial)
+    shape = state_layout_metrics(state, full=False, include_void=True)
     q_span, r_span = int(shape["q_span"]), int(shape["r_span"])
     return (
+        float(shape["layout_energy"]),
         float(shape["violation"]),
+        float(shape["unit_density_cv"]),
+        float(shape["node_density_cv"]),
+        float(shape["largest_void_radius"]),
         float(shape["principal_axis_ratio"]),
         float(shape["linearity"]),
         abs(float(shape["q_over_r"]) - 1.0),
@@ -263,10 +506,12 @@ __all__ = [
     "axial_neg",
     "axial_to_cartesian",
     "coordinate_aspect",
+    "layout_metrics",
     "occupied_span",
     "reflect_axial",
     "rotate_axial",
     "state_shape_rank",
+    "state_layout_metrics",
     "transform_axial",
     "transform_direction",
     "unit_sort_key",

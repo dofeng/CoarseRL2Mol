@@ -14,6 +14,7 @@ from .geometry import (
     axial_distance,
     axial_neg,
     coordinate_aspect,
+    layout_metrics,
     transform_axial,
     unit_sort_key,
 )
@@ -591,9 +592,25 @@ def _rigid_boundary_actions(
             if moved_units & set(active_units):
                 continue
         result.append(action)
-    # Reflection/rotation can produce equivalent actions when a template has
-    # symmetry.  Keep a deterministic bounded set for the recursive solver.
-    return result[: max(1, int(candidate_k))]
+    ranked: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+    prospective_units = set(active_units) | {
+        str(contract.source_unit_id), str(contract.target_unit_id)
+    }
+    for action in result:
+        trial = state.clone()
+        ok, _reason = trial.connect(copy.deepcopy(action))
+        if not ok:
+            continue
+        ranked.append((
+            _rigid_component_shape_rank(
+                trial, prospective_units, complete=False
+            ),
+            action,
+        ))
+    ranked.sort(key=lambda row: (row[0], _action_key(row[1])))
+    return [
+        action for _rank, action in ranked[:max(1, int(candidate_k))]
+    ]
 
 
 def _grow_rigid_component(
@@ -693,6 +710,8 @@ def _grow_rigid_component(
 def _rigid_component_shape_rank(
     state: HexAssemblyState,
     units: Iterable[str],
+    *,
+    complete: bool = False,
 ) -> Tuple[Any, ...]:
     """Rank one physical rigid component independently of staging poses."""
     node_ids = {
@@ -702,13 +721,54 @@ def _rigid_component_shape_rank(
         for node in state.unit(str(unit_id)).nodes
         if int(node.node_id) in state.node_axial
     }
-    shape = coordinate_aspect(
-        state.node_axial[node_id] for node_id in node_ids
+    component_values = [state.node_axial[node_id] for node_id in node_ids]
+    unit_groups = {
+        str(unit_id): [
+            state.node_axial[int(node.node_id)]
+            for node in state.unit(str(unit_id)).nodes
+            if int(node.node_id) in node_ids
+        ]
+        for unit_id in units
+    }
+    placed_unit_count = len([values for values in unit_groups.values() if values])
+    shape = layout_metrics(
+        component_values,
+        unit_groups,
+        full=bool(complete),
+        include_void=True,
     )
     q_span = int(shape["q_span"])
     r_span = int(shape["r_span"])
+    principal_ratio = float(shape["principal_axis_ratio"])
+    # One or two aromatic units are intrinsically elongated.  Tightening the
+    # target only after a component has enough joints prevents early beam
+    # search from rejecting every legitimate start while strongly favouring a
+    # folded, space-filling pose for long rigid chains.
+    target_ratio = (
+        math.inf if placed_unit_count <= 2
+        else 3.0 if placed_unit_count <= 4
+        else 2.2
+    )
+    axis_excess = (
+        0.0 if math.isinf(target_ratio)
+        else max(0.0, principal_ratio - target_ratio)
+    )
+    compactness_energy = (
+        3.0 * axis_excess * axis_excess
+        + 1.5 * float(shape["normalized_radius_of_gyration"])
+        + 1.0 * float(shape["unit_density_cv"])
+        + 0.5 * float(shape["node_density_cv"])
+        + 1.5 * max(0.0, float(shape["largest_void_radius"]) - 4.0) ** 2
+        + 0.5 * max(0.0, 0.45 - float(shape["hull_fill"])) ** 2
+    )
     return (
-        float(shape["principal_axis_ratio"]),
+        float(compactness_energy),
+        float(axis_excess),
+        float(shape["largest_void_radius"]),
+        float(shape["normalized_radius_of_gyration"]),
+        float(shape["unit_density_cv"]),
+        float(shape["node_density_cv"]),
+        principal_ratio,
         float(shape["linearity"]),
         max(q_span, r_span),
         abs(q_span - r_span),
@@ -755,9 +815,57 @@ def _rigid_component_beam_rank(
     return (
         -int(completed),
         -int(placed),
-        *_rigid_component_shape_rank(state, unit_ids),
+        *_rigid_component_shape_rank(state, unit_ids, complete=False),
         _rigid_component_signature(state, unit_ids, contracts),
     )
+
+
+def _rigid_root_candidates(
+    units: Iterable[str],
+    contracts: Sequence[Any],
+) -> List[str]:
+    """Return graph-centre, branch and leaf roots in a bounded order."""
+    unit_ids = set(str(value) for value in units)
+    adjacency: Dict[str, set[str]] = {unit_id: set() for unit_id in unit_ids}
+    for contract in contracts:
+        left = str(contract.source_unit_id)
+        right = str(contract.target_unit_id)
+        if left in adjacency and right in adjacency:
+            adjacency[left].add(right)
+            adjacency[right].add(left)
+
+    eccentricity: Dict[str, int] = {}
+    for root in unit_ids:
+        distance = {root: 0}
+        queue = [root]
+        for current in queue:
+            for neighbor in adjacency[current]:
+                if neighbor not in distance:
+                    distance[neighbor] = distance[current] + 1
+                    queue.append(neighbor)
+        eccentricity[root] = max(distance.values(), default=0)
+
+    centers = sorted(
+        unit_ids,
+        key=lambda unit_id: (
+            eccentricity[unit_id],
+            -len(adjacency[unit_id]),
+            unit_sort_key(unit_id),
+        ),
+    )[:2]
+    branches = sorted(
+        (unit_id for unit_id in unit_ids if len(adjacency[unit_id]) > 2),
+        key=lambda unit_id: (-len(adjacency[unit_id]), unit_sort_key(unit_id)),
+    )
+    leaves = sorted(
+        (unit_id for unit_id in unit_ids if len(adjacency[unit_id]) <= 1),
+        key=lambda unit_id: unit_sort_key(unit_id),
+    )
+    ordered: List[str] = []
+    for unit_id in centers + branches + leaves:
+        if unit_id not in ordered:
+            ordered.append(unit_id)
+    return ordered[:6] or sorted(unit_ids, key=unit_sort_key)[:1]
 
 
 def _grow_rigid_component_beam(
@@ -781,7 +889,7 @@ def _grow_rigid_component_beam(
     contract_ids = {
         str(contract.contract_id) for contract in contracts
     }
-    width = max(4, min(32, max(int(beam_width), int(candidate_k))))
+    width = max(24, min(96, max(4 * int(beam_width), 4 * int(candidate_k))))
     beam = [state]
     complete: List[HexAssemblyState] = []
     step_budget = max(
@@ -814,7 +922,7 @@ def _grow_rigid_component_beam(
                     candidate,
                     contract,
                     active,
-                    max(2, int(candidate_k)),
+                    max(12, 3 * int(candidate_k)),
                 )
                 if actions:
                     boundary.append((
@@ -906,10 +1014,58 @@ def _grow_rigid_component_beam(
     return min(
         complete,
         key=lambda value: (
-            _rigid_component_shape_rank(value, units),
+            _rigid_component_shape_rank(value, units, complete=True),
             _rigid_component_signature(value, units, contracts),
         ),
     )
+
+
+def _rigid_component_metrics(
+    state: HexAssemblyState,
+    components: Sequence[Tuple[set[str], Sequence[Any]]],
+) -> List[Dict[str, Any]]:
+    """Audit physical shape per rigid component, excluding staging gaps."""
+    rows: List[Dict[str, Any]] = []
+    for index, (units, contracts) in enumerate(components):
+        node_ids = {
+            int(node.node_id)
+            for unit_id in units
+            if state.is_placed(str(unit_id))
+            for node in state.unit(str(unit_id)).nodes
+            if int(node.node_id) in state.node_axial
+        }
+        groups = {
+            str(unit_id): [
+                state.node_axial[int(node.node_id)]
+                for node in state.unit(str(unit_id)).nodes
+                if int(node.node_id) in node_ids
+            ]
+            for unit_id in units
+        }
+        metrics = layout_metrics(
+            [state.node_axial[node_id] for node_id in node_ids],
+            groups,
+            full=True,
+            include_void=True,
+        )
+        unit_count = len(units)
+        ratio_limit = math.inf if unit_count <= 2 else 3.0 if unit_count <= 4 else 2.2
+        rows.append({
+            "component_index": int(index),
+            "unit_ids": sorted(units, key=unit_sort_key),
+            "unit_count": int(unit_count),
+            "node_count": len(node_ids),
+            "contract_count": len(contracts),
+            "principal_axis_ratio_limit": (
+                None if math.isinf(ratio_limit) else float(ratio_limit)
+            ),
+            **metrics,
+            "component_layout_valid": bool(
+                float(metrics["principal_axis_ratio"]) <= ratio_limit
+                and float(metrics["largest_void_radius"]) <= 8.0
+            ),
+        })
+    return rows
 
 
 def _pack_rigid_components(
@@ -1078,31 +1234,7 @@ def _search_rigid_components(
         # non-root units.  Occupancy is restricted to the root while growing;
         # already-solved components remain in ``node_axial`` but do not block
         # this independent rigid solve.
-        roots = sorted(
-            units,
-            key=lambda unit_id: (
-                sum(
-                    1 for contract in contracts
-                    if unit_id in {
-                        str(contract.source_unit_id),
-                        str(contract.target_unit_id),
-                    }
-                ) != 1,
-                unit_id,
-            ),
-        )
-        degrees = {
-            unit_id: sum(
-                1 for contract in contracts
-                if unit_id in {
-                    str(contract.source_unit_id),
-                    str(contract.target_unit_id),
-                }
-            )
-            for unit_id in units
-        }
-        leaf_roots = [root for root in roots if degrees[root] <= 1]
-        roots_to_try = leaf_roots or roots
+        roots_to_try = _rigid_root_candidates(units, contracts)
         solved_candidates: List[HexAssemblyState] = []
         for root in roots_to_try:
             trial_base = current.clone()
@@ -1150,7 +1282,9 @@ def _search_rigid_components(
             min(
                 solved_candidates,
                 key=lambda value: (
-                    _rigid_component_shape_rank(value, units),
+                    _rigid_component_shape_rank(
+                        value, units, complete=True
+                    ),
                     _rigid_component_signature(value, units, contracts),
                 ),
             )
@@ -1176,6 +1310,9 @@ def _search_rigid_components(
     _pack_rigid_components(current, components)
     actions = copy.deepcopy(current.action_history)
     result = TopologyPlacementStage(current, "rigid").get_result()
+    result["rigid_component_metrics"] = _rigid_component_metrics(
+        current, components
+    )
     return SearchResult(
         state=current,
         score=float(TopologyPlacementStage(current, "rigid").score()),

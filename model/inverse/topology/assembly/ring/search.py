@@ -42,6 +42,37 @@ def view_is_fused_pair_bridgehead(assembler, view: AssemblyFragmentView) -> bool
     )
 
 
+def view_supports_fused_pair_bridgeheads(
+    assembler,
+    view: AssemblyFragmentView,
+) -> bool:
+    """Return whether one real adjacent 14-14 view can fill both bridgeheads."""
+    if not view_is_fused_pair_bridgehead(assembler, view):
+        return False
+    if "fused" not in ring_planner_module.view_ring_allowed_skeletons(assembler, view):
+        return False
+    node_ids = ring_segments_module.view_ring_backbone_node_ids(
+        assembler,
+        view,
+        skeleton_kind="fused",
+        reverse=False,
+    )
+    if len(node_ids) != 2 or any(node_id is None for node_id in node_ids):
+        return False
+    left_id, right_id = (int(node_ids[0]), int(node_ids[1]))
+    if left_id == right_id:
+        return False
+    left = assembler.nodes_by_id.get(left_id)
+    right = assembler.nodes_by_id.get(right_id)
+    if left is None or right is None:
+        return False
+    if int(getattr(left, "su_type", -1)) != 14 or int(getattr(right, "su_type", -1)) != 14:
+        return False
+    left_neighbors = {int(value) for value in list(getattr(left, "hop1_ids", []) or [])}
+    right_neighbors = {int(value) for value in list(getattr(right, "hop1_ids", []) or [])}
+    return bool(right_id in left_neighbors or left_id in right_neighbors)
+
+
 def view_supports_fused_bridgehead_single(assembler, view: AssemblyFragmentView) -> bool:
     return bool(
         "fused" in ring_planner_module.view_ring_allowed_skeletons(assembler, view)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field, replace
 import copy
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
@@ -18,6 +19,7 @@ from .geometry import (
     transform_direction,
     aromatic_slot_direction,
     coordinate_aspect,
+    state_layout_metrics,
     unit_sort_key,
     valid_hex_directions,
 )
@@ -25,6 +27,8 @@ from .models import (
     ExternalContract,
     InverseAssemblyInput,
     InverseInputError,
+    MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
+    TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES,
     TopologyUnit,
     UnitEdge,
     UnitPort,
@@ -1025,6 +1029,50 @@ class HexAssemblyState:
             return False
         return not self.mandatory_contracts(phase)
 
+    def audit_resource_partition_errors(self) -> List[Dict[str, Any]]:
+        assembled = self.problem.node_map()
+        ownership = self.problem.ownership_map()
+        resources = tuple(self.problem.unassembled_closure_resources)
+        errors: List[Dict[str, Any]] = []
+        if set(assembled) != set(ownership):
+            errors.append({
+                "reason": "assembled_node_ownership_mismatch",
+                "missing_ownership_ids": sorted(set(assembled) - set(ownership)),
+                "unexpected_ownership_ids": sorted(set(ownership) - set(assembled)),
+            })
+        resource_ids = [int(resource.node_id) for resource in resources]
+        if len(resource_ids) != len(set(resource_ids)):
+            errors.append({
+                "reason": "duplicate_unassembled_resource_id",
+                "node_ids": sorted(resource_ids),
+            })
+        overlap = sorted(set(resource_ids) & set(assembled))
+        if overlap:
+            errors.append({
+                "reason": "unassembled_resource_owned_by_graph",
+                "node_ids": overlap,
+            })
+        if len(resources) > MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES:
+            errors.append({
+                "reason": "unassembled_resource_limit_exceeded",
+                "count": len(resources),
+                "limit": MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
+            })
+        for resource in resources:
+            if str(resource.state) != "remaining_closure_resource":
+                errors.append({
+                    "reason": "unassembled_resource_state_invalid",
+                    "node_id": int(resource.node_id),
+                    "state": str(resource.state),
+                })
+            if int(resource.su_type) not in TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES:
+                errors.append({
+                    "reason": "unassembled_resource_su_invalid",
+                    "node_id": int(resource.node_id),
+                    "su_type": int(resource.su_type),
+                })
+        return errors
+
     def is_complete(self) -> bool:
         return (
             all(self.is_placed(unit.unit_id) for unit in self.problem.units)
@@ -1037,6 +1085,7 @@ class HexAssemblyState:
             and not self.audit_port_direction_errors()
             and not self.audit_unintended_contacts()
             and not self.audit_substitution_errors()
+            and not self.audit_resource_partition_errors()
         )
 
     def audit_substitution_errors(self) -> List[Dict[str, Any]]:
@@ -1288,10 +1337,49 @@ class HexAssemblyState:
         port_direction_errors = self.audit_port_direction_errors()
         unintended_contacts = self.audit_unintended_contacts()
         substitution_errors = self.audit_substitution_errors()
-        shape_metrics = coordinate_aspect(self.node_axial.values())
+        resource_partition_errors = self.audit_resource_partition_errors()
+        unassembled_resources = tuple(
+            self.problem.unassembled_closure_resources
+        )
+        # Audit the complete assembled molecule, including staging nodes that
+        # may be hidden from the active collision index during flex search.
+        shape_metrics = state_layout_metrics(self, full=True, include_all=True)
         shape_warnings = []
-        if float(shape_metrics["principal_axis_ratio"]) > 4.0:
+        if float(shape_metrics["principal_axis_ratio"]) > 2.5:
             shape_warnings.append("excessive_principal_axis_ratio")
+        if float(shape_metrics.get("largest_void_radius", 0.0)) > 8.0:
+            shape_warnings.append("large_internal_void")
+        if float(shape_metrics.get("unit_density_cv", 0.0)) > 0.60:
+            shape_warnings.append("uneven_unit_density")
+        if float(shape_metrics.get("hull_fill", 1.0)) < 0.30:
+            shape_warnings.append("low_convex_hull_fill")
+
+        ownership = self.problem.ownership_map()
+        unit_phase = {
+            str(unit.unit_id): str(unit.phase) for unit in self.problem.units
+        }
+        side_unit_loads: Counter[str] = Counter()
+        for edge in self.edges:
+            if str(edge.kind) != "side":
+                continue
+            left = ownership.get(int(edge.source_node_id), "")
+            right = ownership.get(int(edge.target_node_id), "")
+            if left == right:
+                continue
+            if unit_phase.get(left) == "aromatic" and unit_phase.get(right) == "side":
+                side_unit_loads[left] += 1
+            elif unit_phase.get(right) == "aromatic" and unit_phase.get(left) == "side":
+                side_unit_loads[right] += 1
+        side_attachment_count = sum(side_unit_loads.values())
+        side_coverage_ratio = (
+            len(side_unit_loads) / side_attachment_count
+            if side_attachment_count else 1.0
+        )
+        side_distribution_warnings = []
+        if max(side_unit_loads.values(), default=0) > 2:
+            side_distribution_warnings.append("side_unit_overloaded")
+        if side_attachment_count >= 4 and side_coverage_ratio < 0.65:
+            side_distribution_warnings.append("side_attachments_clustered")
         return {
             "complete": bool(self.is_complete()),
             "stage": str(self.stage),
@@ -1299,6 +1387,21 @@ class HexAssemblyState:
             "unit_count": len(self.problem.units),
             "placed_node_count": len(placed_ids),
             "expected_node_count": len(expected_ids),
+            "source_node_count": int(dict(self.problem.diagnostics).get(
+                "source_node_count",
+                len(expected_ids) + len(unassembled_resources),
+            )),
+            "unassembled_resource_count": len(unassembled_resources),
+            "unassembled_resource_ids": sorted(
+                int(resource.node_id) for resource in unassembled_resources
+            ),
+            "strict_all_nodes_assembled": not bool(unassembled_resources),
+            "completion_mode": (
+                "tolerated_unassembled_closure_resources"
+                if unassembled_resources else "strict_all_nodes_assembled"
+            ),
+            "resource_partition_errors": resource_partition_errors,
+            "resource_partition_valid": not resource_partition_errors,
             "missing_node_ids": sorted(expected_ids - placed_ids),
             "unexpected_node_ids": sorted(placed_ids - expected_ids),
             "pending_contract_ids": sorted(contract.contract_id for contract in self.mandatory_contracts()),
@@ -1315,6 +1418,17 @@ class HexAssemblyState:
             "shape_metrics": shape_metrics,
             "shape_valid": not shape_warnings,
             "shape_warnings": shape_warnings,
+            "side_distribution": {
+                "attachment_count": int(side_attachment_count),
+                "covered_aromatic_unit_count": len(side_unit_loads),
+                "coverage_ratio": float(side_coverage_ratio),
+                "max_unit_load": max(side_unit_loads.values(), default=0),
+                "unit_loads": dict(sorted(
+                    side_unit_loads.items(), key=lambda row: unit_sort_key(row[0])
+                )),
+            },
+            "side_distribution_valid": not side_distribution_warnings,
+            "side_distribution_warnings": side_distribution_warnings,
             "allowed_unbonded_contacts": sorted(
                 sorted(pair) for pair in self.allowed_unbonded_contacts
             ),
@@ -1385,6 +1499,16 @@ class HexAssemblyState:
                     "direction": list(edge.direction) if edge.direction is not None else None,
                 }
                 for edge in self.edges
+            ],
+            "unassembled_resources": [
+                {
+                    "node_id": int(resource.node_id),
+                    "su_type": int(resource.su_type),
+                    "state": str(resource.state),
+                    "hop1_ids": [int(value) for value in resource.hop1_ids],
+                    "reason": str(resource.reason),
+                }
+                for resource in self.problem.unassembled_closure_resources
             ],
             "audit": self.audit(),
         }

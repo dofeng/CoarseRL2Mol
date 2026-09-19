@@ -13,6 +13,7 @@ from ...shared.inverse_common import (
     get_effective_hist_element_vector,
     estimate_region_carbon_budgets,
 )
+from ...shared.aromatic_plan import su12_transition_diagnostics
 from ..special_anchor_evidence import (
     SU19_DOUBLE_EVIDENCE_WINDOWS,
     split_su19_double_area,
@@ -293,6 +294,19 @@ class Layer0Estimator:
                 'reason': 'histogram_transition_does_not_fix_parity',
                 'target_degree_sum_before': int(before),
                 'target_degree_sum_after': int(after),
+            }
+
+        probe = H_new.detach().clone()
+        probe[int(source_su)] -= 1
+        probe[int(target_su)] += 1
+        su12_cap = su12_transition_diagnostics(H_new, probe)
+        if not bool(su12_cap.get('generation_allowed', True)):
+            return H_new, {
+                'adjusted': False,
+                'reason': 'su12_generation_cap_reached',
+                'target_degree_sum_before': int(before),
+                'target_degree_sum_after': int(after),
+                'su12_cap': dict(su12_cap),
             }
 
         H_new[int(source_su)] -= 1
@@ -2094,6 +2108,14 @@ class Layer0Estimator:
             target_11 -= reducible
             aromatic_excess -= reducible
 
+        # Apply the same 4:5 SU12 budget used by Stage3 to the initial
+        # histogram estimate, so later soft-H corrections do not start from a
+        # structurally over-cap aromatic state.
+        non_bridgehead = int(existing_5_9 + target_10 + target_11 + target_13)
+        max_target_12 = int((4 * non_bridgehead) // 5)
+        max_target_12 -= int(max_target_12 % 2)
+        target_12 = min(int(target_12), max(0, int(max_target_12)))
+
         aromatic_deficit = int(W - existing_5_9 - target_10 - target_11 - target_12 - target_13)
         if aromatic_deficit > 0:
             target_11 += int(aromatic_deficit)
@@ -2183,8 +2205,19 @@ class Layer0Estimator:
 
         while reduced < X:
             if H_new[13] > 0:
+                target_su = int(cycle[c_idx])
+                if target_su == 12:
+                    probe = H_new.detach().clone()
+                    probe[13] -= 1
+                    probe[12] += 1
+                    if not bool(
+                        su12_transition_diagnostics(H_new, probe).get(
+                            'generation_allowed', True
+                        )
+                    ):
+                        target_su = 11 if int(H_new[11].item()) >= 0 else 10
                 H_new[13] -= 1
-                H_new[cycle[c_idx]] += 1
+                H_new[target_su] += 1
                 reduced += 1
                 c_idx = (c_idx + 1) % len(cycle)
             else:

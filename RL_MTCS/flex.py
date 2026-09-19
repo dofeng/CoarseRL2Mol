@@ -19,6 +19,7 @@ from .geometry import (
     aromatic_slot_direction,
     axial_to_cartesian,
     coordinate_aspect,
+    state_layout_metrics,
     state_shape_rank,
     unit_sort_key,
 )
@@ -1344,6 +1345,7 @@ class _SiteSearchCandidate:
     actions: List[Dict[str, Any]]
     nmr_score: Dict[str, Any] | None = None
     nmr_rank: float | None = None
+    shape_rank: Tuple[Any, ...] = ()
 
 
 def _rigid_endpoint_ids(state: HexAssemblyState) -> Set[int]:
@@ -1383,6 +1385,36 @@ def _component_slot_records(
                 tuple(outward),
             ))
     return sorted(records, key=lambda row: (_unit_sort_key(row[0]), row[1]))
+
+
+def _diverse_slot_records(
+    records: Sequence[Tuple[str, int, Tuple[int, int], Tuple[int, int]]],
+    limit: int,
+) -> List[Tuple[str, int, Tuple[int, int], Tuple[int, int]]]:
+    """Sample sites across aromatic units and outward directions."""
+    if len(records) <= max(1, int(limit)):
+        return list(records)
+    grouped: Dict[
+        Tuple[str, Tuple[int, int]],
+        List[Tuple[str, int, Tuple[int, int], Tuple[int, int]]],
+    ] = {}
+    for record in records:
+        grouped.setdefault((str(record[0]), tuple(record[3])), []).append(record)
+    keys = sorted(grouped, key=lambda row: (_unit_sort_key(row[0]), row[1]))
+    selected = []
+    round_index = 0
+    while keys and len(selected) < max(1, int(limit)):
+        next_keys = []
+        for key in keys:
+            values = grouped[key]
+            if round_index < len(values):
+                selected.append(values[round_index])
+                next_keys.append(key)
+                if len(selected) >= max(1, int(limit)):
+                    break
+        keys = next_keys
+        round_index += 1
+    return selected
 
 
 def _flex_port_records(
@@ -1484,7 +1516,7 @@ def _occupied_span(state: HexAssemblyState) -> Tuple[int, int, int]:
 
 
 def _coordinate_aspect(state: HexAssemblyState) -> Dict[str, Any]:
-    return coordinate_aspect(state.occupied_axial)
+    return state_layout_metrics(state, full=False, include_void=True)
 
 
 def _state_shape_rank(state: HexAssemblyState) -> Tuple[Any, ...]:
@@ -1498,11 +1530,40 @@ def _site_candidate_rank(candidate: _SiteSearchCandidate) -> Tuple[Any, ...]:
             float(candidate.nmr_rank),
             float(candidate.nmr_score["loss"]),
         )
+    if not candidate.shape_rank:
+        candidate.shape_rank = _state_shape_rank(candidate.state)
+    shape_rank = candidate.shape_rank
+    combined_rank = float(shape_rank[0])
+    if nmr_prefix:
+        # Preserve NMR discrimination while making compactness a meaningful
+        # secondary objective instead of allowing graph score alone to choose
+        # a hollow or highly elongated pose.
+        combined_rank = float(nmr_prefix[0]) + 0.10 * float(shape_rank[0])
+    nmr_tail = nmr_prefix[1:] if nmr_prefix else ()
     return (
-        *nmr_prefix,
-        *_state_shape_rank(candidate.state),
+        combined_rank,
+        *nmr_tail,
+        *shape_rank[1:],
         tuple(sorted(candidate.boundary_site_ids.items())),
     )
+
+
+def _bounded_nmr_scoring_pool(
+    candidates: Sequence[_SiteSearchCandidate],
+    limit: int,
+) -> List[_SiteSearchCandidate]:
+    """Deduplicate and geometrically prefilter one expensive NMR layer."""
+    unique: Dict[Tuple[Any, ...], _SiteSearchCandidate] = {}
+    for candidate in sorted(candidates, key=_site_candidate_rank):
+        signature = (
+            candidate.state.state_signature(),
+            tuple(sorted(candidate.boundary_site_ids.items())),
+            tuple(sorted(candidate.active_component_indices)),
+        )
+        unique.setdefault(signature, candidate)
+        if len(unique) >= max(1, int(limit)):
+            break
+    return list(unique.values())
 
 
 def _score_site_candidates(
@@ -1530,6 +1591,7 @@ def _score_site_candidates(
             float(shape["violation"])
             + 0.10 * abs(float(shape["q_over_r"]) - 1.0)
             + 0.05 * abs(float(shape["width_over_height"]) - 1.0)
+            + 0.05 * float(shape.get("layout_energy", 0.0))
         )
         contact_penalty = len(candidate.state.allowed_unbonded_contacts)
         candidate.nmr_score = dict(score)
@@ -1695,6 +1757,7 @@ def _backbone_site_outcomes(
     allow_hub_neighbors = len(groups) > 2
     outcomes: List[_SiteSearchCandidate] = []
     seen = set()
+    pool_limit = max(24, 2 * max(1, int(max_candidates)))
 
     def match_group(
         group: Sequence[Tuple[ExternalContract, int, int, Any]],
@@ -1748,6 +1811,7 @@ def _backbone_site_outcomes(
                 rigid_components[active_index],
                 candidate.used_site_ids,
             )
+            anchor_slots = _diverse_slot_records(anchor_slots, 48)
             for _uid, first_site, first_axial, first_outward in anchor_slots:
                 for reflection in (False, True):
                     for rotation in range(6):
@@ -1843,6 +1907,7 @@ def _backbone_site_outcomes(
                                     rigid_components[component_index],
                                     set(candidate.used_site_ids) | selected_sites,
                                 )
+                                slots = _diverse_slot_records(slots, 48)
                                 representative = rigid_components[component_index][0]
                                 for _su, site_id, site_axial, site_outward in slots:
                                     for component_reflection in (False, True):
@@ -1943,6 +2008,16 @@ def _backbone_site_outcomes(
                                                         "translation": list(component_translation),
                                                     }],
                                                 ))
+                                                if len(next_partial) >= pool_limit:
+                                                    break
+                                            if len(next_partial) >= pool_limit:
+                                                break
+                                        if len(next_partial) >= pool_limit:
+                                            break
+                                    if len(next_partial) >= pool_limit:
+                                        break
+                                if len(next_partial) >= pool_limit:
+                                    break
                             partial = sorted(
                                 next_partial,
                                 key=lambda row: _state_shape_rank(row[0]),
@@ -1992,7 +2067,7 @@ def _backbone_site_outcomes(
                             if signature not in seen:
                                 seen.add(signature)
                                 outcomes.append(result)
-                                if len(outcomes) >= max(1, int(max_candidates)):
+                                if len(outcomes) >= pool_limit:
                                     return sorted(
                                         outcomes, key=_site_candidate_rank
                                     )[:max(1, int(max_candidates))]
@@ -2014,7 +2089,12 @@ def _interior_site_outcomes(
         for index in sorted(candidate.active_component_indices)
         for unit_id in rigid_components[index]
     )
-    slots = _component_slot_records(state, active_units, candidate.used_site_ids)
+    slots = _diverse_slot_records(
+        _component_slot_records(
+            state, active_units, candidate.used_site_ids
+        ),
+        96,
+    )
     slot_index: Dict[
         Tuple[Tuple[int, int], Tuple[int, int]],
         List[Tuple[str, int, Tuple[int, int], Tuple[int, int]]],
@@ -2023,6 +2103,7 @@ def _interior_site_outcomes(
         slot_index.setdefault((slot[2], slot[3]), []).append(slot)
     outcomes: List[_SiteSearchCandidate] = []
     seen = set()
+    pool_limit = max(24, 2 * max(1, int(max_candidates)))
 
     for anchor_index, anchor_record in enumerate(records):
         contract, topology_node_id, boundary_id, topology_port = anchor_record
@@ -2143,7 +2224,7 @@ def _interior_site_outcomes(
                         if signature not in seen:
                             seen.add(signature)
                             outcomes.append(result)
-                            if len(outcomes) >= max(1, int(max_candidates)):
+                            if len(outcomes) >= pool_limit:
                                 return sorted(
                                     outcomes, key=_site_candidate_rank
                                 )[:max(1, int(max_candidates))]
@@ -2331,40 +2412,11 @@ def _run_csv_site_flex_search(
         active_component_indices=frozenset({int(anchor_index)}),
         actions=[],
     )]
-    remaining_component_indices = [
-        index for index in range(len(rigid_components)) if index != anchor_index
-    ]
-    # The first, highest-port-count topology is a compact hub.  Feed only its
-    # close arms with the smallest rigid components, then restore the proven
-    # large-to-small order for the longer two-ended backbone bridges.
-    hub_components = sorted(
-        remaining_component_indices,
-        key=lambda index: (
-            node_counts[index],
-            tuple(map(_unit_sort_key, rigid_components[index])),
-        ),
-    )[:first_expansion]
-    hub_component_set = set(hub_components)
-    component_order = hub_components + sorted(
-        (
-            index for index in remaining_component_indices
-            if index not in hub_component_set
-        ),
-        key=lambda index: (
-            -node_counts[index],
-            tuple(map(_unit_sort_key, rigid_components[index])),
-        ),
-    )
-    component_cursor = 0
-    search_width = (
-        max(1, int(beam_width))
-        if nmr_scorer is not None
-        else max(4, min(16, max(int(beam_width), int(candidate_k))))
-    )
-    outcome_limit = (
-        max(1, int(candidate_k))
-        if nmr_scorer is not None
-        else max(4, min(12, int(candidate_k)))
+    # Each beam state chooses its own next rigid component.  A global fixed
+    # component order made one early choice determine the complete backbone.
+    search_width = max(4, min(8, max(int(beam_width), int(candidate_k))))
+    outcome_limit = max(
+        12, min(24, max(int(candidate_k), 2 * int(beam_width)))
     )
     explored = 0
     nmr_protected_ids = _rigid_endpoint_ids(initial)
@@ -2375,24 +2427,43 @@ def _run_csv_site_flex_search(
         selected_topology_id: str | None = None
         selected_expansion = 0
         selected_beam: List[_SiteSearchCandidate] = []
+        viable_options: List[Tuple[str, int, List[_SiteSearchCandidate]]] = []
         for topology_unit_id in pending_backbone_ids:
             expansion = len(_flex_port_groups(initial, topology_unit_id)) - 1
-            outside = component_order[
-                component_cursor:component_cursor + expansion
-            ]
-            if len(outside) != expansion:
-                continue
             next_beam: List[_SiteSearchCandidate] = []
             for candidate in beam:
-                outcomes = _backbone_site_outcomes(
-                    candidate,
-                    topology_unit_id,
-                    outside,
-                    rigid_components,
-                    outcome_limit,
+                remaining = sorted(
+                    set(range(len(rigid_components)))
+                    - set(candidate.active_component_indices),
+                    key=lambda index: (
+                        -node_counts[index],
+                        tuple(map(_unit_sort_key, rigid_components[index])),
+                    ),
                 )
-                explored += len(outcomes)
-                next_beam.extend(outcomes)
+                if len(remaining) < expansion:
+                    continue
+                # Compare the large-first and small-first extremes directly.
+                # Materialising every permutation here is factorial in the
+                # number of disconnected rigid components even though only
+                # those two deterministic alternatives are retained.
+                component_options = [tuple(remaining[:expansion])]
+                reverse_option = tuple(reversed(remaining))[:expansion]
+                if reverse_option != component_options[0]:
+                    component_options.append(reverse_option)
+                for outside in component_options:
+                    outcomes = _backbone_site_outcomes(
+                        candidate,
+                        topology_unit_id,
+                        outside,
+                        rigid_components,
+                        outcome_limit,
+                    )
+                    explored += len(outcomes)
+                    next_beam.extend(outcomes)
+            if nmr_scorer is not None:
+                next_beam = _bounded_nmr_scoring_pool(
+                    next_beam, max(8, search_width)
+                )
             _score_site_candidates(
                 next_beam,
                 nmr_scorer=nmr_scorer,
@@ -2412,10 +2483,22 @@ def _run_csv_site_flex_search(
                 if len(unique) >= search_width:
                     break
             if unique:
-                selected_topology_id = str(topology_unit_id)
-                selected_expansion = int(expansion)
-                selected_beam = list(unique.values())
-                break
+                viable_options.append((
+                    str(topology_unit_id),
+                    int(expansion),
+                    list(unique.values()),
+                ))
+                if len(viable_options) >= 2:
+                    break
+
+        if viable_options:
+            selected_topology_id, selected_expansion, selected_beam = min(
+                viable_options,
+                key=lambda item: min(
+                    (_site_candidate_rank(candidate) for candidate in item[2]),
+                    default=(math.inf,),
+                ),
+            )
 
         if selected_topology_id is None:
             errors.append(
@@ -2425,16 +2508,25 @@ def _run_csv_site_flex_search(
             beam = []
             break
         beam = selected_beam
-        component_cursor += selected_expansion
         pending_backbone_ids.remove(selected_topology_id)
         executed_backbone_ids.append(selected_topology_id)
 
-    if beam and component_cursor != len(component_order):
+    complete_component_beam = [
+        candidate for candidate in beam
+        if len(candidate.active_component_indices) == len(rigid_components)
+    ]
+    if beam and not complete_component_beam:
+        remaining_count = min(
+            len(rigid_components) - len(candidate.active_component_indices)
+            for candidate in beam
+        )
         errors.append(
-            f"flex backbone left {len(component_order)-component_cursor} "
+            f"flex backbone left {remaining_count} "
             "rigid components disconnected"
         )
         beam = []
+    elif complete_component_beam:
+        beam = complete_component_beam
 
     for topology_unit_id in interior_ids if beam else ():
         next_beam = []
@@ -2447,6 +2539,10 @@ def _run_csv_site_flex_search(
             )
             explored += len(outcomes)
             next_beam.extend(outcomes)
+        if nmr_scorer is not None:
+            next_beam = _bounded_nmr_scoring_pool(
+                next_beam, max(8, search_width)
+            )
         _score_site_candidates(
             next_beam,
             nmr_scorer=nmr_scorer,
@@ -2517,9 +2613,9 @@ def _run_csv_site_flex_search(
         selected = min(
             beam,
             key=lambda candidate: (
-                abs(
-                    float(_coordinate_aspect(candidate.state)["width_over_height"])
-                    - 1.0
+                float(_site_candidate_rank(candidate)[0])
+                + 0.05 * float(
+                    state_layout_metrics(candidate.state, full=True)["layout_energy"]
                 ),
                 _site_candidate_rank(candidate),
             ),

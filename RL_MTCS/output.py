@@ -241,6 +241,21 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
                 str(edge.contract_id), direction, bool(edge.direction is not None),
             ])
 
+    residual_path = directory / "final_unassembled_resources.csv"
+    with residual_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow([
+            "node_id", "su_type", "state", "hop1_ids", "reason",
+        ])
+        for resource in state.problem.unassembled_closure_resources:
+            writer.writerow([
+                int(resource.node_id),
+                int(resource.su_type),
+                str(resource.state),
+                json.dumps([int(value) for value in resource.hop1_ids]),
+                str(resource.reason),
+            ])
+
     png_path = directory / "final_molecule.png"
     try:
         save_state_png(
@@ -264,6 +279,7 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
         "molecule_json": str(directory / "final_molecule.json"),
         "nodes_csv": str(directory / "final_nodes.csv"),
         "edges_csv": str(directory / "final_edges.csv"),
+        "unassembled_resources_csv": str(residual_path),
         "audit_json": str(directory / "final_audit.json"),
         "subst_png": str(directory / "subst_result.png"),
     }

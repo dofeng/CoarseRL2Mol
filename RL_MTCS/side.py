@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from dataclasses import dataclass
+import math
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Set, Tuple
 
 from .geometry import (
     aromatic_slot_direction as _aromatic_slot_direction,
-    coordinate_aspect,
+    axial_distance,
+    state_layout_metrics,
     state_shape_rank as _state_shape_rank,
     unit_sort_key as _unit_sort_key,
 )
@@ -31,7 +34,7 @@ from .rigid import SearchResult, TopologyPlacementStage, search_phase
 
 def _coordinate_aspect(state: HexAssemblyState) -> Dict[str, Any]:
     """Compatibility adapter around the shared pure geometry helper."""
-    return coordinate_aspect(state.occupied_axial)
+    return state_layout_metrics(state, full=False, include_void=True)
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,19 @@ class _SideCandidate:
     actions: List[Dict[str, Any]]
     nmr_score: Dict[str, Any] | None = None
     nmr_rank: float | None = None
+    distribution_rank: Tuple[Any, ...] = ()
+    shape_rank: Tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True)
+class _SideDistributionContext:
+    site_to_unit: Mapping[int, str]
+    site_axial: Mapping[int, Tuple[int, int]]
+    unit_to_component: Mapping[str, int]
+    unit_capacity: Mapping[str, int]
+    component_capacity: Mapping[int, int]
+    site_bin: Mapping[int, Tuple[int, int]]
+    bin_capacity: Mapping[Tuple[int, int], int]
 
 
 def _aromatic_endpoint(
@@ -190,6 +206,173 @@ def _site_records(
     return sorted(rows, key=lambda row: (_unit_sort_key(row[0]), row[1]))
 
 
+def _aromatic_component_map(state: HexAssemblyState) -> Dict[str, int]:
+    aromatic_ids = {
+        str(unit.unit_id)
+        for unit in state.problem.units
+        if unit.phase == "aromatic"
+    }
+    adjacency: Dict[str, Set[str]] = {
+        unit_id: set() for unit_id in aromatic_ids
+    }
+    for contract in state.problem.contracts:
+        if contract.kind != "rigid":
+            continue
+        left = str(contract.source_unit_id)
+        right = str(contract.target_unit_id)
+        if left in adjacency and right in adjacency:
+            adjacency[left].add(right)
+            adjacency[right].add(left)
+    result: Dict[str, int] = {}
+    for component_index, root in enumerate(
+        sorted(aromatic_ids, key=_unit_sort_key)
+    ):
+        if root in result:
+            continue
+        result[root] = component_index
+        queue = [root]
+        for current in queue:
+            for neighbor in adjacency[current]:
+                if neighbor not in result:
+                    result[neighbor] = component_index
+                    queue.append(neighbor)
+    # Compress sparse indices caused by roots already assigned by an earlier
+    # traversal so component reports remain stable and easy to read.
+    remap = {
+        value: index for index, value in enumerate(sorted(set(result.values())))
+    }
+    return {unit_id: remap[index] for unit_id, index in result.items()}
+
+
+def _side_distribution_context(
+    state: HexAssemblyState,
+    site_rows: Sequence[Tuple[str, int, Tuple[int, int], Tuple[int, int]]],
+) -> _SideDistributionContext:
+    site_to_unit = {int(row[1]): str(row[0]) for row in site_rows}
+    site_axial = {int(row[1]): tuple(row[2]) for row in site_rows}
+    unit_to_component = _aromatic_component_map(state)
+    unit_capacity = Counter(site_to_unit.values())
+    component_capacity = Counter(
+        unit_to_component[unit_id] for unit_id in site_to_unit.values()
+    )
+    q_values = [axial[0] for axial in site_axial.values()]
+    r_values = [axial[1] for axial in site_axial.values()]
+    min_q, max_q = min(q_values), max(q_values)
+    min_r, max_r = min(r_values), max(r_values)
+    q_span = max(1, max_q - min_q)
+    r_span = max(1, max_r - min_r)
+    site_bin = {
+        site_id: (
+            min(2, int((axial[0] - min_q) / q_span * 3)),
+            min(2, int((axial[1] - min_r) / r_span * 3)),
+        )
+        for site_id, axial in site_axial.items()
+    }
+    return _SideDistributionContext(
+        site_to_unit=site_to_unit,
+        site_axial=site_axial,
+        unit_to_component=unit_to_component,
+        unit_capacity=dict(unit_capacity),
+        component_capacity=dict(component_capacity),
+        site_bin=site_bin,
+        bin_capacity=dict(Counter(site_bin.values())),
+    )
+
+
+def _side_distribution_metrics(
+    assignments: Mapping[int, int],
+    context: _SideDistributionContext,
+) -> Dict[str, Any]:
+    selected = [
+        int(site_id) for site_id in assignments.values()
+        if int(site_id) in context.site_to_unit
+    ]
+    total = len(selected)
+    if not selected:
+        return {
+            "energy": 0.0,
+            "unit_repeat_fraction": 0.0,
+            "max_unit_load": 0,
+            "component_load_rmse": 0.0,
+            "spatial_load_rmse": 0.0,
+            "crowding": 0.0,
+            "unit_loads": {},
+            "component_loads": {},
+        }
+    unit_loads = Counter(context.site_to_unit[site_id] for site_id in selected)
+    component_loads = Counter(
+        context.unit_to_component[context.site_to_unit[site_id]]
+        for site_id in selected
+    )
+    bin_loads = Counter(context.site_bin[site_id] for site_id in selected)
+    unit_repeat_fraction = sum(
+        max(0, load - 1) ** 2 for load in unit_loads.values()
+    ) / total
+
+    def proportional_rmse(
+        loads: Mapping[Any, int], capacities: Mapping[Any, int]
+    ) -> float:
+        capacity_total = max(1, sum(capacities.values()))
+        scale = max(1.0, total / max(1, len(capacities)))
+        return math.sqrt(sum(
+            (
+                float(loads.get(key, 0))
+                - total * float(capacity) / capacity_total
+            ) ** 2
+            for key, capacity in capacities.items()
+        ) / max(1, len(capacities))) / scale
+
+    component_rmse = proportional_rmse(
+        component_loads, context.component_capacity
+    )
+    spatial_rmse = proportional_rmse(bin_loads, context.bin_capacity)
+    pair_penalty = 0.0
+    pair_count = 0
+    for index, left in enumerate(selected):
+        for right in selected[index + 1:]:
+            distance = axial_distance(
+                context.site_axial[left], context.site_axial[right]
+            )
+            pair_penalty += (max(0.0, 6.0 - float(distance)) / 6.0) ** 2
+            pair_count += 1
+    crowding = pair_penalty / max(1, pair_count)
+    max_unit_load = max(unit_loads.values(), default=0)
+    energy = (
+        6.0 * unit_repeat_fraction
+        + 1.5 * max(0, max_unit_load - 1)
+        + 3.0 * component_rmse
+        + 2.0 * spatial_rmse
+        + 1.0 * crowding
+    )
+    return {
+        "energy": float(energy),
+        "unit_repeat_fraction": float(unit_repeat_fraction),
+        "max_unit_load": int(max_unit_load),
+        "component_load_rmse": float(component_rmse),
+        "spatial_load_rmse": float(spatial_rmse),
+        "crowding": float(crowding),
+        "unit_loads": dict(sorted(unit_loads.items(), key=lambda row: _unit_sort_key(row[0]))),
+        "component_loads": {
+            str(key): int(value) for key, value in sorted(component_loads.items())
+        },
+    }
+
+
+def _side_distribution_rank(
+    assignments: Mapping[int, int],
+    context: _SideDistributionContext,
+) -> Tuple[Any, ...]:
+    metrics = _side_distribution_metrics(assignments, context)
+    return (
+        float(metrics["energy"]),
+        float(metrics["unit_repeat_fraction"]),
+        int(metrics["max_unit_load"]),
+        float(metrics["component_load_rmse"]),
+        float(metrics["spatial_load_rmse"]),
+        float(metrics["crowding"]),
+    )
+
+
 def _record_hardness(
     state: HexAssemblyState,
     record: _SideRecord,
@@ -219,11 +402,12 @@ def _pose_specs(
     site_rows: Sequence[
         Tuple[str, int, Tuple[int, int], Tuple[int, int]]
     ],
-) -> List[Tuple[Tuple[Any, ...], int, int, Tuple[int, int], bool]]:
+    context: _SideDistributionContext,
+) -> List[Tuple[Tuple[Any, ...], str, int, int, Tuple[int, int], bool]]:
     state = candidate.state
     unit = state.unit(record.topology_unit_id)
     rows = []
-    for _aromatic_unit, site_id, site_axial, outward in site_rows:
+    for aromatic_unit, site_id, site_axial, outward in site_rows:
         if int(site_id) in candidate.used_site_ids:
             continue
         for reflection in (False, True):
@@ -283,6 +467,13 @@ def _pose_specs(
                 r_values = [coord[1] for coord in coordinates.values()]
                 rank = (
                     len(close_contacts),
+                    *_side_distribution_rank(
+                        {
+                            **candidate.boundary_site_ids,
+                            int(record.boundary_node_id): int(site_id),
+                        },
+                        context,
+                    ),
                     max(q_values) - min(q_values)
                     + max(r_values) - min(r_values),
                     int(site_id),
@@ -291,6 +482,7 @@ def _pose_specs(
                 )
                 rows.append((
                     rank,
+                    str(aromatic_unit),
                     int(site_id),
                     int(rotation),
                     tuple(translation),
@@ -306,12 +498,38 @@ def _place_outcomes(
         Tuple[str, int, Tuple[int, int], Tuple[int, int]]
     ],
     limit: int,
+    context: _SideDistributionContext,
 ) -> Tuple[List[_SideCandidate], int]:
     state = candidate.state
     outcomes = []
     seen = set()
-    specs = _pose_specs(candidate, record, site_rows)
-    for _rank, site_id, rotation, translation, reflection in specs:
+    specs = _pose_specs(candidate, record, site_rows, context)
+    # Round-robin across aromatic units before the expensive state clones.
+    # This prevents low site IDs from consuming the entire pose pool.
+    grouped: Dict[str, List[Tuple[Any, ...]]] = defaultdict(list)
+    for spec in specs:
+        grouped[str(spec[1])].append(spec)
+    groups = [
+        grouped[unit_id]
+        for unit_id in sorted(
+            grouped,
+            key=lambda value: (grouped[value][0][0], _unit_sort_key(value)),
+        )
+    ]
+    pose_limit = max(64, 4 * max(1, int(limit)))
+    diverse_specs = []
+    round_index = 0
+    while groups and len(diverse_specs) < pose_limit:
+        next_groups = []
+        for group in groups:
+            if round_index < len(group):
+                diverse_specs.append(group[round_index])
+                next_groups.append(group)
+                if len(diverse_specs) >= pose_limit:
+                    break
+        groups = next_groups
+        round_index += 1
+    for _rank, aromatic_unit, site_id, rotation, translation, reflection in diverse_specs:
         trial = state.clone()
         if not trial.place_unit(
             record.topology_unit_id,
@@ -343,6 +561,10 @@ def _place_outcomes(
             "topology_node_id": int(record.topology_node_id),
             "boundary_node_id": int(record.boundary_node_id),
             "physical_site_id": int(site_id),
+            "aromatic_unit_id": str(aromatic_unit),
+            "rigid_component_index": int(
+                context.unit_to_component[str(aromatic_unit)]
+            ),
             "topology_rotation": int(rotation),
             "topology_reflection": bool(reflection),
             "topology_translation": list(translation),
@@ -362,6 +584,13 @@ def _place_outcomes(
                 int(record.boundary_node_id): int(site_id),
             },
             actions=candidate.actions + [action],
+            distribution_rank=_side_distribution_rank(
+                {
+                    **candidate.boundary_site_ids,
+                    int(record.boundary_node_id): int(site_id),
+                },
+                context,
+            ),
         )
         signature = (
             result.state.state_signature(),
@@ -371,9 +600,17 @@ def _place_outcomes(
             continue
         seen.add(signature)
         outcomes.append(result)
-        if len(outcomes) >= max(1, int(limit)):
-            break
-    return outcomes, len(specs)
+    # Distribution and local-contact terms are cheap and remove most poses
+    # before the global void calculation.  The retained set still spans twice
+    # the requested output width.
+    outcomes.sort(key=lambda candidate: (
+        candidate.distribution_rank,
+        len(candidate.state.allowed_unbonded_contacts),
+        tuple(sorted(candidate.boundary_site_ids.items())),
+    ))
+    outcomes = outcomes[:max(24, 2 * max(1, int(limit)))]
+    outcomes.sort(key=_candidate_rank)
+    return outcomes[: max(1, int(limit))], len(diverse_specs)
 
 
 def _candidate_rank(candidate: _SideCandidate) -> Tuple[Any, ...]:
@@ -383,12 +620,42 @@ def _candidate_rank(candidate: _SideCandidate) -> Tuple[Any, ...]:
             float(candidate.nmr_rank),
             float(candidate.nmr_score["loss"]),
         )
+    if not candidate.shape_rank:
+        candidate.shape_rank = _state_shape_rank(candidate.state)
+    shape_rank = candidate.shape_rank
+    distribution_rank = candidate.distribution_rank or (0.0,) * 6
+    combined_rank = (
+        0.08 * float(shape_rank[0])
+        + 0.60 * float(distribution_rank[0])
+    )
+    if nmr_prefix:
+        combined_rank += float(nmr_prefix[0])
+    nmr_tail = nmr_prefix[1:] if nmr_prefix else ()
     return (
-        *nmr_prefix,
+        combined_rank,
+        *nmr_tail,
+        *distribution_rank,
         len(candidate.state.allowed_unbonded_contacts),
-        *_state_shape_rank(candidate.state),
+        *shape_rank[1:],
         tuple(sorted(candidate.boundary_site_ids.items())),
     )
+
+
+def _bounded_nmr_scoring_pool(
+    candidates: Sequence[_SideCandidate],
+    limit: int,
+) -> List[_SideCandidate]:
+    """Deduplicate and distribution-prefilter one expensive NMR layer."""
+    unique: Dict[Tuple[Any, ...], _SideCandidate] = {}
+    for candidate in sorted(candidates, key=_candidate_rank):
+        signature = (
+            candidate.state.state_signature(),
+            tuple(sorted(candidate.boundary_site_ids.items())),
+        )
+        unique.setdefault(signature, candidate)
+        if len(unique) >= max(1, int(limit)):
+            break
+    return list(unique.values())
 
 
 def _score_side_candidates(
@@ -416,6 +683,7 @@ def _score_side_candidates(
             float(shape["violation"])
             + 0.10 * abs(float(shape["q_over_r"]) - 1.0)
             + 0.05 * abs(float(shape["width_over_height"]) - 1.0)
+            + 0.05 * float(shape.get("layout_energy", 0.0))
         )
         contact_penalty = len(candidate.state.allowed_unbonded_contacts)
         candidate.nmr_score = dict(score)
@@ -479,17 +747,14 @@ def run_planned_side_search(
             f"missing={sorted(boundary_ids-all_site_ids)[:12]} "
         )
     site_rows = _site_records(initial, all_site_ids)
+    distribution_context = _side_distribution_context(initial, site_rows)
 
     ordered = sorted(records, key=lambda row: _record_hardness(initial, row))
-    search_width = (
-        max(1, int(beam_width))
-        if nmr_scorer is not None
-        else max(2, min(12, max(int(beam_width), int(candidate_k))))
+    search_width = max(
+        8, min(16, max(2 * int(beam_width), int(candidate_k)))
     )
-    outcome_limit = (
-        max(1, int(candidate_k))
-        if nmr_scorer is not None
-        else max(2, min(8, int(candidate_k)))
+    outcome_limit = max(
+        12, min(24, max(int(candidate_k), 2 * int(beam_width)))
     )
     beam = [_SideCandidate(
         state=initial,
@@ -507,9 +772,14 @@ def run_planned_side_search(
                 record,
                 site_rows,
                 outcome_limit,
+                distribution_context,
             )
             explored += int(inspected)
             next_beam.extend(outcomes)
+        if nmr_scorer is not None:
+            next_beam = _bounded_nmr_scoring_pool(
+                next_beam, max(8, search_width)
+            )
         _score_side_candidates(
             next_beam,
             nmr_scorer=nmr_scorer,
@@ -537,7 +807,16 @@ def run_planned_side_search(
             break
 
     if beam:
-        selected = min(beam, key=_candidate_rank)
+        selected = min(
+            beam,
+            key=lambda candidate: (
+                float(_candidate_rank(candidate)[0])
+                + 0.05 * float(
+                    state_layout_metrics(candidate.state, full=True)["layout_energy"]
+                ),
+                _candidate_rank(candidate),
+            ),
+        )
         current = relabel_aromatic_sites(
             selected.state,
             selected.boundary_site_ids,
@@ -572,6 +851,9 @@ def run_planned_side_search(
             "mode": "search_time_physical_su13_selection",
             "boundary_site_assignments": dict(assignments),
         },
+        "side_distribution": _side_distribution_metrics(
+            assignments, distribution_context
+        ),
         "search_algorithm": (
             "nmr_guided_beam_search" if nmr_scorer is not None
             else "geometry_beam_search"

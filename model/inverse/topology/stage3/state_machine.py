@@ -6,6 +6,14 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
+from ....shared.aromatic_plan import (
+    su12_generation_cap,
+    su12_transition_diagnostics,
+)
+from ....shared.topology_contract import (
+    MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
+    TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES,
+)
 from ...layer1.port_role_balance import audit_layer1_port_roles
 from ..classification.classifier import classify_topology_units
 from .phase_eval import assemble_topology_units
@@ -23,7 +31,6 @@ from ..resources.conversion_scoring import (
 from ..resources.profiles import (
     DEFAULT_STAGE3_H_SOFT_TOLERANCE,
     MIN_STAGE3_AROMATIC_RESOURCE_COUNT,
-    MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
     h_soft_bounds,
 )
 from ..resources.accounting import build_resource_accounting_snapshot
@@ -500,7 +507,13 @@ def _tolerated_remaining_closure_ids(
     remaining_flex_goal: int,
     recycled_resource_ids: Optional[Set[int]] = None,
 ) -> Dict[int, List[int]]:
-    by_su = _remaining_closure_ids_by_su(pool)
+    by_su = {
+        int(su_type): [
+            int(value) for value in list(pool.get(int(su_type), []) or [])
+        ]
+        for su_type in sorted(TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES)
+        if list(pool.get(int(su_type), []) or [])
+    }
     recycled_ids = {int(value) for value in list(recycled_resource_ids or set())}
     if recycled_ids & {
         int(value) for values in by_su.values() for value in values
@@ -582,30 +595,6 @@ def _deficit_from_counts(
         int(su_type): int(count) - int(available_counts.get(int(su_type), 0))
         for su_type, count in dict(required or {}).items()
         if int(count) > int(available_counts.get(int(su_type), 0))
-    }
-
-
-def _deficit_after_protection(
-    pool: Dict[int, List[int]],
-    required: Dict[int, int],
-    protected_counts: Optional[Dict[int, int]] = None,
-) -> Dict[int, int]:
-    protected = {
-        int(key): max(0, int(value))
-        for key, value in dict(protected_counts or {}).items()
-    }
-    return {
-        int(su_type): int(count) - max(
-            0,
-            len(list(pool.get(int(su_type), []) or []))
-            - int(protected.get(int(su_type), 0)),
-        )
-        for su_type, count in required.items()
-        if int(count) > max(
-            0,
-            len(list(pool.get(int(su_type), []) or []))
-            - int(protected.get(int(su_type), 0)),
-        )
     }
 
 
@@ -896,6 +885,425 @@ def _plan_internal_su24_aromatic_conversion(
     }
 
 
+def _plan_su12_cap_recovery(
+    *,
+    phase_eval: Any,
+    iteration_ledger: Any,
+    H: torch.Tensor,
+    phase: str,
+    max_conversions: int,
+    special_degree_meta: Optional[Dict[str, Any]],
+    contract_id: int,
+    h_tolerance: float,
+    reason_prefix: str = "su12_cap_recovery",
+) -> Optional[Stage3AdjustmentPlan]:
+    """Repair an already-over-cap SU12 histogram before topology planning.
+
+    The 4:5 rule applies to the complete state, including states produced by
+    an earlier Layer1/Layer2 pass.  Conversion candidates normally guard only
+    their *next* transition, so an already-invalid input would otherwise skip
+    every legal topology plan and fail during aromatic materialization.  Use
+    only concrete unclaimed SU12 donors and convert the smallest number of
+    them to SU13 that restores the cap.
+    """
+    cap_before = dict(su12_generation_cap(H))
+    if bool(cap_before.get("within_limit", True)):
+        return None
+
+    pool = deepcopy(getattr(iteration_ledger, "available_ids_by_su", {}) or {})
+    donor_ids = sorted({
+        int(value) for value in list(pool.get(12, []) or [])
+    })
+    max_count = min(
+        max(0, int(max_conversions)),
+        len(donor_ids),
+        max(0, int(cap_before.get("su12_count", 0)) - int(MIN_STAGE3_AROMATIC_RESOURCE_COUNT)),
+    )
+    selected_count = 0
+    H_after: Optional[torch.Tensor] = None
+    cap_after: Dict[str, Any] = {}
+    for count in range(1, max_count + 1):
+        probe = H.detach().clone().long()
+        if int(probe.numel()) <= 13 or int(probe[12].item()) < count:
+            break
+        probe[12] -= int(count)
+        probe[13] += int(count)
+        diagnostics = dict(su12_transition_diagnostics(H, probe))
+        if bool(diagnostics.get("generation_allowed", False)) and bool(
+            diagnostics.get("after_within_limit", False)
+        ):
+            selected_count = int(count)
+            H_after = probe
+            cap_after = diagnostics
+            break
+
+    if selected_count <= 0 or H_after is None:
+        proof = {
+            "phase": str(phase),
+            "reason": "su12_cap_recovery_unavailable",
+            "cap_before": cap_before,
+            "available_su12_donor_count": len(donor_ids),
+            "max_recovery_conversions": int(max_count),
+        }
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+            ok=False,
+            reason="phase_resource_infeasible",
+            blocked_reason="su12_cap_recovery_unavailable",
+            phase=str(phase),
+            plan_kind="su12_cap_recovery_unavailable",
+            active_subphase=str(phase),
+            phase_result=Stage3PhaseResult(
+                active_phase=str(phase),
+                phase_completed=False,
+                rebuild_required=False,
+                stop_reason="su12_cap_recovery_unavailable",
+                infeasibility_proof=proof,
+            ),
+            diagnostics=proof,
+            runtime=_runtime_with_pool(
+                phase_eval,
+                getattr(iteration_ledger, "available_ids_by_su", {}) or {},
+            ),
+        ), h_tolerance)
+
+    selected_ids = donor_ids[:selected_count]
+    operation = HistogramConversion(
+        from_su=12,
+        to_su=13,
+        count=int(selected_count),
+        node_ids=[int(value) for value in selected_ids],
+        reason=str(reason_prefix),
+    )
+    group = AtomicAdjustmentGroup(
+        primary_op=operation,
+        combined_delta={12: -int(selected_count), 13: int(selected_count)},
+        demand_before={},
+        demand_after={},
+        h_before=_h_total(H, special_degree_meta),
+        h_after_primary=_h_total(H_after, special_degree_meta),
+        h_after_final=_h_total(H_after, special_degree_meta),
+        scoring_diagnostics={
+            "mode": str(reason_prefix),
+            "cap_before": cap_before,
+            "cap_after": cap_after,
+        },
+    )
+    histogram = HistogramAdjustmentPlan(
+        phase=str(phase),
+        groups=[group],
+        primary_adjustment_count=int(selected_count),
+        physical_conversion_count=int(selected_count),
+        H_before=H.detach().clone(),
+        H_after=H_after.detach().clone(),
+        inventory_before={
+            int(key): len(list(values or [])) for key, values in pool.items()
+        },
+        inventory_after={},
+        accounting_diagnostics={
+            "mode": str(reason_prefix),
+            "cap_before": cap_before,
+            "cap_after": cap_after,
+            "converted_node_ids": list(selected_ids),
+        },
+    )
+    ledger_after = _ledger_after_histogram_conversions(
+        iteration_ledger,
+        histogram,
+    )
+    histogram.inventory_after = {
+        int(key): len(list(values or []))
+        for key, values in ledger_after.available_ids_by_su.items()
+    }
+    transaction = TopologyResourceTransaction(
+        phase=str(phase),
+        contract_id=int(contract_id),
+        target_role="su12_cap_recovery",
+        converted_node_ids=list(selected_ids),
+        conversion_path=[operation.to_dict()],
+        h_before=_h_total(H, special_degree_meta),
+        h_after_primary=_h_total(H_after, special_degree_meta),
+        h_after=_h_total(H_after, special_degree_meta),
+        commit_scope="physical_histogram",
+        transaction_origin="su12_cap_recovery",
+        committed=True,
+    )
+    return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+        ok=True,
+        reason="stage3_rebuild_required",
+        phase=str(phase),
+        plan_kind="su12_cap_recovery",
+        active_subphase=str(phase),
+        planned_conversions=[Stage3AdjustmentOp(
+            op="convert",
+            from_su=12,
+            to_su=13,
+            node_id=int(node_id),
+            reason=str(reason_prefix),
+        ) for node_id in selected_ids],
+        adjustment_bundles=[Stage3AdjustmentBundle(
+            bundle_id=f"{str(phase)}:{int(contract_id)}:su12_cap",
+            phase=str(phase),
+            bundle_ops=[operation.to_dict()],
+            diagnostics={
+                "cap_before": cap_before,
+                "cap_after": cap_after,
+            },
+        )],
+        histogram_adjustment_plan=histogram,
+        phase_result=Stage3PhaseResult(
+            active_phase=str(phase),
+            phase_completed=False,
+            rebuild_required=True,
+            primary_adjustment_count=int(selected_count),
+            transactions=[transaction],
+            stop_reason="su12_cap_recovery_required",
+        ),
+        diagnostics={
+            "stage3_phase": str(phase),
+            "su12_cap_recovery": True,
+            "su12_cap_before": cap_before,
+            "su12_cap_after": cap_after,
+            "su12_cap_recovery_count": int(selected_count),
+            "su12_cap_recovery_node_ids": list(selected_ids),
+        },
+        runtime={
+            **_runtime_with_pool(phase_eval, ledger_after.available_ids_by_su),
+            "iteration_topology_ledger": ledger_after,
+        },
+    ), h_tolerance)
+
+
+def _surplus_su11_aromatic_targets(
+    H: torch.Tensor,
+    *,
+    conversion_count: int,
+    aromatic_cursor: int,
+) -> Tuple[int, int, int, Dict[str, Any]]:
+    """Choose an even, cap-safe SU12 share; send all other SU11 to SU13."""
+    count = max(0, int(conversion_count))
+    cursor = int(aromatic_cursor)
+    proposed_su12 = 0
+    for _ in range(count):
+        target, cursor_after = next_su11_aromatic_target(
+            cursor,
+            available_targets=(12, 13),
+        )
+        if target is None:
+            target = 13
+            cursor_after = cursor
+        if int(target) == 12:
+            proposed_su12 += 1
+        cursor = int(cursor_after)
+
+    current_su12 = int(H[12].item()) if int(H.numel()) > 12 else 0
+    required_added_parity = int(current_su12 % 2)
+    selected_su12 = min(int(proposed_su12), int(count))
+    if int(selected_su12 % 2) != required_added_parity:
+        if selected_su12 > 0:
+            selected_su12 -= 1
+        elif required_added_parity and count > 0:
+            selected_su12 = 1
+
+    cap_diagnostics: Dict[str, Any] = {}
+    while selected_su12 > 0:
+        probe = H.detach().clone().long()
+        if int(probe.numel()) <= 13 or int(probe[11].item()) < selected_su12:
+            selected_su12 = max(0, selected_su12 - 2)
+            continue
+        probe[11] -= int(selected_su12)
+        probe[12] += int(selected_su12)
+        cap_diagnostics = dict(su12_transition_diagnostics(H, probe))
+        if bool(cap_diagnostics.get("generation_allowed", True)):
+            break
+        selected_su12 = max(0, selected_su12 - 2)
+
+    selected_su13 = max(0, int(count) - int(selected_su12))
+    return (
+        int(selected_su12),
+        int(selected_su13),
+        int(cursor),
+        {
+            "requested_conversion_count": int(count),
+            "rotation_proposed_su12_count": int(proposed_su12),
+            "selected_su12_count": int(selected_su12),
+            "selected_su13_count": int(selected_su13),
+            "su12_cap": dict(cap_diagnostics),
+        },
+    )
+
+
+def _plan_internal_surplus_su11_aromatic_conversion(
+    *,
+    phase_eval: Any,
+    iteration_ledger: Any,
+    H: torch.Tensor,
+    special_degree_meta: Optional[Dict[str, Any]],
+    contract_id: int,
+    max_conversions: int,
+    aromatic_cursor: int,
+) -> Optional[Dict[str, Any]]:
+    """Return unused concrete SU11 nodes directly to the aromatic pool."""
+    limit = max(0, int(max_conversions))
+    if limit <= 0:
+        return None
+    pool = deepcopy(getattr(iteration_ledger, "available_ids_by_su", {}) or {})
+    su11_ids = sorted({int(value) for value in list(pool.get(11, []) or [])})
+    # A single SU11 aromatic conversion changes port parity.  The subsequent
+    # parity/role repair can then rotate 11->13->12->11 and erase the complete
+    # histogram effect.  Small terminal pools are handled by the shared <=3
+    # residual contract; larger pools are reclassified only in even batches.
+    selected_count = min(len(su11_ids), limit)
+    selected_count -= selected_count % 2
+    selected_ids = list(su11_ids[:selected_count])
+    if not selected_ids:
+        return None
+
+    su12_count, su13_count, cursor_after, target_diagnostics = (
+        _surplus_su11_aromatic_targets(
+            H,
+            conversion_count=len(selected_ids),
+            aromatic_cursor=int(aromatic_cursor),
+        )
+    )
+    target_groups = [
+        (12, selected_ids[:su12_count]),
+        (13, selected_ids[su12_count:su12_count + su13_count]),
+    ]
+    H_after = H.detach().clone().long()
+    groups: List[AtomicAdjustmentGroup] = []
+    operations: List[HistogramConversion] = []
+    for target_su, node_ids in target_groups:
+        if not node_ids:
+            continue
+        op = HistogramConversion(
+            from_su=11,
+            to_su=int(target_su),
+            count=len(node_ids),
+            node_ids=[int(value) for value in node_ids],
+            reason="internal_surplus_su11_to_aromatic",
+        )
+        next_H = apply_conversions_to_H(H_after, [op])
+        if next_H is None:
+            return None
+        groups.append(AtomicAdjustmentGroup(
+            primary_op=op,
+            combined_delta={11: -len(node_ids), int(target_su): len(node_ids)},
+            demand_before={},
+            demand_after={},
+            h_before=_h_total(H_after, special_degree_meta),
+            h_after_primary=_h_total(next_H, special_degree_meta),
+            h_after_final=_h_total(next_H, special_degree_meta),
+            scoring_diagnostics={
+                "plan_kind": "internal_surplus_su11_aromatic_reclassification",
+                "aromatic_target_su": int(target_su),
+            },
+        ))
+        operations.append(op)
+        H_after = next_H
+
+    if not groups:
+        return None
+    inventory_before = {
+        int(key): len(list(values or []))
+        for key, values in pool.items()
+    }
+    inventory_after = dict(inventory_before)
+    inventory_after[11] = max(
+        0,
+        int(inventory_after.get(11, 0)) - len(selected_ids),
+    )
+    inventory_after[12] = int(inventory_after.get(12, 0)) + int(su12_count)
+    inventory_after[13] = int(inventory_after.get(13, 0)) + int(su13_count)
+    histogram = HistogramAdjustmentPlan(
+        phase="internal_topology",
+        groups=groups,
+        primary_adjustment_count=len(selected_ids),
+        physical_conversion_count=len(selected_ids),
+        H_before=H.detach().clone(),
+        H_after=H_after.detach().clone(),
+        inventory_before=inventory_before,
+        inventory_after=inventory_after,
+        su11_rotation_index_before=int(aromatic_cursor),
+        su11_rotation_index_after=int(cursor_after),
+        accounting_diagnostics={
+            "mode": "internal_surplus_su11_aromatic_reclassification",
+            **dict(target_diagnostics),
+        },
+    )
+    ledger_after = _ledger_after_histogram_conversions(
+        iteration_ledger,
+        histogram,
+    )
+    transaction = TopologyResourceTransaction(
+        phase="internal_topology",
+        contract_id=int(contract_id),
+        target_role="internal_surplus_su11_aromatic_reclassification",
+        converted_node_ids=[int(value) for value in selected_ids],
+        conversion_path=[op.to_dict() for op in operations],
+        h_before=_h_total(H, special_degree_meta),
+        h_after_primary=_h_total(H_after, special_degree_meta),
+        h_after=_h_total(H_after, special_degree_meta),
+        commit_scope="physical_histogram",
+        transaction_origin="internal_surplus_su11_reclassification",
+        committed=True,
+    )
+    plan = Stage3AdjustmentPlan(
+        ok=True,
+        reason="internal_surplus_su11_aromatic_reclassification",
+        phase="internal_topology",
+        plan_kind="internal_surplus_su11_aromatic_reclassification",
+        active_subphase="residual_resource_self_closure",
+        planned_conversions=[
+            Stage3AdjustmentOp(
+                op="convert",
+                from_su=11,
+                to_su=int(op.to_su),
+                node_id=int(node_id),
+                reason=str(op.reason),
+            )
+            for op in operations
+            for node_id in list(op.node_ids or [])
+        ],
+        adjustment_bundles=[Stage3AdjustmentBundle(
+            bundle_id=f"internal_topology:{int(contract_id)}:surplus_su11",
+            phase="internal_topology",
+            bundle_ops=[op.to_dict() for op in operations],
+            diagnostics=dict(target_diagnostics),
+        )],
+        histogram_adjustment_plan=histogram,
+        phase_result=Stage3PhaseResult(
+            active_phase="internal_topology",
+            phase_completed=False,
+            rebuild_required=False,
+            primary_adjustment_count=len(selected_ids),
+            transactions=[transaction],
+            stop_reason="internal_surplus_su11_aromatic_reclassification",
+        ),
+        diagnostics={
+            "stage3_phase": "internal_topology",
+            "internal_surplus_su11_reclassification": True,
+            "internal_surplus_su11_node_ids": [int(value) for value in selected_ids],
+            **dict(target_diagnostics),
+        },
+        runtime={
+            **_runtime_with_pool(
+                phase_eval,
+                ledger_after.available_ids_by_su,
+            ),
+            "iteration_topology_ledger": ledger_after,
+        },
+    )
+    return {
+        "mode": "conversion",
+        "plan": plan,
+        "product_role": "internal_surplus_su11_aromatic_donor",
+        "chain_23_count": 0,
+        "required_counts": {},
+        "attempt_count": 0,
+        "attempts": [],
+    }
+
+
 def _residual_template_specs(
     *,
     remaining_flex_chains: int,
@@ -903,14 +1311,14 @@ def _residual_template_specs(
     residual_flex_min_23: int,
     residual_side_preferred_23: int,
     residual_side_min_23: int,
-    remaining_flex_capacity: Optional[int] = None,
+    remaining_optional_flex_capacity: Optional[int] = None,
 ) -> List[Tuple[str, int, Dict[int, int]]]:
     requirements: List[Tuple[str, int, Dict[int, int]]] = []
     allow_flex = bool(
         int(remaining_flex_chains) > 0
         or (
-            remaining_flex_capacity is not None
-            and int(remaining_flex_capacity) > 0
+            remaining_optional_flex_capacity is not None
+            and int(remaining_optional_flex_capacity) > 0
         )
     )
     if allow_flex:
@@ -944,12 +1352,17 @@ def _residual_product_contract(
     contract_id: int,
 ) -> TopologyClosureContract:
     sequence = _residual_product_sequence(product_role, chain_23_count)
+    target_role = (
+        "flex_chain"
+        if str(product_role) == "residual_flex_chain"
+        else "side_chain"
+    )
     return TopologyClosureContract(
         contract_id=int(contract_id),
         contract_kind="residual_conversion",
         phase="residual_resource_self_closure",
         priority=0 if product_role == "residual_flex_chain" else 1,
-        target_role="residual_resource_conversion",
+        target_role=str(target_role),
         mainline_slots=[TopologyClosureSlot(
             slot_id=f"residual:{int(contract_id)}:mainline",
             kind="RESOURCE_PATH",
@@ -984,7 +1397,7 @@ def _plan_next_residual_product(
     max_conversions: int,
     max_h_compensation_ops: int,
     contract_id: int,
-    remaining_flex_capacity: Optional[int] = None,
+    remaining_optional_flex_capacity: Optional[int] = None,
     prefix_groups: Optional[Sequence[Any]] = None,
     accounting_initial_pool: Optional[Dict[int, List[int]]] = None,
     forbidden_primary_conversion_signatures: Optional[Sequence[str]] = None,
@@ -997,7 +1410,7 @@ def _plan_next_residual_product(
         residual_flex_min_23=residual_flex_min_23,
         residual_side_preferred_23=residual_side_preferred_23,
         residual_side_min_23=residual_side_min_23,
-        remaining_flex_capacity=remaining_flex_capacity,
+        remaining_optional_flex_capacity=remaining_optional_flex_capacity,
     )
     if required_flex:
         template_specs = [
@@ -1024,10 +1437,22 @@ def _plan_next_residual_product(
             special_degree_meta=special_degree_meta,
         )
         if transaction is not None:
+            # The midpoint of the flex window is only an upper capacity for
+            # optional residual flex products.  It is not a target.  Once the
+            # mandatory flex deficit is satisfied, consume a directly
+            # available side-chain closure before spending the same resources
+            # on an optional flex chain; optional flex is considered only when
+            # no side-chain closure can be materialized from the live pool.
+            if not required_flex:
+                role_priority = (
+                    0 if product_role == "residual_side_chain" else 1
+                )
+            else:
+                role_priority = 0
             direct_candidates.append((
                 (
+                    int(role_priority),
                     -sum(int(value) for value in required_counts.values()),
-                    0 if product_role == "residual_flex_chain" else 1,
                     int(template_index),
                 ),
                 {
@@ -1068,6 +1493,19 @@ def _plan_next_residual_product(
     h_lower, h_upper = h_soft_bounds(target_h, h_tolerance)
 
     for template_index, (product_role, chain_23_count, required_counts) in enumerate(template_specs):
+        optional_flex = bool(
+            str(product_role) == "residual_flex_chain"
+            and not required_flex
+        )
+        if optional_flex:
+            attempts.append({
+                "product_role": product_role,
+                "chain_23_count": int(chain_23_count),
+                "required_counts": dict(required_counts),
+                "reason": "optional_flex_capacity_is_direct_only",
+                "mode": "conversion",
+            })
+            continue
         direct_coverage = sum(
             min(len(pool.get(int(su_type), []) or []), int(count))
             for su_type, count in required_counts.items()
@@ -1097,6 +1535,16 @@ def _plan_next_residual_product(
             required_counts=required_counts,
             contract_id=int(contract_id),
         )
+        candidate_forbidden_signatures = {
+            str(value)
+            for value in list(forbidden_primary_conversion_signatures or [])
+            if str(value)
+        }
+        if str(product_role) == "residual_side_chain":
+            # SU23 may legitimately become a terminal SU22.  Surplus SU11,
+            # however, is an aromatic attachment resource and must not be
+            # consumed to manufacture optional side-chain termini.
+            candidate_forbidden_signatures.add("11>22")
         candidate_plan = _transaction_plan(
             phase_eval=phase_eval,
             contract=contract,
@@ -1111,7 +1559,9 @@ def _plan_next_residual_product(
             iteration_ledger=iteration_ledger,
             prefix_groups=prefix_groups,
             accounting_initial_pool=accounting_initial_pool,
-            forbidden_primary_conversion_signatures=forbidden_primary_conversion_signatures,
+            forbidden_primary_conversion_signatures=sorted(
+                candidate_forbidden_signatures
+            ),
             # Released SU24 is a donor only in this internal residual phase;
             # the histogram scorer still binds it by concrete released ID.
             forbidden_conversion_su_types=[],
@@ -1218,6 +1668,19 @@ def _plan_next_residual_product(
             else "ranked_single_gap_optional_conversion_candidates"
         )
         return selected
+    su11_conversion = _plan_internal_surplus_su11_aromatic_conversion(
+        phase_eval=phase_eval,
+        iteration_ledger=iteration_ledger,
+        H=H,
+        special_degree_meta=special_degree_meta,
+        contract_id=contract_id,
+        max_conversions=max_conversions,
+        aromatic_cursor=su11_rotation_index,
+    )
+    if su11_conversion is not None:
+        su11_conversion["attempt_count"] = len(attempts)
+        su11_conversion["attempts"] = _diagnostic_attempt_samples(attempts)
+        return su11_conversion
     # Ordinary 11/12/13/22/23 conversion has been exhausted.  Only now may
     # an isolated SU24 be reclassified for the internal aromatic pool.
     su24_conversion = _plan_internal_su24_aromatic_conversion(
@@ -1433,6 +1896,12 @@ def _fixed_flex_capacity_candidate(
             balanced = candidate.detach().clone()
             balanced[int(balance_source)] -= 1
             balanced[int(balance_target)] += 1
+            if not bool(
+                su12_transition_diagnostics(candidate, balanced).get(
+                    "generation_allowed", True
+                )
+            ):
+                continue
             balanced_audit = audit_layer1_port_roles(
                 balanced,
                 special_degree_meta,
@@ -1560,6 +2029,12 @@ def _fixed_flex_capacity_candidate(
                 balanced_H = candidate_H.detach().clone()
                 balanced_H[int(balance_source)] -= 1
                 balanced_H[int(balance_target)] += 1
+                if not bool(
+                    su12_transition_diagnostics(candidate_H, balanced_H).get(
+                        "generation_allowed", True
+                    )
+                ):
+                    continue
                 balanced_impact = evaluate_flex_impact(H, balanced_H, audit)
                 balanced_after = dict(balanced_impact.after or {})
                 balanced_lower = int(
@@ -2372,32 +2847,6 @@ def _iteration_ledger_for_phase_eval(
     )
 
 
-def _prioritize_pending_converted_ids(
-    ledger: Any,
-    converted_node_ids: Sequence[int],
-) -> Any:
-    working = deepcopy(ledger)
-    preferred_order = [
-        int(value) for value in list(converted_node_ids or [])
-    ]
-    for su_type, raw_ids in dict(
-        getattr(working, "available_ids_by_su", {}) or {}
-    ).items():
-        available = [int(value) for value in list(raw_ids or [])]
-        preferred = [
-            int(node_id)
-            for node_id in preferred_order
-            if int(node_id) in available
-        ]
-        preferred_set = set(preferred)
-        working.available_ids_by_su[int(su_type)] = preferred + [
-            int(node_id)
-            for node_id in available
-            if int(node_id) not in preferred_set
-        ]
-    return working
-
-
 def _restore_uncommitted_ring_pool_nodes(
     ledger: Any,
     nodes: Sequence[Any],
@@ -2540,33 +2989,6 @@ def _restore_uncommitted_ring_pool_nodes(
         audit["missing_node_ids"] or audit["committed_owner_conflicts"]
     )
     return working, audit
-
-
-def _uncommitted_physical_su24_ids(
-    ledger: Any,
-    nodes: Sequence[Any],
-) -> List[int]:
-    """Return real SU24 nodes not owned by a committed topology product."""
-    committed_states = {
-        Stage3OwnershipState.COMPLETED_TOPOLOGY.value,
-        Stage3OwnershipState.CLAIMED_CLOSURE_RESOURCE.value,
-        Stage3OwnershipState.CLAIMED_SU24_RING_RESOURCE.value,
-    }
-    ownership = dict(getattr(ledger, "ownership_by_node_id", {}) or {})
-    return sorted({
-        int(getattr(node, "global_id", -1))
-        for node in list(nodes or [])
-        if int(getattr(node, "global_id", -1)) >= 0
-        and int(getattr(node, "su_type", -1)) == 24
-        and str(
-            getattr(
-                ownership.get(int(getattr(node, "global_id", -1))),
-                "state",
-                "",
-            )
-            or ""
-        ) not in committed_states
-    })
 
 
 def _all_physical_su24_ids(nodes: Sequence[Any]) -> List[int]:
@@ -4490,6 +4912,25 @@ def _residual_1122_product_nodes(product: Dict[str, Any], ledger: Any) -> Option
     return {11: int(ids11[0]), 22: int(ids22[0])}
 
 
+def _residual_1122_node_id(
+    ids_by_su: Optional[Dict[Any, Any]],
+    su_type: int,
+) -> int:
+    """Read a residual product node ID from either integer or string keys.
+
+    Live products use integer SU keys, while released/serialized rows use
+    string keys.  Reclassification must accept both representations; using
+    only one form silently turns every valid pair into an unresolved pair.
+    """
+    values = dict(ids_by_su or {})
+    key = int(su_type)
+    value = values.get(key, values.get(str(key), -1))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
 def _is_exact_residual_1122_product(product: Dict[str, Any]) -> bool:
     """Recognize an exact residual 11-22 product without resolving node IDs."""
     payload = dict(product or {})
@@ -4570,7 +5011,6 @@ def _residual_product_is_current_stage(product: Dict[str, Any]) -> bool:
     return bool(
         role.startswith("residual_")
         or phase == "residual_resource_self_closure"
-        or role == "residual_resource_conversion"
     )
 
 
@@ -4582,6 +5022,19 @@ def _release_residual_1122_products(
     working = deepcopy(ledger)
     selected = [dict(item or {}) for item in list(products or [])]
     excess = selected[5:]
+    selected_reclassification_modes = {
+        _residual_product_identity(item, working): (
+            str(item.get("_reclassification_mode", "") or ""),
+            [
+                [int(pair[0]), int(pair[1])]
+                for pair in list(
+                    item.get("_reclassification_targets", []) or []
+                )
+                if isinstance(pair, (list, tuple)) and len(pair) == 2
+            ],
+        )
+        for item in excess
+    }
     # Product IDs are provenance, not the physical identity of a residual
     # product.  During a direct/conversion continuation the same completed
     # product can be observed more than once, and older serialized products
@@ -4694,10 +5147,25 @@ def _release_residual_1122_products(
                 suffix += 1
         used_product_ids.add(product_id)
         assigned_release_product_ids.add(product_id)
+        selected_mode, selected_targets = selected_reclassification_modes.get(
+            product_key,
+            (
+                str(product.get("_reclassification_mode", "") or ""),
+                [
+                    [11, 12],
+                    [22, 13],
+                ],
+            ),
+        )
         released.append({
             "product_id": product_id,
             "contract_id": int(product.get("contract_id", -1) or -1),
             "node_ids_by_su": {str(key): int(value) for key, value in ids_by_su.items()},
+            # The planner annotates each selected pair before release.  Keep
+            # this private provenance on the released row so the concrete
+            # histogram transaction can apply the same normal/fallback mode.
+            "_reclassification_mode": str(selected_mode or ""),
+            "_reclassification_targets": list(selected_targets),
         })
         released_keys.add(product_key)
         released_product_id_by_key[product_key] = product_id
@@ -4866,14 +5334,121 @@ def _build_residual_1122_reclassification_plan(
         max_reclass_pairs = total_excess_count
     else:
         max_reclass_pairs = max(0, int(max_primary_adjustments)) // 2
-    selected_excess_count = min(total_excess_count, max_reclass_pairs)
+    selected_excess_count = 0
+    selected_reclassification_products: List[Dict[str, Any]] = []
+    su12_cap_blocked = False
+    su12_cap_diagnostics: Dict[str, Any] = {}
+    su12_cap_fallback_count = 0
+    normal_reclassification_count = 0
+    skipped_reclassification_count = 0
+    # Reclassification is a pair transaction, but the 11 -> 12 member of a
+    # pair can itself exceed the dynamic SU12 budget.  Probe each pair in
+    # order.  If that member would cross the cap, the pair is still usable:
+    # both physical nodes are converted to SU13 instead of creating SU12.
+    H_reclass_probe = H_work.detach().clone().long()
+    for item in exact_products[5:5 + max_reclass_pairs]:
+        ids_by_su = _residual_1122_product_nodes(item, iteration_ledger)
+        node11 = _residual_1122_node_id(ids_by_su, 11)
+        node22 = _residual_1122_node_id(ids_by_su, 22)
+        if node11 < 0 or node22 < 0:
+            skipped_reclassification_count += 1
+            continue
+
+        selected_mode = ""
+        selected_targets: Tuple[Tuple[int, int], ...] = ()
+        H_after_pair: Optional[torch.Tensor] = None
+        first_op = HistogramConversion(
+            from_su=11,
+            to_su=12,
+            count=1,
+            node_ids=[node11],
+            reason="residual_1122_reclassification_probe",
+        )
+        H_after_first = apply_conversions_to_H(H_reclass_probe, [first_op])
+        if H_after_first is not None:
+            probe_diag = su12_transition_diagnostics(
+                H_reclass_probe,
+                H_after_first,
+            )
+            if bool(probe_diag.get("generation_allowed", True)):
+                second_op = HistogramConversion(
+                    from_su=22,
+                    to_su=13,
+                    count=1,
+                    node_ids=[node22],
+                    reason="residual_1122_reclassification_probe",
+                )
+                normal_after_pair = apply_conversions_to_H(
+                    H_after_first,
+                    [second_op],
+                )
+                if normal_after_pair is not None:
+                    H_after_pair = normal_after_pair
+                    selected_mode = "11_to_12_22_to_13"
+                    selected_targets = ((11, 12), (22, 13))
+                    normal_reclassification_count += 1
+            else:
+                su12_cap_blocked = True
+                su12_cap_diagnostics = dict(probe_diag)
+
+        # Once SU12 has reached its dynamic 4:5 cap, preserve the pair's
+        # carbon count by converting both members to SU13.  This fallback is
+        # deliberately probed from the original state, not from the rejected
+        # 11->12 state.
+        if H_after_pair is None:
+            fallback_first = HistogramConversion(
+                from_su=11,
+                to_su=13,
+                count=1,
+                node_ids=[node11],
+                reason="residual_1122_reclassification_su12_cap_fallback",
+            )
+            H_after_fallback_first = apply_conversions_to_H(
+                H_reclass_probe,
+                [fallback_first],
+            )
+            if H_after_fallback_first is not None:
+                fallback_second = HistogramConversion(
+                    from_su=22,
+                    to_su=13,
+                    count=1,
+                    node_ids=[node22],
+                    reason="residual_1122_reclassification_su12_cap_fallback",
+                )
+                fallback_after_pair = apply_conversions_to_H(
+                    H_after_fallback_first,
+                    [fallback_second],
+                )
+                if fallback_after_pair is not None:
+                    H_after_pair = fallback_after_pair
+                    selected_mode = "both_to_13"
+                    selected_targets = ((11, 13), (22, 13))
+                    su12_cap_fallback_count += 1
+
+        if H_after_pair is None:
+            skipped_reclassification_count += 1
+            continue
+        H_reclass_probe = H_after_pair
+        selected_excess_count += 1
+        selected_item = dict(item)
+        selected_item["_reclassification_mode"] = selected_mode
+        selected_item["_reclassification_targets"] = [
+            [int(from_su), int(to_su)]
+            for from_su, to_su in selected_targets
+        ]
+        selected_reclassification_products.append(selected_item)
+    selected_excess_count = min(selected_excess_count, total_excess_count)
     if selected_excess_count <= 0:
         return _residual_1122_reclassification_failure(
             phase_eval=phase_eval,
             iteration_ledger=iteration_ledger,
             transactions=transactions,
             h_tolerance=h_tolerance,
-            reason="residual_1122_reclassification_budget_exhausted",
+            reason=(
+                "residual_1122_reclassification_no_feasible_pair"
+                if skipped_reclassification_count
+                else "residual_1122_reclassification_budget_exhausted"
+            ),
             diagnostics={
                 "residual_1122_count_before": len(exact_products),
                 "residual_1122_preserved_count": 5,
@@ -4885,12 +5460,20 @@ def _build_residual_1122_reclassification_plan(
                     0, int(max_primary_adjustments or 0)
                 ),
                 "remaining_excess_after_batch": total_excess_count,
+                "su12_cap": dict(su12_cap_diagnostics),
+                "su12_cap_blocked": bool(su12_cap_blocked),
+                "su12_cap_fallback_count": int(su12_cap_fallback_count),
+                "normal_reclassification_count": int(normal_reclassification_count),
+                "skipped_reclassification_count": int(skipped_reclassification_count),
             },
         )
     # Release only the pairs that fit this batch.  Any remaining excess is
     # intentionally left in the old generation and will be reconsidered after
     # the fresh Layer1/2 rebuild requested below.
-    selected_products = exact_products[:5 + selected_excess_count]
+    selected_products = [
+        *exact_products[:5],
+        *selected_reclassification_products,
+    ]
 
     # A conversion batch is atomic at the concrete-node level.  If an
     # ordinary residual conversion in this generation created a node that is
@@ -5060,8 +5643,8 @@ def _build_residual_1122_reclassification_plan(
     }
     for row in released_rows:
         ids_by_su = dict(row.get("node_ids_by_su", {}) or {})
-        node11 = int(ids_by_su.get("11", -1))
-        node22 = int(ids_by_su.get("22", -1))
+        node11 = _residual_1122_node_id(ids_by_su, 11)
+        node22 = _residual_1122_node_id(ids_by_su, 22)
         if node11 < 0 or node22 < 0 or node11 == node22:
             return _residual_1122_reclassification_failure(
                 phase_eval=phase_eval,
@@ -5074,13 +5657,24 @@ def _build_residual_1122_reclassification_plan(
                     "node_ids_by_su": dict(ids_by_su),
                 },
             )
-        for from_su, to_su, node_id in ((11, 12, node11), (22, 13, node22)):
+        mode = str(row.get("_reclassification_mode", "") or "")
+        if mode == "both_to_13":
+            conversion_targets = ((11, 13, node11), (22, 13, node22))
+        else:
+            # Backward-compatible default for rows created by an older
+            # serialized ledger that has no mode provenance.
+            conversion_targets = ((11, 12, node11), (22, 13, node22))
+        for from_su, to_su, node_id in conversion_targets:
             op = HistogramConversion(
                 from_su=int(from_su),
                 to_su=int(to_su),
                 count=1,
                 node_ids=[int(node_id)],
-                reason="residual_1122_reclassification",
+                reason=(
+                    "residual_1122_reclassification_su12_cap_fallback"
+                    if mode == "both_to_13"
+                    else "residual_1122_reclassification"
+                ),
             )
             next_H = apply_conversions_to_H(H_reclassified, [op])
             if next_H is None:
@@ -5106,6 +5700,8 @@ def _build_residual_1122_reclassification_plan(
                 scoring_diagnostics={
                     "plan_kind": "residual_1122_reclassification",
                     "source_product_id": str(row.get("product_id", "") or ""),
+                    "reclassification_mode": mode
+                    or "11_to_12_22_to_13",
                 },
             ))
             reclass_operations.append({
@@ -5113,6 +5709,8 @@ def _build_residual_1122_reclassification_plan(
                 "to_su": int(to_su),
                 "node_id": int(node_id),
                 "product_id": str(row.get("product_id", "") or ""),
+                "reclassification_mode": mode
+                or "11_to_12_22_to_13",
             })
             H_reclassified = next_H
     all_groups = list(groups or []) + reclass_groups
@@ -5241,11 +5839,23 @@ def _build_residual_1122_reclassification_plan(
             ],
             "reclassified_node_ids_by_source_su": {
                 str(su): [
-                    int(item.get("node_ids_by_su", {}).get(str(su), -1))
+                    _residual_1122_node_id(item.get("node_ids_by_su", {}), su)
                     for item in released_rows
                 ]
                 for su in (11, 22)
             },
+            "normal_reclassification_count": int(sum(
+                1
+                for item in released_rows
+                if str(item.get("_reclassification_mode", "") or "")
+                != "both_to_13"
+            )),
+            "su12_cap_fallback_count": int(sum(
+                1
+                for item in released_rows
+                if str(item.get("_reclassification_mode", "") or "")
+                == "both_to_13"
+            )),
             "reclassification_operations": list(reclass_operations),
             "h_delta": int(_h_total(H_reclassified, special_degree_meta) - _h_total(H_work, special_degree_meta)),
             "restart_stage3_after_rebuild": True,
@@ -5346,11 +5956,29 @@ def _plan_internal_topology_stage(
     remaining_budget = budget
     flex_bounds = dict(getattr(phase_eval, "flex_bounds", {}) or {})
     flex_counts = dict(getattr(phase_eval, "flex_counts", {}) or {})
-    remaining_flex_capacity = max(
-        0,
-        int(flex_bounds.get("max", 0) or 0)
-        - int(flex_counts.get("final", 0) or 0),
+    current_flex_count = max(0, int(flex_counts.get("final", 0) or 0))
+    flex_lower = max(0, int(flex_bounds.get("min", 0) or 0))
+    flex_upper = max(0, int(flex_bounds.get("max", 0) or 0))
+    flex_window_valid = bool(
+        flex_bounds.get("enforced", False)
+        and int(flex_lower) <= int(flex_upper)
     )
+    residual_flex_soft_cap = (
+        int((flex_lower + flex_upper) // 2)
+        if flex_window_valid
+        else int(current_flex_count)
+    )
+    remaining_required_flex_chains = (
+        max(0, int(flex_lower) - int(current_flex_count))
+        if flex_window_valid else 0
+    )
+    remaining_optional_flex_capacity = max(
+        0,
+        int(residual_flex_soft_cap)
+        - max(int(current_flex_count), int(flex_lower)),
+    )
+    initial_required_flex_chains = int(remaining_required_flex_chains)
+    initial_optional_flex_capacity = int(remaining_optional_flex_capacity)
     residual_contract_id = 2_000_000
     assembly_view = dict(getattr(phase_eval, "assembly_view", {}) or {})
     resource_ledger = dict(assembly_view.get("resource_ledger", {}) or {})
@@ -5380,7 +6008,7 @@ def _plan_internal_topology_stage(
         )
         tolerated = _tolerated_remaining_closure_ids(
             iteration_ledger.available_ids_by_su,
-            remaining_flex_goal=0,
+            remaining_flex_goal=remaining_required_flex_chains,
             recycled_resource_ids=recycled_resource_ids,
         )
         # A singleton SU24 is not an acceptable terminal residual. Keep the
@@ -5396,7 +6024,7 @@ def _plan_internal_topology_stage(
             h_tolerance=h_tolerance,
             special_degree_meta=special_degree_meta,
             su11_rotation_index=cursor,
-            remaining_flex_chains=0,
+            remaining_flex_chains=remaining_required_flex_chains,
             residual_flex_preferred_23=residual_flex_preferred_23,
             residual_flex_min_23=residual_flex_min_23,
             residual_side_preferred_23=residual_side_preferred_23,
@@ -5404,7 +6032,7 @@ def _plan_internal_topology_stage(
             max_conversions=remaining_budget,
             max_h_compensation_ops=max_h_compensation_ops,
             contract_id=residual_contract_id,
-            remaining_flex_capacity=remaining_flex_capacity,
+            remaining_optional_flex_capacity=remaining_optional_flex_capacity,
             prefix_groups=groups,
             accounting_initial_pool=initial_pool,
             forbidden_primary_conversion_signatures=forbidden_primary_conversion_signatures,
@@ -5422,7 +6050,12 @@ def _plan_internal_topology_stage(
             transactions.append(next_product["transaction"])
             collect_new_residual_products(iteration_ledger)
             if str(next_product.get("product_role", "")) == "residual_flex_chain":
-                remaining_flex_capacity = max(0, remaining_flex_capacity - 1)
+                if remaining_required_flex_chains > 0:
+                    remaining_required_flex_chains -= 1
+                else:
+                    remaining_optional_flex_capacity = max(
+                        0, remaining_optional_flex_capacity - 1
+                    )
             residual_contract_id += 1
             continue
         if mode != "conversion" or remaining_budget <= 0:
@@ -5455,7 +6088,12 @@ def _plan_internal_topology_stage(
         transactions.extend(list(conversion_plan.phase_result.transactions or []))
         collect_new_residual_products(iteration_ledger)
         if str(next_product.get("product_role", "")) == "residual_flex_chain":
-            remaining_flex_capacity = max(0, remaining_flex_capacity - 1)
+            if remaining_required_flex_chains > 0:
+                remaining_required_flex_chains -= 1
+            else:
+                remaining_optional_flex_capacity = max(
+                    0, remaining_optional_flex_capacity - 1
+                )
         residual_contract_id += 1
         remaining_budget = budget - _concrete_primary_node_count(groups)
 
@@ -5478,11 +6116,12 @@ def _plan_internal_topology_stage(
     )
     tolerated_final = _tolerated_remaining_closure_ids(
         iteration_ledger.available_ids_by_su,
-        remaining_flex_goal=0,
+        remaining_flex_goal=remaining_required_flex_chains,
         recycled_resource_ids=recycled_resource_ids,
     )
     internal_stage_completed = bool(
         (not remaining_closure_final or bool(tolerated_final))
+        and int(remaining_required_flex_chains) <= 0
         and not preserved_unassembled_su24_ids
     )
     ordinary_internal_count, residual_reclassification_count = (
@@ -5508,6 +6147,24 @@ def _plan_internal_topology_stage(
         "internal_residual_product_count": len(residual_products),
         "internal_ring_attempt_count": 0,
         "internal_ring_attempts": [],
+        "residual_flex_count_before": int(current_flex_count),
+        "residual_flex_soft_cap": int(residual_flex_soft_cap),
+        "required_flex_deficit_before": int(initial_required_flex_chains),
+        "required_flex_deficit_remaining": int(remaining_required_flex_chains),
+        "optional_flex_capacity_before": int(initial_optional_flex_capacity),
+        "optional_flex_direct_added_count": int(
+            initial_optional_flex_capacity - remaining_optional_flex_capacity
+        ),
+        "optional_flex_unused_capacity": int(remaining_optional_flex_capacity),
+        "optional_flex_conversion_count": 0,
+        # Backward-compatible diagnostics; this value is a soft cap, not a
+        # completion target.
+        "residual_flex_target": int(residual_flex_soft_cap),
+        "residual_flex_added_count": int(
+            initial_required_flex_chains - remaining_required_flex_chains
+            + initial_optional_flex_capacity - remaining_optional_flex_capacity
+        ),
+        "residual_flex_slots_remaining": int(remaining_optional_flex_capacity),
         # Only SU24 owned by completed ring products may survive Stage3.  IDs
         # still present in this available pool are physically unassembled and
         # therefore block the terminal completion state below.
@@ -5517,6 +6174,13 @@ def _plan_internal_topology_stage(
             str(key): list(values)
             for key, values in remaining_closure_final.items()
         },
+        "tolerated_remaining_ids_by_su": {
+            str(key): list(values)
+            for key, values in tolerated_final.items()
+        },
+        "tolerated_remaining_count": int(sum(
+            len(values) for values in tolerated_final.values()
+        )),
         "internal_residual_attempt_count": int(residual_attempt_count),
         "internal_residual_attempts": list(residual_attempts),
         "committed_residual_products": list(residual_products),
@@ -6168,6 +6832,36 @@ def plan_stage3_state_machine(
                 "iteration_topology_ledger": iteration_ledger,
             },
         ), h_tolerance)
+
+    # Repair an over-cap state before any external/spectrum/internal planner
+    # reads the resource ledger. Without this boundary an already-invalid
+    # Layer1/Layer2 histogram could only be rejected, even though concrete
+    # SU12 donors were available for the required SU12->SU13 recovery.
+    cap_phase = (
+        EXTERNAL_STAGE if external_phases_pending else "internal_topology"
+    )
+    cap_budget = (
+        max(
+            0,
+            int(external_max_primary_adjustments)
+            - int(external_primary_adjustments_used),
+        )
+        if external_phases_pending
+        else int(internal_max_primary_adjustments)
+    )
+    cap_recovery = _plan_su12_cap_recovery(
+        phase_eval=phase_eval,
+        iteration_ledger=iteration_ledger,
+        H=H,
+        phase=cap_phase,
+        max_conversions=cap_budget,
+        special_degree_meta=special_degree_meta,
+        contract_id=1_900_000,
+        h_tolerance=h_tolerance,
+    )
+    if cap_recovery is not None:
+        return cap_recovery
+
     completed_phases: List[str] = ["flex_range_reconciliation"]
     direct_transactions: List[TopologyResourceTransaction] = _assembly_product_transactions(
         phase_eval,

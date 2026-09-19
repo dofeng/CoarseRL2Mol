@@ -7,6 +7,7 @@ import torch
 
 from ....shared.coarse_graph import E_SU
 from ....shared.inverse_common import get_effective_hist_element_vector
+from ....shared.aromatic_plan import su12_transition_diagnostics
 from ..stage3_models import (
     AtomicAdjustmentGroup,
     HistogramAdjustmentPlan,
@@ -250,6 +251,13 @@ def _flex_lower_increase_allowed(
         diagnostics["flex_lower_increase_rejections"] = rejections
         plan.diagnostics = diagnostics
     return allowed
+
+
+def _bundle_has_valid_aromatic_staging(
+    score: ConversionBundleScore,
+) -> bool:
+    flex_after = dict(getattr(score.flex_impact, "after", {}) or {})
+    return bool(flex_after.get("aromatic_staging_valid", True))
 
 
 def _scoring_context(
@@ -814,16 +822,17 @@ def _choose_bundle_from_gap(
         str(getattr(plan, "phase", "") or "")
         == "residual_resource_self_closure"
     )
-    candidates = _direct_gap_candidates(
+    direct_candidates = _direct_gap_candidates(
         int(target),
         inventory,
         demand,
         residual_closure_only=residual_closure_only,
     )
-    if not residual_closure_only:
-        candidates.extend(
-            _atomic_aromatic_bridge_candidates(int(target), inventory, demand)
-        )
+    aromatic_candidates = (
+        []
+        if residual_closure_only
+        else _atomic_aromatic_bridge_candidates(int(target), inventory, demand)
+    )
     forbidden = _forbidden_primary_signatures(plan)
     forbidden_su_types = _forbidden_conversion_su_types(plan)
     context = _scoring_context(
@@ -836,44 +845,57 @@ def _choose_bundle_from_gap(
         aromatic_cursor,
         h_tolerance,
     )
-    candidates = [
-        candidate
-        for candidate in candidates
-        if _conversion_signature(candidate) not in forbidden
-        and not _conversion_uses_forbidden_su(
-            candidate,
-            forbidden_su_types,
-            allowed_conversion_types=context.allowed_conversion_types,
+    def _select_from(candidates: List[HistogramConversion]):
+        filtered = [
+            candidate
+            for candidate in candidates
+            if _conversion_signature(candidate) not in forbidden
+            and not _conversion_uses_forbidden_su(
+                candidate,
+                forbidden_su_types,
+                allowed_conversion_types=context.allowed_conversion_types,
+            )
+        ]
+        ranked_primary = rank_conversions(
+            context,
+            filtered,
+            h_total_fn=_h_total,
+            special_degree_meta=special_degree_meta,
         )
-    ]
-    ranked_primary = rank_conversions(
-        context,
-        candidates,
-        h_total_fn=_h_total,
-        special_degree_meta=special_degree_meta,
-    )
-    primary_candidates = [impact.op for impact in ranked_primary if impact.feasible]
-    if not primary_candidates:
-        return [], int(aromatic_cursor), None
-    scored_bundles = _enumerate_scored_bundles(
-        primary_candidates,
-        context=context,
-        max_h_compensation_ops=max_h_compensation_ops,
-        h_tolerance=h_tolerance,
-        special_degree_meta=special_degree_meta,
-        forbidden_su_types=forbidden_su_types,
-    )
-    feasible = [
-        score for score in scored_bundles
-        if score.feasible
-        and not _bundle_is_forbidden(H, score.ops, forbidden)
-        and _bundle_preserves_primary_effect(score.ops)
-        and _gap_total(score.resource_gap_after) < _gap_total(score.resource_gap_before)
-        and _does_not_worsen_resource_gap(context.demand, context.inventory, score.inventory_after)
-        and _bundle_uses_only_initial_donors(context.inventory, score.ops)
-        and _bundle_preserves_donor_reserves(context, score.ops)
-        and _flex_lower_increase_allowed(plan, score)
-    ]
+        primary_candidates = [
+            impact.op for impact in ranked_primary if impact.feasible
+        ]
+        if not primary_candidates:
+            return []
+        scored_bundles = _enumerate_scored_bundles(
+            primary_candidates,
+            context=context,
+            max_h_compensation_ops=max_h_compensation_ops,
+            h_tolerance=h_tolerance,
+            special_degree_meta=special_degree_meta,
+            forbidden_su_types=forbidden_su_types,
+        )
+        return [
+            score for score in scored_bundles
+            if score.feasible
+            and _bundle_has_valid_aromatic_staging(score)
+            and not _bundle_is_forbidden(H, score.ops, forbidden)
+            and _bundle_preserves_primary_effect(score.ops)
+            and _gap_total(score.resource_gap_after) < _gap_total(score.resource_gap_before)
+            and _does_not_worsen_resource_gap(
+                context.demand, context.inventory, score.inventory_after
+            )
+            and _bundle_uses_only_initial_donors(context.inventory, score.ops)
+            and _bundle_preserves_donor_reserves(context, score.ops)
+            and _flex_lower_increase_allowed(plan, score)
+        ]
+
+    # Aromatic donors are a fallback for an external resource deficit, not a
+    # co-equal scoring option.  This preserves SU13 for the aromatic plan and
+    # prevents avoidable SU13->SU11->SU22/23 conversions.
+    feasible = _select_from(direct_candidates)
+    if not feasible and aromatic_candidates:
+        feasible = _select_from(direct_candidates + aromatic_candidates)
     if not feasible:
         return [], int(aromatic_cursor), None
     selected = min(feasible, key=lambda item: item.sort_key)
@@ -1105,6 +1127,7 @@ def build_histogram_adjustment_plan(
                     [
                         item for item in scored
                         if item.feasible
+                        and _bundle_has_valid_aromatic_staging(item)
                         and not _bundle_is_forbidden(
                             H_work,
                             item.ops,
@@ -1322,7 +1345,37 @@ def apply_histogram_adjustment_plan(
             conservation_before={"su_count": initial_total},
             conservation_after={"su_count": initial_total},
         )
+    planned_h_after = getattr(histogram_plan, "H_after", None)
+    if (
+        list(histogram_plan.groups or [])
+        and isinstance(planned_h_after, torch.Tensor)
+        and torch.equal(
+            torch.clamp(planned_h_after.detach().cpu(), min=0).long(),
+            H_before.detach().cpu(),
+        )
+    ):
+        return Stage3AdjustmentApplyResult(
+            nodes=copy.deepcopy(list(nodes or [])),
+            H=H_before,
+            applied_ops=[],
+            rejected_ops=[{"reason": "histogram_plan_has_no_net_effect"}],
+            changed=False,
+            conservation_before={"su_count": initial_total},
+            conservation_after={"su_count": initial_total},
+        )
     used_conversion_node_ids: set[int] = set()
+    # Port-balance operations are part of the same atomic Stage3 transaction.
+    # Do not reject a primary group merely because its intermediate histogram
+    # is over the SU12 cap; the final cap check below evaluates the complete
+    # group + balance batch.
+    has_planned_balance = bool(
+        getattr(histogram_plan, "parity_balance_op", None) is not None
+        or getattr(histogram_plan, "port_role_balance_op", None) is not None
+    )
+    planned_balance_count = sum(
+        getattr(histogram_plan, field, None) is not None
+        for field in ("parity_balance_op", "port_role_balance_op")
+    )
     projected_node_types = {
         int(node_id): int(getattr(node, "su_type", -1))
         for node_id, node in nodes_by_id.items()
@@ -1449,6 +1502,22 @@ def apply_histogram_adjustment_plan(
                 conservation_before={"su_count": initial_total},
                 conservation_after={"su_count": int(H_out.sum().item())},
             )
+        su12_cap = su12_transition_diagnostics(H_out, candidate)
+        if (
+            not has_planned_balance
+            and not bool(su12_cap.get("generation_allowed", True))
+        ):
+            rejected_ops.append({
+                "group": group.to_dict(),
+                "reason": "su12_generation_cap_reached",
+                "su12_cap": dict(su12_cap),
+            })
+            return Stage3AdjustmentApplyResult(
+                nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],
+                rejected_ops=rejected_ops, changed=False,
+                conservation_before={"su_count": initial_total},
+                conservation_after={"su_count": int(H_out.sum().item())},
+            )
         H_out = candidate
         for op in [group.primary_op] + list(group.h_compensation_ops or []):
             node_ids = [int(value) for value in list(getattr(op, "node_ids", []) or [])]
@@ -1556,6 +1625,21 @@ def apply_histogram_adjustment_plan(
                 conservation_before={"su_count": initial_total},
                 conservation_after={"su_count": initial_total},
             )
+        su12_cap = su12_transition_diagnostics(H_out, candidate)
+        if (
+            planned_balance_count <= 1
+            and not bool(su12_cap.get("generation_allowed", True))
+        ):
+            return Stage3AdjustmentApplyResult(
+                nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],
+                rejected_ops=[{
+                    "reason": f"{reason_prefix}_su12_generation_cap_reached",
+                    "su12_cap": dict(su12_cap),
+                }],
+                changed=False,
+                conservation_before={"su_count": initial_total},
+                conservation_after={"su_count": int(H_out.sum().item())},
+            )
         for node_id in node_ids:
             node = nodes_by_id.get(int(node_id))
             if node is None or int(getattr(node, "su_type", -1)) != source:
@@ -1576,7 +1660,18 @@ def apply_histogram_adjustment_plan(
         convertible_inventory[target] = int(convertible_inventory.get(target, 0)) + count
         applied_ops.append({balance_field: balance_op.to_dict()})
 
-    planned_h_after = getattr(histogram_plan, "H_after", None)
+    final_su12_cap = su12_transition_diagnostics(H_before, H_out)
+    if not bool(final_su12_cap.get("generation_allowed", True)):
+        return Stage3AdjustmentApplyResult(
+            nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],
+            rejected_ops=[{
+                "reason": "su12_generation_cap_reached",
+                "su12_cap": dict(final_su12_cap),
+            }],
+            changed=False,
+            conservation_before={"su_count": initial_total},
+            conservation_after={"su_count": initial_total},
+        )
     if planned_h_after is not None:
         expected_h = torch.clamp(planned_h_after.detach().cpu(), min=0).long()
         actual_h = torch.clamp(H_out.detach().cpu(), min=0).long()

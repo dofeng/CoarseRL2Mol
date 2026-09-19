@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 import csv
+import gc
 import hashlib
 import json
 import math
@@ -398,7 +399,20 @@ class NMRGuidanceScorer:
             for (left, right), attr in descriptor["edge_attr_by_index"].items()
             if left in selected and right in selected
         ))
-        return (int(node_ids[center]), int(self.k_hop), labels, edges)
+        # The full nested environment was previously retained as the key for
+        # every predicted centre.  Large beam-search layers can contain tens
+        # of thousands of distinct environments, making that representation
+        # consume several gigabytes even though equality is all the cache
+        # needs.  A deterministic digest preserves the cache semantics while
+        # keeping each key bounded in size.
+        environment_digest = hashlib.sha256(
+            repr((labels, edges)).encode("utf-8")
+        ).digest()
+        return (
+            int(node_ids[center]),
+            int(self.k_hop),
+            environment_digest,
+        )
 
     def _raw_graph(self, descriptor: Mapping[str, Any], centers: Iterable[int]) -> Dict[str, Any]:
         mask = torch.zeros(int(descriptor["x"].shape[0]), dtype=torch.bool)
@@ -437,29 +451,64 @@ class NMRGuidanceScorer:
             centers_by_graph[graph_index].append(center)
             key_by_graph_center[(graph_index, center)] = key
         graph_indices = sorted(centers_by_graph)
-        raw_list = [
-            self._raw_graph(descriptors[index], centers_by_graph[index])
-            for index in graph_indices
-        ]
-        dataset = LocalNMRDataset(
-            raw_list, k=self.k_hop, require_real_ppm=False
-        )
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
         missing_count = len(representatives)
         self._stats["node_predictions"] += missing_count
         self._stage_stats[stage]["node_predictions"] += missing_count
-        for batch in loader:
-            self._stats["model_calls"] += 1
-            self._stage_stats[stage]["model_calls"] += 1
-            batch = batch.to(self.device)
-            (mu_pred, _pi), _latent = self.model(batch)
-            mu_pred = torch.clamp(mu_pred.view(-1), min=0.1, max=240.0).cpu()
-            mol_ids = batch.mol_id.view(-1).long().cpu().tolist()
-            centers = batch.original_center_id.view(-1).long().cpu().tolist()
-            for value, raw_index, center in zip(mu_pred.tolist(), mol_ids, centers):
-                graph_index = graph_indices[int(raw_index)]
-                key = key_by_graph_center[(graph_index, int(center))]
-                self._node_cache[key] = float(value)
+
+        # LocalNMRDataset eagerly materialises one k-hop graph per requested
+        # carbon centre.  Building it for an entire search layer can multiply
+        # hundreds of candidates by hundreds of centres and exhaust RAM before
+        # DataLoader gets a chance to batch inference.  Partition by centre
+        # count so both dataset construction and model execution stay bounded.
+        # PyG's eager collation has a much larger transient footprint than the
+        # raw feature tensors.  Keep this below the configured model batch so
+        # a caller can request a large inference batch without also requesting
+        # a multi-gigabyte in-memory preprocessing batch.
+        root_limit = max(1, min(256, self.batch_size))
+        center_chunks: list[Tuple[int, list[int]]] = []
+        for graph_index in graph_indices:
+            graph_centers = centers_by_graph[graph_index]
+            center_chunks.extend(
+                (graph_index, graph_centers[offset:offset + root_limit])
+                for offset in range(0, len(graph_centers), root_limit)
+            )
+
+        for graph_index, chunk_centers in center_chunks:
+            raw_list = [self._raw_graph(
+                descriptors[graph_index], chunk_centers
+            )]
+            dataset = LocalNMRDataset(
+                raw_list, k=self.k_hop, require_real_ppm=False
+            )
+            loader = DataLoader(
+                dataset, batch_size=self.batch_size, shuffle=False
+            )
+            for batch in loader:
+                self._stats["model_calls"] += 1
+                self._stage_stats[stage]["model_calls"] += 1
+                batch = batch.to(self.device)
+                (mu_pred, _pi), _latent = self.model(batch)
+                mu_pred = torch.clamp(
+                    mu_pred.view(-1), min=0.1, max=240.0
+                ).cpu()
+                mol_ids = batch.mol_id.view(-1).long().cpu().tolist()
+                centers = (
+                    batch.original_center_id.view(-1).long().cpu().tolist()
+                )
+                for value, raw_index, center in zip(
+                    mu_pred.tolist(), mol_ids, centers
+                ):
+                    if int(raw_index) != 0:
+                        raise RuntimeError(
+                            "unexpected graph index in chunked NMR inference"
+                        )
+                    key = key_by_graph_center[(graph_index, int(center))]
+                    self._node_cache[key] = float(value)
+                del batch, mu_pred, mol_ids, centers, _pi, _latent
+            del loader, dataset, raw_list
+            gc.collect()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
 
     def _spectrum_metrics(
         self,

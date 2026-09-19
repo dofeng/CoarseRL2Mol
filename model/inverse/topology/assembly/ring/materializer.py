@@ -654,7 +654,7 @@ def commit_fused_ring_candidate(assembler, plan: RingCandidatePlan, branch_donor
             branch_map=left_bridge_segment.branch_map,
             branch_id_map=left_bridge_segment.branch_id_map,
         )
-        if len(bridge_tokens) < 2 or len(bridge_gid_tokens) < 2:
+        if len(bridge_tokens) != 2 or len(bridge_gid_tokens) != 2:
             return _rollback_fused("fused_ring_bridgehead_render_invalid")
         left_bridge_text = _clean_ring_segment_text(bridge_tokens[0])
         right_bridge_text = _clean_ring_segment_text(bridge_tokens[-1])
@@ -662,7 +662,12 @@ def commit_fused_ring_candidate(assembler, plan: RingCandidatePlan, branch_donor
         right_bridge_gid = _clean_ring_segment_text(bridge_gid_tokens[-1])
         pair_bridge_labels = [str(value) for value in list(left_bridge_segment.ring_backbone_labels or []) if str(value)]
         pair_bridge_node_ids = _normalize_ring_backbone_node_ids(left_bridge_segment.ring_backbone_node_ids or [])
-        if len(pair_bridge_labels) < 2 or len(pair_bridge_node_ids) < 2:
+        if (
+            len(pair_bridge_labels) != 2
+            or len(pair_bridge_node_ids) != 2
+            or any(node_id is None for node_id in pair_bridge_node_ids)
+            or pair_bridge_node_ids[0] == pair_bridge_node_ids[1]
+        ):
             return _rollback_fused("fused_ring_bridgehead_pair_invalid")
         left_bridge_labels = [str(pair_bridge_labels[0])]
         right_bridge_labels = [str(pair_bridge_labels[-1])]
@@ -717,13 +722,17 @@ def commit_fused_ring_candidate(assembler, plan: RingCandidatePlan, branch_donor
     ) + list(left_filler_ids) + list(inner_segment.ring_backbone_node_ids) + list(right_filler_ids) + (
         [right_bridge_node_ids[0]] if list(right_bridge_node_ids or []) else []
     )
+    materialization_segments = [
+        left_anchor_segment,
+        left_bridge_segment,
+        inner_segment,
+        *([] if pair_bridgehead_mode else [right_bridge_segment]),
+        right_anchor_segment,
+    ]
     source_views = list({
         int(view.fragment_id): view
-        for view in list(left_anchor_segment.source_views)
-        + list(left_bridge_segment.source_views)
-        + list(inner_segment.source_views)
-        + list(right_bridge_segment.source_views)
-        + list(right_anchor_segment.source_views)
+        for segment in materialization_segments
+        for view in list(segment.source_views or [])
     }.values())
     materialization = ResolvedRingTopology(
         source_views=source_views,
@@ -733,85 +742,44 @@ def commit_fused_ring_candidate(assembler, plan: RingCandidatePlan, branch_donor
         backbone_node_ids=outer_backbone_node_ids,
         topology_notation=topology_notation,
         node_id_notation=node_id_notation,
-        support_node_ids=resolved_ring_support_node_ids(assembler, [
-            left_anchor_segment,
-            left_bridge_segment,
-            inner_segment,
-            right_bridge_segment,
-            right_anchor_segment,
-        ]),
+        support_node_ids=resolved_ring_support_node_ids(
+            assembler, materialization_segments
+        ),
         pool_node_ids_by_su=chain_materializer_module.merge_pool_ids([
-            left_anchor_segment.pool_node_ids_by_su,
-            left_bridge_segment.pool_node_ids_by_su,
-            inner_segment.pool_node_ids_by_su,
-            right_bridge_segment.pool_node_ids_by_su,
-            right_anchor_segment.pool_node_ids_by_su,
+            *[
+                segment.pool_node_ids_by_su
+                for segment in materialization_segments
+            ],
             {"23": list(filler_ids)},
         ]),
         fixed_source_node_ids=sorted({
             int(node_id)
-            for segment in [
-                left_anchor_segment,
-                left_bridge_segment,
-                inner_segment,
-                right_bridge_segment,
-                right_anchor_segment,
-            ]
+            for segment in materialization_segments
             for node_id in list(getattr(segment, "fixed_source_node_ids", []) or [])
         }),
         branch_paths=[
             dict(path or {})
-            for segment in [
-                left_anchor_segment,
-                left_bridge_segment,
-                inner_segment,
-                right_bridge_segment,
-                right_anchor_segment,
-            ]
+            for segment in materialization_segments
             for path in list(segment.branch_paths or [])
         ],
         external_attachments=[
             [int(value) for value in list(edge or [])]
-            for segment in [
-                left_anchor_segment,
-                left_bridge_segment,
-                inner_segment,
-                right_bridge_segment,
-                right_anchor_segment,
-            ]
+            for segment in materialization_segments
             for edge in list(segment.external_attachments or [])
         ],
         like24_node_ids=sorted({
             int(node_id)
-            for segment in [
-                left_anchor_segment,
-                left_bridge_segment,
-                inner_segment,
-                right_bridge_segment,
-                right_anchor_segment,
-            ]
+            for segment in materialization_segments
             for node_id in list(segment.like24_node_ids or [])
         }),
         node_profiles_by_id={
             int(key): str(value)
-            for segment in [
-                left_anchor_segment,
-                left_bridge_segment,
-                inner_segment,
-                right_bridge_segment,
-                right_anchor_segment,
-            ]
+            for segment in materialization_segments
             for key, value in dict(segment.node_profiles_by_id or {}).items()
         },
         replaced_branch_requirements=[
             dict(requirement or {})
-            for segment in [
-                left_anchor_segment,
-                left_bridge_segment,
-                inner_segment,
-                right_bridge_segment,
-                right_anchor_segment,
-            ]
+            for segment in materialization_segments
             for requirement in list(segment.replaced_branch_requirements or [])
         ],
     )

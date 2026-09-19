@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import torch
 from typing import Any, Dict, List, Optional, Tuple
@@ -151,12 +153,17 @@ def adjust_block_a_carbonyl_anchor_impl(
     def _audit_candidate(H_before: torch.Tensor,
                          H_after: torch.Tensor,
                          special_degree_meta: Optional[Dict[int, Dict[int, int]]] = None,
-                         enforce_fixed_elements: bool = True) -> Tuple[bool, Dict[str, Any]]:
+                         enforce_fixed_elements: bool = True,
+                         audit_mode: str = 'standard',
+                         unmet: Optional[List[Dict[str, Any]]] = None) -> Tuple[bool, Dict[str, Any]]:
         before = H_before.detach().cpu().long()
         after = H_after.detach().cpu().long()
+        mode = str(audit_mode or 'standard')
+        if mode not in {'standard', 'oxygen_rebalance'}:
+            raise ValueError(f'unsupported Block A audit mode: {mode}')
         if bool(torch.any(after < 0)):
             return False, {'reason': 'negative_histogram'}
-        if int(before.sum().item()) != int(after.sum().item()):
+        if mode == 'standard' and int(before.sum().item()) != int(after.sum().item()):
             return False, {'reason': 'su_total_not_conserved'}
         before_meta = adjuster._get_special_degree_meta(before)
         after_meta = special_degree_meta if special_degree_meta is not None else adjuster._get_special_degree_meta(after)
@@ -170,24 +177,21 @@ def adjust_block_a_carbonyl_anchor_impl(
             special_degree_meta=after_meta,
             E_SU_tensor=adjuster.E_SU.detach().cpu(),
         ).detach().cpu().float()
-        copied = min(int(before_elements.numel()), int(after_elements.numel()))
-        fixed_mismatch = {
-            int(idx): float(after_elements[idx].item() - before_elements[idx].item())
-            for idx in range(copied)
-            if int(idx) != 1 and abs(float(after_elements[idx].item() - before_elements[idx].item())) > 1e-6
-        }
-        if enforce_fixed_elements and fixed_mismatch:
-            return False, {'reason': 'fixed_elements_not_conserved', 'fixed_element_delta': fixed_mismatch}
         diagnostics = {
             'reason': 'ok',
+            'audit_mode': mode,
+            'su_total_before': int(before.sum().item()),
+            'su_total_after': int(after.sum().item()),
             'h_before': float(before_elements[1].item()) if int(before_elements.numel()) > 1 else 0.0,
             'h_after': float(after_elements[1].item()) if int(after_elements.numel()) > 1 else 0.0,
             'h_constraint_mode': 'soft',
             'h_topology_gate': False,
         }
         E_target = getattr(adjuster, 'E_target', None)
-        if E_target is not None and int(after_elements.numel()) > 1:
+        target = None
+        if E_target is not None:
             target = E_target.detach().cpu().float() if hasattr(E_target, 'detach') else torch.tensor(E_target, dtype=torch.float)
+        if target is not None and int(after_elements.numel()) > 1:
             target_h = float(target[1].item()) if int(target.numel()) > 1 else 0.0
             h_after = float(after_elements[1].item())
             diagnostics.update({
@@ -195,16 +199,114 @@ def adjust_block_a_carbonyl_anchor_impl(
                 'h_rel': float(abs(h_after - target_h) / max(abs(target_h), 1.0)),
                 'h_tolerance': float(getattr(adjuster, '_h_tolerance', 0.08)),
             })
+
+        if mode == 'oxygen_rebalance':
+            if unmet:
+                return False, {
+                    **diagnostics,
+                    'reason': 'oxygen_rebalance_unmet',
+                    'unmet': copy.deepcopy(list(unmet)),
+                }
+            if target is None:
+                return False, {**diagnostics, 'reason': 'oxygen_rebalance_missing_target'}
+            copied = min(int(target.numel()), int(after_elements.numel()))
+            target_mismatch = {
+                int(idx): {
+                    'predicted': float(after_elements[idx].item()),
+                    'target': float(target[idx].item()),
+                    'delta': float(after_elements[idx].item() - target[idx].item()),
+                }
+                for idx in range(copied)
+                if int(idx) != 1
+                and abs(float(after_elements[idx].item() - target[idx].item())) > 1e-6
+            }
+            if target_mismatch:
+                return False, {
+                    **diagnostics,
+                    'reason': 'oxygen_rebalance_fixed_element_mismatch',
+                    'fixed_element_mismatch': target_mismatch,
+                }
+            invalid_degree_totals = {}
+            for raw_su, raw_parts in dict(after_meta or {}).items():
+                su = int(raw_su)
+                if su < 0 or su >= int(after.numel()):
+                    continue
+                degree_total = sum(max(0, int(count)) for count in dict(raw_parts or {}).values())
+                if int(degree_total) != int(after[su].item()):
+                    invalid_degree_totals[su] = {
+                        'degree_total': int(degree_total),
+                        'histogram_total': int(after[su].item()),
+                    }
+            if invalid_degree_totals:
+                return False, {
+                    **diagnostics,
+                    'reason': 'oxygen_rebalance_degree_meta_mismatch',
+                    'degree_meta_mismatch': invalid_degree_totals,
+                }
+            diagnostics['fixed_elements_match_target'] = True
+            return True, diagnostics
+
+        copied = min(int(before_elements.numel()), int(after_elements.numel()))
+        fixed_mismatch = {
+            int(idx): float(after_elements[idx].item() - before_elements[idx].item())
+            for idx in range(copied)
+            if int(idx) != 1 and abs(float(after_elements[idx].item() - before_elements[idx].item())) > 1e-6
+        }
+        if enforce_fixed_elements and fixed_mismatch:
+            return False, {
+                **diagnostics,
+                'reason': 'fixed_elements_not_conserved',
+                'fixed_element_delta': fixed_mismatch,
+            }
         return True, diagnostics
 
-    def _rebalance_oxygen_related(reason: str) -> None:
+    def _snapshot_oxygen_metadata() -> Dict[str, Any]:
+        layer0_estimator = getattr(adjuster, 'layer0_estimator', None)
+        layer0_fields = (
+            'fixed_partition_meta',
+            'special_degree_meta',
+            'special_partition_meta',
+            'special_anchor_mode_meta',
+            'degree_parity_adjustment',
+            'port_role_balance_adjustment',
+        )
+        return {
+            'adjuster_fixed_partition_meta': copy.deepcopy(
+                getattr(adjuster, 'fixed_partition_meta', {}) or {}
+            ),
+            'layer0': {
+                field: copy.deepcopy(getattr(layer0_estimator, field, {}) or {})
+                for field in layer0_fields
+            } if layer0_estimator is not None else {},
+        }
+
+    def _restore_oxygen_metadata(snapshot: Dict[str, Any]) -> None:
+        adjuster.fixed_partition_meta = copy.deepcopy(
+            dict(snapshot.get('adjuster_fixed_partition_meta', {}) or {})
+        )
+        layer0_estimator = getattr(adjuster, 'layer0_estimator', None)
+        if layer0_estimator is None:
+            return
+        for field, value in dict(snapshot.get('layer0', {}) or {}).items():
+            setattr(layer0_estimator, str(field), copy.deepcopy(value))
+
+    def _rebalance_oxygen_related(reason: str) -> bool:
         nonlocal H_work, all_moves, meta
         layer0_estimator = getattr(adjuster, 'layer0_estimator', None)
         E_target = getattr(adjuster, 'E_target', None)
         if layer0_estimator is None or E_target is None:
-            return
+            return True
+        H_before = H_work.detach().clone()
+        move_count_before = len(all_moves)
+        metadata_before = _snapshot_oxygen_metadata()
+
+        def _rollback() -> None:
+            nonlocal H_work
+            H_work = H_before.detach().clone()
+            del all_moves[move_count_before:]
+            _restore_oxygen_metadata(metadata_before)
+
         try:
-            H_before = H_work.clone()
             H_target, rebalance_meta = layer0_estimator._rebalance_oxygen_linked_units_after_carbonyl_adjust(
                 H_work,
                 E_target,
@@ -372,14 +474,21 @@ def adjust_block_a_carbonyl_anchor_impl(
 
             special_meta[19] = {int(deg): int(cur19_meta.get(int(deg), 0)) for deg in (1, 2, 3)}
 
-            audit_ok, audit = _audit_candidate(H_before, H_new, special_degree_meta=special_meta)
+            audit_ok, audit = _audit_candidate(
+                H_before,
+                H_new,
+                special_degree_meta=special_meta,
+                audit_mode='oxygen_rebalance',
+                unmet=unmet,
+            )
             if not audit_ok:
+                _rollback()
                 rejected_bundles.append({
                     'op': f'A_recompute_carbonyl_O_fixed_links_by_conversion[{reason}]',
                     **dict(audit),
                 })
                 meta['rejected_bundles'] = list(rejected_bundles)
-                return
+                return False
 
             if target_fixed_meta:
                 fixed_meta_seed = dict(target_fixed_meta)
@@ -435,9 +544,19 @@ def adjust_block_a_carbonyl_anchor_impl(
                 "carbon_before": _carbon_count(H_before),
                 "carbon_after": _carbon_count(H_work),
                 "fixed_partition_meta": dict(fixed_meta_after),
+                "audit": dict(audit),
             }
+            return True
         except Exception as e:
+            _rollback()
             meta["post_oxygen_rebalance_error"] = str(e)
+            rejected_bundles.append({
+                'op': f'A_recompute_carbonyl_O_fixed_links_by_conversion[{reason}]',
+                'reason': 'oxygen_rebalance_exception',
+                'error': str(e),
+            })
+            meta['rejected_bundles'] = list(rejected_bundles)
+            return False
 
     # 先做少量羰基中心类型修正，再做 9/13 与 22/23/24 的联合迁移。
     # 注意：11 号与脂肪碳数量高度关联，Block A 不再把 11 作为可随意增减的缓冲池。
@@ -468,13 +587,22 @@ def adjust_block_a_carbonyl_anchor_impl(
             center_moves = []
             H_work = H_center_before
         else:
+            center_move_start = len(all_moves)
             H_work = H_center_candidate
             for mv in center_moves:
                 tagged = dict(mv)
                 tagged["block"] = "A_center"
                 all_moves.append(tagged)
-        if center_moves:
-            _rebalance_oxygen_related(reason='after_center_moves')
+            if center_moves and not _rebalance_oxygen_related(reason='after_center_moves'):
+                del all_moves[center_move_start:]
+                rejected_bundles.append({
+                    'op': 'A_center_bundle',
+                    'moves': list(center_moves),
+                    'reason': 'oxygen_rebalance_rejected',
+                })
+                meta['rejected_bundles'] = list(rejected_bundles)
+                center_moves = []
+                H_work = H_center_before
 
     if ppm is None or diff is None:
         meta["joint_direction"] = None
@@ -554,10 +682,20 @@ def adjust_block_a_carbonyl_anchor_impl(
             if not audit_ok:
                 rejected_bundles.append({'op': str(name), **dict(audit)})
                 continue
+            H_joint_before = H_work.detach().clone()
+            joint_move_start = len(all_moves)
             H_work = H_try
             all_moves.append({"block": "A_joint", "op": name, "delta": dict(delta)})
             if any(int(k) in {1, 2, 3} for k in delta.keys()):
-                _rebalance_oxygen_related(reason=f'after_joint_move:{name}')
+                if not _rebalance_oxygen_related(reason=f'after_joint_move:{name}'):
+                    del all_moves[joint_move_start:]
+                    H_work = H_joint_before
+                    rejected_bundles.append({
+                        'op': str(name),
+                        'reason': 'oxygen_rebalance_rejected',
+                    })
+                    meta['rejected_bundles'] = list(rejected_bundles)
+                    continue
             applied = True
             break
         if not applied:

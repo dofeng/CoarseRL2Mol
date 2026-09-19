@@ -719,6 +719,11 @@ def plan_fused_ring_templates(
         and ring_search_module.view_supports_real_su24_c_bridgehead(assembler, view)
         and ring_segments_module.view_is_ring_core_explicit(assembler, view)
     ]
+    pair_bridgeheads = [
+        view for view in available
+        if ring_search_module.view_supports_fused_pair_bridgeheads(assembler, view)
+        and ring_segments_module.view_is_ring_core_explicit(assembler, view)
+    ]
     inner_cores = [
         view for view in available
         if ring_search_module.view_supports_fused_inner(assembler, view)
@@ -728,12 +733,16 @@ def plan_fused_ring_templates(
     missing_slots: List[str] = []
     if len(anchors) < 2:
         missing_slots.append("fused_outer_anchor_missing")
-    if not bridgeheads:
+    if not bridgeheads and not pair_bridgeheads:
         missing_slots.append("fused_bridgehead_missing")
     if not inner_cores:
         missing_slots.append("fused_inner_core_missing")
     anchors.sort(key=lambda item: (ring_segments_module.view_ring_contract_priority(assembler, item, "fused_ring_plan"), int(item.fragment_id)))
     bridgeheads.sort(key=lambda item: (
+        ring_segments_module.view_ring_contract_priority(assembler, item, "fused_ring_plan"),
+        int(item.fragment_id),
+    ))
+    pair_bridgeheads.sort(key=lambda item: (
         ring_segments_module.view_ring_contract_priority(assembler, item, "fused_ring_plan"),
         int(item.fragment_id),
     ))
@@ -745,7 +754,9 @@ def plan_fused_ring_templates(
     )
     left_anchor = anchors[0] if anchors else None
     right_anchor = next((item for item in anchors[1:] if left_anchor is not None and int(item.fragment_id) != int(left_anchor.fragment_id)), None)
-    bridge = bridgeheads[0] if bridgeheads else None
+    # Pair bridgeheads have priority and require the bounded combination search
+    # below because one physical fragment fills two logical bridgehead slots.
+    bridge = bridgeheads[0] if bridgeheads and not pair_bridgeheads else None
     right_bridge = (
         next(
             (
@@ -886,6 +897,34 @@ def plan_fused_ring_templates(
         )
 
         bridge_pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+        for pair_view in pair_bridgeheads:
+            candidate_id = f"view:fused:bridge_pair:{int(pair_view.fragment_id)}"
+            pair_spec = ring_segments_module.build_ring_template_segment(assembler,
+                skeleton_kind="fused",
+                role="left_bridgehead",
+                candidate_id=candidate_id,
+                view=pair_view,
+                reverse=False,
+                priority=(
+                    ring_segments_module.view_ring_contract_priority(
+                        assembler, pair_view, "fused_ring_plan"
+                    ),
+                    int(pair_view.fragment_id),
+                ),
+            )
+            if pair_spec is None:
+                continue
+            if len(list(pair_spec.get("backbone_node_ids", []) or [])) != 2:
+                continue
+            # The source view resolves atomically as a two-node segment.  The
+            # planner accounts for one logical node in each bridgehead slot.
+            left_spec = dict(pair_spec)
+            left_spec["backbone_span"] = 1
+            right_spec = dict(pair_spec)
+            right_spec["role"] = "right_bridgehead"
+            right_spec["backbone_span"] = 1
+            right_spec["shared_candidate_id"] = str(candidate_id)
+            bridge_pairs.append((left_spec, right_spec))
         for left_view in bridgeheads:
             left_spec = ring_segments_module.build_ring_template_segment(assembler, 
                 skeleton_kind="fused",
