@@ -502,6 +502,16 @@ def record_pending(
         for fragment_id in source_fragment_ids
         for slot in list(getattr(fragment_by_id.get(int(fragment_id)), "branch_contracts", []) or [])
     ]
+    intrinsic_failure = (
+        diagnostic_payload.get("failure_domain") == "topology_materialization"
+        and diagnostic_payload.get("failure_scope") == "current_contract"
+    )
+    if intrinsic_failure:
+        # These slots cannot be executed. Do not resurrect their resource
+        # demand merely because the fragment still carries an older slot.
+        required_counts = {}
+        open_mainline_slots = []
+        branch_slots = []
     slot_counts = _slot_required_counts(open_mainline_slots + branch_slots)
     if str(reason) in {"fixed_branch_partner_missing", "fused_bridgehead_missing"}:
         required_counts = {}
@@ -525,6 +535,8 @@ def record_pending(
         required_counts=dict(required_counts or {}),
         has_branch_contracts=bool(branch_slots),
     )
+    if intrinsic_failure:
+        contract_kind = "structural_blocker"
     missing_counts = {
         str(key): max(
             0,
@@ -605,6 +617,10 @@ def record_pending(
             explicit_failure_domain = "ownership_constraint"
         else:
             explicit_failure_domain = "resource_capacity"
+    if not explicit_failure_domain and contract_kind == "structural_blocker":
+        explicit_failure_domain = "topology_materialization"
+    if not explicit_failure_domain and shortage_reason and required_counts:
+        explicit_failure_domain = "resource_capacity"
     if explicit_failure_domain:
         diagnostic_payload["failure_domain"] = str(explicit_failure_domain)
     pending_key = pending_owner_key(

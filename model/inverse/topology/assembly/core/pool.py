@@ -232,13 +232,29 @@ class PoolAllocator:
 
     def rollback(self, snapshot: Dict[str, Any]) -> None:
         snapshot = dict(snapshot or {})
+        # Transaction snapshots can come from JSON/legacy callers where SU
+        # bucket keys were serialized as integers.  The allocator contract is
+        # string-keyed everywhere else; restoring the raw mapping would make
+        # subsequent ``get(str(su))`` calls silently miss valid resources.
+        def normalize_ids(raw: Any) -> Dict[str, List[int]]:
+            normalized: Dict[str, List[int]] = {}
+            for raw_key, raw_values in dict(raw or {}).items():
+                key = _su_key(raw_key)
+                normalized.setdefault(key, []).extend(
+                    int(value) for value in list(raw_values or [])
+                )
+            return {
+                key: sorted(set(values))
+                for key, values in normalized.items()
+            }
+
         before_remaining = {
             str(key): {int(value) for value in list(values or [])}
             for key, values in self.remaining_ids_by_su.items()
         }
         restored_remaining = {
-            str(key): {int(value) for value in list(values or [])}
-            for key, values in dict(snapshot.get("remaining", {}) or {}).items()
+            key: set(values)
+            for key, values in normalize_ids(snapshot.get("remaining", {})).items()
         }
         rolled_back_ids_by_su = {
             str(key): sorted(
@@ -249,17 +265,29 @@ class PoolAllocator:
             if restored_remaining.get(str(key), set())
             - before_remaining.get(str(key), set())
         }
-        self.initial_ids_by_su = deepcopy(
+        self.initial_ids_by_su = normalize_ids(
             snapshot.get("initial", self.initial_ids_by_su)
         )
-        self.remaining_ids_by_su = deepcopy(snapshot.get("remaining", {}))
-        self.consumed_ids_by_su = deepcopy(snapshot.get("consumed", {}))
-        self.su_key_by_node_id = deepcopy(
-            snapshot.get("su_key_by_node_id", self.su_key_by_node_id)
+        self.remaining_ids_by_su = normalize_ids(
+            snapshot.get("remaining", self.remaining_ids_by_su)
         )
-        self.protected_counts_by_su = deepcopy(
-            snapshot.get("protected_counts", self.protected_counts_by_su)
+        self.consumed_ids_by_su = normalize_ids(
+            snapshot.get("consumed", self.consumed_ids_by_su)
         )
+        self.su_key_by_node_id = {
+            int(node_id): _su_key(su_key)
+            for node_id, su_key in dict(
+                snapshot.get("su_key_by_node_id", self.su_key_by_node_id)
+                or {}
+            ).items()
+        }
+        self.protected_counts_by_su = {
+            _su_key(key): max(0, int(value))
+            for key, value in dict(
+                snapshot.get("protected_counts", self.protected_counts_by_su)
+                or {}
+            ).items()
+        }
         self._generic_claim_excluded_node_ids = {
             int(value)
             for value in list(

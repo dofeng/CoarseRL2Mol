@@ -1526,6 +1526,24 @@ def ring_materialization_blockers(assembler) -> Dict[int, Dict[str, Any]]:
     return blockers
 
 
+def release_ring_view_to_chain_fallback(assembler, fragment_id: int) -> None:
+    """Discard exhausted ring retry state without consuming the fragment."""
+    fragment_id = int(fragment_id)
+    if hasattr(assembler, "pending_units") and hasattr(
+        assembler, "pending_contracts"
+    ):
+        ownership_module.invalidate_pending_identity(
+            assembler,
+            fragment_ids=[fragment_id],
+            claimed_node_ids=[],
+        )
+    assembler.ring_exhausted_fragment_ids.add(fragment_id)
+    assembler.ring_pending_reasons.pop(fragment_id, None)
+    assembler.ring_pending_attempts.pop(fragment_id, None)
+    assembler.ring_infeasible_contracts.pop(fragment_id, None)
+    assembler.materialization_failure_by_fragment_id.pop(fragment_id, None)
+
+
 def assemble_priority_rings(
     assembler,
     branch_donors: List[AssemblyFragmentView],
@@ -1550,20 +1568,6 @@ def assemble_priority_rings(
     )
     for view in available_ring_views:
         fragment_id = int(view.fragment_id)
-        resource_contract = dict(
-            assembler.ring_infeasible_contracts.get(fragment_id, {}) or {}
-        )
-        has_resource_deficit = bool(
-            dict(resource_contract.get("required_counts", {}) or {})
-            and dict(resource_contract.get("missing_counts", {}) or {})
-        )
-        if (
-            has_resource_deficit
-            and ring_policy_module.view_requires_ring_resource_retry(view)
-        ):
-            pool_only_blocked = True
-            continue
-
         attempts = dict(
             getattr(assembler, "ring_pending_attempts", {}).get(
                 fragment_id, {}
@@ -1578,6 +1582,55 @@ def assemble_priority_rings(
             str(value)
             for value in view_ring_allowed_skeletons(assembler, view)
         }
+        all_allowed_skeletons_attempted = bool(
+            allowed_skeletons
+            and allowed_skeletons.issubset(attempted_skeletons)
+        )
+        resource_contract = dict(
+            assembler.ring_infeasible_contracts.get(fragment_id, {}) or {}
+        )
+        missing_counts = {
+            int(key): int(value)
+            for key, value in dict(
+                resource_contract.get("missing_counts", {}) or {}
+            ).items()
+            if str(key).lstrip("-").isdigit() and int(value) > 0
+        }
+        has_resource_deficit = bool(
+            dict(resource_contract.get("required_counts", {}) or {})
+            and missing_counts
+        )
+        if (
+            has_resource_deficit
+            and ring_policy_module.view_requires_ring_resource_retry(view)
+        ):
+            available_counts = {
+                str(key): int(value)
+                for key, value in dict(
+                    assembler.allocator.available_counts() or {}
+                ).items()
+            }
+            unavailable_non_convertible = {
+                int(su_type): int(missing_counts.get(int(su_type), 0))
+                for su_type in (
+                    ring_policy_module.NON_CONVERTIBLE_RING_RESOURCE_SU_TYPES
+                )
+                if int(missing_counts.get(int(su_type), 0)) > 0
+                and int(available_counts.get(str(int(su_type)), 0)) <= 0
+            }
+            if (
+                unavailable_non_convertible
+                and all_allowed_skeletons_attempted
+                and ring_policy_module.view_allows_non_ring_fallback(view)
+            ):
+                # No later Stage3 conversion can create the missing SU24.
+                # Release only dual-use views; mandatory ring-only views
+                # remain explicit resource blockers.
+                release_ring_view_to_chain_fallback(assembler, fragment_id)
+                continue
+            pool_only_blocked = True
+            continue
+
         # Do not consume a view merely because another candidate represented
         # the current skeleton.  It is exhausted only after every skeleton
         # allowed by its own contract has had a concrete attempt.
@@ -1590,10 +1643,7 @@ def assemble_priority_rings(
         # must not keep this fully-probed view in ring-pending state.  That
         # global coupling previously left valid 24_D side fallbacks blocked
         # whenever any unrelated ring needed a conversion.
-        assembler.ring_exhausted_fragment_ids.add(fragment_id)
-        assembler.ring_pending_reasons.pop(fragment_id, None)
-        assembler.ring_pending_attempts.pop(fragment_id, None)
-        assembler.materialization_failure_by_fragment_id.pop(fragment_id, None)
+        release_ring_view_to_chain_fallback(assembler, fragment_id)
 
     # A non-mandatory classified ring view can fail to materialize while a
     # complete ring made only from pool resources is still feasible.  Run an

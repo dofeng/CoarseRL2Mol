@@ -174,6 +174,24 @@ def seed_ledger_topology_state(
             for node_id in list(values or [])
         }
         resource_id_set = set(resource_node_ids)
+        conflict_count = len(working.conflicts)
+        if len(resource_node_ids) != len(resource_id_set) or resource_id_set.intersection(fixed_node_ids):
+            working.conflicts.append({
+                "reason": "completed_product_duplicate_node",
+                "product_id": product_id,
+            })
+        expected_su = {
+            int(node_id): int(su_type)
+            for node_id, su_type in dict(product.get("expected_su_type_by_node_id", {}) or {}).items()
+        }
+        for node_id, claimed_su in claimed_su_by_node_id.items():
+            if node_id in expected_su and expected_su[node_id] != claimed_su:
+                working.conflicts.append({
+                    "node_id": node_id,
+                    "reason": "completed_product_su_declaration_conflict",
+                    "product_id": product_id,
+                })
+            expected_su[node_id] = claimed_su
         for node_id in sorted(set(fixed_node_ids + resource_node_ids)):
             owner = working.ownership_by_node_id.get(int(node_id))
             if owner is None:
@@ -190,7 +208,7 @@ def seed_ledger_topology_state(
                     "owners": [str(owner.owner_product_id), product_id],
                 })
                 continue
-            claimed_su = claimed_su_by_node_id.get(int(node_id))
+            claimed_su = expected_su.get(int(node_id))
             if claimed_su is not None and int(owner.su_type) != int(claimed_su):
                 working.conflicts.append({
                     "node_id": int(node_id),
@@ -200,8 +218,18 @@ def seed_ledger_topology_state(
                     "actual_su_type": int(owner.su_type),
                 })
                 continue
+        # A product is indivisible. Never publish a completed product with
+        # only a subset of its resources claimed after an identity failure.
+        if len(working.conflicts) != conflict_count:
+            continue
+        product["expected_su_type_by_node_id"] = {
+            int(node_id): int(working.ownership_by_node_id[int(node_id)].su_type)
+            for node_id in set(fixed_node_ids + resource_node_ids)
+        }
+        for node_id in sorted(set(fixed_node_ids + resource_node_ids)):
+            owner = working.ownership_by_node_id[int(node_id)]
             for values in working.available_ids_by_su.values():
-                if int(node_id) in values:
+                while int(node_id) in values:
                     values.remove(int(node_id))
             if int(node_id) in working.conflict_node_ids:
                 working.conflict_node_ids.remove(int(node_id))
@@ -234,8 +262,34 @@ def seed_ledger_topology_state(
             int(value)
             for value in list(contract.get("claimed_source_node_ids", []) or [])
         ]
-        source_status, _ = contract_source_status(working, node_ids)
+        source_status, source_proof = contract_source_status(
+            working,
+            node_ids,
+            current_contract_id=int(contract_id),
+        )
         if source_status == "superseded":
+            continue
+        if source_status == "pending":
+            working.conflicts.append({
+                "reason": "pending_contract_overlap",
+                "contract_id": int(contract_id),
+                **{
+                    str(key): deepcopy(value)
+                    for key, value in dict(source_proof or {}).items()
+                    if str(key) != "reason"
+                },
+            })
+            continue
+        if source_status == "conflict":
+            working.conflicts.append({
+                "reason": str(source_proof.get("reason", "pending_contract_overlap")),
+                "contract_id": int(contract_id),
+                **{
+                    str(key): deepcopy(value)
+                    for key, value in dict(source_proof or {}).items()
+                    if str(key) != "reason"
+                },
+            })
             continue
         for node_id in sorted(set(node_ids)):
             owner = working.ownership_by_node_id.get(int(node_id))
@@ -265,13 +319,26 @@ def seed_ledger_topology_state(
         normalized = dict(contract)
         normalized["contract_id"] = contract_id
         normalized["claimed_source_node_ids"] = sorted(set(node_ids))
-        working.pending_contracts.append(normalized)
+        # Re-seeding the same live contract refreshes its demand/proof; it
+        # must not append another pending row for the same physical sources.
+        existing_index = next((
+            index for index, item in enumerate(working.pending_contracts)
+            if int(item["contract_id"]) == contract_id
+            and sorted(set(item.get("claimed_source_node_ids", []) or []))
+            == normalized["claimed_source_node_ids"]
+        ), None)
+        if existing_index is None:
+            working.pending_contracts.append(normalized)
+        else:
+            working.pending_contracts[existing_index] = normalized
     return working
 
 
 def contract_source_status(
     ledger: Stage3OwnershipLedger,
     claimed_source_node_ids: Sequence[int],
+    *,
+    current_contract_id: Optional[int] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     node_ids = sorted({
         int(value) for value in list(claimed_source_node_ids or [])
@@ -282,30 +349,65 @@ def contract_source_status(
     missing_ids = [node_id for node_id, owner in zip(node_ids, owners) if owner is None]
     if missing_ids:
         return "conflict", {"reason": "source_node_missing", "node_ids": missing_ids}
+    # Check every committed owner before allowing continuation of pending
+    # sources. One pending source must not hide another source that has already
+    # been consumed by a product (including a claimed closure/ring resource).
+    completed_states = {
+        Stage3OwnershipState.COMPLETED_TOPOLOGY.value,
+        Stage3OwnershipState.CLAIMED_CLOSURE_RESOURCE.value,
+        Stage3OwnershipState.CLAIMED_SU24_RING_RESOURCE.value,
+    }
     completed = [
         owner for owner in owners
-        if owner is not None and owner.state == Stage3OwnershipState.COMPLETED_TOPOLOGY.value
+        if owner.state in completed_states or owner.owner_product_id
     ]
-    if not completed:
-        return "available", {}
-    product_ids = {str(owner.owner_product_id or "") for owner in completed}
-    if len(completed) == len(owners) and len(product_ids) == 1:
-        return "superseded", {
-            "reason": "source_contract_superseded",
+    if completed:
+        product_ids = {str(owner.owner_product_id or "") for owner in completed}
+        if len(completed) == len(owners) and len(product_ids) == 1 and "" not in product_ids:
+            return "superseded", {
+                "reason": "source_contract_superseded",
+                "claimed_source_node_ids": node_ids,
+                "owner_product_id": next(iter(product_ids)),
+            }
+        return "conflict", {
+            "reason": "contract_identity_conflict",
             "claimed_source_node_ids": node_ids,
-            "owner_product_id": next(iter(product_ids)),
+            "completed_node_ids": sorted(int(owner.node_id) for owner in completed),
+            "available_node_ids": sorted(
+                int(owner.node_id) for owner in owners
+                if owner.state not in completed_states and not owner.owner_product_id
+            ),
+            "owner_product_ids": sorted(product_ids),
         }
-    return "conflict", {
-        "reason": "contract_identity_conflict",
-        "claimed_source_node_ids": node_ids,
-        "completed_node_ids": sorted(int(owner.node_id) for owner in completed),
-        "available_node_ids": sorted(
-            int(owner.node_id)
-            for owner in owners
-            if str(owner.state) != Stage3OwnershipState.COMPLETED_TOPOLOGY.value
-        ),
-        "owner_product_ids": sorted(product_ids),
-    }
+    pending = [
+        owner for owner in owners
+        if owner is not None
+        and owner.state == Stage3OwnershipState.PENDING_TOPOLOGY.value
+    ]
+    if pending:
+        pending_contract_ids = sorted({
+            int(owner.owner_contract_id)
+            for owner in pending
+            if owner.owner_contract_id is not None
+        })
+        if (
+            current_contract_id is not None
+            and (
+                not pending_contract_ids
+                or set(pending_contract_ids) == {int(current_contract_id)}
+            )
+        ):
+            return "available", {
+                "reason": "source_contract_pending_current",
+                "claimed_source_node_ids": node_ids,
+                "pending_contract_ids": pending_contract_ids,
+            }
+        return "pending", {
+            "reason": "source_contract_pending",
+            "claimed_source_node_ids": node_ids,
+            "pending_contract_ids": pending_contract_ids,
+        }
+    return "available", {}
 
 
 def assign_contract_slots(
@@ -317,12 +419,20 @@ def assign_contract_slots(
     claimed: Dict[int, List[int]] = {}
     used_ids: set[int] = set()
     source_ids = list(contract.claimed_source_node_ids)
-    source_status, source_proof = contract_source_status(working, source_ids)
+    source_status, source_proof = contract_source_status(
+        working,
+        source_ids,
+        current_contract_id=int(contract.contract_id),
+    )
     if source_status != "available":
         return None, slots, {}, dict(source_proof or {})
     for source_id in source_ids:
         owner = working.ownership_by_node_id.get(int(source_id))
-        if owner is None or owner.state == Stage3OwnershipState.COMPLETED_TOPOLOGY.value:
+        if owner is None or owner.owner_product_id or owner.state in {
+            Stage3OwnershipState.COMPLETED_TOPOLOGY.value,
+            Stage3OwnershipState.CLAIMED_CLOSURE_RESOURCE.value,
+            Stage3OwnershipState.CLAIMED_SU24_RING_RESOURCE.value,
+        }:
             return None, slots, {}, {
                 "reason": "source_node_unavailable",
                 "node_id": int(source_id),
@@ -363,6 +473,13 @@ def assign_contract_slots(
                     },
                 }
             node_id = int(available[0])
+            owner = working.ownership_by_node_id.get(node_id)
+            if owner is None or int(owner.su_type) != int(su_type) or owner.owner_product_id:
+                return None, slots, {}, {
+                    "reason": "slot_resource_identity_conflict",
+                    "node_id": node_id,
+                    "required_su": int(su_type),
+                }
             working.available_ids_by_su[int(su_type)].remove(node_id)
             used_ids.add(node_id)
             assigned.append(node_id)
@@ -427,6 +544,10 @@ def assign_contract_slots(
         "source_fragment_classes": list(contract.source_fragment_classes),
         "fixed_source_node_ids": list(contract.claimed_source_node_ids),
         "claimed_resource_ids_by_su": {str(key): list(values) for key, values in claimed.items()},
+        "expected_su_type_by_node_id": {
+            int(node_id): int(working.ownership_by_node_id[int(node_id)].su_type)
+            for node_id in product_nodes
+        },
         "mainline_slots": [
             slot.to_dict() for slot in slots[: len(list(contract.mainline_slots or []))]
         ],

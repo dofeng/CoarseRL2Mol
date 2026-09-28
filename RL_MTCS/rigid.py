@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import copy
 import math
 import random
@@ -13,6 +13,7 @@ from .geometry import (
     axial_add,
     axial_distance,
     axial_neg,
+    aromatic_slot_direction,
     coordinate_aspect,
     layout_metrics,
     transform_axial,
@@ -40,10 +41,6 @@ def _port_compatible(source: UnitPort, target: UnitPort, source_su: int, target_
     if target.required_su_types and int(source_su) not in set(target.required_su_types):
         return False
     return True
-
-
-def _phase_for_unit(unit: TopologyUnit) -> str:
-    return str(unit.phase)
 
 
 def _unit_matches_search_phase(unit: TopologyUnit, phase: str) -> bool:
@@ -187,8 +184,6 @@ class TopologyPlacementStage:
                     )
                     action["source_reflection"] = bool(reflection)
                     actions.append(action)
-                    if len(actions) >= 12:
-                        return actions
         return actions
 
     def _component_transform_candidates(
@@ -257,8 +252,6 @@ class TopologyPlacementStage:
                         "moved_node_count": len(component_nodes),
                     })
                     actions.append(action)
-                    if len(actions) >= 12:
-                        return actions
         return actions
 
     @staticmethod
@@ -352,7 +345,10 @@ class TopologyPlacementStage:
         return {
             "phase": self.phase,
             "done": bool(self.is_done()),
-            "placed_units": len(self.state.placements),
+            "placed_units": sum(
+                self.state.is_placed(unit.unit_id)
+                for unit in self.state.problem.units if unit.phase == phase_unit
+            ),
             "phase_units_total": sum(1 for unit in self.state.problem.units if unit.phase == phase_unit),
             "contracts_done": sum(1 for contract in self.state.problem.contracts if contract.kind == self.phase and contract.contract_id in self.state.satisfied_contracts),
             "contracts_total": sum(1 for contract in self.state.problem.contracts if contract.kind == self.phase),
@@ -370,6 +366,7 @@ class SearchResult:
     score: float
     action_sequence: List[Dict[str, Any]] = field(default_factory=list)
     info: Dict[str, Any] = field(default_factory=dict)
+    candidate_states: List[HexAssemblyState] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -477,13 +474,25 @@ class TopologyMCTS:
         return 1.0 / (1.0 + math.exp(max(-40.0, min(40.0, raw / 10.0))))
 
 
-def search_phase(stage: TopologyPlacementStage, *, iterations: int, candidate_k: int, max_steps: int, beam_width: int = 1, c_puct: float = 1.414, seed: Optional[int] = None) -> SearchResult:
+def search_phase(stage: TopologyPlacementStage, *, iterations: int, candidate_k: int, max_steps: int, beam_width: int = 1, c_puct: float = 1.414, seed: Optional[int] = None, search_guidance=None, max_tree_nodes: int = 128) -> SearchResult:
     if str(stage.phase) == "rigid":
+        if not any(contract.kind == "rigid" for contract in stage.state.problem.contracts):
+            return _search_dynamic_rigid(
+                stage, candidate_k=candidate_k, beam_width=beam_width,
+                max_steps=max_steps, iterations=iterations, c_puct=c_puct,
+                seed=seed, search_guidance=search_guidance,
+                max_tree_nodes=max_tree_nodes,
+            )
         return _search_rigid_components(
             stage,
             candidate_k=int(candidate_k),
             beam_width=int(beam_width),
             max_steps=int(max_steps),
+            root_trials=int(iterations),
+            c_puct=c_puct,
+            seed=seed,
+            search_guidance=search_guidance,
+            max_tree_nodes=max_tree_nodes,
         )
     # Rollouts are only a value estimate.  Scaling their depth with the full
     # phase length makes a CSV with hundreds of contracts needlessly clone a
@@ -509,6 +518,9 @@ def search_phase(stage: TopologyPlacementStage, *, iterations: int, candidate_k:
         action_sequence=actions,
         info={"phase": stage.phase, "result": current.get_result()},
     )
+
+
+from .rigid_sites import search_dynamic_rigid as _search_dynamic_rigid
 
 
 def _rigid_unit_components(
@@ -592,7 +604,7 @@ def _rigid_boundary_actions(
             if moved_units & set(active_units):
                 continue
         result.append(action)
-    ranked: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+    ranked: List[Tuple[Tuple[Any, ...], Tuple[int, int], Dict[str, Any]]] = []
     prospective_units = set(active_units) | {
         str(contract.source_unit_id), str(contract.target_unit_id)
     }
@@ -601,16 +613,73 @@ def _rigid_boundary_actions(
         ok, _reason = trial.connect(copy.deepcopy(action))
         if not ok:
             continue
+        source = trial.node_axial[int(action["source_node_id"])]
+        target = trial.node_axial[int(action["target_node_id"])]
+        direction = (target[0] - source[0], target[1] - source[1])
+        axis = min(direction, axial_neg(direction))
         ranked.append((
-            _rigid_component_shape_rank(
-                trial, prospective_units, complete=False
-            ),
-            action,
+            _rigid_component_shape_rank(trial, prospective_units, complete=False),
+            axis, action,
         ))
-    ranked.sort(key=lambda row: (row[0], _action_key(row[1])))
-    return [
-        action for _rank, action in ranked[:max(1, int(candidate_k))]
-    ]
+    ranked.sort(key=lambda row: (row[0], _action_key(row[2])))
+    selected = []
+    axes = set()
+    limit = max(1, int(candidate_k))
+    for _rank, axis, action in ranked:
+        if axis not in axes:
+            selected.append(action)
+            axes.add(axis)
+        if len(selected) >= limit:
+            return selected
+    selected_keys = {_action_key(action) for action in selected}
+    for _rank, _axis, action in ranked:
+        if _action_key(action) not in selected_keys:
+            selected.append(action)
+            selected_keys.add(_action_key(action))
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _rigid_connection_concentration(
+    state: HexAssemblyState,
+    units: Iterable[str],
+    contracts: Sequence[Any],
+) -> Tuple[float, int, float]:
+    """Return a soft penalty for overly concentrated rigid joins.
+
+    The realized rigid graph is authoritative: a unit may have several rigid
+    neighbours and this function never rejects that topology.  It only ranks
+    candidate poses that spread joins more evenly when the prescribed graph
+    offers alternatives.  A degree of two is the normal aromatic backbone;
+    degrees three and four are allowed; only higher loads receive a penalty.
+    """
+    unit_ids = {str(value) for value in units}
+    degrees = {unit_id: 0 for unit_id in unit_ids}
+    satisfied = set(state.satisfied_contracts)
+    for contract in contracts:
+        if (
+            str(getattr(contract, "kind", "")) != "rigid"
+            or str(contract.contract_id) not in satisfied
+        ):
+            continue
+        left = str(contract.source_unit_id)
+        right = str(contract.target_unit_id)
+        if left in degrees and right in degrees and left != right:
+            degrees[left] += 1
+            degrees[right] += 1
+    if not degrees:
+        return 0.0, 0, 0.0
+    values = list(degrees.values())
+    max_degree = max(values)
+    overload = sum(max(0, degree - 4) ** 2 for degree in values)
+    # A small variance term distinguishes a balanced branch from a layout that
+    # repeatedly spends the same hub's perimeter ports, without penalising the
+    # common degree-1/degree-2 aromatic backbone pattern.
+    mean = sum(values) / len(values)
+    variance = sum((degree - mean) ** 2 for degree in values) / len(values)
+    penalty = 3.0 * float(overload) + 0.08 * float(variance)
+    return penalty, int(max_degree), float(variance)
 
 
 def _grow_rigid_component(
@@ -761,8 +830,18 @@ def _rigid_component_shape_rank(
         + 1.5 * max(0.0, float(shape["largest_void_radius"]) - 4.0) ** 2
         + 0.5 * max(0.0, 0.45 - float(shape["hull_fill"])) ** 2
     )
+    concentration_penalty, max_degree, degree_variance = (
+        _rigid_connection_concentration(state, units, state.problem.contracts)
+    )
+    # Component size is deliberately a soft term.  The CSV rigid graph may
+    # legitimately contain a large prescribed component; this must not become
+    # a hidden maximum-size feasibility rule.
+    size_penalty = 0.02 * max(0, placed_unit_count - 4) ** 2
     return (
-        float(compactness_energy),
+        float(concentration_penalty + size_penalty + compactness_energy),
+        float(concentration_penalty),
+        int(max_degree),
+        float(degree_variance),
         float(axis_excess),
         float(shape["largest_void_radius"]),
         float(shape["normalized_radius_of_gyration"]),
@@ -868,7 +947,7 @@ def _rigid_root_candidates(
     return ordered[:6] or sorted(unit_ids, key=unit_sort_key)[:1]
 
 
-def _grow_rigid_component_beam(
+def _grow_rigid_component_mcts(
     state: HexAssemblyState,
     units: set[str],
     contracts: Sequence[Any],
@@ -877,147 +956,92 @@ def _grow_rigid_component_beam(
     candidate_k: int,
     beam_width: int,
     max_steps: int,
-) -> Optional[HexAssemblyState]:
-    """Search all useful turn/reflection choices for one rigid component.
+    iterations: int,
+    c_puct: float,
+    seed: Optional[int],
+    diagnostics: list,
+    search_guidance=None,
+    max_tree_nodes: int = 128,
+) -> List[HexAssemblyState]:
+    """Keep a persistent PUCT tree over rigid connection actions."""
+    from .search import PersistentMCTS, SearchBudget, SearchObservation
 
-    The former recursive solver returned the first complete pose.  With
-    symmetric aromatic templates that deterministically selected the same
-    reflection at every junction and produced a long diagonal rod.  A small
-    shape-aware beam is sufficient here because every rigid edge normally has
-    only the two mirror-related placements.
-    """
     contract_ids = {
         str(contract.contract_id) for contract in contracts
     }
-    width = max(24, min(96, max(4 * int(beam_width), 4 * int(candidate_k))))
-    beam = [state]
-    complete: List[HexAssemblyState] = []
-    step_budget = max(
-        len(contracts) + 1,
-        min(max(1, int(max_steps)), len(contracts) * 2 + 4),
-    )
-
-    for _step in range(step_budget):
-        expansions: List[HexAssemblyState] = []
-        for candidate in beam:
-            pending = [
-                contract for contract in contracts
-                if str(contract.contract_id)
-                not in candidate.satisfied_contracts
-            ]
-            if not pending:
-                complete.append(candidate)
+    def expand(candidate):
+        pending = [c for c in contracts if c.contract_id not in candidate.satisfied_contracts]
+        if len(contract_ids & candidate.satisfied_contracts) >= max_steps:
+            return
+        active = candidate.component_unit_ids(root) & units
+        boundary = []
+        for contract in pending:
+            if (contract.source_unit_id in active) == (contract.target_unit_id in active):
                 continue
-
-            active = candidate.component_unit_ids(root) & set(units)
-            boundary: List[Tuple[int, str, Any, List[Dict[str, Any]]]] = []
+            actions = _rigid_boundary_actions(candidate, contract, active, max(12, 3 * candidate_k))
+            if actions:
+                boundary.append((len(actions), contract.contract_id, actions))
+        actions = []
+        if boundary:
+            for _count, _cid, choices in sorted(boundary):
+                actions.extend(choices)
+        else:
+            # A cycle may only be closed without moving an already joined unit.
             for contract in pending:
-                left = str(contract.source_unit_id)
-                right = str(contract.target_unit_id)
-                left_active = left in active
-                right_active = right in active
-                if left_active == right_active:
-                    continue
-                actions = _rigid_boundary_actions(
-                    candidate,
-                    contract,
-                    active,
-                    max(12, 3 * int(candidate_k)),
-                )
-                if actions:
-                    boundary.append((
-                        len(actions),
-                        str(contract.contract_id),
-                        contract,
-                        actions,
-                    ))
+                left, right = candidate.unit(contract.source_unit_id), candidate.unit(contract.target_unit_id)
+                lp = _port_for_node(candidate, left, contract.source_node_id, contract.source_port_id)
+                rp = _port_for_node(candidate, right, contract.target_node_id, contract.target_port_id)
+                if lp is not None and rp is not None:
+                    actions.extend(a for a in TopologyPlacementStage(candidate, 'rigid')._candidate_for_pair(
+                        left, lp, right, rp, contract=contract) if not a.get('move_component_unit_id'))
+        trials = []
+        for action in actions:
+            trial = candidate.clone()
+            ok, _reason = trial.connect(copy.deepcopy(action))
+            if ok:
+                trials.append(trial)
+        yield from sorted(trials, key=lambda value: _rigid_component_beam_rank(value, units, contracts))
 
-            if boundary:
-                # Expansion order is deterministic, but retain all equally
-                # constrained boundary choices so a branched component is not
-                # forced into the first serialized contract order.
-                boundary.sort(key=lambda row: (row[0], row[1]))
-                minimum = boundary[0][0]
-                selected_boundaries = [
-                    row for row in boundary if row[0] == minimum
-                ]
-                for _count, _contract_id, _contract, actions in selected_boundaries:
-                    for action in actions:
-                        trial = candidate.clone()
-                        ok, _reason = trial.connect(copy.deepcopy(action))
-                        if ok:
-                            expansions.append(trial)
-                continue
-
-            # All component units can already be active in a cyclic rigid
-            # graph.  Only an adjacent, non-moving closure is legal.
-            for contract in pending:
-                source_unit = candidate.unit(contract.source_unit_id)
-                target_unit = candidate.unit(contract.target_unit_id)
-                source_port = _port_for_node(
-                    candidate,
-                    source_unit,
-                    contract.source_node_id,
-                    contract.source_port_id,
-                )
-                target_port = _port_for_node(
-                    candidate,
-                    target_unit,
-                    contract.target_node_id,
-                    contract.target_port_id,
-                )
-                if source_port is None or target_port is None:
-                    continue
-                actions = TopologyPlacementStage(
-                    candidate, "rigid"
-                )._candidate_for_pair(
-                    source_unit,
-                    source_port,
-                    target_unit,
-                    target_port,
-                    contract=contract,
-                )
-                for action in actions:
-                    if action.get("move_component_unit_id"):
-                        continue
-                    trial = candidate.clone()
-                    ok, _reason = trial.connect(copy.deepcopy(action))
-                    if ok:
-                        expansions.append(trial)
-
-        if complete and not expansions:
-            break
-        if not expansions:
-            break
-
-        unique: Dict[Tuple[Any, ...], HexAssemblyState] = {}
-        for candidate in sorted(
-            expansions,
-            key=lambda value: _rigid_component_beam_rank(
-                value, units, contracts
-            ),
-        ):
-            signature = _rigid_component_signature(
-                candidate, units, contracts
-            )
-            unique.setdefault(signature, candidate)
-            if len(unique) >= width:
-                break
-        beam = list(unique.values())
-
-    complete.extend(
-        candidate for candidate in beam
-        if contract_ids <= candidate.satisfied_contracts
-    )
-    if not complete:
-        return None
-    return min(
-        complete,
+    budget = SearchBudget(max(1, iterations) * max(1, len(contracts)))
+    tree = PersistentMCTS(state, expand=expand,
+        accept=lambda s: contract_ids <= s.satisfied_contracts,
+        signature=lambda s: _rigid_component_signature(s, units, contracts),
+        solution_signature=lambda s: _rigid_layout_signature(s, units),
+        evaluate=lambda s: 0.8 * len(contract_ids & s.satisfied_contracts) / max(1, len(contract_ids)),
+        action=lambda p, c: c.action_history[-1] if c.action_history else {},
+        c_puct=c_puct, seed=seed,
+        max_nodes=max(1, int(max_tree_nodes)),
+        guidance=(search_guidance.adapted(lambda s: SearchObservation('rigid', s,
+            dict(root_unit_id=root, component_unit_ids=tuple(sorted(units)))))
+            if search_guidance is not None else None))
+    tree.run(budget, solution_limit=max(1, beam_width, candidate_k))
+    tree.record()
+    diagnostics.append(dict(root=root, simulations=budget.simulations,
+                            budget=budget.limit, **tree.diagnostics()))
+    ordered = sorted(
+        tree.solutions,
         key=lambda value: (
             _rigid_component_shape_rank(value, units, complete=True),
             _rigid_component_signature(value, units, contracts),
         ),
     )
+    unique = {}
+    for value in ordered:
+        unique.setdefault(_rigid_layout_signature(value, units), value)
+    return list(unique.values())[:max(1, beam_width, candidate_k)]
+
+
+def _rigid_layout_signature(state, units):
+    """Ignore whole-component translations, rotations and reflections."""
+    ids = sorted(n.node_id for uid in units for n in state.unit(uid).nodes
+                 if n.node_id in state.node_axial)
+    if not ids:
+        return ()
+    origin = state.node_axial[ids[0]]
+    relative = [(state.node_axial[n][0] - origin[0],
+                 state.node_axial[n][1] - origin[1]) for n in ids]
+    return min(tuple(transform_axial(p, rotation, reflection) for p in relative)
+               for reflection in (False, True) for rotation in range(6))
 
 
 def _rigid_component_metrics(
@@ -1211,138 +1235,72 @@ def _pack_rigid_components(
 
 
 def _search_rigid_components(
-    stage: TopologyPlacementStage,
-    *,
-    candidate_k: int,
-    beam_width: int = 4,
-    max_steps: int,
-) -> SearchResult:
-    """Solve all rigid aromatic components with bounded backtracking."""
-    current = stage.clone().state
-    components = _rigid_unit_components(current)
-    # CSV initialization materializes every aromatic unit in a temporary
-    # staging pose.  A rigid component must nevertheless be solved as a fresh
-    # tree: only its root is initially placed and every other unit is added by
-    # ``connect``.  Keeping all staging placements here makes the solver treat
-    # an unconnected unit as a movable component and can make an otherwise
-    # valid chain geometrically impossible.
-    actions: List[Dict[str, Any]] = []
+    stage, *, candidate_k, beam_width=4, max_steps, root_trials=16,
+    c_puct=1.414, seed=None,
+    search_guidance=None,
+    max_tree_nodes: int = 128,
+):
+    """Retain distinct solved component layouts for the downstream Flex tree."""
+    initial = stage.clone().state
+    components = _rigid_unit_components(initial)
+    width = max(1, int(candidate_k), int(beam_width))
+    beam = [initial]
+    diagnostics = []
     for units, contracts in components:
         if not contracts:
             continue
-        # Restore this component's original staging pose, then unplace all
-        # non-root units.  Occupancy is restricted to the root while growing;
-        # already-solved components remain in ``node_axial`` but do not block
-        # this independent rigid solve.
-        roots_to_try = _rigid_root_candidates(units, contracts)
-        solved_candidates: List[HexAssemblyState] = []
-        for root in roots_to_try:
-            trial_base = current.clone()
-            for unit_id in units:
-                if unit_id == root:
-                    continue
-                unit_nodes = {
-                    int(node.node_id)
-                    for node in trial_base.unit(unit_id).nodes
-                }
-                trial_base.placements.pop(unit_id, None)
-                for node_id in unit_nodes:
-                    trial_base.node_axial.pop(node_id, None)
-                    trial_base.final_node_positions.pop(node_id, None)
-                    trial_base.occupied_axial = {
-                        axial: occupant
-                        for axial, occupant in trial_base.occupied_axial.items()
-                        if int(occupant) != node_id
-                    }
-            # Keep only the current root in the collision index.  This is
-            # intentionally temporary; the complete occupancy map is rebuilt
-            # after all rigid components have been solved.
-            root_nodes = {
-                int(node.node_id)
-                for node in trial_base.unit(root).nodes
-                if int(node.node_id) in trial_base.node_axial
-            }
-            trial_base.occupied_axial = {
-                axial: int(node_id)
-                for node_id, axial in trial_base.node_axial.items()
-                if int(node_id) in root_nodes
-            }
-            solved = _grow_rigid_component_beam(
-                trial_base,
-                units,
-                contracts,
-                root,
-                candidate_k=max(1, int(candidate_k)),
-                beam_width=max(1, int(beam_width)),
-                max_steps=max(1, int(max_steps)),
-            )
-            if solved is not None:
-                solved_candidates.append(solved)
-        solved = (
-            min(
-                solved_candidates,
-                key=lambda value: (
-                    _rigid_component_shape_rank(
-                        value, units, complete=True
-                    ),
-                    _rigid_component_signature(value, units, contracts),
-                ),
-            )
-            if solved_candidates
-            else None
-        )
-        if solved is None:
+        expanded = []
+        for current in beam:
+            for root in _rigid_root_candidates(units, contracts)[:max(1, root_trials)]:
+                trial = current.clone()
+                removed = {n.node_id for uid in units if uid != root
+                           for n in trial.unit(uid).nodes}
+                for uid in units - {root}:
+                    trial.placements.pop(uid, None)
+                for node in removed:
+                    trial.node_axial.pop(node, None)
+                    trial.final_node_positions.pop(node, None)
+                root_nodes = {n.node_id for n in trial.unit(root).nodes}
+                trial.occupied_axial = {p: n for n, p in trial.node_axial.items()
+                                        if n in root_nodes}
+                expanded.extend(_grow_rigid_component_mcts(
+                    trial, units, contracts, root, candidate_k=candidate_k,
+                    beam_width=beam_width, max_steps=max_steps,
+                    iterations=root_trials, c_puct=c_puct, seed=seed, diagnostics=diagnostics,
+                    search_guidance=search_guidance,
+                    max_tree_nodes=max_tree_nodes,
+                ))
+        if not expanded:
             break
-        current = solved
-
-        # Keep the solved component in its own staging region.  The root was
-        # left at its original CSV pose, so no additional translation is
-        # needed; subsequent rigid components are solved with an isolated
-        # occupancy map and cannot collide with it.
-
-    # If a component could not be solved, preserve the partial state and let
-    # the normal stage result report the unsatisfied contracts.  Otherwise all
-    # aromatic units in the rigid graph are now placed.
-
-    # Independent components inherit deliberately distant CSV staging roots.
-    # Repack those components for the rigid-only output; the following flex
-    # phase may still translate each complete component as a single body.
-    _pack_rigid_components(current, components)
-    actions = copy.deepcopy(current.action_history)
-    result = TopologyPlacementStage(current, "rigid").get_result()
-    result["rigid_component_metrics"] = _rigid_component_metrics(
-        current, components
-    )
+        unique = {}
+        for candidate in sorted(expanded, key=lambda s: (
+            _rigid_component_shape_rank(s, units, complete=True), s.state_signature(),
+        )):
+            signature = tuple(_rigid_layout_signature(candidate, group)
+                              for group, _contracts in components)
+            unique.setdefault(signature, candidate)
+        beam = list(unique.values())[:width]
+    for candidate in beam:
+        _pack_rigid_components(candidate, components)
+    current = beam[0]
+    result = TopologyPlacementStage(current, 'rigid').get_result()
+    result['rigid_component_metrics'] = _rigid_component_metrics(current, components)
+    result['retained_candidate_count'] = len(beam)
+    result['search_algorithm'] = 'component_puct'
+    result['mcts_searches'] = diagnostics
+    result['status'] = 'complete' if result['done'] else 'budget_exhausted'
+    result['failure_scope'] = 'none' if result['done'] else 'rigid_search_budget'
+    result['candidate_space_complete'] = False
+    result['completed_contract_count'] = int(result['contracts_done'])
+    result['zero_domain_units'] = []
+    result['best_partial_state'] = {
+        'placed_unit_ids': sorted(str(uid) for uid in current.placements),
+        'satisfied_contract_ids': sorted(str(cid) for cid in current.satisfied_contracts),
+        'completed_contract_count': int(result['contracts_done']),
+        'component_count': int(current.component_count()),
+    }
     return SearchResult(
-        state=current,
-        score=float(TopologyPlacementStage(current, "rigid").score()),
-        action_sequence=actions,
-        info={"phase": "rigid", "result": result},
-    )
-
-
-def assemble_inverse_topology(init_data: Dict[str, Any], config: Any = None) -> SearchResult:
-    """Run rigid -> flex -> side placement using the inverse initializer."""
-    cfg = config
-    state = init_data["state"].clone()
-    all_actions: List[Dict[str, Any]] = []
-    phase_results: Dict[str, Any] = {}
-    phase_specs = (
-        ("rigid", int(getattr(cfg, "iterations", 32) if cfg is not None else 32), int(getattr(cfg, "candidate_k", 16) if cfg is not None else 16), int(getattr(cfg, "rigid_max_steps", 128) if cfg is not None else 128)),
-        ("flex", int(getattr(cfg, "flex_iterations", 32) if cfg is not None else 32), int(getattr(cfg, "candidate_k", 16) if cfg is not None else 16), int(getattr(cfg, "flex_max_steps", 128) if cfg is not None else 128)),
-        ("side", int(getattr(cfg, "side_iterations", 32) if cfg is not None else 32), int(getattr(cfg, "candidate_k", 16) if cfg is not None else 16), int(getattr(cfg, "side_max_steps", 128) if cfg is not None else 128)),
-    )
-    for phase, iterations, candidate_k, max_steps in phase_specs:
-        stage = TopologyPlacementStage(state, phase)
-        result = search_phase(stage, iterations=iterations, candidate_k=candidate_k, max_steps=max_steps, beam_width=int(getattr(cfg, "beam_width", 1) if cfg is not None else 1), c_puct=float(getattr(cfg, "c_puct", 1.414) if cfg is not None else 1.414), seed=getattr(cfg, "seed", None) if cfg is not None else None)
-        state = result.state
-        all_actions.extend(result.action_sequence)
-        phase_results[phase] = result.info.get("result", {})
-        if not bool(result.info.get("result", {}).get("done", False)):
-            break
-    return SearchResult(
-        state=state,
-        score=float(sum(float(row.get("score", 0.0)) for row in phase_results.values())),
-        action_sequence=all_actions,
-        info={"phase_results": phase_results, "audit": state.audit(), "complete": state.is_complete()},
+        state=current, score=float(TopologyPlacementStage(current, 'rigid').score()),
+        action_sequence=copy.deepcopy(current.action_history),
+        info={'phase': 'rigid', 'result': result}, candidate_states=beam,
     )

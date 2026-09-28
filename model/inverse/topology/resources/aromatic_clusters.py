@@ -44,7 +44,7 @@ class AromaticClusterGenerator:
         self.original_12, self.original_13, self.five_member_count = (
             staging_aromatic_counts(self.original_counts)
         )
-        self.staging_topup_count = 0
+        self.idle_aromatic_count = 0
         self.plan_diagnostics: Dict[str, object] = {}
 
     def _append_cluster(self, kind: str) -> None:
@@ -66,8 +66,8 @@ class AromaticClusterGenerator:
         )
         for kind in list(exact_plan.get("kinds", []) or []):
             self._append_cluster(str(kind))
-        self.staging_topup_count = int(
-            exact_plan.get("staging_topup_count", 0) or 0
+        self.idle_aromatic_count = int(
+            exact_plan.get("idle_aromatic_count", 0) or 0
         )
         self.plan_diagnostics = {
             **dict(exact_plan),

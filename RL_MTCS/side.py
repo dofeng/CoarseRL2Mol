@@ -8,6 +8,7 @@ import math
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Set, Tuple
 
 from .geometry import (
+    HEX_DIRECTIONS,
     aromatic_slot_direction as _aromatic_slot_direction,
     axial_distance,
     state_layout_metrics,
@@ -20,16 +21,17 @@ from .state import (
     axial_neg,
     transform_axial,
     relabel_aromatic_sites,
+    aromatic_perimeter_ids,
+    hetero_staging_ids,
 )
 from .models import (
     ExternalContract,
-    HEX_DIRECTIONS,
     InverseInputError,
-    InputSourceKind,
+    AssemblySearchError,
     TopologyUnit,
     UnitPort,
 )
-from .rigid import SearchResult, TopologyPlacementStage, search_phase
+from .rigid import SearchResult, TopologyPlacementStage
 
 
 def _coordinate_aspect(state: HexAssemblyState) -> Dict[str, Any]:
@@ -165,7 +167,7 @@ def _side_records(state: HexAssemblyState) -> List[_SideRecord]:
 
 
 def _fixed_aromatic_endpoint_ids(state: HexAssemblyState) -> Set[int]:
-    fixed: Set[int] = set()
+    fixed: Set[int] = hetero_staging_ids(state)
     for contract in state.problem.contracts:
         if str(contract.contract_id) not in state.satisfied_contracts:
             continue
@@ -188,9 +190,12 @@ def _site_records(
         if unit.phase != "aromatic" or unit.unit_id not in state.placements:
             continue
         placement = state.placements[unit.unit_id]
+        perimeter_ids = aromatic_perimeter_ids(unit)
         for node in unit.nodes:
             node_id = int(node.node_id)
             if node_id not in available or int(node.su_type) != 13:
+                continue
+            if node_id not in perimeter_ids:
                 continue
             outward = transform_axial(
                 _aromatic_slot_direction(unit, node_id),
@@ -641,23 +646,6 @@ def _candidate_rank(candidate: _SideCandidate) -> Tuple[Any, ...]:
     )
 
 
-def _bounded_nmr_scoring_pool(
-    candidates: Sequence[_SideCandidate],
-    limit: int,
-) -> List[_SideCandidate]:
-    """Deduplicate and distribution-prefilter one expensive NMR layer."""
-    unique: Dict[Tuple[Any, ...], _SideCandidate] = {}
-    for candidate in sorted(candidates, key=_candidate_rank):
-        signature = (
-            candidate.state.state_signature(),
-            tuple(sorted(candidate.boundary_site_ids.items())),
-        )
-        unique.setdefault(signature, candidate)
-        if len(unique) >= max(1, int(limit)):
-            break
-    return list(unique.values())
-
-
 def _score_side_candidates(
     candidates: Sequence[_SideCandidate],
     *,
@@ -708,19 +696,12 @@ def run_planned_side_search(
     nmr_weight: float = 1.0,
     geometry_weight: float = 0.05,
     contact_weight: float = 0.02,
+    search_budget: int = 2000,
+    search_guidance: Any = None,
+    max_tree_nodes: int = 512,
 ) -> SearchResult:
     """Place every prescribed side unit without changing its local topology."""
-    if state.problem.source_kind != InputSourceKind.CSV_PAIR:
-        return search_phase(
-            TopologyPlacementStage(state, "side"),
-            iterations=iterations,
-            candidate_k=candidate_k,
-            max_steps=max_steps,
-            beam_width=beam_width,
-            c_puct=c_puct,
-            seed=seed,
-        )
-    del iterations, c_puct, seed
+    from .search import PersistentMCTS, SearchBudget, SearchObservation
     initial = state.clone()
     initial.stage = "side"
     records = _side_records(initial)
@@ -756,92 +737,126 @@ def run_planned_side_search(
     outcome_limit = max(
         12, min(24, max(int(candidate_k), 2 * int(beam_width)))
     )
-    beam = [_SideCandidate(
+    root = _SideCandidate(
         state=initial,
         used_site_ids=frozenset(),
         boundary_site_ids={},
         actions=[],
-    )]
+    )
+    best = root
+    committed = {}
+    diagnostics = {}
+    budget = SearchBudget(max(1, int(search_budget)))
     explored = 0
     errors: List[str] = []
-    for depth, record in enumerate(ordered, start=1):
-        next_beam = []
-        for candidate in beam:
-            outcomes, inspected = _place_outcomes(
-                candidate,
-                record,
-                site_rows,
-                outcome_limit,
-                distribution_context,
-            )
-            explored += int(inspected)
-            next_beam.extend(outcomes)
-        if nmr_scorer is not None:
-            next_beam = _bounded_nmr_scoring_pool(
-                next_beam, max(8, search_width)
-            )
+
+    def expand(candidate):
+        nonlocal explored
+        depth = len(candidate.actions)
+        if depth >= min(len(ordered), max_steps):
+            return
+        record = ordered[depth]
+        outcomes, inspected = _place_outcomes(candidate, record, site_rows,
+                                               outcome_limit, distribution_context)
+        explored += int(inspected)
         _score_side_candidates(
-            next_beam,
+            outcomes,
             nmr_scorer=nmr_scorer,
-            depth=depth,
+            depth=depth + 1,
             nmr_weight=nmr_weight,
             geometry_weight=geometry_weight,
             contact_weight=contact_weight,
             protected_aromatic_ids=fixed_ids,
         )
-        unique: Dict[Tuple[Any, ...], _SideCandidate] = {}
-        for candidate in sorted(next_beam, key=_candidate_rank):
-            signature = (
-                candidate.state.state_signature(),
-                tuple(sorted(candidate.boundary_site_ids.items())),
-            )
-            unique.setdefault(signature, candidate)
-            if len(unique) >= search_width:
-                break
-        beam = list(unique.values())
-        if not beam:
-            errors.append(
-                "no fixed-geometry side placement for "
-                f"{record.topology_unit_id!r} ({record.contract.contract_id})"
-            )
-            break
+        if not outcomes:
+            diagnostics['last_dead_end'] = dict(topology=record.topology_unit_id,
+                placed=[a['topology_unit_id'] for a in candidate.actions])
+        yield from sorted(outcomes, key=_candidate_rank)
 
-    if beam:
-        selected = min(
-            beam,
-            key=lambda candidate: (
-                float(_candidate_rank(candidate)[0])
-                + 0.05 * float(
-                    state_layout_metrics(candidate.state, full=True)["layout_energy"]
-                ),
-                _candidate_rank(candidate),
-            ),
-        )
+    def observe(candidate):
+        nonlocal best
+        if len(candidate.actions) > len(best.actions):
+            best = candidate
+
+    def accept(candidate):
+        if len(candidate.actions) != len(ordered):
+            return False
+        try:
+            final = relabel_aromatic_sites(candidate.state, candidate.boundary_site_ids,
+                candidate.actions, protected_aromatic_ids=fixed_ids,
+                replay_contract_kinds=('rigid', 'flex', 'side'), stage='side')
+        except InverseInputError as exc:
+            diagnostics['commit_rejection'] = str(exc)
+            return False
+        committed.update(state=final, candidate=candidate)
+        return True
+
+    tree = PersistentMCTS(root, expand=expand, accept=accept, observe=observe,
+        signature=lambda c: (c.state.state_signature(), tuple(sorted(c.boundary_site_ids.items()))),
+        action=lambda p, c: c.actions[-1],
+        evaluate=lambda c: 0.8 * len(c.actions) / max(1, len(ordered))
+            - (0.1 * math.tanh(c.nmr_rank) if c.nmr_rank is not None else 0.0),
+        c_puct=c_puct, seed=seed,
+        max_nodes=max(16, int(max_tree_nodes)),
+        guidance=(search_guidance.adapted(lambda c: SearchObservation('side', c.state,
+            dict(used_site_ids=c.used_site_ids, boundary_site_ids=dict(c.boundary_site_ids))))
+            if search_guidance is not None else None))
+    solved = tree.run(budget)
+    tree.record()
+    selected = committed.get('candidate', best)
+    current = committed.get('state', best.state)
+    actions, assignments = selected.actions, selected.boundary_site_ids
+    if 'state' not in committed and assignments:
         current = relabel_aromatic_sites(
-            selected.state,
-            selected.boundary_site_ids,
-            selected.actions,
+            selected.state, assignments, selected.actions,
             protected_aromatic_ids=fixed_ids,
-            replay_contract_kinds=("rigid", "flex", "side"),
-            stage="side",
+            replay_contract_kinds=('rigid', 'flex', 'side'), stage='side',
         )
-        actions = selected.actions
-        assignments = selected.boundary_site_ids
-    else:
-        current = initial
-        actions = []
-        assignments = {}
-        if strict:
-            raise InverseInputError(
-                errors[-1] if errors else "no geometry-preserving side assembly"
-            )
+    status = 'complete' if solved is not None else (
+        'budget_exhausted' if budget.exhausted else 'candidate_space_exhausted')
+    completed_contract_count = sum(
+        str(record.contract.contract_id) in current.satisfied_contracts
+        for record in records
+    )
+    best_partial_state = {
+        "placed_unit_ids": sorted(
+            str(uid) for uid in current.placements
+            if current.unit(uid).phase == "side"
+        ),
+        "satisfied_contract_ids": sorted(
+            str(record.contract.contract_id)
+            for record in records
+            if str(record.contract.contract_id) in current.satisfied_contracts
+        ),
+        "completed_contract_count": int(completed_contract_count),
+        "action_count": int(len(actions)),
+    }
+    diagnostics.update(status=status, simulations=budget.simulations,
+        search_budget=budget.limit, visited_states=budget.visited, mcts=tree.diagnostics(),
+        candidate_space_complete=False,
+        failure_scope=("none" if status == "complete" else
+                       "search_budget" if status == "budget_exhausted" else
+                       "bounded_candidate_pool"),
+        completed_contract_count=int(completed_contract_count),
+        zero_domain_units=[], best_partial_state=best_partial_state)
+    if solved is None:
+        errors.append(f'side MCTS {status}: placed {len(actions)}/{len(ordered)} topology units; '
+                      f'simulations={budget.simulations}/{budget.limit}')
 
     result_row = TopologyPlacementStage(current, "side").get_result()
     result_row.update({
+        "done": solved is not None,
+        "status": status,
+        "failure_scope": diagnostics["failure_scope"],
+        "candidate_space_complete": diagnostics["candidate_space_complete"],
+        "completed_contract_count": int(completed_contract_count),
+        "zero_domain_units": [],
+        "best_partial_state": best_partial_state,
+        "search_diagnostics": diagnostics,
         "planning_errors": list(errors),
         "explored_geometry_poses": int(explored),
         "fixed_local_geometry": True,
-        "resource_allocation_used": False,
+        "domain_selection_only": True,
         "force_completion_used": False,
         "allowed_nonbonded_contact_count": len(
             current.allowed_unbonded_contacts
@@ -849,28 +864,31 @@ def run_planned_side_search(
         "coordinate_aspect": _coordinate_aspect(current),
         "slot_geometry": {
             "mode": "search_time_physical_su13_selection",
+            "committed": True,
+            "boundary_slot_bindings": {gid: slot for gid, slot in current.aromatic_site_bindings().items()
+                                       if int(gid) in assignments},
             "boundary_site_assignments": dict(assignments),
         },
         "side_distribution": _side_distribution_metrics(
             assignments, distribution_context
         ),
-        "search_algorithm": (
-            "nmr_guided_beam_search" if nmr_scorer is not None
-            else "geometry_beam_search"
-        ),
+        "search_algorithm": "persistent_puct",
         "search_width": int(search_width),
         "candidate_k": int(outcome_limit),
         "nmr_guidance": (
             {
                 "selected": (
                     dict(selected.nmr_score)
-                    if beam and selected.nmr_score is not None else None
+                    if selected.nmr_score is not None else None
                 ),
                 "statistics": nmr_scorer.statistics("side"),
             }
             if nmr_scorer is not None else {"enabled": False}
         ),
     })
+    if solved is None and strict:
+        raise AssemblySearchError(errors[-1], {**diagnostics, 'partial_molecule': current.to_dict()})
+    tree._close_subtree(tree.root)
     return SearchResult(
         state=current,
         score=float(TopologyPlacementStage(current, "side").score()),

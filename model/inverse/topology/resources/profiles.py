@@ -23,7 +23,9 @@ H_SOFT_UPPER_RATIO = DEFAULT_STAGE3_H_SOFT_TOLERANCE
 # aromatization: the two operations have different chemical roles.
 SU11_AROMATIC_ROTATION = (12, 13, 13)
 # Terminal SU24 aromatization must preserve more bridgeheads than ordinary
-# SU11 donor compensation.
+# SU11 donor compensation. This is the minimum for ordinary resource/staging
+# conversions; the explicit rebuild-boundary port-balance operation may consume
+# one reserved donor and a later structural-unit pass restores the pool.
 MAX_FLEX_LOWER_INCREASE_PER_ADJUSTMENT_PLAN = 1
 MIN_STAGE3_AROMATIC_RESOURCE_COUNT = 3
 

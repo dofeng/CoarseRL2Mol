@@ -50,6 +50,7 @@ from ..core.rules import (
     TERMINAL_ENDPOINT_LABELS,
     main_kind_for_class as _main_kind_for_class,
 )
+from ..core.validation import mainline_contract_reason, validate_chain_product_shape
 from ..state.iteration_ledger import normalize_slot, required_counts_from_slots
 from ...resources.profiles import (
     build_raw_su24_resource_profiles,
@@ -828,12 +829,6 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
     center_su = int(getattr(center, "su_type", -1))
     matched_neighbors = list(dict(fragment.evidence or {}).get("matched_neighbors", []) or [])
     claimed_ids = {int(value) for value in list(fragment.claimed_node_ids or fragment.source_node_ids or [])}
-    # An unsaturated atomic pair such as SU17-SU18 is a branch unit when it is
-    # attached to a basic center through SU17.  SU18 is a terminal endpoint;
-    # putting the pair on the center's mainline would force a route such as
-    # ``18-17-3`` and place the terminal in the middle after closure resources
-    # are prepended.  Keep the pair together as one flat branch payload and
-    # let the center's remaining open ports form the mainline.
     atomic_branch_paths: List[List[int]] = []
     atomic_branch_member_ids: Set[int] = set()
     atomic_group_records = list(
@@ -870,16 +865,18 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
         atomic_branch_paths.append([int(open_id), int(terminal_id)])
         atomic_branch_member_ids.update({int(open_id), int(terminal_id)})
 
+    consumed_atomic_member_ids = set(atomic_branch_member_ids)
     raw_open_neighbor_ids = [
         _dict_node_id(dict(item or {}))
         for item in matched_neighbors
         if _is_open_token(dict(item or {}))
+        and _dict_node_id(dict(item or {})) not in consumed_atomic_member_ids
     ]
-    if atomic_branch_member_ids:
+    if consumed_atomic_member_ids:
         matched_neighbors = [
             dict(item or {})
             for item in matched_neighbors
-            if _dict_node_id(dict(item or {})) not in atomic_branch_member_ids
+            if _dict_node_id(dict(item or {})) not in consumed_atomic_member_ids
         ]
     center_atomic_node_ids = {
         int(value)
@@ -887,7 +884,14 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
             dict(fragment.evidence or {}).get("center_atomic_group_node_ids", []) or []
         )
     }
-    aromatic = _sort_token_dicts([nb for nb in matched_neighbors if _is_aromatic_token(nb)])
+    claimed_neighbors = [
+        dict(nb or {})
+        for nb in matched_neighbors
+        if _dict_node_id(dict(nb or {})) in claimed_ids
+    ]
+    aromatic = _sort_token_dicts([
+        nb for nb in claimed_neighbors if _is_aromatic_token(nb)
+    ])
     open_neighbors = _sort_token_dicts([nb for nb in matched_neighbors if _is_open_token(nb)])
     generic_open_neighbors = _sort_token_dicts([
         nb for nb in matched_neighbors
@@ -896,7 +900,7 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
     ])
     special_open_neighbors = _sort_token_dicts([nb for nb in open_neighbors if not _is_generic_open_token(nb)])
     terminal = sorted(
-        [dict(nb or {}) for nb in matched_neighbors if _is_terminal_token(nb)],
+        [dict(nb or {}) for nb in claimed_neighbors if _is_terminal_token(nb)],
         key=_terminal_priority,
     )
     existing_bridge: Dict[str, Any] = {}
@@ -924,7 +928,7 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
             pair_su_types = {14, 15, 16} if center_su == 15 else {17, 18}
             pair_neighbor = next(
                 dict(nb or {})
-                for nb in matched_neighbors
+                for nb in claimed_neighbors
                 if _dict_su(dict(nb or {})) in pair_su_types
             )
             labels = [_node_label(center), _dict_label(pair_neighbor)]
@@ -968,7 +972,7 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
         elif center_su == 15:
             other_15 = next(
                 dict(nb or {})
-                for nb in matched_neighbors
+                for nb in claimed_neighbors
                 if _dict_su(dict(nb or {})) == 15
             )
             labels = [_dict_label(terminal[0]), _node_label(center), _dict_label(other_15)]
@@ -1002,7 +1006,7 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
             pair_su_types = {14, 15, 16} if center_su == 16 else {17, 18}
             pair_neighbor = next(
                 dict(nb or {})
-                for nb in matched_neighbors
+                for nb in claimed_neighbors
                 if _dict_su(dict(nb or {})) in pair_su_types
             )
             labels = [_dict_label(pair_neighbor), _node_label(center)]
@@ -1040,6 +1044,7 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
         open_left = bool(list(fragment.open_slots or []))
         open_right = bool(list(fragment.open_slots or []))
         preferred = "unknown"
+
     endpoint_profiles = [
         dict(item or {})
         for item in list(dict(fragment.evidence or {}).get("basic_open_endpoints", []) or [])
@@ -1093,7 +1098,42 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
         node_ids=node_ids,
         nodes_by_id=nodes_by_id,
     )
-    main_kind = _main_kind_for_class(class_type)
+    slot_anchor_by_side = {
+        str(slot.anchor_role).split("_", 1)[0]: int(slot.anchor_node_id)
+        for slot in list(fragment.open_mainline_slots or [])
+        if not bool(getattr(slot, "is_complete", lambda: False)())
+        and str(getattr(slot, "anchor_role", ""))
+        in {"left_mainline", "right_mainline"}
+    }
+    # Atomic-pair expansion can reverse the pair relative to the normalized
+    # left/right slot contract.  Orient the concrete route by its slot
+    # anchors before endpoint validation and closure allocation.
+    if (
+        "left" in slot_anchor_by_side
+        and "right" in slot_anchor_by_side
+        and len(node_ids) >= 2
+        and int(node_ids[0]) == int(slot_anchor_by_side["right"])
+        and int(node_ids[-1]) == int(slot_anchor_by_side["left"])
+    ):
+        labels = list(reversed(labels))
+        node_ids = list(reversed(node_ids))
+    # The normalized fragment contract is authoritative for pending mainline
+    # ports.  Inferring D/G openness from the raw neighbor tokens is unsafe
+    # for center-owned atomic pairs: the fixed partner itself is an
+    # ``open`` SU type, although it is already part of the concrete route.
+    # Reconcile the projected endpoint flags with the non-terminal closure
+    # slots after the route has been materialized.
+    open_slot_sides = set(slot_anchor_by_side)
+    if open_slot_sides:
+        open_left = "left" in open_slot_sides
+        open_right = "right" in open_slot_sides
+    main_kind = str(
+        dict(fragment.evidence or {}).get(
+            "flex_reconcile_main_kind",
+            _main_kind_for_class(class_type),
+        )
+        or _main_kind_for_class(class_type)
+    )
     (
         ring_backbone_labels,
         ring_backbone_node_ids,
@@ -1181,6 +1221,17 @@ def _project_basic_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
         evidence=view_evidence,
         diagnostics={
             "source_fragment_family": str(fragment.family),
+            "mainline_closure_slots": [
+                (
+                    slot.to_dict()
+                    if hasattr(slot, "to_dict")
+                    else dict(slot or {})
+                )
+                for slot in list(fragment.open_mainline_slots or [])
+                if not bool(getattr(slot, "is_complete", lambda: False)())
+                and str(getattr(slot, "anchor_role", ""))
+                in {"left_mainline", "right_mainline"}
+            ],
             "matched_neighbors": [dict(token or {}) for token in matched_neighbors],
             "aromatic_neighbors": [dict(token or {}) for token in aromatic],
             "terminal_neighbors": [dict(token or {}) for token in terminal],
@@ -2434,6 +2485,16 @@ def preflight_fragment_view_projection(
 ) -> Dict[str, Any]:
     """Project every classified fragment without mutating assembly state."""
 
+    rejects = list(classification.classification_rejects) + list(classification.claim_conflicts)
+    if rejects or classification.unclassified_nodes:
+        return {
+            "ok": False,
+            "reason": "stage3_classification_incomplete",
+            "failure_domain": "classification",
+            "rejects": rejects,
+            "unclassified_nodes": list(classification.unclassified_nodes),
+        }
+
     nodes_by_id = {
         int(getattr(node, "global_id", -1)): node
         for node in list(nodes or [])
@@ -2453,6 +2514,26 @@ def preflight_fragment_view_projection(
         for fragment in list(getattr(classification, "fragments", []) or [])
     )
     view_ids = sorted(int(view.fragment_id) for view in views)
+    for view in views:
+        if view.family != "basic":
+            continue
+        reason = mainline_contract_reason(view)
+        if not reason and not (view.open_left or view.open_right):
+            reason = validate_chain_product_shape(
+                view.preferred_product_type, view.main_labels, [view], view.main_node_ids,
+            )
+        if reason:
+            return {
+                "ok": False,
+                "reason": "stage3_fragment_mainline_contract_invalid",
+                "failure_domain": "topology_materialization",
+                "fragment_id": int(view.fragment_id),
+                "error": reason,
+                "mainline_node_ids": list(view.main_node_ids),
+                "mainline_labels": list(view.main_labels),
+                "left_endpoint": view.endpoint("left").to_dict(),
+                "right_endpoint": view.endpoint("right").to_dict(),
+            }
     if fragment_ids != view_ids:
         return {
             "ok": False,

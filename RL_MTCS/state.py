@@ -10,15 +10,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 from .geometry import (
     Axial,
     HEX_DIRECTIONS,
+    hex_edge_valid,
     axial_add,
-    axial_distance,
     axial_neg,
-    reflect_axial,
-    rotate_axial,
     transform_axial,
-    transform_direction,
     aromatic_slot_direction,
-    coordinate_aspect,
     state_layout_metrics,
     unit_sort_key,
     valid_hex_directions,
@@ -27,12 +23,60 @@ from .models import (
     ExternalContract,
     InverseAssemblyInput,
     InverseInputError,
-    MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
-    TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES,
     TopologyUnit,
     UnitEdge,
     UnitPort,
 )
+from model.shared.topology_contract import (
+    MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
+    TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES,
+)
+
+
+def aromatic_template_errors(problem: InverseAssemblyInput) -> List[Dict[str, Any]]:
+    """Validate ring membership independently of the current placement."""
+    errors = []
+    for unit in problem.units:
+        if unit.phase != "aromatic":
+            continue
+        by_coord = {tuple(node.local_axial): node.node_id for node in unit.nodes}
+        ring_coords = {tuple(p) for ring in unit.local_rings for p in ring}
+        edges = {frozenset((e.source_node_id, e.target_node_id)) for e in unit.internal_edges}
+        ring_edges = set()
+        for ring in unit.local_rings:
+            if len(ring) < 3 or len(set(ring)) != len(ring):
+                errors.append(dict(unit_id=unit.unit_id, reason="invalid_aromatic_ring"))
+                continue
+            for index, point in enumerate(ring):
+                other = ring[(index + 1) % len(ring)]
+                if tuple(point) not in by_coord or tuple(other) not in by_coord:
+                    errors.append(dict(unit_id=unit.unit_id, reason="aromatic_ring_site_missing"))
+                    continue
+                pair = frozenset((by_coord[tuple(point)], by_coord[tuple(other)]))
+                ring_edges.add(pair)
+                if pair not in edges or not hex_edge_valid(point, other):
+                    errors.append(dict(unit_id=unit.unit_id, reason="invalid_aromatic_ring_edge",
+                                       node_ids=sorted(pair)))
+        outside = sorted(n.node_id for n in unit.nodes if tuple(n.local_axial) not in ring_coords)
+        if outside:
+            errors.append(dict(unit_id=unit.unit_id, reason="aromatic_nodes_outside_rings",
+                               node_ids=outside, node_count=len(unit.nodes), ring_site_count=len(ring_coords)))
+        if edges - ring_edges:
+            errors.append(dict(unit_id=unit.unit_id, reason="aromatic_edges_outside_rings",
+                               edges=sorted(sorted(pair) for pair in edges - ring_edges)))
+    return errors
+
+
+def aromatic_perimeter_ids(unit: TopologyUnit) -> Set[int]:
+    ring_coords = {tuple(p) for ring in unit.local_rings for p in ring}
+    degree = Counter(n for e in unit.internal_edges for n in (e.source_node_id, e.target_node_id))
+    return {n.node_id for n in unit.nodes if n.su_type != 12
+            and tuple(n.local_axial) in ring_coords and degree[n.node_id] == 2}
+
+
+def hetero_staging_ids(state) -> Set[int]:
+    return {n for request in state.problem.hetero_requests
+            for n in (request.target_node_id, request.synthetic_node_id) if n is not None}
 
 
 def _allowed_contact_pairs(
@@ -86,6 +130,8 @@ class HexAssemblyState:
     satisfied_contracts: Set[str] = field(default_factory=set)
     allowed_unbonded_contacts: Set[frozenset[int]] = field(default_factory=set)
     reembedded_units: Set[str] = field(default_factory=set)
+    # Original CSV templates are retained independently of the selected pose.
+    conformer_sources: Dict[str, TopologyUnit] = field(default_factory=dict)
     current_su_types: Dict[int, int] = field(default_factory=dict)
     stage: str = "aromatic"
     action_history: List[Dict[str, Any]] = field(default_factory=list)
@@ -122,12 +168,31 @@ class HexAssemblyState:
         new.satisfied_contracts = set(self.satisfied_contracts)
         new.allowed_unbonded_contacts = set(self.allowed_unbonded_contacts)
         new.reembedded_units = set(self.reembedded_units)
+        new.conformer_sources = dict(self.conformer_sources)
         new.current_su_types = dict(self.current_su_types)
         new.stage = str(self.stage)
         new.action_history = copy.deepcopy(self.action_history)
         new.substitution_relaxed_edges = set(self.substitution_relaxed_edges)
         new.substitution_relaxed_contracts = set(self.substitution_relaxed_contracts)
         return new
+
+    def select_conformer(self, candidate: TopologyUnit) -> None:
+        from .conformers import validate_conformer
+
+        if self.is_placed(candidate.unit_id):
+            raise InverseInputError("cannot replace a placed unit's conformer")
+        original = self.conformer_sources.get(candidate.unit_id, self.unit(candidate.unit_id))
+        validate_conformer(original, candidate)
+        if candidate == self.unit(candidate.unit_id):
+            return
+        self.conformer_sources[candidate.unit_id] = original
+        self.problem = replace(self.problem, units=tuple(
+            candidate if u.unit_id == candidate.unit_id else u
+            for u in self.problem.units
+        ))
+        self._units[candidate.unit_id] = candidate
+        for port in candidate.ports:
+            self._ports[f"{candidate.unit_id}:{port.port_id}"] = port
 
     def component_unit_ids(self, unit_id: str) -> Set[str]:
         """Return placed units connected to ``unit_id`` by assembly edges."""
@@ -438,6 +503,11 @@ class HexAssemblyState:
         endpoints: Iterable[Tuple[str, int]],
     ) -> None:
         planned = self.problem.node_map()
+        # SU13 is only the aromatic search-stage placeholder.  Once a
+        # contract is committed, the endpoint must expose the SU type encoded
+        # by the inverse topology (for example SU5 in 5-29-19-29-5).  The
+        # immutable inverse node map remains unchanged; this is assembly-time
+        # state only.
         for unit_id, node_id in endpoints:
             unit = self._units.get(str(unit_id))
             node_id = int(node_id)
@@ -453,14 +523,9 @@ class HexAssemblyState:
     ) -> bool:
         if frozenset((int(source_node_id), int(target_node_id))) in self.substitution_relaxed_edges:
             return True
-        delta = (int(target[0]) - int(source[0]), int(target[1]) - int(source[1]))
-        if delta not in HEX_DIRECTIONS:
-            return False
-        # The legacy assembly stages use the six axial neighbour offsets for
-        # rigid and inter-unit bonds.  Flexible-chain construction imposes the
-        # stricter alternating honeycomb directions when it lays out a chain;
-        # do not apply that local path rule to the old rigid matcher.
-        return True
+        # Coarse assembly edges use the six-neighbour lattice. Ordinary chain
+        # conformers additionally validate their honeycomb sublattice locally.
+        return hex_edge_valid(source, target)
 
     def _potential_unintended_contact(
         self,
@@ -669,6 +734,22 @@ class HexAssemblyState:
             return False, "port_node_mismatch"
         if source_key in self.used_ports or target_key in self.used_ports:
             return False, "port_already_used"
+        dynamic_rigid = str(action.get("kind", "")) == "rigid"
+        if dynamic_rigid:
+            if self.unit(source_unit_id).phase != "aromatic" or self.unit(target_unit_id).phase != "aromatic":
+                return False, "rigid_requires_aromatic_units"
+            if self.problem.node_map().get(source_node_id) != 10 or self.problem.node_map().get(target_node_id) != 10:
+                return False, "rigid_requires_su10_ports"
+            if source_port.phase != "rigid" or target_port.phase != "rigid":
+                return False, "rigid_port_phase_mismatch"
+            if (source_node_id not in aromatic_perimeter_ids(self.unit(source_unit_id))
+                    or target_node_id not in aromatic_perimeter_ids(self.unit(target_unit_id))):
+                return False, "rigid_endpoint_not_ring_perimeter"
+            if target_unit_id in self.component_unit_ids(source_unit_id):
+                return False, "rigid_cycle"
+            expected_id = f"rigid:dynamic:{min(source_node_id, target_node_id)}-{max(source_node_id, target_node_id)}"
+            if str(action.get("contract_id", "")) != expected_id:
+                return False, "rigid_contract_id_mismatch"
         move_component = str(action.get("move_component_unit_id", ""))
         if move_component:
             if move_component not in self.placements:
@@ -714,9 +795,32 @@ class HexAssemblyState:
         ):
             self._restore(snapshot)
             return False, "endpoints_not_honeycomb_neighbors"
+        if dynamic_rigid:
+            source_direction = self.global_port_direction(source_unit_id, source_port)
+            target_direction = self.global_port_direction(target_unit_id, target_port)
+            if source_direction != direction or target_direction != axial_neg(direction):
+                self._restore(snapshot)
+                return False, "rigid_port_direction_mismatch"
         contract_id = str(action.get("contract_id", ""))
         kind = str(action.get("kind", self.stage))
         self._append_edge(source_node_id, target_node_id, kind, contract_id, direction)
+        if dynamic_rigid and not any(
+            contract.contract_id == contract_id for contract in self.problem.contracts
+        ):
+            contract = ExternalContract(
+                contract_id=contract_id,
+                source_unit_id=source_unit_id,
+                source_node_id=source_node_id,
+                target_unit_id=target_unit_id,
+                target_node_id=target_node_id,
+                kind="rigid",
+                fixed=False,
+                source_port_id=source_port_id,
+                target_port_id=target_port_id,
+            )
+            self.problem = replace(
+                self.problem, contracts=(*self.problem.contracts, contract)
+            )
         self.used_ports.update({source_key, target_key})
         if contract_id:
             self.satisfied_contracts.add(contract_id)
@@ -780,211 +884,11 @@ class HexAssemblyState:
         })
         return True
 
-    def reembed_topology_for_contract(
-        self,
-        contract: ExternalContract,
-        max_attempts: int = 50000,
-        search_variant: int = 0,
-        allow_unbonded_neighbors: bool = False,
-        solution_index: int = 0,
-    ) -> bool:
-        """Find a collision-free conformer while keeping satisfied ports fixed.
-
-        The inverse product is a complete tree.  Re-embedding changes only its
-        axial conformer; node IDs, SU types, internal edges and port ownership
-        remain immutable.
-        """
-        candidates = [
-            unit_id
-            for unit_id in (contract.source_unit_id, contract.target_unit_id)
-            if self.unit(unit_id).phase != "aromatic" and self.is_placed(unit_id)
-        ]
-        if not candidates:
-            return False
-        unit_id = str(candidates[0])
-        unit = self.unit(unit_id)
-        node_ids = {int(node.node_id) for node in unit.nodes}
-        adjacency: Dict[int, Set[int]] = {node_id: set() for node_id in node_ids}
-        for edge in unit.internal_edges:
-            left, right = int(edge.source_node_id), int(edge.target_node_id)
-            if left in adjacency and right in adjacency:
-                adjacency[left].add(right)
-                adjacency[right].add(left)
-        if len(unit.nodes) > 1 and sum(len(values) for values in adjacency.values()) // 2 != len(unit.nodes) - 1:
-            return False
-
-        anchored: Dict[int, Set[Axial]] = {}
-        allowed_external: Dict[int, Set[int]] = {}
-        relevant_ids = set(self.satisfied_contracts) | {str(contract.contract_id)}
-        for item in self.problem.contracts:
-            if str(item.contract_id) not in relevant_ids:
-                continue
-            if item.source_unit_id == unit_id:
-                local_node = int(item.source_node_id)
-                external_node = int(item.target_node_id)
-            elif item.target_unit_id == unit_id:
-                local_node = int(item.target_node_id)
-                external_node = int(item.source_node_id)
-            else:
-                continue
-            external_axial = self.node_axial.get(external_node)
-            if local_node not in node_ids or external_axial is None:
-                return False
-            allowed = {
-                axial_add(external_axial, direction)
-                for direction in HEX_DIRECTIONS
-            }
-            anchored[local_node] = allowed if local_node not in anchored else anchored[local_node] & allowed
-            allowed_external.setdefault(local_node, set()).add(external_node)
-            if not anchored[local_node]:
-                return False
-        if not anchored:
-            return False
-
-        stationary = {
-            axial: int(node_id)
-            for axial, node_id in self.occupied_axial.items()
-            if int(node_id) not in node_ids
-        }
-        root = min(anchored, key=lambda node_id: (len(anchored[node_id]), -len(adjacency[node_id]), node_id))
-
-        # Tree distances provide a strong endpoint-closure bound during DFS.
-        distances: Dict[Tuple[int, int], int] = {}
-        for start in node_ids:
-            queue = [(start, 0)]
-            seen = {start}
-            for current, depth in queue:
-                distances[(start, current)] = depth
-                for neighbor in adjacency[current]:
-                    if neighbor not in seen:
-                        seen.add(neighbor)
-                        queue.append((neighbor, depth + 1))
-
-        assigned: Dict[int, Axial] = {}
-        used: Set[Axial] = set()
-        attempts = 0
-        solutions_seen = 0
-
-        def ordered_coordinates(values: Iterable[Axial]) -> List[Axial]:
-            ordered = sorted(
-                values,
-                key=lambda value: (
-                    abs(value[0]) + abs(value[1]), value[0], value[1]
-                ),
-            )
-            if not ordered:
-                return ordered
-            variant = max(0, int(search_variant))
-            if (variant // len(ordered)) % 2:
-                ordered.reverse()
-            shift = variant % len(ordered)
-            return ordered[shift:] + ordered[:shift]
-
-        def closure_possible() -> bool:
-            for placed_node, placed_axial in assigned.items():
-                for anchor_node, allowed in anchored.items():
-                    if anchor_node in assigned:
-                        continue
-                    steps = distances.get((placed_node, anchor_node), len(node_ids) + 1)
-                    if min(axial_distance(placed_axial, value) for value in allowed) > steps:
-                        return False
-            return True
-
-        def choose_frontier() -> Optional[int]:
-            values = [
-                node_id for node_id in node_ids - set(assigned)
-                if any(neighbor in assigned for neighbor in adjacency[node_id])
-            ]
-            if not values:
-                return None
-            return min(values, key=lambda node_id: (node_id not in anchored, -len(adjacency[node_id]), node_id))
-
-        def place_remaining() -> bool:
-            nonlocal attempts, solutions_seen
-            if len(assigned) == len(node_ids):
-                if solutions_seen >= max(0, int(solution_index)):
-                    return True
-                solutions_seen += 1
-                return False
-            node_id = choose_frontier()
-            if node_id is None:
-                return False
-            assigned_neighbors = [neighbor for neighbor in adjacency[node_id] if neighbor in assigned]
-            possible: Optional[Set[Axial]] = None
-            for neighbor in assigned_neighbors:
-                around = {axial_add(assigned[neighbor], direction) for direction in HEX_DIRECTIONS}
-                possible = around if possible is None else possible & around
-            possible = possible or set()
-            if node_id in anchored:
-                possible &= anchored[node_id]
-            for coord in ordered_coordinates(possible):
-                attempts += 1
-                if attempts > int(max_attempts):
-                    return False
-                if coord in used or coord in stationary:
-                    continue
-                if not allow_unbonded_neighbors:
-                    contacts = set()
-                    for direction in HEX_DIRECTIONS:
-                        neighbor_coord = axial_add(coord, direction)
-                        occupant = stationary.get(neighbor_coord)
-                        if occupant is not None and self._potential_unintended_contact(
-                            int(node_id), coord, int(occupant), neighbor_coord
-                        ):
-                            contacts.add(int(occupant))
-                    if contacts - allowed_external.get(node_id, set()):
-                        continue
-                assigned[node_id] = coord
-                used.add(coord)
-                if closure_possible() and place_remaining():
-                    return True
-                used.remove(coord)
-                assigned.pop(node_id, None)
-            return False
-
-        for root_coord in ordered_coordinates(anchored[root]):
-            if root_coord in stationary:
-                continue
-            assigned.clear()
-            used.clear()
-            assigned[root] = root_coord
-            used.add(root_coord)
-            if not closure_possible() or not place_remaining():
-                continue
-            for node_id in node_ids:
-                old_axial = self.node_axial[node_id]
-                if self.occupied_axial.get(old_axial) == node_id:
-                    self.occupied_axial.pop(old_axial, None)
-            for node_id, coord in assigned.items():
-                self.node_axial[node_id] = coord
-                self.occupied_axial[coord] = node_id
-                self.final_node_positions[node_id] = (float(coord[0]), float(coord[1]))
-            self.edges = [
-                AssemblyEdge(
-                    edge.source_node_id,
-                    edge.target_node_id,
-                    edge.kind,
-                    edge.contract_id,
-                    self._edge_direction(
-                        self.node_axial[edge.source_node_id],
-                        self.node_axial[edge.target_node_id],
-                    ),
-                )
-                for edge in self.edges
-            ]
-            self.reembedded_units.add(unit_id)
-            self.action_history.append({
-                "kind": str(contract.kind),
-                "contract_id": str(contract.contract_id),
-                "unit_id": unit_id,
-                "topology_reembedded": True,
-                "attempts": attempts,
-                "solution_index": int(solution_index),
-            })
-            return True
-        return False
-
     def _restore(self, snapshot: "HexAssemblyState") -> None:
+        self.problem = snapshot.problem
+        self._units = dict(snapshot._units)
+        self._ports = dict(snapshot._ports)
+        self.conformer_sources = dict(snapshot.conformer_sources)
         self.placements = dict(snapshot.placements)
         self.node_axial = dict(snapshot.node_axial)
         self.final_node_positions = dict(snapshot.final_node_positions)
@@ -1027,6 +931,18 @@ class HexAssemblyState:
         unit_phase = "aromatic" if str(phase) in {"aromatic", "rigid"} else str(phase)
         if any(not self.is_placed(unit.unit_id) for unit in self.problem.units if unit.phase == unit_phase):
             return False
+        if str(phase) == "rigid":
+            rigid = [contract for contract in self.problem.contracts if contract.kind == "rigid"]
+            su10 = {node_id for node_id, su in self.problem.node_su_types if su == 10}
+            used = [node_id for contract in rigid for node_id in (
+                contract.source_node_id, contract.target_node_id
+            )]
+            return (
+                len(rigid) == len(su10) // 2
+                and len(used) == len(su10)
+                and set(used) == su10
+                and all(contract.contract_id in self.satisfied_contracts for contract in rigid)
+            )
         return not self.mandatory_contracts(phase)
 
     def audit_resource_partition_errors(self) -> List[Dict[str, Any]]:
@@ -1041,6 +957,10 @@ class HexAssemblyState:
                 "unexpected_ownership_ids": sorted(set(ownership) - set(assembled)),
             })
         resource_ids = [int(resource.node_id) for resource in resources]
+        idle_ids = [node_id for node_id, _su in self.problem.idle_aromatic_nodes]
+        if (len(idle_ids) != len(set(idle_ids))
+                or set(idle_ids) & (set(assembled) | set(resource_ids))):
+            errors.append({"reason": "idle_aromatic_partition_mismatch", "node_ids": idle_ids})
         if len(resource_ids) != len(set(resource_ids)):
             errors.append({
                 "reason": "duplicate_unassembled_resource_id",
@@ -1076,6 +996,7 @@ class HexAssemblyState:
     def is_complete(self) -> bool:
         return (
             all(self.is_placed(unit.unit_id) for unit in self.problem.units)
+            and self.phase_done("rigid")
             and not self.mandatory_contracts()
             and len(self.node_axial) == len(self.problem.ownership)
             and self.component_count() <= 1
@@ -1158,6 +1079,44 @@ class HexAssemblyState:
                 errors.append({"reason": "relaxed_edge_endpoint_missing", "edge": sorted(int(node_id) for node_id in pair)})
         return errors
 
+    def audit_flex_endpoint_su_errors(self) -> List[Dict[str, Any]]:
+        """Ensure Flex endpoints expose their inverse-topology SU types."""
+        ownership = self.problem.ownership_map()
+        phases = {
+            str(unit.unit_id): str(unit.phase) for unit in self.problem.units
+        }
+        contracts = {
+            str(contract.contract_id): contract
+            for contract in self.problem.contracts
+        }
+        errors: List[Dict[str, Any]] = []
+        for edge in self.edges:
+            if str(edge.kind) != "flex" or not str(edge.contract_id):
+                continue
+            contract = contracts.get(str(edge.contract_id))
+            if contract is None:
+                continue
+            if phases.get(str(contract.source_unit_id)) == "aromatic":
+                expected_node_id = int(contract.source_node_id)
+            elif phases.get(str(contract.target_unit_id)) == "aromatic":
+                expected_node_id = int(contract.target_node_id)
+            else:
+                continue
+            expected_su_type = int(self.problem.node_map().get(expected_node_id, -1))
+            for node_id in (int(edge.source_node_id), int(edge.target_node_id)):
+                unit_id = ownership.get(node_id, "")
+                if phases.get(unit_id) != "aromatic":
+                    continue
+                actual = int(self.current_su_types.get(node_id, -1))
+                if actual != expected_su_type:
+                    errors.append({
+                        "contract_id": str(edge.contract_id),
+                        "node_id": node_id,
+                        "expected_su_type": expected_su_type,
+                        "actual_su_type": actual,
+                    })
+        return errors
+
     def audit_geometry_errors(self) -> List[Dict[str, Any]]:
         errors: List[Dict[str, Any]] = []
         for edge in self.edges:
@@ -1179,8 +1138,27 @@ class HexAssemblyState:
     def audit_topology_conformation_errors(self) -> List[Dict[str, Any]]:
         """Verify that every placed unit is still its immutable local shape."""
         errors: List[Dict[str, Any]] = []
+        from .conformers import validate_conformer
+        for unit_id, original in self.conformer_sources.items():
+            try:
+                validate_conformer(original, self.unit(unit_id))
+            except InverseInputError as exc:
+                errors.append({"unit_id": unit_id, "reason": str(exc)})
         for unit_id, placement in sorted(self.placements.items()):
             unit = self.unit(unit_id)
+            if unit.phase != 'aromatic':
+                ids = {n.node_id for n in unit.nodes}
+                expected_edges = {frozenset((e.source_node_id, e.target_node_id))
+                                  for e in unit.internal_edges}
+                actual_edges = {frozenset((e.source_node_id, e.target_node_id))
+                                for e in self.edges
+                                if e.source_node_id in ids and e.target_node_id in ids}
+                if actual_edges != expected_edges:
+                    errors.append({
+                        'unit_id': unit_id, 'reason': 'internal_connectivity_changed',
+                        'missing_edges': sorted(sorted(e) for e in expected_edges - actual_edges),
+                        'unexpected_edges': sorted(sorted(e) for e in actual_edges - expected_edges),
+                    })
             if unit_id in self.reembedded_units:
                 errors.append({
                     "unit_id": str(unit_id),
@@ -1302,8 +1280,11 @@ class HexAssemblyState:
         return errors
 
     def state_signature(self) -> Tuple[Any, ...]:
+        from .conformers import geometry_signature
         return (
             str(self.stage),
+            tuple((uid, geometry_signature(self.unit(uid)))
+                  for uid in sorted(self.conformer_sources)),
             tuple(sorted((
                 unit_id,
                 placement.rotation,
@@ -1334,9 +1315,11 @@ class HexAssemblyState:
         }
         non_hex_edges = self.audit_geometry_errors()
         conformation_errors = self.audit_topology_conformation_errors()
+        aromatic_errors = [] if self.substitution_relaxed_edges else aromatic_template_errors(self.problem)
         port_direction_errors = self.audit_port_direction_errors()
         unintended_contacts = self.audit_unintended_contacts()
         substitution_errors = self.audit_substitution_errors()
+        flex_endpoint_su_errors = self.audit_flex_endpoint_su_errors()
         resource_partition_errors = self.audit_resource_partition_errors()
         unassembled_resources = tuple(
             self.problem.unassembled_closure_resources
@@ -1382,6 +1365,14 @@ class HexAssemblyState:
             side_distribution_warnings.append("side_attachments_clustered")
         return {
             "complete": bool(self.is_complete()),
+            "rigid_stage_complete": bool(self.phase_done("rigid")),
+            "rigid_connections_done": sum(
+                contract.kind == "rigid" and contract.contract_id in self.satisfied_contracts
+                for contract in self.problem.contracts
+            ),
+            "rigid_connections_total": sum(
+                su == 10 for _node_id, su in self.problem.node_su_types
+            ) // 2,
             "stage": str(self.stage),
             "placed_unit_count": len(self.placements),
             "unit_count": len(self.problem.units),
@@ -1395,8 +1386,15 @@ class HexAssemblyState:
             "unassembled_resource_ids": sorted(
                 int(resource.node_id) for resource in unassembled_resources
             ),
-            "strict_all_nodes_assembled": not bool(unassembled_resources),
+            "idle_aromatic_nodes": [
+                {"node_id": node_id, "su_type": su_type}
+                for node_id, su_type in self.problem.idle_aromatic_nodes
+            ],
+            "idle_aromatic_count": len(self.problem.idle_aromatic_nodes),
+            "strict_all_nodes_assembled": not bool(
+                unassembled_resources or self.problem.idle_aromatic_nodes),
             "completion_mode": (
+                "bounded_idle_aromatic" if self.problem.idle_aromatic_nodes else
                 "tolerated_unassembled_closure_resources"
                 if unassembled_resources else "strict_all_nodes_assembled"
             ),
@@ -1415,6 +1413,8 @@ class HexAssemblyState:
             "nonbonded_contacts_valid": not unintended_contacts,
             "substitution_errors": substitution_errors,
             "substitution_valid": not substitution_errors,
+            "flex_endpoint_su_errors": flex_endpoint_su_errors,
+            "flex_endpoint_su_valid": not flex_endpoint_su_errors,
             "shape_metrics": shape_metrics,
             "shape_valid": not shape_warnings,
             "shape_warnings": shape_warnings,
@@ -1433,14 +1433,16 @@ class HexAssemblyState:
                 sorted(pair) for pair in self.allowed_unbonded_contacts
             ),
             "geometry_valid": not (
-                duplicate_axials
+                aromatic_errors or duplicate_axials
                 or non_hex_edges
                 or conformation_errors
                 or port_direction_errors
                 or unintended_contacts
                 or substitution_errors
+                or flex_endpoint_su_errors
             ),
             "component_count": self.component_count(),
+            "aromatic_template_errors": aromatic_errors,
             "edge_count": len(self.edges),
             "geometry_fallback_contract_ids": sorted(
                 str(action.get("contract_id", ""))
@@ -1449,6 +1451,14 @@ class HexAssemblyState:
             ),
             "substitution_relaxed_edge_count": len(self.substitution_relaxed_edges),
             "substitution_relaxed_contract_ids": sorted(self.substitution_relaxed_contracts),
+        }
+
+    def aromatic_site_bindings(self) -> Dict[str, Any]:
+        return {
+            str(node.node_id): {"unit_id": unit.unit_id, "slot_index": index,
+                                "local_axial": list(node.local_axial)}
+            for unit in self.problem.units if unit.phase == "aromatic"
+            for index, node in enumerate(unit.nodes)
         }
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1465,6 +1475,28 @@ class HexAssemblyState:
             )
 
         return {
+            "aromatic_site_bindings": self.aromatic_site_bindings(),
+            "rigid_contracts": [
+                {
+                    "contract_id": str(contract.contract_id),
+                    "source_unit_id": str(contract.source_unit_id),
+                    "source_node_id": int(contract.source_node_id),
+                    "target_unit_id": str(contract.target_unit_id),
+                    "target_node_id": int(contract.target_node_id),
+                    "satisfied": str(contract.contract_id) in self.satisfied_contracts,
+                }
+                for contract in self.problem.contracts if contract.kind == "rigid"
+            ],
+            "selected_conformers": {
+                uid: {
+                    "node_coordinates": {str(n.node_id): list(n.local_axial)
+                                         for n in self.unit(uid).nodes},
+                    "port_directions": {p.port_id: list(p.direction)
+                                        for p in self.unit(uid).ports},
+                    "geometry_source": "generated_from_connectivity",
+                }
+                for uid in sorted(self.conformer_sources)
+            },
             "placements": {
                 unit_id: {
                     "rotation": int(placement.rotation),
@@ -1514,6 +1546,43 @@ class HexAssemblyState:
         }
 
 
+def stage_snapshot(state: HexAssemblyState, stage: str) -> HexAssemblyState:
+    """Copy a committed prefix without changing the live search or its IDs."""
+    result = state.clone()
+    def included(unit):
+        if unit.phase == "aromatic":
+            return True
+        if stage == "flex_chain":
+            return unit.product_type == "flex_chain"
+        if stage == "aliphatic_ring":
+            return unit.phase == "flex"
+        return True
+    keep_units = {u.unit_id for u in result.problem.units if included(u)}
+    keep_nodes = {n.node_id for u in result.problem.units if u.unit_id in keep_units for n in u.nodes}
+    result.placements = {u: p for u, p in result.placements.items() if u in keep_units}
+    result.conformer_sources = {u: source for u, source in result.conformer_sources.items() if u in keep_units}
+    result.node_axial = {n: p for n, p in result.node_axial.items() if n in keep_nodes}
+    result.occupied_axial = {p: n for n, p in result.node_axial.items()}
+    result.final_node_positions = {n: p for n, p in result.final_node_positions.items() if n in keep_nodes}
+    result.edges = [e for e in result.edges if e.source_node_id in keep_nodes and e.target_node_id in keep_nodes]
+    result.satisfied_contracts = {e.contract_id for e in result.edges if e.contract_id}
+    result.used_ports = {f"{uid}:{pid}" for c in result.problem.contracts
+                         if c.contract_id in result.satisfied_contracts
+                         for uid, pid in ((c.source_unit_id, c.source_port_id), (c.target_unit_id, c.target_port_id))}
+    connected = {n for c in result.problem.contracts if c.contract_id in result.satisfied_contracts
+                 for n in (c.source_node_id, c.target_node_id)}
+    for unit in result.problem.units:
+        if unit.phase == "aromatic":
+            for node in unit.nodes:
+                if node.node_id not in connected:
+                    result.current_su_types[node.node_id] = node.su_type
+    result.allowed_unbonded_contacts = {pair for pair in result.allowed_unbonded_contacts if pair <= keep_nodes}
+    result.action_history = [a for a in result.action_history
+                             if a.get('topology_unit_id', '') in keep_units or a.get('kind') == 'rigid']
+    result.stage = stage
+    return result
+
+
 def relabel_aromatic_sites(
     geometric_state: HexAssemblyState,
     boundary_site_ids: Mapping[int, int],
@@ -1532,7 +1601,7 @@ def relabel_aromatic_sites(
         for node_id in (contract.source_node_id, contract.target_node_id)
     } | {
         int(node_id) for node_id in protected_aromatic_ids
-    }
+    } | hetero_staging_ids(state)
     aromatic_units = [
         unit for unit in state.problem.units if unit.phase == "aromatic"
     ]
@@ -1541,11 +1610,13 @@ def relabel_aromatic_sites(
         for unit in aromatic_units
         for node in unit.nodes
     }
+    perimeter_ids = {n for unit in aromatic_units for n in aromatic_perimeter_ids(unit)}
     movable_ids = {
         int(node.node_id)
         for unit in aromatic_units
         for node in unit.nodes
-        if int(node.node_id) not in protected_ids and int(node.su_type) != 12
+        if int(node.node_id) not in protected_ids
+        and int(node.node_id) in perimeter_ids
     }
     assignments = {
         int(boundary_id): int(site_id)
@@ -1576,12 +1647,18 @@ def relabel_aromatic_sites(
         unit_id, coordinate, _old_id, _node = slot_by_old_id[old_site_id]
         new_id_by_slot[(unit_id, coordinate)] = int(boundary_id)
 
-    remaining_ids = sorted(movable_ids - set(assignments))
+    # Preserve untouched occupants; only displaced IDs need another slot.
+    assigned_slots = set(assignments.values())
+    stationary = movable_ids - set(assignments) - assigned_slots
+    for old_id in stationary:
+        unit_id, coordinate, _old_id, _node = slot_by_old_id[old_id]
+        new_id_by_slot[(unit_id, coordinate)] = old_id
+    remaining_ids = sorted(movable_ids - set(assignments) - stationary)
     remaining_slots = sorted(
         (
             (unit_id, coordinate)
             for unit_id, coordinate, old_id, _node in slot_rows
-            if old_id not in set(assignments.values())
+            if old_id not in assigned_slots and old_id not in stationary
         ),
         key=lambda row: (unit_sort_key(row[0]), row[1]),
     )
@@ -1641,6 +1718,15 @@ def relabel_aromatic_sites(
             ),
         )
 
+    # ``current_su_types`` describes the searched physical state, so it must
+    # follow the same coordinate/GID permutation as the aromatic templates.
+    # Rebuilding from ``problem`` alone would silently turn physical flex
+    # endpoint labels back into the aromatic staging SU13 labels.
+    remapped_current_su_types = {
+        int(old_to_new_aromatic_id.get(int(node_id), int(node_id))): int(su_type)
+        for node_id, su_type in state.current_su_types.items()
+    }
+
     old_ports_by_node: Dict[int, List[Any]] = {}
     for unit in aromatic_units:
         for port in unit.ports:
@@ -1699,6 +1785,7 @@ def relabel_aromatic_sites(
     )
 
     rebuilt = HexAssemblyState(problem)
+    rebuilt.conformer_sources = dict(state.conformer_sources)
     for unit_id, placement in sorted(state.placements.items()):
         unit = rebuilt.unit(unit_id)
         coordinates = rebuilt._placement_coordinates(
@@ -1755,6 +1842,25 @@ def relabel_aromatic_sites(
             )
     rebuilt.action_history.extend(copy.deepcopy(list(actions)))
     rebuilt.stage = str(stage)
+    rebuilt.current_su_types = dict(remapped_current_su_types)
+    # Contract replay intentionally reconstructs used ports and edges.  Make
+    # the inverse-topology flex label explicit after replay as well.
+    for contract in problem.contracts:
+        if (
+            str(contract.contract_id) not in satisfied_ids
+            or str(contract.kind) != "flex"
+        ):
+            continue
+        source_unit = rebuilt.unit(contract.source_unit_id)
+        if source_unit.phase == "aromatic":
+            endpoint = int(contract.source_node_id)
+        elif rebuilt.unit(contract.target_unit_id).phase == "aromatic":
+            endpoint = int(contract.target_node_id)
+        else:
+            continue
+        rebuilt.current_su_types[endpoint] = int(
+            problem.node_map().get(endpoint, rebuilt.current_su_types.get(endpoint, -1))
+        )
     if str(stage) == "side" and rebuilt.is_complete():
         # Aromatic clusters intentionally use only SU12/SU13 while sites are
         # being searched.  Once every prescribed connection is committed, the

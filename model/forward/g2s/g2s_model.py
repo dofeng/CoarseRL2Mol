@@ -186,6 +186,7 @@ class LocalNMRDataset(InMemoryDataset):
             y_mol = _mol_get(mol, "y_spectrum", _mol_get(mol, "y_mol"))
             real_ppm = _mol_get(mol, "real_ppm")
             real_intensity = _mol_get(mol, "real_intensity")
+            requested_centers = _mol_get(mol, "center_ids")
             su_hist_global = _mol_get(mol, "su_hist", torch.zeros(NUM_SU_TYPES))
             elem_counts_global = _mol_get(mol, "total_atom_counts", torch.zeros(6))
             smiles = _mol_get(mol, "smiles", "")
@@ -215,7 +216,19 @@ class LocalNMRDataset(InMemoryDataset):
             elem_ratio = elem_counts_global.float() / total_atoms
             global_feat = torch.cat([su_hist_freq, elem_ratio], dim=0).view(1, -1)
 
-            for center in range(x_node.size(0)):
+            if requested_centers is None:
+                centers = range(x_node.size(0))
+            else:
+                # Inference may request only a small set of rooted
+                # environments.  Do not materialise every carbon-centred
+                # subgraph in the molecule for each such request.
+                centers = (
+                    int(value)
+                    for value in torch.as_tensor(requested_centers).view(-1).tolist()
+                    if 0 <= int(value) < int(x_node.size(0))
+                )
+
+            for center in centers:
                 if not bool(is_carbon[center]):
                     continue
                 ppm_value = float(real_ppm[center].item())

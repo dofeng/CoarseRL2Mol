@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -17,11 +16,13 @@ from .types import (
     GENERIC_CLOSURE_RESOURCE_TYPES,
 )
 from ..stage3_models import HistogramConversion
-from ....shared.aromatic_plan import su12_transition_diagnostics
+from ....shared.aromatic_plan import (
+    MAX_FLEX_WINDOW_WIDTH, flex_count_window, su12_transition_diagnostics,
+)
 
 
 AROMATIC_TYPES = (12, 13)
-CONVERSION_SCORING_VERSION = "soft_h_flex_balance_v8"
+CONVERSION_SCORING_VERSION = "soft_h_flex_balance_v9"
 INFEASIBLE_SCORE = 1.0e12
 AROMATIC_STAGING_INVALID_PENALTY = 250.0
 
@@ -331,13 +332,11 @@ def _flex_window_from_H(H: torch.Tensor, bridgehead_info: Tuple[int, ...], expli
             except ValueError as projection_exc:
                 staging_projection_error = str(projection_exc)
     cluster_count = int(len(clusters))
-    rigid10_pairs = max(0, int(counts.get(10, 0)) // 2)
-    z_value = int(cluster_count) - int(rigid10_pairs)
-    flex_lower = int(z_value + 1)
-    flex_upper = int(math.floor(0.8 * float(max(0, int(cluster_count)))))
+    window = flex_count_window(cluster_count, counts.get(10, 0))
+    flex_lower, flex_upper = window["flex_lower"], window["flex_upper"]
     if cluster_count <= 0:
         projected_scenario = "not_applicable"
-    elif flex_lower > flex_upper:
+    elif not window["flex_window_ok"]:
         projected_scenario = "invalid"
     elif int(explicit_count) < int(flex_lower):
         projected_scenario = "below_range"
@@ -359,11 +358,7 @@ def _flex_window_from_H(H: torch.Tensor, bridgehead_info: Tuple[int, ...], expli
         deviation = 0
     scenario = str(projected_scenario) if staging_valid else "invalid"
     return {
-        "X": int(cluster_count),
-        "Y": int(rigid10_pairs),
-        "Z": int(z_value),
-        "flex_lower": int(flex_lower),
-        "flex_upper": int(flex_upper),
+        **window,
         "explicit_flex_count": int(explicit_count),
         "maximum_flex_capacity": max(0, int(flex_upper) - int(explicit_count)),
         "minimum_flex_gap": max(0, int(flex_lower) - int(explicit_count)),
@@ -385,6 +380,9 @@ def _flex_transition_penalty(
     before_deviation = int(before.get("deviation", 0) or 0)
     after_deviation = int(after.get("deviation", 0) or 0)
     penalty = 0.0
+    before_width_gap = max(0, int(before.get("flex_window_width", 0)) - MAX_FLEX_WINDOW_WIDTH)
+    after_width_gap = max(0, int(after.get("flex_window_width", 0)) - MAX_FLEX_WINDOW_WIDTH)
+    penalty += 120.0 * (after_width_gap - before_width_gap)
 
     # A conversion that raises the lower bound without reducing the current
     # flex deviation has made no net progress. Flex convergence therefore has
@@ -633,6 +631,23 @@ def score_conversion_bundle(
     resource_penalty = float(_gap_total(gap_after)) * 22.0
     if _gap_total(gap_after) > _gap_total(gap_before):
         resource_penalty += 250.0
+    aromatic_staging = dict(flex_impact.after or {})
+    aromatic_staging_valid = bool(
+        aromatic_staging.get("aromatic_staging_valid", True)
+    )
+    aromatic_staging_projected = bool(
+        aromatic_staging.get("aromatic_staging_projected", False)
+    )
+    staging_infeasible = bool(
+        not aromatic_staging_valid and not aromatic_staging_projected
+    )
+    # Once coordinated, ordinary resource conversions must not reopen a
+    # wider window and cause repeated SU10 retirement on the next generation.
+    width_regressed = bool(
+        context.flex_audit.get("enforced", False)
+        and flex_impact.before.get("flex_window_width_ok", False)
+        and int(aromatic_staging.get("flex_window_width", 0)) > MAX_FLEX_WINDOW_WIDTH
+    )
     total_score = (
         resource_penalty
         - topology_gain
@@ -665,6 +680,25 @@ def score_conversion_bundle(
         "total_score": float(total_score),
         "su12_cap": dict(su12_diagnostics),
     }
+    if staging_infeasible:
+        # A failed aromatic-cluster plan is a hard rejection.  The only
+        # admissible exception is an odd-SU12 intermediate explicitly marked
+        # as projected, which the generation-boundary balancer can repair.
+        diagnostics["reason"] = "aromatic_staging_invalid_final"
+        diagnostics["aromatic_staging"] = {
+            "valid": bool(aromatic_staging_valid),
+            "projected": bool(aromatic_staging_projected),
+            "error": str(aromatic_staging.get("aromatic_staging_error", "")),
+            "projection_error": str(
+                aromatic_staging.get("aromatic_staging_projection_error", "")
+            ),
+        }
+        total_score = INFEASIBLE_SCORE
+        diagnostics["total_score"] = float(total_score)
+    if width_regressed:
+        diagnostics["reason"] = "flex_window_width_regressed"
+        total_score = INFEASIBLE_SCORE
+        diagnostics["total_score"] = float(total_score)
     return ConversionBundleScore(
         ops=ops,
         H_after=H_after,
@@ -683,7 +717,7 @@ def score_conversion_bundle(
         topology_gain=float(topology_gain),
         operation_penalty=float(operation_penalty),
         total_score=float(total_score),
-        feasible=True,
+        feasible=not (staging_infeasible or width_regressed),
         diagnostics=diagnostics,
     )
 

@@ -58,6 +58,7 @@ from ..core.rules import (
     external_phase_for_role as _external_phase_for_role,
 )
 from ..core.validation import (
+    mainline_contract_reason,
     branch_route_shape_reason as _branch_route_shape_reason,
     nested_path_edges as _nested_path_edges,
     validate_branch_capacity as _validate_branch_capacity,
@@ -270,10 +271,6 @@ def physical_product_reason(
             continue
         if _node_label(node) in set(TERMINAL_ENDPOINT_LABELS):
             return f"terminal_in_mainline_middle:{int(node_id)}"
-    mainline_ids = [
-        int(value) for value in list(node_ids or [])
-        if value is not None and int(value) >= 0
-    ]
     edges: Set[Tuple[int, int]] = {
         tuple(sorted((int(left), int(right))))
         for left, right in zip(mainline_ids, mainline_ids[1:])
@@ -1164,8 +1161,10 @@ def record_invalid_materialization_failure(
         "source_fragment_ids": sorted({
             int(view.fragment_id) for view in list(source_views or [])
         }),
-        "left_endpoint": {},
-        "right_endpoint": {},
+        "left_endpoint": {"node_id": node_ids[0] if node_ids else None, "label": labels[0] if labels else ""},
+        "right_endpoint": {"node_id": node_ids[-1] if node_ids else None, "label": labels[-1] if labels else ""},
+        "failure_domain": "topology_materialization",
+        "failure_scope": "candidate",
         "validation_reason": str(validation_reason),
         "attempted_topology_su": str(attempted_render.topology_notation),
         "attempted_topology_gid": str(attempted_render.node_id_notation),
@@ -1606,6 +1605,46 @@ def claim_view_context_resources(
     return local_view, dict(required)
 
 
+def reject_invalid_mainline_contract(
+    assembler,
+    view: AssemblyFragmentView,
+    *,
+    product_kind: str,
+    closing_mainline: bool = False,
+) -> bool:
+    """Record intrinsic route failures before branch or resource mutation."""
+    reason = mainline_contract_reason(view)
+    if not reason and not closing_mainline and not (view.open_left or view.open_right):
+        reason = _validate_chain_product_shape(
+            product_kind, view.main_labels, [view], view.main_node_ids,
+        )
+    if not reason:
+        return False
+    pending_module.record_pending(
+        assembler,
+        unit_id=int(view.fragment_id),
+        pending_kind=pending_kind_for_view(assembler, view),
+        views=[view],
+        required_counts={},
+        available_counts=assembler.allocator.available_counts(),
+        reason=reason,
+        partial_render=view.partial_render(),
+        actual_render=view.pending_render(),
+        diagnostics={
+            "failure_domain": "topology_materialization",
+            "failure_scope": "current_contract",
+            "generation_id": int(getattr(assembler, "generation_id", 0)),
+            "left_endpoint": view.endpoint("left").to_dict(),
+            "right_endpoint": view.endpoint("right").to_dict(),
+            "mainline_labels": list(view.main_labels),
+            "mainline_node_ids": list(view.main_node_ids),
+        },
+        target_role_override=product_kind,
+        mainline_slots_override=[],
+    )
+    return True
+
+
 def finalize_with_two_end_closures(
     assembler,
     view: AssemblyFragmentView,
@@ -1615,6 +1654,24 @@ def finalize_with_two_end_closures(
     right_mode: str,
     branch_donors: List[AssemblyFragmentView],
 ) -> bool:
+    # This operator is only valid for a genuinely dual-open view.  A closed
+    # endpoint may be treated as a second operator only for the explicit d2
+    # contract whose tail boundary still requires a full F1 sequence.  In
+    # particular, a basic SU3 carrying a fixed SU17-SU18 path has one
+    # remaining external port and must never receive two independent closure
+    # chains (which would create a spurious three-edge center).
+    if reject_invalid_mainline_contract(
+        assembler, view, product_kind=product_kind, closing_mainline=True,
+    ):
+        return False
+    for side, mode in (("left", left_mode), ("right", right_mode)):
+        endpoint = view.endpoint(side)
+        if endpoint.label in TERMINAL_ENDPOINT_LABELS:
+            return False
+        if not endpoint.is_open and not _d2_endpoint_requires_full_f1(
+            assembler, view, side=side, closure_mode=str(mode),
+        ):
+            return False
     snapshot = assembler.allocator.snapshot()
     trace_checkpoint = assembler.allocator.trace_checkpoint()
     donor_snapshot = list(branch_donors)
@@ -1836,6 +1893,8 @@ def finalize_single_view_product(
     reason: str,
     branch_donors: List[AssemblyFragmentView],
 ) -> bool:
+    if reject_invalid_mainline_contract(assembler, view, product_kind=product_kind):
+        return False
     snapshot = assembler.allocator.snapshot()
     trace_checkpoint = assembler.allocator.trace_checkpoint()
     donor_snapshot = list(branch_donors)
@@ -1974,11 +2033,23 @@ def finalize_with_closure(
     closure_mode: str,
     branch_donors: List[AssemblyFragmentView],
 ) -> bool:
+    if reject_invalid_mainline_contract(assembler, view, product_kind=product_kind):
+        return False
+    open_sides = [side for side in ("left", "right") if view.endpoint(side).is_open]
+    if not open_sides:
+        return finalize_single_view_product(
+            assembler, view, product_kind=product_kind,
+            reason="closed_mainline", branch_donors=branch_donors,
+        )
+    if len(open_sides) != 1:
+        # This is a single-port operator. A dual-open view must be handled
+        # by the caller's two-end strategy with its explicit pair of modes.
+        return False
+    side = open_sides[0]
     snapshot = assembler.allocator.snapshot()
     trace_checkpoint = assembler.allocator.trace_checkpoint()
     donor_snapshot = list(branch_donors)
     original_view = view
-    side = "left" if bool(original_view.open_left) else "right"
     attempt_slots = attempt_mainline_slots(assembler,
         original_view,
         [(str(side), str(closure_mode))],
@@ -2056,7 +2127,7 @@ def finalize_with_closure(
     view.main_node_ids = normalized_node_ids
     closure_payload, closure_required = build_main_closure(assembler, 
         view,
-        side="left" if bool(view.open_left) else "right",
+        side=side,
         closure_mode=str(closure_mode),
     )
     if closure_payload is None:
@@ -2114,7 +2185,6 @@ def finalize_with_closure(
         branch_id_map,
     )
     canonical_labels = list(view.canonical_labels or [])
-    side = "left" if bool(view.open_left) else "right"
     if bool(view.open_left):
         canonical_labels = main_closure_canonical_labels(str(closure_mode), side) + canonical_labels
     else:
@@ -3699,6 +3769,8 @@ def record_remaining_external_pending(
             diagnostics=(
                 {
                     "materialization_failure": materialization_failure,
+                    "failure_domain": materialization_failure.get("failure_domain", ""),
+                    "failure_scope": materialization_failure.get("failure_scope", "candidate"),
                     "claim_trace": [
                         dict(item or {})
                         for item in list(

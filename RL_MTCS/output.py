@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable
-
-from .geometry import axial_to_cartesian
-
 
 REFERENCE_NODE_RADIUS = 0.22
 REFERENCE_FONT_SIZE = 7
 REFERENCE_LABEL_ROTATION_DEGREES = 0.0
+# Keep the coarse-graph palette without importing its molecule/NMR stack
+# (torch, PyG, RDKit) merely to render stage PNGs.
+EDGE_COLOR = (0.5, 0.5, 0.5)
+EDGE_LENGTH = 1.0
+EDGE_LW = 1.5
+FONT_COLOR = "white"
+NODE_ALPHA = 0.9
 
 
 def _reference_node_color(su: int):
@@ -75,25 +80,28 @@ def save_state_png(
     *,
     title: str | None = None,
     visible_node_ids: Iterable[int] | None = None,
+    su_types: Dict[int, int] | None = None,
+    show_node_ids: bool = False,
 ) -> str:
     """Render an assembly state with the canonical coarse-graph style."""
+    # Jupyter/conda installations often make ``~/.config/matplotlib``
+    # read-only.  Use a small writable process-local cache so stage rendering
+    # does not emit warnings or fail before the first PNG is written.
+    if not os.environ.get("MPLCONFIGDIR"):
+        mpl_cache = Path("/tmp/graphnmr-mplconfig")
+        mpl_cache.mkdir(parents=True, exist_ok=True)
+        os.environ["MPLCONFIGDIR"] = str(mpl_cache)
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.patches as mpatches
     from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
     from matplotlib.figure import Figure
 
-    from model.shared.coarse_graph import (
-        EDGE_COLOR,
-        EDGE_LENGTH,
-        EDGE_LW,
-        FONT_COLOR,
-        NODE_ALPHA,
-    )
-
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     su_map = state.current_node_map()
+    if su_types is not None:
+        su_map.update({int(node_id): int(su) for node_id, su in su_types.items()})
     visible = (
         {int(node_id) for node_id in visible_node_ids}
         if visible_node_ids is not None
@@ -179,6 +187,13 @@ def save_state_png(
             rotation_mode="anchor",
             zorder=4,
         )
+        if show_node_ids:
+            ax.text(
+                x + REFERENCE_NODE_RADIUS * 1.15,
+                y + REFERENCE_NODE_RADIUS * 1.15,
+                str(node_id),
+                ha="left", va="bottom", fontsize=5, color="#333333", zorder=5,
+            )
     ax.set_xlim(min_x - margin, max_x + margin)
     ax.set_ylim(min_y - margin, max_y + margin)
     ax.set_aspect("equal")
@@ -188,15 +203,75 @@ def save_state_png(
         fontsize=9,
         pad=8,
     )
-    fig.savefig(
-        path,
-        dpi=150,
-        bbox_inches="tight",
-        facecolor="white",
-        pad_inches=0.1,
-    )
-    fig.clear()
+    try:
+        fig.savefig(
+            path,
+            dpi=150,
+            bbox_inches="tight",
+            facecolor="white",
+            pad_inches=0.1,
+        )
+    finally:
+        # Stage snapshots can be rendered repeatedly during a bounded search.
+        # Clear the figure even when writing the PNG fails so the renderer does
+        # not retain the full graph until the notebook cell exits.
+        fig.clear()
     return str(path)
+
+
+def export_rigid_views(state, directory: str | Path, *, initial: bool = False) -> Dict[str, Any]:
+    """Export exact aromatic subgraphs, one file pair per unit/component."""
+    base = Path(directory)
+    base.mkdir(parents=True, exist_ok=True)
+    aromatic = sorted(
+        (unit.unit_id for unit in state.problem.units if unit.phase == "aromatic"),
+        key=lambda value: int(value.split(":", 1)[1]),
+    )
+    groups = []
+    if initial:
+        groups = [(unit_id,) for unit_id in aromatic]
+    else:
+        remaining = set(aromatic)
+        while remaining:
+            unit_id = min(remaining, key=lambda value: int(value.split(":", 1)[1]))
+            group = tuple(sorted(state.component_unit_ids(unit_id) & set(aromatic),
+                                 key=lambda value: int(value.split(":", 1)[1])))
+            groups.append(group)
+            remaining.difference_update(group)
+        groups.sort(key=lambda group: (-len(group), group))
+    molecule = state.to_dict()
+    owners = state.problem.ownership_map()
+    planned = state.problem.node_map()
+    rows = []
+    for index, group in enumerate(groups, 1):
+        name = f"aromatic_{index:02d}" if initial else f"rigid_cluster_{index:02d}"
+        node_ids = {node_id for node_id in state.node_axial if owners.get(node_id) in group}
+        nodes = [row for row in molecule["nodes"] if int(row["node_id"]) in node_ids]
+        edges = [row for row in molecule["edges"] if int(row["source_node_id"]) in node_ids
+                 and int(row["target_node_id"]) in node_ids]
+        contracts = [contract for contract in state.problem.contracts if contract.kind == "rigid"
+                     and contract.source_unit_id in group and contract.target_unit_id in group]
+        payload = {
+            "id": name,
+            "unit_ids": list(group),
+            "nodes": nodes,
+            "edges": edges,
+            "placements": {unit_id: molecule["placements"][unit_id] for unit_id in group},
+            "su10_port_ids": sorted(node_id for node_id in node_ids if planned.get(node_id) == 10),
+            "rigid_contract_ids": sorted(contract.contract_id for contract in contracts),
+        }
+        png = base / f"{name}.png"
+        data = base / f"{name}.json"
+        save_state_png(state, png, visible_node_ids=node_ids,
+                       show_node_ids=False,
+                       title=f"{name} | {len(group)} aromatic units")
+        _write_json(payload, data)
+        rows.append({"id": name, "unit_ids": list(group), "node_count": len(nodes),
+                     "rigid_connection_count": len(contracts),
+                     "png": str(png), "json": str(data)})
+    manifest = base / "manifest.json"
+    _write_json({"initial": initial, "count": len(rows), "items": rows}, manifest)
+    return {"directory": str(base), "manifest": str(manifest), "count": len(rows)}
 
 
 def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
@@ -285,4 +360,4 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
     }
 
 
-__all__ = ["export_final_state", "save_state_png"]
+__all__ = ["export_final_state", "save_state_png", "export_rigid_views"]

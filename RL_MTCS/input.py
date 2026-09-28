@@ -1,4 +1,4 @@
-"""Build immutable hex-grid assembly contracts from inverse CSV exports.
+"""Build hex-grid units and fixed non-rigid topology from inverse CSV exports.
 
 The node CSV supplies the final node identities/SU distribution and the
 aromatic bridgehead evidence.  The topology CSV supplies the authoritative
@@ -9,7 +9,7 @@ are never reconstructed from the older ``hop1_ids`` cache.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass, is_dataclass
+from dataclasses import dataclass
 import ast
 import csv
 import hashlib
@@ -20,11 +20,16 @@ from pathlib import Path
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
-from model.shared.aromatic_plan import exact_aromatic_cluster_plan
+from model.shared.aromatic_plan import MAX_IDLE_AROMATIC_NODES, exact_aromatic_cluster_plan
+from model.shared.topology_contract import (
+    MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
+    TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES,
+)
 
 from .geometry import (
     Axial,
     HEX_DIRECTIONS,
+    hex_edge_valid,
     HEX_VERTEX_OFFSETS,
     axial_distance,
     axial_to_cartesian,
@@ -34,17 +39,14 @@ from .models import (
     ExternalContract,
     InverseAssemblyInput,
     InverseInputError,
-    InputSourceKind,
-    MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
     TopologyUnit,
-    TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES,
     UnitEdge,
     UnitNode,
     UnitPort,
     HeteroAromaticRequest,
     UnassembledClosureResource,
 )
-from .state import HexAssemblyState
+from .state import HexAssemblyState, aromatic_template_errors
 
 
 AROMATIC_SU_TYPES = frozenset(range(5, 14)) | {26, 30}
@@ -79,6 +81,7 @@ class ParsedTopology:
     edges: Tuple[Tuple[int, int], ...]
     main_path: Tuple[int, ...]
     branches: Tuple[Tuple[int, Tuple[int, ...]], ...]
+    closure_edges: Tuple[Tuple[int, int], ...] = ()
 
 
 @dataclass
@@ -196,15 +199,23 @@ def load_node_rows(path: str | Path) -> Dict[int, NodeRow]:
 
 
 def parse_topology_notation(value: str) -> ParsedTopology:
-    """Parse ``1-2-3(-4)(-5-6)-7`` into a rooted tree.
+    """Parse a rooted topology, including ``@(gid)`` ring closures.
 
     Branch parentheses attach to the node immediately before ``(``.  GID
     notation contains only integer atoms, so labels in ``actual_su`` cannot
-    accidentally create fake node IDs.
+    accidentally create fake node IDs.  ``@(gid)`` adds an edge from the
+    preceding node to an already declared node without declaring that node a
+    second time.
     """
-    tokens = re.findall(r"\d+|[()]|-", str(value or ""))
+    source = re.sub(r"\s+", "", str(value or ""))
+    tokens = re.findall(r"@\(\d+\)|\d+|[()\[\]-]", source)
+    if "".join(tokens) != source:
+        raise InverseInputError(
+            f"unsupported token in topology notation: {value}"
+        )
     nodes: List[int] = []
     edges: List[Tuple[int, int]] = []
+    closure_edges: List[Tuple[int, int]] = []
     branches: List[Tuple[int, Tuple[int, ...]]] = []
 
     def parse_sequence(index: int, parent: Optional[int] = None) -> Tuple[int, List[int]]:
@@ -214,7 +225,7 @@ def parse_topology_notation(value: str) -> ParsedTopology:
             token = tokens[index]
             if token == ")":
                 return index + 1, path
-            if token == "-":
+            if token in {"-", "[", "]"}:
                 index += 1
                 continue
             if token == "(":
@@ -224,10 +235,37 @@ def parse_topology_notation(value: str) -> ParsedTopology:
                 index, branch_path = parse_sequence(index + 1, branch_parent)
                 branches.append((branch_parent, tuple(branch_path)))
                 continue
+            if token.startswith("@("):
+                if previous is None:
+                    raise InverseInputError(
+                        f"ring closure without source in topology notation: {value}"
+                    )
+                target_id = int(token[2:-1])
+                if target_id not in nodes:
+                    raise InverseInputError(
+                        f"ring closure references undeclared GID {target_id}: {value}"
+                    )
+                if int(previous) == target_id:
+                    raise InverseInputError(
+                        f"ring closure self-edge at GID {target_id}: {value}"
+                    )
+                edge_key = tuple(sorted((int(previous), target_id)))
+                if edge_key in {
+                    tuple(sorted((int(left), int(right))))
+                    for left, right in edges
+                }:
+                    raise InverseInputError(
+                        f"duplicate topology edge {previous}-{target_id}: {value}"
+                    )
+                closure_edge = (int(previous), target_id)
+                edges.append(closure_edge)
+                closure_edges.append(closure_edge)
+                index += 1
+                continue
             node_id = int(token)
             if node_id in nodes:
                 raise InverseInputError(
-                    f"topology notation repeats GID {node_id}; ring-closure syntax is unsupported: {value}"
+                    f"topology notation repeats GID {node_id}; use @({node_id}) for a ring closure: {value}"
                 )
             nodes.append(node_id)
             path.append(node_id)
@@ -240,14 +278,21 @@ def parse_topology_notation(value: str) -> ParsedTopology:
     _index, main_path = parse_sequence(0)
     if not nodes:
         raise InverseInputError(f"empty topology GID notation: {value!r}")
+    closure_keys = {tuple(sorted(edge)) for edge in closure_edges}
     edge_keys = {tuple(sorted(edge)) for edge in edges}
-    if len(edge_keys) != len(edges) or len(edges) != len(nodes) - 1:
-        raise InverseInputError(f"topology notation is not a tree: {value}")
+    ordinary_edge_count = len(edges) - len(closure_edges)
+    if (
+        len(edge_keys) != len(edges)
+        or len(closure_keys) != len(closure_edges)
+        or ordinary_edge_count != len(nodes) - 1
+    ):
+        raise InverseInputError(f"topology notation has an invalid rooted graph: {value}")
     return ParsedTopology(
         nodes=tuple(nodes),
         edges=tuple((int(left), int(right)) for left, right in edges),
         main_path=tuple(main_path),
         branches=tuple(branches),
+        closure_edges=tuple(closure_edges),
     )
 
 
@@ -365,32 +410,6 @@ def _outward_direction(template: _ClusterTemplate, slot_index: int) -> Axial:
     return max(choices, key=lambda direction: radial[0] * _cart(direction)[0] + radial[1] * _cart(direction)[1])
 
 
-def _extend_templates_to_node_count(templates: List[_ClusterTemplate], target_count: int) -> None:
-    current = sum(len(template.coords) for template in templates)
-    while current < target_count:
-        template = max(templates, key=lambda item: (len(item.coords), item.kind))
-        occupied = set(template.coords) | set(template.centers)
-        added = False
-        for base_index in range(len(template.coords)):
-            direction = _outward_direction(template, base_index)
-            coord = (
-                template.coords[base_index][0] + direction[0],
-                template.coords[base_index][1] + direction[1],
-            )
-            if coord in occupied:
-                continue
-            template.coords.append(coord)
-            template.shared.append(False)
-            template.edges.append((base_index, len(template.coords) - 1))
-            current += 1
-            added = True
-            break
-        if not added:
-            raise InverseInputError("cannot extend aromatic template to cover all inverse nodes")
-    if current != target_count:
-        raise InverseInputError(
-            f"aromatic templates contain {current} sites for {target_count} inverse aromatic nodes"
-        )
 
 
 def _rigid_pairs(nodes: Mapping[int, NodeRow]) -> List[Tuple[int, int]]:
@@ -399,14 +418,11 @@ def _rigid_pairs(nodes: Mapping[int, NodeRow]) -> List[Tuple[int, int]]:
         for row in nodes.values()
         if row.su_type == 10
         for neighbor in row.hop1_ids
-        if nodes[neighbor].su_type == 10
+        if neighbor != row.node_id and nodes[neighbor].su_type == 10
     }
-    degree = Counter(node_id for pair in pairs for node_id in pair)
-    su10_ids = {row.node_id for row in nodes.values() if row.su_type == 10}
-    if set(degree) != su10_ids or any(value != 1 for value in degree.values()):
-        raise InverseInputError(
-            "SU10 rigid initialization requires exactly one SU10 partner per SU10 node"
-        )
+    # These are source provenance only.  Assembly may choose different
+    # partners, and a CSV with unpaired SU10 ports is still a valid search
+    # input if its aromatic template exposes those ports.
     return sorted(pairs)
 
 
@@ -509,7 +525,7 @@ def _validate_topology_layout(
             coords[right][0] - coords[left][0],
             coords[right][1] - coords[left][1],
         )
-        if delta not in HEX_DIRECTIONS:
+        if not hex_edge_valid(coords[left], coords[right]):
             raise InverseInputError(f"topology edge {left}-{right} is not a hex neighbor")
         if (
             25 not in {int(su_by_id.get(left, -1)), int(su_by_id.get(right, -1))}
@@ -517,12 +533,179 @@ def _validate_topology_layout(
             and int(su_by_id.get(right, -1)) <= 25
             and len(adjacency[int(left)]) <= 2
             and len(adjacency[int(right)]) <= 2
-            and delta not in valid_hex_directions(coords[left])
+            and not hex_edge_valid(coords[left], coords[right], honeycomb=True)
         ):
             raise InverseInputError(f"topology edge {left}-{right} violates honeycomb parity")
 
 
+def _closure_cycle_nodes(
+    parsed: ParsedTopology,
+) -> Tuple[Tuple[int, ...], ...]:
+    """Return each closure cycle using the rooted non-closure tree path."""
+    closure_keys = {
+        frozenset((int(left), int(right)))
+        for left, right in parsed.closure_edges
+    }
+    tree_adjacency: Dict[int, Set[int]] = {
+        int(node_id): set() for node_id in parsed.nodes
+    }
+    for left, right in parsed.edges:
+        if frozenset((int(left), int(right))) in closure_keys:
+            continue
+        tree_adjacency[int(left)].add(int(right))
+        tree_adjacency[int(right)].add(int(left))
+
+    cycles: List[Tuple[int, ...]] = []
+    for source, target in parsed.closure_edges:
+        queue: List[Tuple[int, Tuple[int, ...]]] = [
+            (int(target), (int(target),))
+        ]
+        seen = {int(target)}
+        selected: Optional[Tuple[int, ...]] = None
+        while queue:
+            current, path = queue.pop(0)
+            if current == int(source):
+                selected = path
+                break
+            for neighbor in sorted(tree_adjacency.get(current, set())):
+                if neighbor in seen:
+                    continue
+                seen.add(neighbor)
+                queue.append((neighbor, path + (neighbor,)))
+        if selected is None:
+            raise InverseInputError(
+                f"ring closure {source}-{target} has no rooted path"
+            )
+        cycles.append(tuple(selected))
+    return tuple(cycles)
+
+
+def _layout_topology_with_closures(
+    parsed: ParsedTopology,
+    su_by_id: Mapping[int, int],
+) -> Dict[int, Axial]:
+    """Embed exported six-membered aliphatic closures on the hex grid."""
+    cycles = _closure_cycle_nodes(parsed)
+    if len(cycles) != 1 or len(cycles[0]) != 6:
+        raise InverseInputError(
+            "RL_MTCS currently requires one six-membered cycle per closed "
+            f"topology unit; cycles={[len(cycle) for cycle in cycles]}"
+        )
+
+    cycle = cycles[0]
+    coords: Dict[int, Axial] = {
+        int(node_id): tuple(HEX_VERTEX_OFFSETS[index])
+        for index, node_id in enumerate(cycle)
+    }
+    occupied: Set[Axial] = set(coords.values())
+    adjacency: Dict[int, Set[int]] = {
+        int(node_id): set() for node_id in parsed.nodes
+    }
+    edge_keys: Set[frozenset[int]] = set()
+    for left, right in parsed.edges:
+        adjacency[int(left)].add(int(right))
+        adjacency[int(right)].add(int(left))
+        edge_keys.add(frozenset((int(left), int(right))))
+
+    remaining = set(int(node_id) for node_id in parsed.nodes) - set(coords)
+
+    def edge_allowed(
+        left: int,
+        right: int,
+        left_coord: Axial,
+        right_coord: Axial,
+    ) -> bool:
+        delta = (
+            int(right_coord[0]) - int(left_coord[0]),
+            int(right_coord[1]) - int(left_coord[1]),
+        )
+        if delta not in HEX_DIRECTIONS:
+            return False
+        if (
+            25 not in {
+                int(su_by_id.get(left, -1)), int(su_by_id.get(right, -1))
+            }
+            and int(su_by_id.get(left, -1)) <= 25
+            and int(su_by_id.get(right, -1)) <= 25
+            and len(adjacency[int(left)]) <= 2
+            and len(adjacency[int(right)]) <= 2
+            and delta not in valid_hex_directions(left_coord)
+        ):
+            return False
+        return True
+
+    def place_remaining() -> bool:
+        if not remaining:
+            return True
+        frontier = [
+            node_id for node_id in remaining
+            if adjacency[node_id] & set(coords)
+        ]
+        if not frontier:
+            return False
+        node_id = min(
+            frontier,
+            key=lambda value: (
+                -len(adjacency[value] & set(coords)),
+                -len(adjacency[value]),
+                value,
+            ),
+        )
+        assigned_neighbors = sorted(adjacency[node_id] & set(coords))
+        possible: Optional[Set[Axial]] = None
+        for neighbor in assigned_neighbors:
+            around = {
+                (
+                    coords[neighbor][0] + direction[0],
+                    coords[neighbor][1] + direction[1],
+                )
+                for direction in HEX_DIRECTIONS
+            }
+            possible = around if possible is None else possible & around
+        for candidate in sorted(possible or set()):
+            if candidate in occupied:
+                continue
+            if any(
+                not edge_allowed(
+                    node_id, neighbor, candidate, coords[neighbor]
+                )
+                for neighbor in assigned_neighbors
+            ):
+                continue
+            # A neighboring coordinate represents a bond in this model.  Do
+            # not create an implicit extra closure while attaching prefixes or
+            # fixed branches to the canonical ring.
+            if any(
+                frozenset((node_id, other_id)) not in edge_keys
+                and (
+                    coords[other_id][0] - candidate[0],
+                    coords[other_id][1] - candidate[1],
+                ) in HEX_DIRECTIONS
+                for other_id in coords
+            ):
+                continue
+            coords[node_id] = candidate
+            occupied.add(candidate)
+            remaining.remove(node_id)
+            if place_remaining():
+                return True
+            remaining.add(node_id)
+            occupied.remove(candidate)
+            coords.pop(node_id, None)
+        return False
+
+    if not place_remaining():
+        raise InverseInputError(
+            "cannot embed closed topology on the hex grid: "
+            f"{parsed.nodes}"
+        )
+    _validate_topology_layout(parsed, su_by_id, coords)
+    return coords
+
+
 def _layout_topology_tree(parsed: ParsedTopology, su_by_id: Mapping[int, int]) -> Dict[int, Axial]:
+    if parsed.closure_edges:
+        return _layout_topology_with_closures(parsed, su_by_id)
     special = _three_aromatic_hub_layout(parsed, su_by_id)
     if special is not None:
         _validate_topology_layout(parsed, su_by_id, special)
@@ -555,95 +738,187 @@ def _layout_topology_tree(parsed: ParsedTopology, su_by_id: Mapping[int, int]) -
         if path:
             grouped[int(parent)].append((order, tuple(path)))
 
-    su25_standard_direction: Dict[int, Axial] = {}
+    branch_rows: List[Tuple[int, int, Tuple[int, ...]]] = []
     for parent, rows in grouped.items():
         # SU25's long branch uses the ordinary third honeycomb direction.  Its
         # extra one-node substituent uses the opposite, fourth connection site.
         if int(su_by_id.get(parent, -1)) == 25:
             rows = sorted(rows, key=lambda item: (-len(item[1]), item[0]))
-        for _order, path in rows:
-            previous_id = parent
-            previous_previous_id: Optional[int] = None
-            branch_forward: Optional[Tuple[float, float]] = None
-            if parent in parsed.main_path:
-                parent_index = parsed.main_path.index(parent)
-                if 0 < parent_index < len(parsed.main_path) - 1:
-                    before = coords[parsed.main_path[parent_index - 1]]
-                    after = coords[parsed.main_path[parent_index + 1]]
-                    branch_forward = _cart((
-                        after[0] - before[0], after[1] - before[1]
-                    ))
-                elif parent_index + 1 < len(parsed.main_path):
-                    after = coords[parsed.main_path[parent_index + 1]]
-                    branch_forward = _cart((
-                        after[0] - coords[parent][0],
-                        after[1] - coords[parent][1],
-                    ))
-                elif parent_index > 0:
-                    before = coords[parsed.main_path[parent_index - 1]]
-                    branch_forward = _cart((
-                        coords[parent][0] - before[0],
-                        coords[parent][1] - before[1],
-                    ))
-            for path_index, node_id in enumerate(path):
-                parent_coord = coords[previous_id]
-                used = {
-                    (coords[neighbor][0] - parent_coord[0], coords[neighbor][1] - parent_coord[1])
-                    for neighbor in adjacency[previous_id]
-                    if neighbor in coords
-                }
-                preferred: List[Axial]
-                if path_index == 0:
-                    preferred = [
-                        direction for direction in valid_hex_directions(parent_coord)
-                        if direction not in used
-                    ]
-                    if int(su_by_id.get(parent, -1)) == 25:
-                        if preferred and parent not in su25_standard_direction:
-                            su25_standard_direction[parent] = preferred[0]
-                        elif parent in su25_standard_direction:
-                            standard = su25_standard_direction[parent]
-                            opposite = (-standard[0], -standard[1])
-                            preferred = [opposite] + preferred
-                else:
-                    assert previous_previous_id is not None
-                    movement = (
-                        parent_coord[0] - coords[previous_previous_id][0],
-                        parent_coord[1] - coords[previous_previous_id][1],
-                    )
-                    back = (-movement[0], -movement[1])
-                    forward = [
-                        direction for direction in valid_hex_directions(parent_coord)
-                        if direction != back and direction not in used
-                    ]
-                    mx, my = _cart(movement)
-                    preferred = sorted(
-                        forward,
-                        key=lambda direction: (
-                            (
-                                branch_forward[0] * _cart(direction)[0]
-                                + branch_forward[1] * _cart(direction)[1]
-                                if branch_forward is not None else 0.0
-                            ),
-                            mx * _cart(direction)[0]
-                            + my * _cart(direction)[1],
-                            direction,
-                        ),
-                        reverse=True,
-                    )
-                chosen = None
-                for direction in preferred:
-                    candidate = (parent_coord[0] + direction[0], parent_coord[1] + direction[1])
-                    if candidate not in occupied:
-                        chosen = candidate
-                        break
-                if chosen is None:
-                    raise InverseInputError(
-                        f"cannot embed topology branch at GID {previous_id} on the honeycomb grid"
-                    )
-                coords[node_id] = chosen
-                occupied.add(chosen)
-                previous_previous_id, previous_id = previous_id, node_id
+        branch_rows.extend(
+            (int(parent), int(order), tuple(path))
+            for order, path in rows
+        )
+    pending_branch_rows = list(branch_rows)
+    branch_rows = []
+    reachable_ids = {int(node_id) for node_id in parsed.main_path}
+    while pending_branch_rows:
+        ready_index = next(
+            (
+                index
+                for index, (parent, _order, _path) in enumerate(
+                    pending_branch_rows
+                )
+                if int(parent) in reachable_ids
+            ),
+            None,
+        )
+        if ready_index is None:
+            raise InverseInputError(
+                "topology branches are disconnected from the main path"
+            )
+        row = pending_branch_rows.pop(int(ready_index))
+        branch_rows.append(row)
+        reachable_ids.update(int(node_id) for node_id in row[2])
+
+    def allowed_edge_directions(left: int, right: int) -> List[Axial]:
+        left_coord = coords[int(left)]
+        strict_honeycomb = bool(
+            25 not in {
+                int(su_by_id.get(left, -1)),
+                int(su_by_id.get(right, -1)),
+            }
+            and int(su_by_id.get(left, -1)) <= 25
+            and int(su_by_id.get(right, -1)) <= 25
+            and len(adjacency[int(left)]) <= 2
+            and len(adjacency[int(right)]) <= 2
+        )
+        strict = list(valid_hex_directions(left_coord))
+        if strict_honeycomb:
+            return strict
+        # Branched centers are exempt from the alternating two-sublattice
+        # restriction in _validate_topology_layout. Prefer the ordinary three
+        # directions first, then expose the remaining hex neighbors.
+        return strict + [
+            direction for direction in HEX_DIRECTIONS
+            if direction not in set(strict)
+        ]
+
+    branch_forward_by_parent: Dict[int, Optional[Tuple[float, float]]] = {}
+    for parent, _order, _path in branch_rows:
+        branch_forward: Optional[Tuple[float, float]] = None
+        if parent in parsed.main_path:
+            parent_index = parsed.main_path.index(parent)
+            if 0 < parent_index < len(parsed.main_path) - 1:
+                before = coords[parsed.main_path[parent_index - 1]]
+                after = coords[parsed.main_path[parent_index + 1]]
+                branch_forward = _cart((
+                    after[0] - before[0], after[1] - before[1]
+                ))
+            elif parent_index + 1 < len(parsed.main_path):
+                after = coords[parsed.main_path[parent_index + 1]]
+                branch_forward = _cart((
+                    after[0] - coords[parent][0],
+                    after[1] - coords[parent][1],
+                ))
+            elif parent_index > 0:
+                before = coords[parsed.main_path[parent_index - 1]]
+                branch_forward = _cart((
+                    coords[parent][0] - before[0],
+                    coords[parent][1] - before[1],
+                ))
+        branch_forward_by_parent[parent] = branch_forward
+
+    su25_standard_direction: Dict[int, Axial] = {}
+    last_blocked_gid: List[int] = []
+
+    def place_branch_path(row_index: int, path_index: int) -> bool:
+        if row_index >= len(branch_rows):
+            return True
+        parent, _order, path = branch_rows[row_index]
+        if path_index >= len(path):
+            return place_branch_path(row_index + 1, 0)
+
+        node_id = int(path[path_index])
+        previous_id = int(parent if path_index == 0 else path[path_index - 1])
+        previous_previous_id = (
+            None
+            if path_index == 0
+            else int(parent if path_index == 1 else path[path_index - 2])
+        )
+        if previous_id not in coords:
+            return False
+        parent_coord = coords[previous_id]
+        used = {
+            (
+                coords[neighbor][0] - parent_coord[0],
+                coords[neighbor][1] - parent_coord[1],
+            )
+            for neighbor in adjacency[previous_id]
+            if neighbor in coords
+        }
+        preferred = [
+            direction
+            for direction in allowed_edge_directions(previous_id, node_id)
+            if direction not in used
+        ]
+        if path_index == 0 and int(su_by_id.get(parent, -1)) == 25:
+            standard = su25_standard_direction.get(parent)
+            if standard is not None:
+                opposite = (-standard[0], -standard[1])
+                preferred = [opposite] + [
+                    direction for direction in preferred
+                    if direction != opposite
+                ]
+        elif previous_previous_id is not None:
+            movement = (
+                parent_coord[0] - coords[previous_previous_id][0],
+                parent_coord[1] - coords[previous_previous_id][1],
+            )
+            back = (-movement[0], -movement[1])
+            forward = [
+                direction for direction in preferred
+                if direction != back
+            ]
+            mx, my = _cart(movement)
+            branch_forward = branch_forward_by_parent.get(parent)
+            preferred = sorted(
+                forward,
+                key=lambda direction: (
+                    (
+                        branch_forward[0] * _cart(direction)[0]
+                        + branch_forward[1] * _cart(direction)[1]
+                        if branch_forward is not None else 0.0
+                    ),
+                    mx * _cart(direction)[0]
+                    + my * _cart(direction)[1],
+                    direction,
+                ),
+                reverse=True,
+            )
+
+        for direction in preferred:
+            candidate = (
+                parent_coord[0] + direction[0],
+                parent_coord[1] + direction[1],
+            )
+            if candidate in occupied:
+                continue
+            standard_was_set = parent in su25_standard_direction
+            prior_standard = su25_standard_direction.get(parent)
+            if (
+                path_index == 0
+                and int(su_by_id.get(parent, -1)) == 25
+                and not standard_was_set
+            ):
+                su25_standard_direction[parent] = direction
+            coords[node_id] = candidate
+            occupied.add(candidate)
+            if place_branch_path(row_index, path_index + 1):
+                return True
+            occupied.remove(candidate)
+            coords.pop(node_id, None)
+            if standard_was_set and prior_standard is not None:
+                su25_standard_direction[parent] = prior_standard
+            else:
+                su25_standard_direction.pop(parent, None)
+        last_blocked_gid[:] = [previous_id]
+        return False
+
+    if not place_branch_path(0, 0):
+        blocked = last_blocked_gid[0] if last_blocked_gid else parsed.main_path[0]
+        raise InverseInputError(
+            f"cannot embed topology branch at GID {blocked} on the honeycomb grid"
+        )
 
     if set(coords) != set(parsed.nodes):
         missing = sorted(set(parsed.nodes) - set(coords))
@@ -800,7 +1075,7 @@ def _assign_aromatic_nodes(
     used_slots: Set[Tuple[int, int]] = set()
     fixed_flex_coordinates: Dict[int, Axial] = {}
     rigid_endpoint_ids = {
-        int(node_id) for pair in rigid_pairs for node_id in pair
+        int(node_id) for node_id in aromatic_ids if nodes[node_id].su_type == 10
     }
     cluster_load = Counter()
     dsu = _DSU(len(templates))
@@ -876,8 +1151,8 @@ def _assign_aromatic_nodes(
         cluster_load[slot[0]] += 1
         return slot[0]
 
-    # Rigid SU10 endpoints are fixed by the node CSV.  Spreading the pairs
-    # over separate templates reproduces the legacy rigid-cluster start.
+    # Source SU10 pairs are staging guidance for aromatic slot assignment;
+    # the later rigid MCTS is free to choose different partners.
     for pair_index, (left, right) in enumerate(rigid_pairs):
         preferred_left = (2 * pair_index) % len(templates)
         preferred_right = (2 * pair_index + 1) % len(templates)
@@ -906,6 +1181,9 @@ def _assign_aromatic_nodes(
         cluster_load[left_cluster] += 1
         cluster_load[right_cluster] += 1
         dsu.union(left_cluster, right_cluster)
+
+    for node_id in sorted(rigid_endpoint_ids - set(assignment)):
+        allocate(node_id)
 
     # A rigid aromatic unit may expose two (or more) SU10 endpoints.  The
     # historical allocator picked the first available perimeter sites, which
@@ -1073,7 +1351,8 @@ def _assign_aromatic_nodes(
     # an aromatic-ring slot coordinate.  Within an already selected aromatic
     # cluster, match long bridge endpoints to lateral slots and reserve
     # vertical slots for one/two-body bridges.  This is geometry assignment,
-    # not resource allocation: product identity, cluster ownership and every
+    # This is topology ownership, not a runtime allocation: product identity,
+    # cluster ownership and every
     # topology node remain unchanged.
     body_length_by_boundary: Dict[int, int] = {}
     flex_boundary_ids: Set[int] = set()
@@ -1234,19 +1513,8 @@ def _assign_aromatic_nodes(
     )
     shared_nodes = [node_id for node_id in peripheral if nodes[node_id].su_type == 12]
     nonshared_nodes = [node_id for node_id in peripheral if nodes[node_id].su_type != 12]
-    if len(shared_nodes) > len(shared_slots):
-        raise InverseInputError("more SU12 nodes than fused aromatic bridgehead slots")
-    while len(shared_nodes) < len(shared_slots):
-        eligible_shared_fill = [
-            node_id for node_id in nonshared_nodes
-            if nodes[node_id].su_type not in {26, 30}
-            and nodes[node_id].su_name != "synthetic_staging_13"
-        ]
-        if not eligible_shared_fill:
-            raise InverseInputError("cannot fill all fused aromatic bridgehead slots")
-        selected_fill = eligible_shared_fill[-1]
-        nonshared_nodes.remove(selected_fill)
-        shared_nodes.append(selected_fill)
+    if len(shared_nodes) != len(shared_slots):
+        raise InverseInputError("SU12 count does not match fused aromatic bridgehead slots")
     for node_id, slot in zip(shared_nodes, shared_slots):
         assignment[node_id] = slot
         used_slots.add(slot)
@@ -1503,6 +1771,8 @@ def _templates_from_authoritative_plan(
 def build_csv_inverse_input(
     nodes_csv: str | Path,
     topology_specs_csv: str | Path,
+    *,
+    use_authoritative_plan: bool = True,
 ) -> InverseAssemblyInput:
     nodes = load_node_rows(nodes_csv)
     original_node_count = len(nodes)
@@ -1536,8 +1806,30 @@ def build_csv_inverse_input(
         if row.su_type in AROMATIC_SU_TYPES
     }
     excluded_aromatic_ids: Set[int] = set()
-    authoritative_plan = _load_authoritative_aromatic_plan(nodes_csv)
+    # Only uncommitted real SU13 may be left idle. In particular, do not
+    # discard a rigid port or a temporary site reserved for substitution.
+    protected_ids = {node_id for raw in topology_rows for node_id in raw["parsed"].nodes}
+    protected_ids.update(hetero_five_targets)
+    for node_id, row in nodes.items():
+        if row.su_type in {26, 30}:
+            protected_ids.update(row.hop1_ids)
+    idle_candidates = {
+        node_id for node_id in source_aromatic_ids
+        if nodes[node_id].su_type == 13 and node_id >= 0
+        and node_id not in protected_ids
+    }
+    authoritative_plan = (
+        _load_authoritative_aromatic_plan(nodes_csv) if use_authoritative_plan else None
+    )
     if authoritative_plan is not None:
+        idle_rows = list(authoritative_plan.get("idle_aromatic_nodes", []))
+        excluded_aromatic_ids = {int(row["node_id"]) for row in idle_rows}
+        if (len(excluded_aromatic_ids) != len(idle_rows)
+                or len(idle_rows) > MAX_IDLE_AROMATIC_NODES
+                or not excluded_aromatic_ids <= idle_candidates
+                or any(int(row["su_type"]) != nodes[int(row["node_id"])].su_type
+                       for row in idle_rows)):
+            raise InverseInputError("invalid idle aromatic node declaration")
         if int(authoritative_plan.get(
             "source_node_count", original_node_count
         )) != int(original_node_count):
@@ -1545,18 +1837,18 @@ def build_csv_inverse_input(
                 "authoritative aromatic plan source node count mismatch"
             )
         if int(authoritative_plan.get(
-            "assembly_node_count", len(nodes)
-        )) != int(len(nodes)):
+            "assembly_node_count", len(nodes) - len(excluded_aromatic_ids)
+        )) != int(len(nodes) - len(excluded_aromatic_ids)):
             raise InverseInputError(
                 "authoritative aromatic plan assembly node count mismatch"
             )
         templates, assignment = _templates_from_authoritative_plan(
             authoritative_plan,
             nodes,
-            source_aromatic_ids,
+            source_aromatic_ids - excluded_aromatic_ids,
         )
         kinds = [str(template.kind) for template in templates]
-        aromatic_ids = set(source_aromatic_ids)
+        aromatic_ids = source_aromatic_ids - excluded_aromatic_ids
         assignment_info = _topology_assignment_info(
             topology_rows,
             aromatic_ids,
@@ -1584,14 +1876,14 @@ def build_csv_inverse_input(
                     "aromatic plan does not cover every SU12 bridgehead: "
                     f"nodes={int(counts.get(12, 0))} slots={shared_slot_count}"
                 )
-            # Keep the bounded one/two-site staging top-up in the authoritative
-            # aromatic unit.  Dropping the occupant would make the downstream
-            # molecule contain fewer structure units than the inverse result.
-            _extend_templates_to_node_count(
-                templates, len(source_aromatic_ids)
-            )
+            if surplus_count > MAX_IDLE_AROMATIC_NODES or surplus_count > len(idle_candidates):
+                raise InverseInputError(
+                    f"aromatic_idle_capacity_exceeded: surplus={surplus_count}, "
+                    f"eligible={len(idle_candidates)}, limit={MAX_IDLE_AROMATIC_NODES}"
+                )
+            excluded_aromatic_ids = set(sorted(idle_candidates)[-surplus_count:])
 
-        aromatic_ids = set(source_aromatic_ids)
+        aromatic_ids = source_aromatic_ids - excluded_aromatic_ids
         assignment, assignment_info = _assign_aromatic_nodes(
             nodes,
             topology_rows,
@@ -1693,8 +1985,6 @@ def build_csv_inverse_input(
         left_unit, right_unit = f"aromatic:{left_cluster}", f"aromatic:{right_cluster}"
         left_port = f"{left_unit}:rigid:{left}:{right}"
         right_port = f"{right_unit}:rigid:{right}:{left}"
-        aromatic_port_requests[left].append((right, left_port, "rigid"))
-        aromatic_port_requests[right].append((left, right_port, "rigid"))
         contracts.append(ExternalContract(
             contract_id=f"rigid:{pair_index}:{left}-{right}",
             source_unit_id=left_unit,
@@ -1707,6 +1997,26 @@ def build_csv_inverse_input(
             target_port_id=right_port,
         ))
 
+    source_rigid_contracts = tuple(contracts)
+    contracts.clear()
+    su10_ids = sorted(node_id for node_id in source_aromatic_ids if nodes[node_id].su_type == 10)
+    if len(su10_ids) % 2:
+        raise InverseInputError("input_geometry_invalid: odd number of SU10 rigid ports")
+    for node_id in su10_ids:
+        cluster_index, slot_index = assignment[node_id]
+        if templates[cluster_index].shared[slot_index]:
+            raise InverseInputError(
+                f"input_geometry_invalid: SU10 GID {node_id} is not an exterior site"
+            )
+        if _outward_direction(templates[cluster_index], slot_index) not in HEX_DIRECTIONS:
+            raise InverseInputError(
+                f"input_geometry_invalid: SU10 GID {node_id} has no hex port direction"
+            )
+        unit_id = f"aromatic:{cluster_index}"
+        aromatic_port_requests[node_id].append(
+            (-1, f"{unit_id}:rigid:{node_id}", "rigid")
+        )
+
     su_by_id = {
         node_id: row.su_type
         for node_id, row in nodes.items()
@@ -1717,6 +2027,11 @@ def build_csv_inverse_input(
         parsed = raw["parsed"]
         assert isinstance(parsed, ParsedTopology)
         layout = _layout_topology_tree(parsed, su_by_id)
+        labels = re.findall(r"(?:double|single)?\d+(?:d\d+)?", re.sub(
+            r"@\(\d+\)", "", str(raw.get("actual_su", ""))))
+        if len(labels) != len(parsed.nodes):
+            raise InverseInputError(f"SU/GID node count mismatch in topology row {raw['row_index']}")
+        label_by_id = dict(zip(parsed.nodes, labels))
         internal_ids = [node_id for node_id in parsed.nodes if node_id not in aromatic_ids]
         if not internal_ids:
             raise InverseInputError(f"topology row {raw['row_index']} has no non-aromatic body")
@@ -1727,6 +2042,12 @@ def build_csv_inverse_input(
             for node_id in internal_ids
         }
         internal_set = set(internal_ids)
+        closure_cycles = _closure_cycle_nodes(parsed) if parsed.closure_edges else ()
+        local_rings = tuple(
+            tuple(local[int(node_id)] for node_id in cycle)
+            for cycle in closure_cycles
+            if set(int(node_id) for node_id in cycle).issubset(internal_set)
+        )
         internal_edges = tuple(
             UnitEdge(left, right, phase)
             for left, right in parsed.edges
@@ -1782,15 +2103,42 @@ def build_csv_inverse_input(
                 target_port_id=aromatic_port_id,
             ))
 
+        source_product_type = str(raw.get("product_type", "")).strip().lower()
+        if source_product_type in {"flex_chain", "bridge", "chain"} and local_rings:
+            raise InverseInputError(
+                "ring_label_geometry_mismatch: topology row "
+                f"{raw['row_index']} is labelled {source_product_type!r} "
+                "but contains an explicit internal cycle"
+            )
+        if source_product_type in {
+            "aliphatic_ring", "fatty_ring", "fatty_ring_fused",
+            "fatty_ring_side", "fatty_ring_upper_lower",
+        }:
+            product_type = source_product_type
+        elif parsed.closure_edges:
+            product_type = "aliphatic_ring"
+        else:
+            product_type = f"{phase}_chain"
+        ring_geometry_mode = (
+            "internal_cycle"
+            if local_rings
+            else "external_contract_ring"
+            if product_type in {
+                "aliphatic_ring", "fatty_ring", "fatty_ring_fused",
+                "fatty_ring_side", "fatty_ring_upper_lower",
+            }
+            else "tree"
+        )
         topology_unit = TopologyUnit(
             unit_id=unit_id,
-            product_type=f"{phase}_chain",
+            product_type=product_type,
             nodes=tuple(UnitNode(
                 node_id=node_id,
                 su_type=su_by_id[node_id],
                 local_axial=local[node_id],
                 role="topology_node",
-                metadata=(("source_product_type", str(raw.get("product_type", ""))),),
+                metadata=(("source_product_type", str(raw.get("product_type", ""))),
+                          ("su_label", label_by_id[node_id])),
             ) for node_id in internal_ids),
             internal_edges=internal_edges,
             ports=tuple(ports),
@@ -1799,9 +2147,12 @@ def build_csv_inverse_input(
             topology_notation=str(raw.get("actual_su", "")),
             node_id_notation=str(raw.get("gid", "")),
             closed=True,
+            local_rings=local_rings,
             metadata=(
                 ("csv_row", str(raw["row_index"])),
                 ("source_product_type", str(raw.get("product_type", ""))),
+                ("ring_geometry_mode", ring_geometry_mode),
+                ("geometry_source", "generated_from_connectivity"),
             ),
         )
         topology_units.append(topology_unit)
@@ -1938,18 +2289,61 @@ def build_csv_inverse_input(
                 f"plan={sorted(expected_unassembled)} current={sorted(missing_ids)}"
             )
     units = aromatic_units + topology_units
+    unit_by_id = {str(unit.unit_id): unit for unit in units}
+    node_owner = {
+        int(node.node_id): str(unit.unit_id)
+        for unit in units
+        for node in unit.nodes
+    }
+    input_errors: List[str] = []
+    if len(unit_by_id) != len(units):
+        input_errors.append("duplicate_unit_id")
+    contract_ids = [str(contract.contract_id) for contract in contracts]
+    if len(set(contract_ids)) != len(contract_ids):
+        input_errors.append("duplicate_contract_id")
+    for contract in contracts:
+        source_unit = unit_by_id.get(str(contract.source_unit_id))
+        target_unit = unit_by_id.get(str(contract.target_unit_id))
+        if source_unit is None or target_unit is None:
+            input_errors.append(f"unknown_contract_unit:{contract.contract_id}")
+            continue
+        if node_owner.get(int(contract.source_node_id)) != str(source_unit.unit_id):
+            input_errors.append(f"source_contract_node_ownership:{contract.contract_id}")
+        if node_owner.get(int(contract.target_node_id)) != str(target_unit.unit_id):
+            input_errors.append(f"target_contract_node_ownership:{contract.contract_id}")
+        if contract.kind == "rigid" and not (
+            source_unit.phase == target_unit.phase == "aromatic"
+        ):
+            input_errors.append(f"rigid_contract_phase:{contract.contract_id}")
+        if contract.kind == "side" and not (
+            {source_unit.phase, target_unit.phase} == {"aromatic", "side"}
+        ):
+            input_errors.append(f"side_contract_phase:{contract.contract_id}")
+        if contract.kind == "flex" and not (
+            {source_unit.phase, target_unit.phase} == {"aromatic", "flex"}
+        ):
+            input_errors.append(f"flex_contract_phase:{contract.contract_id}")
+    if input_errors:
+        raise InverseInputError(
+            "input_geometry_invalid: " + ", ".join(input_errors[:16])
+        )
     contracts.sort(key=lambda item: ({"rigid": 0, "flex": 1, "side": 2}[item.kind], item.contract_id))
     if authoritative_plan is not None:
         expected_contracts = list(
             authoritative_plan.get("aromatic_boundary_contracts", []) or []
         )
-        actual_contracts = _contract_rows([
-            contract
-            for contract in contracts
-            if str(contract.source_unit_id).startswith("aromatic:")
-            or str(contract.target_unit_id).startswith("aromatic:")
-        ])
-        if expected_contracts and expected_contracts != actual_contracts:
+        actual_contracts = _contract_rows(sorted(
+            (
+                contract
+                for contract in (*source_rigid_contracts, *contracts)
+                if str(contract.source_unit_id).startswith("aromatic:")
+                or str(contract.target_unit_id).startswith("aromatic:")
+            ),
+            key=lambda item: ({"rigid": 0, "flex": 1, "side": 2}[item.kind], item.contract_id),
+        ))
+        if expected_contracts and sorted(expected_contracts, key=lambda row: row["contract_id"]) != sorted(
+            actual_contracts, key=lambda row: row["contract_id"]
+        ):
             raise InverseInputError(
                 "authoritative aromatic boundary contract mismatch; the node, "
                 "topology, and aromatic-plan files are not from one snapshot"
@@ -2005,13 +2399,32 @@ def build_csv_inverse_input(
             ("su26_six_member_count", str(n26 - n26_five)),
             ("su30_five_member_count", str(n30)),
             ("synthetic_staging_node_ids", ",".join(str(value) for value in sorted(synthetic_by_target.values()))),
-            ("rigid_contract_count", str(sum(c.kind == "rigid" for c in contracts))),
+            ("rigid_contract_count", str(len(source_rigid_contracts))),
             ("flex_contract_count", str(sum(c.kind == "flex" for c in contracts))),
             ("side_contract_count", str(sum(c.kind == "side" for c in contracts))),
+            ("flex_chain_unit_count", str(sum(
+                unit.phase == "flex" and _metadata(unit).get("source_product_type", "").lower()
+                == "flex_chain" for unit in topology_units
+            ))),
+            ("aliphatic_ring_unit_count", str(sum(
+                unit.phase == "flex" and _metadata(unit).get("source_product_type", "").lower()
+                in {"aliphatic_ring", "fatty_ring", "fatty_ring_fused", "fatty_ring_side", "fatty_ring_upper_lower"}
+                for unit in topology_units
+            ))),
+            ("internal_cycle_count", str(sum(
+                _metadata(unit).get("ring_geometry_mode") == "internal_cycle"
+                for unit in topology_units
+            ))),
+            ("external_contract_ring_count", str(sum(
+                _metadata(unit).get("ring_geometry_mode") == "external_contract_ring"
+                for unit in topology_units
+            ))),
             ("su25_nodes", ",".join(str(value) for value in sorted(su25_nodes))),
         ))),
-        source_kind=InputSourceKind.CSV_PAIR,
         unassembled_closure_resources=tuple(unassembled_resources),
+        source_rigid_contracts=source_rigid_contracts,
+        idle_aromatic_nodes=tuple((node_id, nodes[node_id].su_type)
+                                 for node_id in sorted(excluded_aromatic_ids)),
     )
 
 
@@ -2029,6 +2442,9 @@ def serialize_aromatic_plan(
     """
 
     aromatic_units = [unit for unit in problem.units if unit.phase == "aromatic"]
+    errors = aromatic_template_errors(problem)
+    if errors:
+        raise InverseInputError(f"invalid aromatic template: {errors}")
 
     def cluster_index(unit: TopologyUnit) -> int:
         match = re.fullmatch(r"aromatic:(\d+)", str(unit.unit_id))
@@ -2155,11 +2571,10 @@ def serialize_aromatic_plan(
         if str(contract.source_unit_id).startswith("aromatic:")
         or str(contract.target_unit_id).startswith("aromatic:")
     ]
-    rigid_contracts = _contract_rows([
-        contract for contract in aromatic_contracts
-        if str(contract.kind) == "rigid"
+    rigid_contracts = _contract_rows(problem.source_rigid_contracts)
+    boundary_contracts = _contract_rows([
+        *problem.source_rigid_contracts, *aromatic_contracts
     ])
-    boundary_contracts = _contract_rows(aromatic_contracts)
     hetero_requests = [{
         "target_su": int(request.target_su),
         "ring_size": int(request.ring_size),
@@ -2192,6 +2607,9 @@ def serialize_aromatic_plan(
         "hop1_ids": [int(value) for value in resource.hop1_ids],
         "reason": str(resource.reason),
     } for resource in problem.unassembled_closure_resources]
+    idle_nodes = [{"node_id": node_id, "su_type": su_type,
+                   "state": "idle_aromatic", "reason": "bounded_template_residual"}
+                  for node_id, su_type in problem.idle_aromatic_nodes]
     return {
         "schema_version": 1,
         "complete": True,
@@ -2208,631 +2626,15 @@ def serialize_aromatic_plan(
         "hetero_requests": hetero_requests,
         "unassembled_closure_resources": unassembled_resources,
         "unassembled_closure_resource_count": len(unassembled_resources),
+        "idle_aromatic_nodes": idle_nodes,
+        "idle_aromatic_count": len(idle_nodes),
         "completion_mode": (
+            "bounded_idle_aromatic" if idle_nodes else
             "tolerated_unassembled_closure_resources"
             if unassembled_resources else "strict_all_nodes_assembled"
         ),
         "diagnostics": diagnostics,
     }
-
-
-def _dict(value: Any) -> Dict[str, Any]:
-    if value is None:
-        return {}
-    if isinstance(value, Mapping):
-        return dict(value)
-    if hasattr(value, "to_public_dict"):
-        try:
-            return dict(value.to_public_dict() or {})
-        except Exception:
-            pass
-    if hasattr(value, "to_dict"):
-        try:
-            return dict(value.to_dict() or {})
-        except Exception:
-            pass
-    if is_dataclass(value):
-        return {
-            str(name): getattr(value, name)
-            for name in getattr(value, "__dataclass_fields__", {})
-        }
-    if hasattr(value, "__dict__"):
-        return dict(vars(value))
-    return {}
-
-
-def _int(value: Any, default: int = -1) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return int(default)
-
-
-def _axial(value: Any, default: Optional[Axial] = None) -> Optional[Axial]:
-    if isinstance(value, Mapping):
-        value = value.get("local_axial", value.get("axial", value.get("coord")))
-    if isinstance(value, (list, tuple)) and len(value) >= 2:
-        try:
-            return (int(value[0]), int(value[1]))
-        except Exception:
-            return default
-    return default
-
-
-def _unique_ints(values: Iterable[Any]) -> Tuple[int, ...]:
-    return tuple(sorted({_int(value) for value in values if _int(value) >= 0}))
-
-
-def _node_id_from_row(row: Any) -> int:
-    data = _dict(row)
-    return _int(data.get("node_id", data.get("global_id", getattr(row, "global_id", -1))))
-
-
-def _extract_products(payload: Any) -> List[Any]:
-    root = _dict(payload)
-    for key in ("topology_products", "topology_units", "planned_topology", "products"):
-        values = root.get(key)
-        if isinstance(values, Mapping):
-            values = list(values.values())
-        if isinstance(values, (list, tuple)) and values:
-            return list(values)
-    for key in ("external_assembly", "assembly_view", "assembly"):
-        nested = root.get(key)
-        if nested is not None:
-            found = _extract_products(nested)
-            if found:
-                return found
-    return []
-
-
-def _extract_aromatic_units(payload: Any) -> List[Any]:
-    root = _dict(payload)
-    for key in ("aromatic_units", "aromatic_clusters", "aromatic_unit_geometry", "clusters"):
-        values = root.get(key)
-        if isinstance(values, Mapping):
-            values = list(values.values())
-        if isinstance(values, (list, tuple)) and values:
-            return list(values)
-    for key in ("external_assembly", "assembly_view", "assembly"):
-        nested = root.get(key)
-        if nested is not None:
-            found = _extract_aromatic_units(nested)
-            if found:
-                return found
-    return []
-
-
-def _extract_hetero_requests(payload: Any) -> Tuple[HeteroAromaticRequest, ...]:
-    """Read optional final-substitution requests from an inverse export."""
-    root = _dict(payload)
-    values = root.get("hetero_requests", root.get("heteroaromatic_requests", []))
-    if not values:
-        for key in ("external_assembly", "assembly_view", "assembly"):
-            nested = _dict(root.get(key))
-            values = nested.get("hetero_requests", nested.get("heteroaromatic_requests", []))
-            if values:
-                break
-    if isinstance(values, Mapping):
-        values = list(values.values())
-    result: List[HeteroAromaticRequest] = []
-    for value in list(values or []):
-        row = _dict(value)
-        target_su = _int(row.get("target_su", row.get("su_type", -1)))
-        ring_size = _int(row.get("ring_size", row.get("ring", 6)))
-        target_node_id = _int(row.get("target_node_id", row.get("node_id", -1)))
-        synthetic = row.get("synthetic_node_id")
-        synthetic_id = None if synthetic in (None, "", -1, "-1") else _int(synthetic)
-        hop1 = tuple(_int(item) for item in list(row.get("hop1_ids", []) or []))
-        if target_su not in {26, 30} or ring_size not in {5, 6} or target_node_id < 0:
-            continue
-        if ring_size == 5 and synthetic_id is None:
-            # A materialized JSON final state has no synthetic staging node;
-            # such a request is already complete and need not be replayed.
-            continue
-        result.append(HeteroAromaticRequest(target_su, ring_size, target_node_id, synthetic_id, hop1))
-    return tuple(result)
-
-
-def _extract_nodes(payload: Any) -> Dict[int, Dict[str, Any]]:
-    root = _dict(payload)
-    values = root.get(
-        "nodes",
-        root.get("node_table", root.get("final_nodes", root.get("node_rows", []))),
-    )
-    if isinstance(values, Mapping):
-        values = list(values.values())
-    result: Dict[int, Dict[str, Any]] = {}
-    for row in list(values or []):
-        data = _dict(row)
-        node_id = _node_id_from_row(row)
-        if node_id < 0:
-            continue
-        result[node_id] = {
-            **data,
-            "node_id": node_id,
-            "su_type": _int(data.get("su_type", getattr(row, "su_type", -1))),
-            "hop1_ids": list(data.get("hop1_ids", getattr(row, "hop1_ids", [])) or []),
-            "fixed_hop1_ids": list(data.get("fixed_hop1_ids", getattr(row, "fixed_hop1_ids", [])) or []),
-        }
-    if not result:
-        for key in ("external_assembly", "assembly_view", "assembly", "inverse_result"):
-            nested = root.get(key)
-            if nested is not None:
-                result = _extract_nodes(nested)
-                if result:
-                    break
-    return result
-
-
-def _parse_ids(text: Any) -> List[int]:
-    return [_int(value) for value in re.findall(r"\d+", str(text or ""))]
-
-
-def _parse_su_tokens(text: Any) -> List[int]:
-    values: List[int] = []
-    for token in re.findall(r"\d+", str(text or "")):
-        value = _int(token)
-        if 0 <= value <= 32:
-            values.append(value)
-    return values
-
-
-def _node_rows_for_unit(raw: Any, global_nodes: Dict[int, Dict[str, Any]], unit_id: str) -> List[Dict[str, Any]]:
-    data = _dict(raw)
-    rows = data.get("nodes", data.get("sites", data.get("local_nodes", [])))
-    if isinstance(rows, Mapping):
-        rows = list(rows.values())
-    rows = list(rows or [])
-    ids = list(data.get("source_node_ids", data.get("node_ids", [])) or [])
-    if not rows and ids:
-        su_tokens = _parse_su_tokens(data.get("topology_notation", data.get("actual_topology_su", "")))
-        rows = [
-            {
-                "node_id": _int(node_id),
-                "su_type": global_nodes.get(_int(node_id), {}).get("su_type", su_tokens[index] if index < len(su_tokens) else -1),
-            }
-            for index, node_id in enumerate(ids)
-        ]
-    # Product/fragment exports use ``main_path`` and ``branches`` as the
-    # authoritative ordered topology.  Preserve those node IDs and roles at
-    # the boundary instead of parsing labels or assigning fresh IDs.
-    if not rows:
-        path_rows: List[Any] = []
-        path_rows.extend(list(data.get("main_path", []) or []))
-        for branch in list(data.get("branches", []) or []):
-            path_rows.extend(list(branch or []))
-        for path_row in path_rows:
-            item = _dict(path_row)
-            if str(item.get("kind", "node")) != "node":
-                continue
-            node_id = _node_id_from_row(item)
-            if node_id < 0:
-                continue
-            rows.append({
-                "node_id": node_id,
-                "su_type": item.get("su_type", global_nodes.get(node_id, {}).get("su_type", -1)),
-                "role": item.get("role", ""),
-            })
-    if not rows:
-        gid_ids = _parse_ids(data.get("node_id_notation", data.get("actual_topology_gid", "")))
-        su_tokens = _parse_su_tokens(data.get("topology_notation", data.get("actual_topology_su", "")))
-        rows = [
-            {"node_id": node_id, "su_type": global_nodes.get(node_id, {}).get("su_type", su_tokens[index] if index < len(su_tokens) else -1)}
-            for index, node_id in enumerate(gid_ids)
-        ]
-
-    normalized: List[Dict[str, Any]] = []
-    for index, row in enumerate(rows):
-        item = _dict(row)
-        node_id = _node_id_from_row(row)
-        if node_id < 0:
-            continue
-        global_row = global_nodes.get(node_id, {})
-        item["node_id"] = node_id
-        item["su_type"] = _int(item.get("su_type", global_row.get("su_type", -1)))
-        item["role"] = str(item.get("role", ""))
-        item["local_axial"] = _axial(
-            item.get(
-                "local_axial",
-                item.get("axial", item.get("coord", global_row.get("local_axial", global_row.get("axial")))),
-            )
-        )
-        normalized.append(item)
-    return normalized
-
-
-def _normalize_edges(raw: Any, node_ids: Sequence[int]) -> List[UnitEdge]:
-    data = _dict(raw)
-    values = data.get("internal_edges", data.get("edges", []))
-    if isinstance(values, Mapping):
-        values = list(values.values())
-    edges: List[UnitEdge] = []
-    node_set = {int(node_id) for node_id in node_ids}
-    for edge in list(values or []):
-        if isinstance(edge, (list, tuple)) and len(edge) >= 2:
-            left, right = _int(edge[0]), _int(edge[1])
-            kind = "internal"
-        else:
-            row = _dict(edge)
-            left = _int(row.get("source_node_id", row.get("u", row.get("source", -1))))
-            right = _int(row.get("target_node_id", row.get("v", row.get("target", -1))))
-            kind = str(row.get("kind", "internal"))
-        # Legacy aromatic cluster exports used site indices in ``edges``;
-        # convert those indices to the inverse node IDs at the boundary.
-        if left not in node_set and 0 <= left < len(node_ids):
-            left = int(node_ids[left])
-        if right not in node_set and 0 <= right < len(node_ids):
-            right = int(node_ids[right])
-        if left >= 0 and right >= 0 and left != right:
-            edges.append(UnitEdge(left, right, kind))
-    if not edges:
-        # Preserve the topology path semantics when an export omits an
-        # explicit edge list.  Branches are independent paths; do not connect
-        # the last main-path node to the first branch node accidentally.
-        paths: List[List[int]] = []
-        main_path = [
-            _node_id_from_row(item)
-            for item in list(data.get("main_path", []) or [])
-            if str(_dict(item).get("kind", "node")) == "node"
-        ]
-        if len(main_path) > 1:
-            paths.append(main_path)
-        for branch in list(data.get("branches", []) or []):
-            branch_ids = [
-                _node_id_from_row(item)
-                for item in list(branch or [])
-                if str(_dict(item).get("kind", "node")) == "node"
-            ]
-            if len(branch_ids) > 1:
-                paths.append(branch_ids)
-        if not paths and len(node_ids) > 1:
-            paths = [list(node_ids)]
-        seen: set[Tuple[int, int, str]] = set()
-        for path in paths:
-            for left, right in zip(path, path[1:]):
-                if left < 0 or right < 0 or left == right:
-                    continue
-                key = (min(int(left), int(right)), max(int(left), int(right)), "internal")
-                if key not in seen:
-                    edges.append(UnitEdge(int(left), int(right)))
-                    seen.add(key)
-    return edges
-
-
-def _normalize_ports(raw: Any, unit_id: str, node_ids: Sequence[int], phase: str, edges: Sequence[UnitEdge]) -> List[UnitPort]:
-    data = _dict(raw)
-    values = data.get("ports", data.get("open_ports", []))
-    # Stage3 names open boundaries as mainline/branch slots.  A slot may
-    # carry an explicit node ID, or a list of source/anchor IDs; retain the
-    # first valid endpoint and preserve the slot identity for contract lookup.
-    if not values:
-        values = []
-        for slot_index, slot in enumerate(
-            list(data.get("mainline_slots", []) or [])
-            + list(data.get("branch_slots", []) or [])
-        ):
-            row = _dict(slot)
-            node_id = _int(
-                row.get(
-                    "node_id",
-                    row.get(
-                        "anchor_node_id",
-                        row.get("source_node_id", (list(row.get("source_node_ids", []) or []) or [-1])[0]),
-                    ),
-                )
-            )
-            if node_id < 0:
-                continue
-            values.append({
-                **row,
-                "node_id": node_id,
-                "port_id": row.get("port_id", row.get("slot_id", f"{unit_id}:slot:{slot_index}")),
-                "role": row.get("role", row.get("target_role", row.get("slot_kind", "open"))),
-                "phase": row.get("phase", phase),
-                "contract_id": row.get("contract_id", row.get("slot_id", "")),
-            })
-    if isinstance(values, Mapping):
-        values = list(values.values())
-    ports: List[UnitPort] = []
-    for index, value in enumerate(list(values or [])):
-        row = _dict(value)
-        node_id = _int(row.get("node_id", row.get("anchor_node_id", -1)))
-        if node_id < 0:
-            continue
-        required = tuple(sorted({_int(v) for v in list(row.get("required_su_types", row.get("required_su_sequence", [])) or []) if _int(v) >= 0}))
-        ports.append(UnitPort(
-            port_id=str(row.get("port_id", row.get("slot_id", f"{unit_id}:port:{index}"))),
-            node_id=node_id,
-            role=str(row.get("role", row.get("anchor_role", "open"))),
-            phase=str(row.get("phase", phase)),
-            direction=_axial(row.get("direction", row.get("outward_direction"))),
-            contract_id=str(row.get("contract_id", row.get("slot_id", ""))),
-            required_su_types=required,
-            metadata=tuple(sorted((str(k), str(v)) for k, v in row.items() if k not in {"node_id", "anchor_node_id", "port_id", "slot_id", "role", "anchor_role", "phase", "direction", "outward_direction", "contract_id", "required_su_types", "required_su_sequence"})),
-        ))
-    if ports:
-        return ports
-    degree: Dict[int, int] = {int(node_id): 0 for node_id in node_ids}
-    for edge in edges:
-        degree[int(edge.source_node_id)] = degree.get(int(edge.source_node_id), 0) + 1
-        degree[int(edge.target_node_id)] = degree.get(int(edge.target_node_id), 0) + 1
-    endpoint_ids = [int(node_id) for node_id in node_ids if degree.get(int(node_id), 0) <= 1]
-    if len(endpoint_ids) == 0 and node_ids:
-        endpoint_ids = [int(node_ids[0])]
-    return [UnitPort(
-        port_id=f"{unit_id}:port:{index}",
-        node_id=node_id,
-        role="open",
-        phase=phase,
-    ) for index, node_id in enumerate(endpoint_ids)]
-
-
-def _normalize_unit(raw: Any, index: int, global_nodes: Dict[int, Dict[str, Any]], aromatic: bool = False) -> TopologyUnit:
-    data = _dict(raw)
-    kind = str(data.get("product_type", data.get("product_kind", data.get("kind", "aromatic_cluster" if aromatic else ""))) or "")
-    unit_id = str(data.get("unit_id", data.get("cluster_id", data.get("id", f"{'aromatic' if aromatic else 'product'}:{index}"))))
-    rows = _node_rows_for_unit(data, global_nodes, unit_id)
-    if not rows:
-        raise InverseInputError(f"inverse unit {unit_id!r} has no node geometry")
-    if any(_int(row.get("su_type", -1)) < 0 for row in rows):
-        raise InverseInputError(f"inverse unit {unit_id!r} has nodes without su_type")
-    missing_geometry = [
-        _int(row.get("node_id", -1))
-        for row in rows
-        if _axial(row.get("local_axial")) is None
-    ]
-    if missing_geometry:
-        raise InverseInputError(
-            f"inverse unit {unit_id!r} has nodes without local_axial geometry: {missing_geometry[:12]}"
-        )
-    nodes = tuple(UnitNode(
-        node_id=_int(row["node_id"]),
-        su_type=_int(row["su_type"]),
-        local_axial=_axial(row.get("local_axial")) or (0, 0),
-        role=str(row.get("role", "")),
-        metadata=tuple(sorted((str(k), str(v)) for k, v in row.items() if k not in {"node_id", "su_type", "local_axial", "axial", "coord", "role"})),
-    ) for row in rows)
-    node_ids = tuple(node.node_id for node in nodes)
-    edges = tuple(_normalize_edges(data, node_ids))
-    ports = tuple(_normalize_ports(data, unit_id, node_ids, "aromatic" if aromatic else "side", edges))
-    source_fragment_ids = _unique_ints(data.get("source_fragment_ids", []))
-    source_node_ids = _unique_ints(data.get("source_node_ids", data.get("node_ids", node_ids)))
-    rings_raw = data.get("rings", data.get("local_rings", []))
-    rings: List[Tuple[Axial, ...]] = []
-    for ring in list(rings_raw or []):
-        points = [_axial(point) for point in list(ring or [])]
-        points = [point for point in points if point is not None]
-        if points:
-            rings.append(tuple(points))
-    return TopologyUnit(
-        unit_id=unit_id,
-        product_type=kind,
-        nodes=nodes,
-        internal_edges=edges,
-        ports=ports,
-        source_fragment_ids=source_fragment_ids,
-        source_node_ids=source_node_ids,
-        topology_notation=str(data.get("topology_notation", data.get("actual_topology_su", "")) or ""),
-        node_id_notation=str(data.get("node_id_notation", data.get("actual_topology_gid", "")) or ""),
-        closed=bool(data.get("closed", True)),
-        local_rings=tuple(rings),
-        metadata=tuple(sorted((str(k), str(v)) for k, v in data.items() if k not in {"unit_id", "cluster_id", "id", "product_type", "product_kind", "kind", "nodes", "sites", "local_nodes", "node_ids", "source_node_ids", "internal_edges", "edges", "ports", "open_ports", "rings", "local_rings", "topology_notation", "actual_topology_su", "node_id_notation", "actual_topology_gid", "closed", "source_fragment_ids"})),
-    )
-
-
-def _infer_contracts(payload: Any, units: Sequence[TopologyUnit], nodes: Dict[int, Dict[str, Any]]) -> List[ExternalContract]:
-    root = _dict(payload)
-    explicit = root.get("external_contracts", root.get("connection_contracts", []))
-    if not explicit:
-        explicit = dict(root.get("diagnostics", {}) or {}).get("external_contracts", [])
-    if not explicit:
-        for key in ("external_assembly", "assembly_view", "assembly"):
-            nested = _dict(root.get(key))
-            explicit = nested.get("external_contracts", nested.get("connection_contracts", []))
-            if explicit:
-                break
-    ownership = {int(node.node_id): unit.unit_id for unit in units for node in unit.nodes}
-    ports_by_node = {
-        int(port.node_id): (unit.unit_id, port.port_id)
-        for unit in units
-        for port in unit.ports
-    }
-    contracts: List[ExternalContract] = []
-    if isinstance(explicit, Mapping):
-        explicit = list(explicit.values())
-    for index, value in enumerate(list(explicit or [])):
-        row = _dict(value)
-        source_node = _int(row.get("source_node_id", row.get("u", row.get("left_node_id", -1))))
-        target_node = _int(row.get("target_node_id", row.get("v", row.get("right_node_id", -1))))
-        source_unit = str(row.get("source_unit_id", ownership.get(source_node, "")))
-        target_unit = str(row.get("target_unit_id", ownership.get(target_node, "")))
-        if source_node < 0 or target_node < 0 or not source_unit or not target_unit or source_unit == target_unit:
-            continue
-        kind = str(row.get("kind", row.get("connection_kind", row.get("phase", "side"))))
-        kind_lower = kind.lower()
-        if "rigid" in kind_lower or kind_lower in {"aromatic", "aromatic_aromatic"}:
-            kind = "rigid"
-        elif "flex" in kind_lower or "ring" in kind_lower:
-            kind = "flex"
-        elif "side" in kind_lower:
-            kind = "side"
-        elif kind not in {"rigid", "flex", "side"}:
-            kind = "side"
-        contracts.append(ExternalContract(
-            contract_id=str(row.get("contract_id", f"external:{index}")),
-            source_unit_id=source_unit,
-            source_node_id=source_node,
-            target_unit_id=target_unit,
-            target_node_id=target_node,
-            kind=kind,
-            mandatory=bool(row.get("mandatory", True)),
-            fixed=bool(row.get("fixed", row.get("connection_semantics", "") == "fixed")),
-            source_port_id=str(row.get("source_port_id", ports_by_node.get(source_node, ("", ""))[1])),
-            target_port_id=str(row.get("target_port_id", ports_by_node.get(target_node, ("", ""))[1])),
-        ))
-    if contracts:
-        return contracts
-    seen: set[Tuple[int, int]] = set()
-    for source_node, row in sorted(nodes.items()):
-        for target_node in list(row.get("hop1_ids", []) or []):
-            target_node = _int(target_node)
-            pair = tuple(sorted((int(source_node), int(target_node))))
-            if target_node < 0 or pair in seen or source_node not in ownership or target_node not in ownership:
-                continue
-            seen.add(pair)
-            source_unit, target_unit = ownership[source_node], ownership[target_node]
-            if source_unit == target_unit:
-                continue
-            source_phase = next(unit.phase for unit in units if unit.unit_id == source_unit)
-            target_phase = next(unit.phase for unit in units if unit.unit_id == target_unit)
-            if source_phase == target_phase == "aromatic":
-                kind = "rigid"
-            elif "flex" in {source_phase, target_phase}:
-                kind = "flex"
-            else:
-                kind = "side"
-            fixed_ids = {_int(value) for value in list(row.get("fixed_hop1_ids", []) or [])}
-            target_row = nodes.get(target_node, {})
-            fixed = target_node in fixed_ids or source_node in {_int(value) for value in list(target_row.get("fixed_hop1_ids", []) or [])}
-            contracts.append(ExternalContract(
-                contract_id=f"hop1:{pair[0]}-{pair[1]}",
-                source_unit_id=source_unit,
-                source_node_id=source_node,
-                target_unit_id=target_unit,
-                target_node_id=target_node,
-                kind=kind,
-                fixed=fixed,
-                source_port_id=ports_by_node.get(source_node, ("", ""))[1],
-                target_port_id=ports_by_node.get(target_node, ("", ""))[1],
-            ))
-    return contracts
-
-
-def build_inverse_input(payload: Any) -> InverseAssemblyInput:
-    """Normalize a complete inverse result for the new MCTS initializer."""
-    if isinstance(payload, InverseAssemblyInput):
-        return payload
-    root = _dict(payload)
-    global_nodes = _extract_nodes(payload)
-    raw_aromatic = _extract_aromatic_units(payload)
-    raw_products = _extract_products(payload)
-    if not raw_aromatic:
-        raise InverseInputError(
-            "inverse result has no aromatic_units; export complete aromatic geometry "
-            "with node_id/local_axial before starting RL_MTCS"
-        )
-    units: List[TopologyUnit] = []
-    for index, raw in enumerate(raw_aromatic):
-        units.append(_normalize_unit(raw, index, global_nodes, aromatic=True))
-    for index, raw in enumerate(raw_products):
-        units.append(_normalize_unit(raw, index, global_nodes, aromatic=False))
-    unit_ids = [unit.unit_id for unit in units]
-    if len(set(unit_ids)) != len(unit_ids):
-        duplicates = sorted({unit_id for unit_id in unit_ids if unit_ids.count(unit_id) > 1})
-        raise InverseInputError(f"inverse unit IDs are not unique: {duplicates[:12]}")
-    by_node: Dict[int, str] = {}
-    for unit in units:
-        for node in unit.nodes:
-            if node.node_id in by_node and by_node[node.node_id] != unit.unit_id:
-                raise InverseInputError(
-                    f"node {node.node_id} is claimed by both {by_node[node.node_id]!r} and {unit.unit_id!r}"
-                )
-            by_node[node.node_id] = unit.unit_id
-    if global_nodes:
-        missing = sorted(set(global_nodes) - set(by_node))
-        ownership_ledger = dict(root.get("ownership_ledger", {}) or {})
-        support = {
-            _int(value)
-            for value in list(ownership_ledger.get("support_context_node_ids", []) or [])
-        }
-        support.update(
-            _int(value)
-            for value in list(dict(ownership_ledger.get("states", {}) or {}).get("support_context", []) or [])
-        )
-        missing = [node_id for node_id in missing if node_id not in support]
-        if missing:
-            raise InverseInputError(f"inverse nodes are not covered by any complete unit: {missing[:12]}")
-    contracts = _infer_contracts(payload, units, global_nodes)
-    known_units = set(unit_ids)
-    bad_contracts = [
-        contract.contract_id
-        for contract in contracts
-        if contract.source_unit_id not in known_units or contract.target_unit_id not in known_units
-    ]
-    if bad_contracts:
-        raise InverseInputError(
-            f"inverse connection contracts reference unknown units: {bad_contracts[:12]}"
-        )
-    node_su = {
-        int(node.node_id): int(node.su_type)
-        for unit in units
-        for node in unit.nodes
-    }
-    hetero_requests = _extract_hetero_requests(payload)
-    return InverseAssemblyInput(
-        units=tuple(units),
-        contracts=tuple(contracts),
-        node_su_types=tuple(sorted(node_su.items())),
-        ownership=tuple(sorted(by_node.items())),
-        hetero_requests=hetero_requests,
-        diagnostics=tuple(sorted((str(k), str(v)) for k, v in {
-            "unit_count": len(units),
-            "contract_count": len(contracts),
-            "aromatic_unit_count": sum(1 for unit in units if unit.phase == "aromatic"),
-            "hetero_request_count": len(hetero_requests),
-        }.items())),
-    )
-
-
-def _load_inverse_payload(value: Any) -> Any:
-    if not isinstance(value, (str, Path)):
-        return value
-    path = Path(value)
-    if path.suffix.lower() != ".json":
-        raise InverseInputError(
-            "initialize expects an inverse JSON export or the two final CSV files"
-        )
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise InverseInputError(f"cannot read inverse JSON export: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise InverseInputError(f"invalid inverse JSON export: {path}") from exc
-
-
-def _validate_inverse_completion(payload: Any) -> None:
-    if not isinstance(payload, dict):
-        return
-    for key in ("ok", "topology_assembly_ok"):
-        if key in payload and not bool(payload.get(key)):
-            raise InverseInputError(
-                f"inverse topology audit is not complete ({key}=False)"
-            )
-    pending = payload.get("pending_contracts") or payload.get("pending_units") or []
-    if not pending:
-        for key in ("external_assembly", "assembly_view", "assembly"):
-            nested = dict(payload.get(key, {}) or {})
-            pending = nested.get("pending_contracts") or nested.get("pending_units") or []
-            if pending:
-                break
-    if pending:
-        raise InverseInputError(
-            f"inverse topology has {len(list(pending))} pending units/contracts"
-        )
-    ownership = dict(payload.get("ownership_ledger", {}) or {})
-    if not ownership:
-        for key in ("external_assembly", "assembly_view", "assembly"):
-            nested = dict(payload.get(key, {}) or {})
-            ownership = dict(nested.get("ownership_ledger", {}) or {})
-            if ownership:
-                break
-    bad = list(dict(ownership.get("states", {}) or {}).get(
-        "unclassified_or_conflict", []
-    ) or [])
-    if bad:
-        raise InverseInputError(
-            f"inverse ownership contains unclassified/conflicting nodes: {bad[:12]}"
-        )
 
 
 def _choose_anchor(problem: InverseAssemblyInput) -> Optional[str]:
@@ -2882,37 +2684,30 @@ def initialize(
     inverse_result: Any,
     topology_specs_csv: Any = None,
 ) -> Dict[str, Any]:
-    """Build an immutable problem and its initial aromatic staging state."""
+    """Build an immutable problem from the authoritative inverse CSV pair."""
     csv_mode = (
         isinstance(inverse_result, (str, Path))
         and Path(inverse_result).suffix.lower() == ".csv"
     )
-    if csv_mode:
-        if topology_specs_csv is None:
-            raise InverseInputError(
-                "CSV/SU-histogram initialization requires both "
-                "final_nodes_by_global_id.csv and final_topology_specs.csv"
-            )
-        problem = build_csv_inverse_input(inverse_result, topology_specs_csv)
-    else:
-        if topology_specs_csv is not None:
-            raise InverseInputError(
-                "topology_specs_csv is only valid with a node CSV input"
-            )
-        payload = _load_inverse_payload(inverse_result)
-        _validate_inverse_completion(payload)
-        problem = build_inverse_input(payload)
+    if not csv_mode or topology_specs_csv is None:
+        raise InverseInputError(
+            "RL_MTCS requires final_nodes_by_global_id.csv and "
+            "final_topology_specs.csv; JSON input is no longer supported"
+        )
+    problem = build_csv_inverse_input(inverse_result, topology_specs_csv)
+
+    errors = aromatic_template_errors(problem)
+    if errors:
+        raise InverseInputError(
+            "invalid aromatic template: " + str(errors),
+            {"errors": errors, "source": "aromatic_template", "status": "input_geometry_invalid"},
+        )
 
     state = HexAssemblyState(problem=problem)
     anchor_id = _choose_anchor(problem)
     if anchor_id is None:
         raise InverseInputError("inverse result contains no aromatic unit")
-    if csv_mode:
-        _place_csv_aromatic_staging(state, anchor_id)
-    elif not state.place_unit(anchor_id, rotation=0, translation=(0, 0)):
-        raise InverseInputError(
-            f"failed to place initial aromatic unit {anchor_id!r}"
-        )
+    _place_csv_aromatic_staging(state, anchor_id)
     state.stage = "rigid"
 
     aromatic_units = [unit for unit in problem.units if unit.phase == "aromatic"]
@@ -2930,12 +2725,12 @@ def initialize(
         "unassembled_closure_resources": list(
             problem.unassembled_closure_resources
         ),
+        "idle_aromatic_nodes": list(problem.idle_aromatic_nodes),
         "current_node_su_types": state.current_node_map(),
         "anchor_unit_id": anchor_id,
         "state": state,
         "diagnostics": {
-            "initializer": "inverse_csv_pair" if csv_mode else "inverse_topology_units",
-            "allocation": False,
+            "initializer": "inverse_csv_pair",
             "conversion": False,
             "substitution": bool(problem.hetero_requests),
             "hetero_request_count": len(problem.hetero_requests),
@@ -2943,6 +2738,7 @@ def initialize(
                 problem.unassembled_closure_resources
             ),
             "completion_mode": (
+                "bounded_idle_aromatic" if problem.idle_aromatic_nodes else
                 "tolerated_unassembled_closure_resources"
                 if problem.unassembled_closure_resources
                 else "strict_all_nodes_assembled"
@@ -2953,13 +2749,6 @@ def initialize(
             "problem_diagnostics": dict(problem.diagnostics),
         },
     }
-
-
-def initialize_from_inverse(
-    inverse_result: Any,
-    topology_specs_csv: Any = None,
-) -> Dict[str, Any]:
-    return initialize(inverse_result, topology_specs_csv)
 
 
 def _metadata(unit: TopologyUnit) -> Dict[str, str]:
@@ -3210,7 +2999,16 @@ def inspect_csv_initialization(
 
     node_rows = load_node_rows(nodes_path)
     source_topologies = load_topology_rows(topology_path)
-    initialized = initialize(nodes_path, topology_path)
+    try:
+        initialized = initialize(nodes_path, topology_path)
+    except InverseInputError as exc:
+        report = {"ok": False, "status": "input_geometry_invalid", "failure_scope": "input",
+                  "validation": {"ok": False, "errors": [str(exc)]},
+                  "diagnostics": exc.diagnostics}
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "initialization_report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return report
     problem = initialized["problem"]
     state = initialized["state"]
     aromatic_units = list(initialized["aromatic_units"])
@@ -3235,6 +3033,7 @@ def inspect_csv_initialization(
     validation_errors = _validate_units(
         list(problem.units), set(problem.node_map()), problem.ownership_map(), su25_rows
     )
+    validation_warnings: List[str] = []
     initial_audit = state.audit()
     if initial_audit.get("duplicate_axials"):
         validation_errors.append("initial_aromatic_staging_has_duplicate_axials")
@@ -3259,7 +3058,7 @@ def inspect_csv_initialization(
         )
         if outside_ring:
             validation_errors.append(
-                f"aromatic_nodes_outside_rings:{unit.unit_id}:{outside_ring}"
+                f"aromatic_nodes_outside_ring_sequences:{unit.unit_id}:{outside_ring}"
             )
 
     report: Dict[str, Any] = {
@@ -3279,6 +3078,8 @@ def inspect_csv_initialization(
             "aromatic_unit_count": len(aromatic_units),
             "topology_unit_count": len(topology_units),
             "contract_count": len(contracts),
+            "source_rigid_pair_count": len(problem.source_rigid_contracts),
+            "rigid_port_count": sum(su == 10 for _node_id, su in problem.node_su_types),
             "initially_placed_unit_count": len(state.placements),
             "initially_placed_node_count": len(state.node_axial),
             "initial_component_count": state.component_count(),
@@ -3297,6 +3098,13 @@ def inspect_csv_initialization(
             "topology_phases": _count_rows(
                 (unit.phase for unit in topology_units), "assembly_phase"
             ),
+            "ring_geometry_modes": _count_rows(
+                (_metadata(unit).get("ring_geometry_mode", "tree")
+                 for unit in topology_units
+                 if _metadata(unit).get("source_product_type", "").lower()
+                 in {"aliphatic_ring", "fatty_ring", "fatty_ring_fused", "fatty_ring_side", "fatty_ring_upper_lower"}),
+                "ring_geometry_mode",
+            ),
             "source_product_types": _count_rows(
                 (_metadata(unit).get("source_product_type", "") for unit in topology_units),
                 "source_product_type",
@@ -3314,11 +3122,13 @@ def inspect_csv_initialization(
         "aromatic_clusters": aromatic_rows,
         "topology_units": topology_rows,
         "contracts": contract_rows,
+        "source_rigid_pairs": _contract_rows(problem.source_rigid_contracts),
         "su25_sites": su25_rows,
         "initial_state_audit": initial_audit,
         "validation": {
             "ok": not validation_errors,
             "errors": validation_errors,
+            "warnings": validation_warnings,
             "owned_node_count": len(problem.ownership),
             "source_node_count": len(node_rows),
             "assembly_node_count": len(problem.node_su_types),
@@ -3374,10 +3184,8 @@ __all__ = [
     "AROMATIC_SU_TYPES",
     "ParsedTopology",
     "build_csv_inverse_input",
-    "build_inverse_input",
     "serialize_aromatic_plan",
     "initialize",
-    "initialize_from_inverse",
     "inspect_csv_initialization",
     "print_initialization_report",
     "load_node_rows",

@@ -7,6 +7,9 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import torch
 
 from ....shared.aromatic_plan import (
+    exact_aromatic_cluster_plan,
+    flex_count_window,
+    staging_aromatic_counts,
     su12_generation_cap,
     su12_transition_diagnostics,
 )
@@ -85,6 +88,7 @@ EXTERNAL_STAGE = "external_topology_assembly"
 EXTERNAL_PHASE_NAMES = frozenset(phase for phase, _ in EXTERNAL_ROLE_ORDER)
 FIXED_FLEX_CAPACITY_DONOR_ORDER = (23, 12, 11)
 MAX_DIAGNOSTIC_ATTEMPT_SAMPLES = 8
+EXTERNAL_NON_CONVERTIBLE_RESOURCE_TYPES = frozenset({SU24_RING_RESOURCE_TYPE})
 
 
 def _classification_with_live_allocator_pool(
@@ -186,13 +190,10 @@ def _evaluate_external_phases(
             allow_ring_recovery=bool(allow_ring_recovery),
         )
         live_assembler = getattr(assembly_obj, "_runtime_assembler", None)
-        if live_assembler is not None and callable(
-            getattr(live_assembler, "sync_after_resource_adjustments", None)
-        ):
-            live_assembler.sync_after_resource_adjustments(
-                list(nodes or []),
-                H=H,
-            )
+        if live_assembler is not None:
+            # Its node copy may already contain a provisional ring recovery.
+            # Do not overwrite that transaction with the caller's older nodes.
+            live_assembler.current_H = H.detach().clone() if hasattr(H, "detach") else H
     assembly = assembly_obj.to_dict()
     symbolic_product_objects = [
         normalize_stage3_product(
@@ -312,19 +313,9 @@ def _evaluate_external_phases(
     # Rebuild the round context from classification plus the assembler's
     # explicit recovery ledger. Keeping the pre-assembly context here would
     # leave dismantled fixed nodes marked as fragment-owned resources.
-    # The external assembler works on a transaction-local node copy. Apply
-    # only the reported reclassification to a context copy so ownership sees
-    # the same effective SU type without mutating the caller graph.
-    context_nodes = deepcopy(list(nodes or []))
-    context_nodes_by_id = {
-        int(getattr(node, "global_id", -1)): node
-        for node in context_nodes
-        if int(getattr(node, "global_id", -1)) >= 0
-    }
-    for node_id in recycled_su24_to_23_ids:
-        node = context_nodes_by_id.get(int(node_id))
-        if node is not None:
-            setattr(node, "su_type", 23)
+    # The live transaction already includes provisional recovery and all later
+    # conversions. Historical recovery rows must never retype these nodes.
+    context_nodes = list(live_assembler.nodes if live_assembler is not None else nodes or [])
     context_classification = _classification_with_live_allocator_pool(
         classification_obj,
         live_assembler,
@@ -441,7 +432,7 @@ def _merge_released_resource_diagnostics(
     phase_eval: Any = None,
     existing: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Merge ring-recovery provenance without exposing a SU24 donor pool."""
+    """Merge release metadata; current records supersede historical SU keys."""
     merged: Dict[str, Any] = dict(existing or {})
     released_by_su: Dict[str, Set[int]] = {}
 
@@ -451,9 +442,10 @@ def _merge_released_resource_diagnostics(
                 su_key = str(int(raw_su))
             except (TypeError, ValueError):
                 continue
-            released_by_su.setdefault(su_key, set()).update(
-                int(value) for value in list(raw_ids or [])
-            )
+            ids = {int(value) for value in list(raw_ids or [])}
+            for values in released_by_su.values():
+                values.difference_update(ids)
+            released_by_su.setdefault(su_key, set()).update(ids)
 
     collect(merged.get("released_resource_ids_by_su", {}))
     assembly = dict(getattr(phase_eval, "assembly_view", {}) or {})
@@ -467,7 +459,6 @@ def _merge_released_resource_diagnostics(
     released_su24.update(
         int(value) for value in list(ledger.get("released_su24_ids", []) or [])
     )
-    released_su24.update(released_by_su.get("24", set()))
     recycled = {
         int(value)
         for value in list(merged.get("recycled_su24_to_23_ids", []) or [])
@@ -476,10 +467,6 @@ def _merge_released_resource_diagnostics(
         int(value)
         for value in list(ledger.get("recycled_su24_to_23_ids", []) or [])
     )
-    # Release provenance is normalized to the effective ordinary SU23 pool.
-    recycled.update(released_su24)
-    released_by_su.setdefault("24", set()).difference_update(recycled)
-    released_by_su.setdefault("23", set()).update(recycled)
 
     merged["released_su24_ids"] = sorted(released_su24)
     merged["recycled_su24_to_23_ids"] = sorted(recycled)
@@ -1141,6 +1128,7 @@ def _plan_internal_surplus_su11_aromatic_conversion(
     contract_id: int,
     max_conversions: int,
     aromatic_cursor: int,
+    forbidden_primary_conversion_signatures: Optional[Sequence[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return unused concrete SU11 nodes directly to the aromatic pool."""
     limit = max(0, int(max_conversions))
@@ -1165,6 +1153,32 @@ def _plan_internal_surplus_su11_aromatic_conversion(
             aromatic_cursor=int(aromatic_cursor),
         )
     )
+    forbidden = set(forbidden_primary_conversion_signatures or [])
+    # Retry the complete two-target batch, preserving parity and the SU12
+    # generation cap. Each split is tried at most once for this input state.
+    preferred_su12 = su12_count
+    selected_signature = ""
+    for count12 in sorted(
+        range(int(H[12].item()) % 2, len(selected_ids) + 1, 2),
+        key=lambda count: (abs(count - preferred_su12), count),
+    ):
+        trial_ops = [
+            HistogramConversion(from_su=11, to_su=target, count=len(ids), node_ids=ids)
+            for target, ids in ((12, selected_ids[:count12]), (13, selected_ids[count12:]))
+            if ids
+        ]
+        trial_H = apply_conversions_to_H(H, trial_ops)
+        if trial_H is None or not su12_transition_diagnostics(H, trial_H).get("generation_allowed", True):
+            continue
+        signature = _stateful_conversion_bundle_signature(H, trial_ops)
+        if signature in forbidden:
+            continue
+        su12_count, su13_count = count12, len(selected_ids) - count12
+        selected_signature = signature
+        break
+    if not selected_signature:
+        return None
+    target_diagnostics.update(selected_su12_count=su12_count, selected_su13_count=su13_count)
     target_groups = [
         (12, selected_ids[:su12_count]),
         (13, selected_ids[su12_count:su12_count + su13_count]),
@@ -1203,6 +1217,7 @@ def _plan_internal_surplus_su11_aromatic_conversion(
 
     if not groups:
         return None
+    groups[-1].scoring_diagnostics["candidate_bundle_signature"] = selected_signature
     inventory_before = {
         int(key): len(list(values or []))
         for key, values in pool.items()
@@ -1676,6 +1691,7 @@ def _plan_next_residual_product(
         contract_id=contract_id,
         max_conversions=max_conversions,
         aromatic_cursor=su11_rotation_index,
+        forbidden_primary_conversion_signatures=forbidden_primary_conversion_signatures,
     )
     if su11_conversion is not None:
         su11_conversion["attempt_count"] = len(attempts)
@@ -1992,12 +2008,6 @@ def _fixed_flex_capacity_candidate(
             source_su: int,
             excluded_ids: Set[int],
         ) -> List[int]:
-            if (
-                int(source_su) in {12, 13}
-                and int(candidate_H[int(source_su)].item())
-                <= int(MIN_STAGE3_AROMATIC_RESOURCE_COUNT)
-            ):
-                return []
             return [
                 int(node_id)
                 for node_id in list(balance_pool_by_su.get(int(source_su), []) or [])
@@ -2020,11 +2030,6 @@ def _fixed_flex_capacity_candidate(
         if int(degree_parity_flips) % 2 != 0:
             for balance_source, balance_target in ((12, 13), (13, 12)):
                 if int(candidate_H[int(balance_source)].item()) <= 0:
-                    continue
-                if (
-                    int(candidate_H[int(balance_source)].item())
-                    <= int(MIN_STAGE3_AROMATIC_RESOURCE_COUNT)
-                ):
                     continue
                 balanced_H = candidate_H.detach().clone()
                 balanced_H[int(balance_source)] -= 1
@@ -2247,6 +2252,109 @@ def _fixed_flex_capacity_candidate(
         "candidate_attempt_count": len(attempts),
         "candidate_attempts": _diagnostic_attempt_samples(attempts),
     }
+
+
+def _narrow_flex_window_plan(
+    *, phase_eval: Any, H: torch.Tensor, nodes: Sequence[Any],
+    max_primary_adjustments: int, special_degree_meta: Optional[Dict[str, Any]],
+    forbidden_signatures: Optional[Sequence[str]] = None,
+) -> Stage3AdjustmentPlan:
+    """Retire complete SU10 pairs before rebuilding the inverse graph.
+
+    This dedicated transaction does not authorize SU10 in the ordinary
+    closure-resource conversion pool. Stop at the smallest feasible bundle.
+    """
+    audit = dict(phase_eval.flex_audit or {})
+    fixed_count = int(audit.get("explicit_flex_count", 0))
+    by_id = {int(node.global_id): node for node in nodes}
+    su10 = {key for key, node in by_id.items() if int(node.su_type) == 10}
+    neighbors = {
+        key: set(map(int, getattr(by_id[key], "hop1_ids", ()) or ())) & su10
+        for key in su10
+    }
+    pairs = sorted((left, right) for left in su10 for right in neighbors[left]
+                   if left < right and neighbors[left] == {right}
+                   and neighbors[right] == {left}
+                   and not any(getattr(by_id[key], "stage3_resource_claimed", False)
+                               or getattr(by_id[key], "stage3_locked_neighbor_ids", ())
+                               or any(int(getattr(by_id.get(int(neighbor)), "su_type", -1))
+                                      not in {*range(5, 14), 26, 30}
+                                      for neighbor in getattr(by_id[key], "hop1_ids", ()))
+                               for key in (left, right)))
+    counts = {index: int(value) for index, value in enumerate(H.tolist())}
+    attempts = []
+    limit = min(len(pairs), max(0, int(max_primary_adjustments)) // 2)
+    for pair_count in range(1, limit + 1):
+        count = 2 * pair_count
+        after = H.detach().clone()
+        after[10] -= count
+        after[12] += count
+        trial = {**counts, 10: counts.get(10, 0) - count, 12: counts.get(12, 0) + count}
+        bridgeheads, perimeter, _five = staging_aromatic_counts(trial)
+        try:
+            aromatic = exact_aromatic_cluster_plan(bridgeheads, perimeter)
+        except ValueError:
+            continue
+        window = flex_count_window(aromatic["cluster_count"], trial[10])
+        attempts.append({"converted_pairs": pair_count, **window})
+        if not (window["flex_window_ok"] and window["flex_window_width_ok"]
+                and window["flex_lower"] <= fixed_count <= window["flex_upper"]
+                and su12_transition_diagnostics(H, after)["generation_allowed"]):
+            continue
+        ids = [key for pair in pairs[:pair_count] for key in pair]
+        operation = HistogramConversion(from_su=10, to_su=12, count=count,
+                                        node_ids=ids, reason="narrow_flex_window")
+        signature = _stateful_conversion_bundle_signature(H, [operation])
+        if signature in set(forbidden_signatures or ()):
+            continue
+        h_before = _h_total(H, special_degree_meta)
+        h_after = _h_total(after, special_degree_meta)
+        group = AtomicAdjustmentGroup(
+            primary_op=operation, combined_delta={10: -count, 12: count},
+            h_before=h_before, h_after_primary=h_after, h_after_final=h_after,
+            scoring_diagnostics={"candidate_bundle_signature": signature},
+        )
+        histogram = HistogramAdjustmentPlan(
+            phase="flex_range_reconciliation", groups=[group],
+            primary_adjustment_count=count, physical_conversion_count=count,
+            H_before=H.detach().clone(), H_after=after,
+            inventory_before={10: len(su10), 12: counts.get(12, 0)},
+            inventory_after={10: len(su10) - count, 12: trial[12]},
+        )
+        return Stage3AdjustmentPlan(
+            ok=True, reason="stage3_rebuild_required", plan_kind="narrow_flex_window",
+            phase="flex_range_reconciliation", active_subphase="flex_range_reconciliation",
+            histogram_adjustment_plan=histogram,
+            planned_conversions=[Stage3AdjustmentOp(op="convert", from_su=10, to_su=12,
+                                 node_id=key, reason="narrow_flex_window") for key in ids],
+            phase_result=Stage3PhaseResult(
+                active_phase="flex_range_reconciliation", phase_completed=False,
+                rebuild_required=True, primary_adjustment_count=count,
+                stop_reason="stage3_rebuild_required",
+                transactions=[TopologyResourceTransaction(
+                    phase="flex_range_reconciliation", target_role="narrow_flex_window",
+                    converted_node_ids=ids, conversion_path=[operation.to_dict()],
+                    h_before=h_before, h_after_primary=h_after, h_after=h_after,
+                    commit_scope="physical_histogram", committed=True,
+                )],
+            ),
+            diagnostics={"realized_flex_before": audit, "realized_flex_after": window,
+                         "retired_su10_pairs": pairs[:pair_count],
+                         "idle_aromatic_count": aromatic["idle_aromatic_count"],
+                         "candidate_alternatives_enabled": True,
+                         "fresh_layer12_rebuild_required": True,
+                         "restart_stage3_after_rebuild": True},
+        )
+    proof = {"reason": "flex_window_coordination_exhausted", "attempts": attempts,
+             "available_pair_count": len(pairs), "primary_adjustment_limit": max_primary_adjustments,
+             "failure_scope": "aromatic_quantity_coordination", "candidate_space_complete": False}
+    return Stage3AdjustmentPlan(
+        ok=False, reason="phase_resource_infeasible", blocked_reason=proof["reason"],
+        phase="flex_range_reconciliation", plan_kind="narrow_flex_window",
+        phase_result=Stage3PhaseResult(active_phase="flex_range_reconciliation",
+                                      stop_reason=proof["reason"], infeasibility_proof=proof),
+        diagnostics=proof,
+    )
 
 
 def _fixed_flex_capacity_expansion_plan(
@@ -2534,62 +2642,6 @@ def _runtime_with_pool(
     # which contains every product, pending contract and classification view.
     assembly = dict(getattr(phase_eval, "assembly_view", {}) or {})
     ledger = deepcopy(dict(assembly.get("resource_ledger", {}) or {}))
-    # Normalize legacy recovery snapshots at the runtime boundary as well as
-    # in RoundContext.  A caller may pass a stale pool that still lists a
-    # dismantled SU24 node under bucket 24; recovered nodes are ordinary SU23
-    # resources and must never be available to a later ring candidate.
-    recycled_su24_ids = {
-        int(value)
-        for value in list(
-            ledger.get("recycled_su24_to_23_ids", []) or []
-        )
-    }
-    recycled_su24_ids.update(
-        int(value)
-        for value in list(ledger.get("released_su24_ids", []) or [])
-    )
-    released_map = dict(ledger.get("released_resource_ids_by_su", {}) or {})
-    recycled_su24_ids.update(
-        int(value)
-        for value in list(
-            released_map.get("24", []) or released_map.get(24, []) or []
-        )
-    )
-    if recycled_su24_ids:
-        normalized_pool = {
-            int(key): sorted({int(value) for value in list(values or [])})
-            for key, values in dict(pool or {}).items()
-        }
-        recycled_present = recycled_su24_ids & set(
-            normalized_pool.get(SU24_RING_RESOURCE_TYPE, [])
-        )
-        if recycled_present:
-            normalized_pool[SU24_RING_RESOURCE_TYPE] = [
-                int(value)
-                for value in normalized_pool.get(SU24_RING_RESOURCE_TYPE, [])
-                if int(value) not in recycled_present
-            ]
-            normalized_pool.setdefault(23, [])
-            normalized_pool[23] = sorted(
-                set(normalized_pool[23]) | recycled_present
-            )
-        pool = normalized_pool
-        ledger["recycled_su24_to_23_ids"] = sorted(recycled_su24_ids)
-        normalized_released = {
-            str(key): {
-                int(value) for value in list(values or [])
-            }
-            for key, values in released_map.items()
-        }
-        normalized_released.setdefault("24", set()).difference_update(
-            recycled_su24_ids
-        )
-        normalized_released.setdefault("23", set()).update(recycled_su24_ids)
-        ledger["released_resource_ids_by_su"] = {
-            str(key): sorted(values)
-            for key, values in normalized_released.items()
-            if values
-        }
     ledger["remaining_ids_by_su"] = {str(key): list(values) for key, values in pool.items()}
     ledger["remaining_counts"] = {str(key): len(values) for key, values in pool.items()}
     ledger["remaining_counts_by_su"] = dict(ledger["remaining_counts"])
@@ -2740,93 +2792,6 @@ def _iteration_ledger_for_phase_eval(
         ledger.conflicts = deepcopy(
             list(getattr(round_context, "conflicts", []) or [])
         )
-    # A caller may provide a serialized/stale round context. Re-apply the
-    # explicit recovery ledger after that ownership overlay so released fixed
-    # classifier nodes cannot remain falsely owned by their old fragment.
-    raw_released_resource_ids_by_su = dict(
-        dict(assembly.get("resource_ledger", {}) or {}).get(
-            "released_resource_ids_by_su", {}
-        )
-        or {}
-    )
-    recycled_su24_ids = {
-        int(value)
-        for value in list(
-            dict(assembly.get("resource_ledger", {}) or {}).get(
-                "recycled_su24_to_23_ids", []
-            )
-            or []
-        )
-    }
-    released_resource_ids_by_su: Dict[int, Set[int]] = {}
-    for raw_su, raw_ids in raw_released_resource_ids_by_su.items():
-        if not str(raw_su).lstrip("-").isdigit():
-            continue
-        su_type = int(raw_su)
-        # Legacy snapshots may still label a recycled node as SU24. Normalize
-        # it before rebuilding the iteration ledger so it cannot re-enter the
-        # ring resource bucket.
-        target_su = 23 if su_type == SU24_RING_RESOURCE_TYPE else su_type
-        ids = {int(value) for value in list(raw_ids or [])}
-        released_resource_ids_by_su.setdefault(target_su, set()).update(ids)
-        if su_type == SU24_RING_RESOURCE_TYPE:
-            recycled_su24_ids.update(ids)
-    released_resource_ids_by_su.setdefault(23, set()).update(recycled_su24_ids)
-    completed_product_node_ids = {
-        int(value)
-        for product in list(assembly.get("products", []) or [])
-        for value in (
-            list(dict(product or {}).get("fixed_source_node_ids", []) or [])
-            + [
-                int(value)
-                for values in dict(
-                    dict(product or {}).get("claimed_resource_ids_by_su", {})
-                    or {}
-                ).values()
-                for value in list(values or [])
-            ]
-        )
-    }
-    node_by_id = {
-        int(getattr(node, "global_id", -1)): node
-        for node in list(nodes or [])
-    }
-    for su_type, node_ids in released_resource_ids_by_su.items():
-        for node_id in node_ids:
-            if int(node_id) in completed_product_node_ids:
-                continue
-            node = node_by_id.get(int(node_id))
-            owner = ledger.ownership_by_node_id.get(int(node_id))
-            if node is None or owner is None:
-                continue
-            actual_su = (
-                23
-                if int(node_id) in recycled_su24_ids
-                else int(getattr(node, "su_type", -1))
-            )
-            if actual_su not in set(
-                GENERIC_CLOSURE_RESOURCE_TYPES
-            ) | {SU24_RING_RESOURCE_TYPE}:
-                continue
-            for values in ledger.available_ids_by_su.values():
-                while int(node_id) in values:
-                    values.remove(int(node_id))
-            ledger.available_ids_by_su.setdefault(actual_su, []).append(int(node_id))
-            ledger.available_ids_by_su[actual_su] = sorted(
-                set(ledger.available_ids_by_su[actual_su])
-            )
-            owner.su_type = actual_su
-            owner.state = (
-                Stage3OwnershipState.REMAINING_SU24_RING_RESOURCE.value
-                if actual_su == SU24_RING_RESOURCE_TYPE
-                else Stage3OwnershipState.REMAINING_CLOSURE_RESOURCE.value
-            )
-            owner.owner_fragment_id = None
-            owner.owner_contract_id = None
-            owner.owner_product_id = ""
-            owner.owner_slot_id = ""
-            owner.role = str(owner.state)
-            owner.reason = "recycled_pure_resource_ring" if int(node_id) in recycled_su24_ids else "released_pure_resource_ring"
     ledger.generation_id = int(getattr(phase_eval, "generation_id", 0) or 0)
     completed_products: List[Dict[str, Any]] = []
     product_ids = set()
@@ -2845,150 +2810,6 @@ def _iteration_ledger_for_phase_eval(
         completed_products=completed_products,
         pending_contracts=list(contracts or []),
     )
-
-
-def _restore_uncommitted_ring_pool_nodes(
-    ledger: Any,
-    nodes: Sequence[Any],
-    *,
-    restore_resource_ids_by_su: Optional[
-        Dict[int, Sequence[int]]
-    ] = None,
-) -> tuple[Any, Dict[str, Any]]:
-    """Restore explicitly supplied uncommitted resource IDs.
-
-    SU24 ring resources are owned by the round context. They must not be
-    rediscovered and injected into the pool when the state machine enters the
-    internal phase; only an explicit release/recovery path may add IDs.
-    """
-    working = deepcopy(ledger)
-    restored_resource_ids = {
-        int(value)
-        for values in dict(restore_resource_ids_by_su or {}).values()
-        for value in list(values or [])
-    }
-    node_by_id = {
-        int(getattr(node, "global_id", -1)): node
-        for node in list(nodes or [])
-        if int(getattr(node, "global_id", -1)) >= 0
-    }
-    committed_states = {
-        Stage3OwnershipState.COMPLETED_TOPOLOGY.value,
-        Stage3OwnershipState.CLAIMED_CLOSURE_RESOURCE.value,
-        Stage3OwnershipState.CLAIMED_SU24_RING_RESOURCE.value,
-    }
-    restored_resource_ids = {
-        int(node_id)
-        for node_id in restored_resource_ids
-        if str(
-            getattr(
-                working.ownership_by_node_id.get(int(node_id)),
-                "state",
-                "",
-            )
-            or ""
-        ) not in committed_states
-    }
-    requested_ids = set(restored_resource_ids)
-    committed_product_node_ids: Set[int] = set()
-    for raw_product in list(getattr(working, "completed_products", []) or []):
-        product = dict(raw_product or {})
-        committed_product_node_ids.update(
-            int(value)
-            for value in list(product.get("fixed_source_node_ids", []) or [])
-        )
-        committed_product_node_ids.update(
-            int(value)
-            for values in dict(
-                product.get("claimed_resource_ids_by_su", {})
-                or {}
-            ).values()
-            for value in list(values or [])
-        )
-    requested_ids.difference_update(committed_product_node_ids)
-    audit: Dict[str, Any] = {
-        "requested_node_ids": sorted(requested_ids),
-        "uncommitted_su24_node_ids": [],
-        "restored_resource_node_ids": sorted(restored_resource_ids),
-        "restored_node_ids": [],
-        "missing_node_ids": [],
-        "committed_owner_conflicts": [],
-        "committed_product_node_ids": sorted(committed_product_node_ids),
-        "ownership_before": {},
-        "ownership_after": {},
-    }
-    if not requested_ids:
-        audit["ok"] = True
-        return working, audit
-
-    for node_id in sorted(requested_ids):
-        node = node_by_id.get(int(node_id))
-        owner = working.ownership_by_node_id.get(int(node_id))
-        if node is None or owner is None:
-            audit["missing_node_ids"].append(int(node_id))
-            continue
-        audit["ownership_before"][str(node_id)] = {
-            "su_type": int(getattr(owner, "su_type", -1)),
-            "state": str(getattr(owner, "state", "") or ""),
-            "owner_fragment_id": getattr(owner, "owner_fragment_id", None),
-            "owner_contract_id": getattr(owner, "owner_contract_id", None),
-            "owner_product_id": str(getattr(owner, "owner_product_id", "") or ""),
-        }
-        if str(owner.state) in {
-            Stage3OwnershipState.COMPLETED_TOPOLOGY.value,
-            Stage3OwnershipState.CLAIMED_CLOSURE_RESOURCE.value,
-            Stage3OwnershipState.CLAIMED_SU24_RING_RESOURCE.value,
-        } and str(owner.owner_product_id or ""):
-            audit["committed_owner_conflicts"].append({
-                "node_id": int(node_id),
-                "owner_product_id": str(owner.owner_product_id),
-                "state": str(owner.state),
-            })
-            continue
-
-        su_type = int(getattr(node, "su_type", -1))
-        if su_type not in STAGE3_ACCOUNTING_SU_TYPES:
-            audit["missing_node_ids"].append(int(node_id))
-            continue
-
-        for values in working.available_ids_by_su.values():
-            while int(node_id) in values:
-                values.remove(int(node_id))
-        working.available_ids_by_su.setdefault(int(su_type), [])
-        working.available_ids_by_su[int(su_type)].insert(0, int(node_id))
-        if int(node_id) in working.support_context_node_ids:
-            working.support_context_node_ids.remove(int(node_id))
-        if int(node_id) in working.conflict_node_ids:
-            working.conflict_node_ids.remove(int(node_id))
-        working.conflicts = [
-            conflict
-            for conflict in list(working.conflicts or [])
-            if int(dict(conflict or {}).get("node_id", -1)) != int(node_id)
-        ]
-        owner.su_type = int(su_type)
-        owner.state = (
-            Stage3OwnershipState.REMAINING_CLOSURE_RESOURCE.value
-            if su_type in GENERIC_CLOSURE_RESOURCE_TYPES
-            else Stage3OwnershipState.REMAINING_SU24_RING_RESOURCE.value
-            if su_type == SU24_RING_RESOURCE_TYPE
-            else Stage3OwnershipState.REMAINING_AROMATIC_DONOR.value
-        )
-        owner.owner_fragment_id = None
-        owner.owner_contract_id = None
-        owner.owner_product_id = ""
-        owner.owner_slot_id = ""
-        owner.role = str(owner.state)
-        owner.reason = "restored_for_current_generation_ring_pool"
-        audit["restored_node_ids"].append(int(node_id))
-        audit["ownership_after"][str(node_id)] = {
-            "su_type": int(su_type),
-            "state": str(owner.state),
-        }
-
-    audit["ok"] = not bool(
-        audit["missing_node_ids"] or audit["committed_owner_conflicts"]
-    )
-    return working, audit
 
 
 def _all_physical_su24_ids(nodes: Sequence[Any]) -> List[int]:
@@ -3310,8 +3131,23 @@ def _round_resource_ids(phase_eval: Any) -> Dict[int, List[int]]:
             getattr(context, "su24_ring_resource_ids", []) or []
         )
     })
+    # Release provenance removes a node from its old classifier fragment,
+    # but the live assembly may already have claimed it for a new product.
+    # Recovery plans are built before the iteration ledger is seeded, so do
+    # not expose these already-owned nodes as balance/conversion donors.
+    assembly = dict(getattr(phase_eval, "assembly_view", {}) or {})
+    owned_ids = {
+        int(node_id)
+        for product in list(assembly.get("products", []) or [])
+        for node_id in (
+            list(product.get("fixed_source_node_ids", []) or [])
+            + [value for values in dict(
+                product.get("claimed_resource_ids_by_su", {}) or {}
+            ).values() for value in values]
+        )
+    }
     return {
-        int(key): sorted(set(values))
+        int(key): sorted(set(values) - owned_ids)
         for key, values in result.items()
     }
 
@@ -3809,7 +3645,7 @@ def _finalize_phase_plan(
             ),
             "attempted_conversion_count": len(phase_infeasible_contracts),
             "attempted_conversions": infeasible_contract_samples,
-            "h_or_element_rejections": [
+            "conversion_rejections": [
                 dict(item or {}).get("proof", {})
                 for item in infeasible_contract_samples
             ],
@@ -4483,11 +4319,11 @@ def _recycled_su24_to_23_ops(
     assembly = dict(getattr(phase_eval, "assembly_view", {}) or {})
     ledger = dict(assembly.get("resource_ledger", {}) or {})
     live_assembler = getattr(phase_eval, "external_assembler", None)
+    # Empty means all operations were committed, not "replay the history".
     raw_ops = list(
-        getattr(live_assembler, "pending_recycled_resource_conversion_ops", [])
-        or ledger.get("recycled_resource_conversion_ops", [])
-        or assembly.get("planned_conversions", [])
-        or []
+        live_assembler.pending_recycled_resource_conversion_ops
+        if live_assembler is not None
+        else ledger.get("pending_recycled_resource_conversion_ops", [])
     )
     ops: List[Dict[str, Any]] = []
     seen: Set[int] = set()
@@ -4855,15 +4691,6 @@ def _internal_ledger_invariant_errors(
             "reason": "ownership_ledger_conflict",
             "conflict": dict(conflict or {}),
         })
-    if errors:
-        # Keep the invariant failure actionable in long CPU runs.  This is
-        # diagnostic only; the caller still rejects the state atomically.
-        try:
-            import json
-            with open("/tmp/graphnmr_internal_ledger_invariant.json", "w") as handle:
-                json.dump(errors, handle, sort_keys=True)
-        except Exception:
-            pass
     return errors
 
 
@@ -6157,9 +5984,6 @@ def _plan_internal_topology_stage(
         ),
         "optional_flex_unused_capacity": int(remaining_optional_flex_capacity),
         "optional_flex_conversion_count": 0,
-        # Backward-compatible diagnostics; this value is a soft cap, not a
-        # completion target.
-        "residual_flex_target": int(residual_flex_soft_cap),
         "residual_flex_added_count": int(
             initial_required_flex_chains - remaining_required_flex_chains
             + initial_optional_flex_capacity - remaining_optional_flex_capacity
@@ -6183,7 +6007,6 @@ def _plan_internal_topology_stage(
         )),
         "internal_residual_attempt_count": int(residual_attempt_count),
         "internal_residual_attempts": list(residual_attempts),
-        "committed_residual_products": list(residual_products),
         "remaining_ids_by_su": {
             str(key): list(values)
             for key, values in dict(iteration_ledger.available_ids_by_su or {}).items()
@@ -6478,6 +6301,13 @@ def plan_stage3_state_machine(
     }
     restore_external_resource_context = progress_phase is Stage3ProgressPhase.INTERNAL_TOPOLOGY
     flex_block = str(getattr(phase_eval, "flex_reconciliation_block_reason", "") or "")
+    if external_phases_pending and flex_block == "flex_window_too_wide":
+        return _narrow_flex_window_plan(
+            phase_eval=phase_eval, H=H, nodes=nodes,
+            max_primary_adjustments=flex_max_primary_adjustments,
+            special_degree_meta=special_degree_meta,
+            forbidden_signatures=forbidden_resource_conversion_signatures,
+        )
     if external_phases_pending and flex_block:
         flex_contracts = [
             dict(item or {})
@@ -6573,9 +6403,6 @@ def plan_stage3_state_machine(
         else []
     )
     if materialization_errors:
-        infeasible_contract_samples = _diagnostic_attempt_samples(
-            infeasible_contracts
-        )
         proof = {
             "phase": EXTERNAL_STAGE,
             "reason": "external_physical_product_validation_failed",
@@ -6786,12 +6613,6 @@ def plan_stage3_state_machine(
     # ``iteration_ledger`` is reconstructed from the live assembler snapshot.
     # Feeding an output product cache back here would create a second, stale
     # ownership authority and could duplicate products after continuation.
-    iteration_ledger, _ring_pool_restore_audit = (
-        _restore_uncommitted_ring_pool_nodes(
-            iteration_ledger,
-            nodes,
-        )
-    )
     pool = deepcopy(iteration_ledger.available_ids_by_su)
     initial_pool = deepcopy(pool)
     committed_product_conflicts = [
@@ -6904,12 +6725,16 @@ def plan_stage3_state_machine(
             source_status, source_proof = contract_source_status(
                 iteration_ledger,
                 list(contract.claimed_source_node_ids),
+                current_contract_id=int(contract.contract_id),
             )
             if source_status == "superseded":
                 external_superseded += 1
                 continue
             blocker_reason = str(raw.get("blocker_kind", raw.get("blocked_reason", "")) or "")
-            if blocker_reason and not contract.required_counts:
+            # An explicit structural blocker cannot be repaired by filling
+            # resource slots. Historical candidate failures are not blockers.
+            intrinsic_blocker = str(raw.get("contract_kind", "")) == "structural_blocker"
+            if blocker_reason and (intrinsic_blocker or not contract.required_counts):
                 failure_domain = str(
                     raw.get("failure_domain", "")
                     or "topology_materialization"
@@ -6919,7 +6744,7 @@ def plan_stage3_state_machine(
                     "contract_id": int(contract.contract_id),
                     "target_role": str(contract.target_role),
                     "claimed_source_node_ids": list(contract.claimed_source_node_ids),
-                    "required_counts": {},
+                    "required_counts": dict(contract.required_counts),
                     "proof": {
                         "contract_id": int(contract.contract_id),
                         "reason": blocker_reason,
@@ -6948,7 +6773,7 @@ def plan_stage3_state_machine(
                 })
                 role_blocked += 1
                 continue
-            if source_status == "conflict":
+            if source_status in {"conflict", "pending"}:
                 stale_proof = {
                     "phase": str(phase),
                     "contract_id": int(contract.contract_id),
@@ -7001,10 +6826,6 @@ def plan_stage3_state_machine(
                     or assembler_diagnostics.get("failure_domain", "")
                     or ""
                 )
-                resource_reason = any(
-                    token in assembler_reason.lower()
-                    for token in ("shortage", "resource", "pool", "missing")
-                )
                 if declared_failure_domain and declared_failure_domain != "topology_materialization":
                     infeasible_contracts.append({
                         "phase": str(phase),
@@ -7015,25 +6836,6 @@ def plan_stage3_state_machine(
                         "proof": {
                             "reason": str(assembler_reason),
                             "failure_domain": str(declared_failure_domain),
-                            "required_counts": dict(contract.required_counts),
-                            "available_counts": dict(claimable_counts),
-                            "missing_counts": {},
-                            "assembler_diagnostics": assembler_diagnostics,
-                        },
-                    })
-                    role_blocked += 1
-                    continue
-                if resource_reason:
-                    infeasible_contracts.append({
-                        "phase": str(phase),
-                        "contract_id": int(contract.contract_id),
-                        "target_role": str(contract.target_role),
-                        "claimed_source_node_ids": list(contract.claimed_source_node_ids),
-                        "required_counts": dict(contract.required_counts),
-                        "proof": {
-                            "reason": "resource_contract_claimability_inconsistent",
-                            "failure_domain": "resource_accounting",
-                            "assembler_reason": str(assembler_reason),
                             "required_counts": dict(contract.required_counts),
                             "available_counts": dict(claimable_counts),
                             "missing_counts": {},
@@ -7141,14 +6943,32 @@ def plan_stage3_state_machine(
                 forbidden_primary_conversion_signatures=forbidden_resource_conversion_signatures,
                 # External topology conversion must never consume SU24,
                 # including SU24 released by a previously dismantled ring.
-                forbidden_conversion_su_types=[24],
+                forbidden_conversion_su_types=sorted(
+                    EXTERNAL_NON_CONVERTIBLE_RESOURCE_TYPES
+                ),
                 reserve_contract_after_conversion=True,
             )
             if not candidate_plan.ok:
+                candidate_proof = dict(
+                    candidate_plan.phase_result.infeasibility_proof
+                    or direct_proof
+                    or {}
+                )
                 candidate_histogram = candidate_plan.histogram_adjustment_plan
                 partial_groups = list(
                     getattr(candidate_histogram, "groups", []) or []
                 )
+                unresolvable_missing = {
+                    int(su_type): int(missing_counts.get(int(su_type), 0))
+                    for su_type in EXTERNAL_NON_CONVERTIBLE_RESOURCE_TYPES
+                    if int(missing_counts.get(int(su_type), 0)) > 0
+                }
+                if unresolvable_missing:
+                    # Do not commit a useful-looking prefix when this contract
+                    # can never be completed: external conversion deliberately
+                    # cannot produce SU24.  The failed transaction must remain
+                    # atomic so it cannot mutate the next Stage3 generation.
+                    partial_groups = []
                 partial_count = _external_primary_node_count(partial_groups)
                 # A legal prefix is still useful when the current contract
                 # needs more resources than this planner pass could provide.
@@ -7182,10 +7002,37 @@ def plan_stage3_state_machine(
                         transaction.product_node_ids = []
                         transaction.slot_assignments = []
                     direct_transactions.extend(partial_transactions)
+                    planned_primary = int(_external_primary_node_count(phase_groups))
+                    remaining_budget = max(
+                        0,
+                        int(external_max_primary_adjustments)
+                        - int(external_primary_adjustments_used)
+                        - planned_primary,
+                    )
+                    # A partial prefix is useful only when the same live
+                    # generation still has enough primary conversions to
+                    # finish the active contract.  Otherwise the next pass
+                    # would consume the last unit, discover the same
+                    # multi-resource deficit, and fail after leaving a
+                    # misleading half-progress state.  Cross the generation
+                    # boundary now; the fresh Layer1/2 rebuild gets a new
+                    # external budget and can materialize the complete route.
+                    unresolved_counts = {
+                        int(key): int(value)
+                        for key, value in dict(
+                            candidate_proof.get("unresolved_counts", {})
+                            or candidate_proof.get("missing_counts", {})
+                            or {}
+                        ).items()
+                        if int(value) > 0
+                    }
+                    minimum_remaining_primary = int(sum(unresolved_counts.values()))
                     budget_exhausted = bool(
-                        int(external_primary_adjustments_used)
-                        + int(_external_primary_node_count(phase_groups))
-                        >= int(external_max_primary_adjustments)
+                        remaining_budget <= 0
+                        or (
+                            minimum_remaining_primary > 0
+                            and remaining_budget < minimum_remaining_primary
+                        )
                     )
                     return _finalize_phase_plan(
                         phase_eval=phase_eval,
@@ -7223,10 +7070,15 @@ def plan_stage3_state_machine(
                                 + _external_primary_node_count(phase_groups)
                             ),
                             "external_remaining_budget": max(
-                                0,
-                                int(external_max_primary_adjustments)
-                                - int(external_primary_adjustments_used)
-                                - _external_primary_node_count(phase_groups),
+                                0, remaining_budget,
+                            ),
+                            "minimum_remaining_primary": int(
+                                minimum_remaining_primary
+                            ),
+                            "external_budget_insufficient_for_active_contract": bool(
+                                budget_exhausted
+                                and remaining_budget > 0
+                                and minimum_remaining_primary > remaining_budget
                             ),
                             "external_conversion_budget_exhausted": bool(
                                 budget_exhausted
@@ -7291,11 +7143,6 @@ def plan_stage3_state_machine(
                     )
                 failed_transactions = list(candidate_plan.phase_result.transactions or [])
                 direct_transactions.extend(failed_transactions)
-                candidate_proof = dict(
-                    candidate_plan.phase_result.infeasibility_proof
-                    or direct_proof
-                    or {}
-                )
                 candidate_failure_domain = str(
                     candidate_proof.get("failure_domain", "") or ""
                 )
@@ -7567,6 +7414,10 @@ def plan_stage3_state_machine(
                 },
             ), h_tolerance)
     completed_phases.append("remaining_pool_spectrum_rebalance")
+    internal_runtime_before = {
+        **_runtime_with_pool(phase_eval, iteration_ledger.available_ids_by_su),
+        "iteration_topology_ledger": deepcopy(iteration_ledger),
+    }
     internal_plan = _plan_internal_topology_stage(
         phase_eval=phase_eval,
         H=H_work,
@@ -7590,4 +7441,5 @@ def plan_stage3_state_machine(
         **dict(getattr(internal_plan, "diagnostics", {}) or {}),
         "spectrum_stage_evaluated": bool(enable_post_external_spectrum),
     }
+    internal_plan.runtime["rollback_runtime"] = internal_runtime_before
     return internal_plan

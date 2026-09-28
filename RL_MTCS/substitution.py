@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from .models import HeteroAromaticRequest, InverseAssemblyInput, InverseInputError, InputSourceKind
+from .models import HeteroAromaticRequest, InverseAssemblyInput, InverseInputError
 from .state import AssemblyEdge, HexAssemblyState
 
 
@@ -128,17 +128,15 @@ def _request_rows(state: HexAssemblyState) -> List[HeteroAromaticRequest]:
                 or int(request.synthetic_node_id) not in state.node_axial
             ):
                 continue
-            # A complete inverse JSON may retain a request audit record while
+            # A complete inverse export may retain a request audit record while
             # already materializing SU26/SU30 in its aromatic unit.  Do not
             # attempt to substitute such a finalized node again.
             if int(request.ring_size) == 6 and node is not None and int(node.su_type) in {26, 30}:
                 continue
             rows.append(request)
         return rows
-    # JSON inputs are already materialized inverse units.  Only CSV staging
-    # inputs require this final reconstruction pass.
-    if state.problem.source_kind != InputSourceKind.CSV_PAIR:
-        return []
+    # CSV staging is the only supported runtime input and requires this final
+    # reconstruction pass for SU26/SU30 requests.
     planned = state.problem.node_map()
     n26 = sum(value == 26 for value in planned.values())
     n30 = sum(value == 30 for value in planned.values())

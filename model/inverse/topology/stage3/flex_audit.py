@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from collections import Counter
-import math
 from typing import Any, Dict, List, Sequence, Tuple
 
 from ....shared.inverse_common import _NodeV3
+from ....shared.aromatic_plan import flex_count_window
 from ..resources.aromatic_clusters import generate_aromatic_clusters
 from ..classification.classification_models import TopologyClassificationResult
 from ..assembly.state.iteration_ledger import required_counts_from_slots
@@ -291,12 +291,11 @@ def _compute_flex_audit(
     cluster_count = int(cluster_count_before_trim)
     source = str(cluster_source_before_trim)
     error = str(cluster_error_before_trim)
-    rigid10_pairs = max(0, int(counts.get(10, 0)) // 2)
-    y_value = rigid10_pairs
-    z_value = cluster_count - y_value
-    flex_lower = z_value + 1
-    flex_upper_raw = int(math.floor(0.8 * float(max(0, cluster_count))))
-    window_ok = flex_lower <= flex_upper_raw
+    window = flex_count_window(cluster_count, counts.get(10, 0))
+    rigid10_pairs = y_value = window["Y"]
+    z_value = window["Z"]
+    flex_lower, flex_upper_raw = window["flex_lower"], window["flex_upper"]
+    window_ok = window["flex_window_ok"] and window["flex_window_width_ok"]
     window_applicable = cluster_count > 0
 
     fixed_route_status = preflight_classification_fixed_routes(nodes, classification)
@@ -391,11 +390,12 @@ def _compute_flex_audit(
     selected_groups: List[Dict[str, Any]] = []
     blocked_reason = ""
     if enforce and window_applicable and not window_ok:
-        blocked_reason = "flex_window_invalid"
+        blocked_reason = ("flex_window_too_wide" if window["flex_window_ok"]
+                          else "flex_window_invalid")
         target_flex_count = explicit_flex_count
     if invalid_explicit_profiles:
         blocked_reason = "topology_materialization_invalid"
-    if scenario == "below_range" and blocked_reason != "flex_window_invalid":
+    if scenario == "below_range" and not blocked_reason:
         selected_groups = supplemental_candidate_groups[
             :max(0, target_flex_count - explicit_flex_count)
         ]
@@ -453,6 +453,8 @@ def _compute_flex_audit(
         "flex_upper_raw": flex_upper_raw,
         "flex_upper_after_window_raise": flex_upper_raw,
         "flex_window_ok": bool(window_ok),
+        "flex_window_width": window["flex_window_width"],
+        "flex_window_width_ok": window["flex_window_width_ok"],
         "flex_window_applicable": bool(window_applicable),
         "flex_window_source": source,
         "flex_window_error": error,
@@ -532,5 +534,5 @@ def _flex_precheck_required(flex_audit: Dict[str, Any]) -> bool:
     audit = dict(flex_audit or {})
     return bool(
         str(audit.get("scenario", "") or "") == "above_range"
-        or str(audit.get("blocked_reason", "") or "") == "flex_window_invalid"
+        or bool(audit.get("blocked_reason"))
     )

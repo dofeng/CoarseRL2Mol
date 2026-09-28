@@ -86,12 +86,13 @@ def _audit_resource_ledger(
     accounting: Dict[str, Any],
     products: Any,
     released_resource_ids_by_su: Optional[Dict[Any, Any]] = None,
+    recycled_su24_to_23_ids: Optional[Any] = None,
 ) -> Dict[str, Any]:
     normalized_released: Dict[str, set[int]] = {}
     for raw_su, raw_ids in dict(released_resource_ids_by_su or {}).items():
         if not str(raw_su).lstrip("-").isdigit():
             continue
-        effective_su = "23" if int(raw_su) == 24 else str(int(raw_su))
+        effective_su = str(int(raw_su))
         normalized_released.setdefault(effective_su, set()).update(
             int(value) for value in list(raw_ids or [])
         )
@@ -104,19 +105,33 @@ def _audit_resource_ledger(
         for key, values in dict(accounting.get("final_remaining_ids_by_su", {}) or {}).items()
     }
     consumed = {
-        str(key): sorted(set(int(value) for value in list(values or [])))
+        str(key): set(int(value) for value in list(values or []))
         for key, values in dict(accounting.get("committed_claimed_ids_by_su", {}) or {}).items()
     }
     residual_claimed: Dict[str, set[int]] = {}
     for raw in list(products or []):
         product = dict(raw or {})
-        role = str(product.get("product_role", product.get("product_type", "")) or "")
-        if not role.startswith("residual_"):
-            continue
+        phase = str(product.get("phase", "") or "")
+        role = str(product.get("product_role", "") or "")
+        product_type = str(product.get("product_type", "") or "")
+        is_residual = bool(
+            phase == "residual_resource_self_closure"
+            or role.startswith("residual_")
+            or product_type.startswith("residual_")
+        )
         for key, values in dict(product.get("claimed_resource_ids_by_su", {}) or {}).items():
-            residual_claimed.setdefault(str(key), set()).update(
-                int(value) for value in list(values or [])
-            )
+            key = str(key)
+            node_ids = {int(value) for value in list(values or [])}
+            consumed.setdefault(key, set()).update(node_ids)
+            if is_residual:
+                residual_claimed.setdefault(key, set()).update(node_ids)
+    for key in set(initial) | set(remaining) | set(consumed):
+        initial[key] = sorted(
+            set(initial.get(key, []))
+            | set(consumed.get(key, set()))
+            | set(remaining.get(key, []))
+        )
+        consumed[key] = set(consumed.get(key, set()))
     keys = sorted(
         set(initial) | set(remaining) | set(consumed),
         key=lambda value: (0, int(value)) if str(value).lstrip("-").isdigit() else (1, str(value)),
@@ -131,9 +146,39 @@ def _audit_resource_ledger(
         str(key): sorted(set(consumed.get(str(key), [])) - set(residual.get(str(key), [])))
         for key in keys
     }
+    consumed = {
+        str(key): sorted(set(consumed.get(str(key), set())))
+        for key in keys
+    }
+    invariant_errors = [
+        dict(item or {}) for item in list(accounting.get("errors", []) or [])
+    ]
+    for key in keys:
+        initial_ids = set(initial.get(str(key), []))
+        consumed_ids = set(consumed.get(str(key), []))
+        remaining_ids = set(remaining.get(str(key), []))
+        if consumed_ids & remaining_ids:
+            invariant_errors.append({
+                "reason": "consumed_remaining_resource_overlap",
+                "su_type": str(key),
+                "node_ids": sorted(consumed_ids & remaining_ids),
+            })
+        if initial_ids != consumed_ids | remaining_ids:
+            invariant_errors.append({
+                "reason": "initial_resource_partition_invalid",
+                "su_type": str(key),
+                "missing_node_ids": sorted(initial_ids - consumed_ids - remaining_ids),
+                "extra_node_ids": sorted((consumed_ids | remaining_ids) - initial_ids),
+            })
     return {
         "initial_ids_by_su": {str(key): list(initial.get(str(key), [])) for key in keys},
         "consumed_ids_by_su": {str(key): list(consumed.get(str(key), [])) for key in keys},
+        "topology_consumed_ids_by_su": {
+            str(key): list(topology.get(str(key), [])) for key in keys
+        },
+        "residual_consumed_ids_by_su": {
+            str(key): list(residual.get(str(key), [])) for key in keys
+        },
         "remaining_ids_by_su": {str(key): list(remaining.get(str(key), [])) for key in keys},
         "initial_counts": {str(key): len(initial.get(str(key), [])) for key in keys},
         "consumed_counts": {str(key): len(consumed.get(str(key), [])) for key in keys},
@@ -141,11 +186,9 @@ def _audit_resource_ledger(
         "residual_consumed_counts": {str(key): len(residual.get(str(key), [])) for key in keys},
         "remaining_counts": {str(key): len(remaining.get(str(key), [])) for key in keys},
         "shortage_counts": {},
-        "invariant_errors": [
-            dict(item or {}) for item in list(accounting.get("errors", []) or [])
-        ],
-        # A release map is normalized by the assembly boundary; a released
-        # SU24 is provenance only and never an effective SU24 pool.
+        "invariant_errors": invariant_errors,
+        # Legacy raw releases do not define current identity. The typed map
+        # below follows live nodes; recovery provenance is recorded separately.
         "released_su24_ids": [],
         "released_resource_ids_by_su": {
             str(key): sorted(values)
@@ -153,7 +196,7 @@ def _audit_resource_ledger(
             if values
         },
         "recycled_su24_to_23_ids": sorted(
-            normalized_released.get("23", set())
+            {int(value) for value in (recycled_su24_to_23_ids or [])}
         ),
         "snapshot_stage": "fresh_stage3_audit",
     }
@@ -193,15 +236,26 @@ def plan_stage3_resource_adjustments(
     forbidden_spectrum_inverse_signatures: Optional[Any] = None,
     forbidden_resource_conversion_signatures: Optional[Any] = None,
 ) -> Stage3AdjustmentPlan:
-    classification = classify_topology_units(
-        list(nodes or []),
-        fixed_partition_meta=fixed_partition_meta,
+    continuing_generation = bool(
+        external_assembler is not None
+        and int(external_assembler.generation_id) == int(generation_id)
+    )
+    # A generation's fragment graph and flex window survive its resource
+    # conversions. Intermediate SU12 parity is repaired at the rebuild
+    # boundary; running the cluster generator before then is invalid.
+    classification = (
+        external_assembler.classification
+        if continuing_generation
+        else classify_topology_units(list(nodes or []), fixed_partition_meta=fixed_partition_meta)
     )
     phase_eval = build_stage3_phase_evaluation(
         nodes=list(nodes or []),
         classification=classification,
         fixed_partition_meta=fixed_partition_meta,
         generation_id=int(generation_id),
+        generation_flex_audit=(
+            external_assembler.flex_audit if continuing_generation else None
+        ),
     )
     plan = plan_stage3_state_machine(
         phase_eval=phase_eval,
@@ -322,10 +376,16 @@ def audit_stage3_topology(
         if not bool(dict(item or {}).get("provisional", False))
         and bool(dict(item or {}).get("closed", False))
     ]
-    if not products:
+    # An evaluated ledger is authoritative even when it contains zero
+    # completed products.  Falling back to the assembly cache in that case can
+    # resurrect provisional/rejected products and overstate resource claims.
+    # Only legacy snapshots that lack the canonical field may use the view.
+    if not products and "completed_products" not in ledger:
         products = [
             dict(item or {})
             for item in list(assembly_snapshot.get("products", []) or [])
+            if not bool(dict(item or {}).get("provisional", False))
+            and bool(dict(item or {}).get("closed", True))
         ]
 
     assembly_pending = [
@@ -556,6 +616,7 @@ def audit_stage3_topology(
             accounting,
             products,
             dict(assembly_resource_ledger.get("released_resource_ids_by_su", {}) or {}),
+            assembly_resource_ledger.get("recycled_su24_to_23_ids", []),
         ),
         "resource_accounting": accounting,
         "infeasibility_proof": proof,

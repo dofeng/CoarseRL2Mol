@@ -253,11 +253,21 @@ def _flex_lower_increase_allowed(
     return allowed
 
 
-def _bundle_has_valid_aromatic_staging(
+def _bundle_has_feasible_aromatic_staging(
     score: ConversionBundleScore,
 ) -> bool:
+    """Allow an odd SU12 prefix that the rebuild-boundary balancer can repair.
+
+    Physical conversions can continue within one external generation before
+    port balance runs. Rejecting these prefixes here would prevent that
+    mandatory balance step from ever seeing them. Other generator failures
+    remain infeasible, and this check never authorizes a final graph export.
+    """
     flex_after = dict(getattr(score.flex_impact, "after", {}) or {})
-    return bool(flex_after.get("aromatic_staging_valid", True))
+    return bool(
+        flex_after.get("aromatic_staging_valid", True)
+        or flex_after.get("aromatic_staging_projected", False)
+    )
 
 
 def _scoring_context(
@@ -878,7 +888,7 @@ def _choose_bundle_from_gap(
         return [
             score for score in scored_bundles
             if score.feasible
-            and _bundle_has_valid_aromatic_staging(score)
+            and _bundle_has_feasible_aromatic_staging(score)
             and not _bundle_is_forbidden(H, score.ops, forbidden)
             and _bundle_preserves_primary_effect(score.ops)
             and _gap_total(score.resource_gap_after) < _gap_total(score.resource_gap_before)
@@ -1127,7 +1137,7 @@ def build_histogram_adjustment_plan(
                     [
                         item for item in scored
                         if item.feasible
-                        and _bundle_has_valid_aromatic_staging(item)
+                        and _bundle_has_feasible_aromatic_staging(item)
                         and not _bundle_is_forbidden(
                             H_work,
                             item.ops,
@@ -1567,6 +1577,11 @@ def apply_histogram_adjustment_plan(
         target = int(balance_op.to_su)
         count = max(1, int(balance_op.count))
         node_ids = [int(value) for value in list(balance_op.node_ids or [])]
+        # SU12/SU13 are protected for ordinary resource conversions, but the
+        # explicit port-balance operations are allowed to consume that reserve
+        # temporarily. A later Stage3 structural-unit adjustment restores the
+        # aromatic staging pool, so this lower-bound check must not reject the
+        # balance transaction itself.
         if (
             source in {12, 13}
             and count
@@ -1575,6 +1590,7 @@ def apply_histogram_adjustment_plan(
                 int(H_out[source].item())
                 - int(MIN_STAGE3_AROMATIC_RESOURCE_COUNT),
             )
+            and balance_field not in {"parity_balance_op", "port_role_balance_op"}
         ):
             return Stage3AdjustmentApplyResult(
                 nodes=copy.deepcopy(list(nodes or [])), H=H_before, applied_ops=[],

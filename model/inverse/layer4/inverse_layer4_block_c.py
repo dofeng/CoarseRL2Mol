@@ -44,7 +44,10 @@ from ..topology.stage3_models import (
     HistogramAdjustmentPlan,
     HistogramConversion,
     Stage3ProgressPhase,
+    merge_stage3_contracts_by_owner,
 )
+from ..topology.stage3.rebuild import rebuild_exception_proof
+from ..topology.assembly.state.snapshot import validate_snapshot_state
 from ..topology.resources.spectrum_rebalance import (
     apply_spectrum_candidate,
     histogram_signature_after_operations,
@@ -52,6 +55,10 @@ from ..topology.resources.spectrum_rebalance import (
     spectrum_profile_loss,
 )
 from ..topology.assembly.closure.chain import ring_recovery_candidate_costs
+from ..topology.assembly.state.iteration_ledger import (
+    build_iteration_ledger,
+    seed_ledger_topology_state,
+)
 from ..layer1.port_role_balance import (
     audit_layer1_port_roles,
     select_layer1_port_balance,
@@ -462,62 +469,41 @@ def _stage3_runtime_snapshot(plan: Any) -> Dict[str, Any]:
         "available_ids_by_su": dict(raw_ledger.get("available_ids_by_su", {}) or {}),
         "conflicts": list(raw_ledger.get("conflicts", []) or []),
     }
-    # The live assembler is the authoritative source at a terminal internal
-    # failure.  Its products/pending contracts must survive even when the
-    # state-machine plan itself contains no newly committed transaction.
+    # Use the live assembler only when no evaluated ownership ledger exists.
     live_products = [
         product.to_dict() if hasattr(product, "to_dict") else dict(product or {})
         for product in list(getattr(live_assembler, "products", []) or [])
         if dict(product.to_dict() if hasattr(product, "to_dict") else product or {})
     ]
-    # Merge every available runtime representation.  A continuation plan may
-    # carry a ledger containing only the newly committed residual product while
-    # ``assembly_view`` still holds the earlier external products; either one
-    # alone is therefore incomplete.
+    # An evaluated ledger is the canonical snapshot, including rejected claims.
+    # Merging a live/output cache into it can resurrect a rejected product or
+    # resources already consumed by the internal phase.
     assembly_products = (
         dict(getattr(phase_eval, "assembly_view", {}) or {}).get("products", [])
         if phase_eval is not None
         else []
     )
-    live_products = _merge_stage3_committed_products(
-        list(ledger.get("completed_products", []) or []),
-        live_products,
-        assembly_products,
-    )
-    live_pending = [
-        pending.to_ownership_dict()
-        if hasattr(pending, "to_ownership_dict")
-        else pending.to_dict()
-        if hasattr(pending, "to_dict")
-        else dict(pending or {})
+    has_evaluated_ledger = "ownership_by_node_id" in raw_ledger
+    if has_evaluated_ledger:
+        live_products = list(ledger["completed_products"])
+    elif live_assembler is None:
+        live_products = list(assembly_products)
+    # Pending units are diagnostic projections, not ownership contracts.
+    # An authoritative empty list must not resurrect an older cached pending.
+    pending_units = [
+        payload(pending)
         for pending in list(getattr(live_assembler, "pending_units", []) or [])
     ]
-    live_pending = [
-        dict(item or {}) for item in list(ledger.get("pending_contracts", []) or [])
-    ] + live_pending
-    if not live_pending and phase_eval is not None:
-        live_pending.extend(
-            dict(item or {})
-            for item in list(
-                dict(getattr(phase_eval, "assembly_view", {}) or {}).get(
-                    "pending_units", []
-                )
-                or []
-            )
-        )
-    if not live_pending:
-        live_pending.extend(
-            dict(item or {})
-            for item in list(getattr(plan, "pending_contracts", []) or [])
-        )
-    live_contracts = [
-        dict(contract or {})
-        for contract in list(getattr(live_assembler, "pending_contracts", []) or [])
-        if dict(contract or {})
-    ]
-    if live_contracts:
-        live_pending.extend(live_contracts)
-    if live_assembler is not None:
+    if has_evaluated_ledger:
+        live_pending = list(ledger["pending_contracts"])
+    elif live_assembler is not None:
+        live_pending = [payload(item) for item in live_assembler.pending_contracts]
+    else:
+        live_pending = [payload(item) for item in list(getattr(plan, "pending_contracts", []) or [])]
+    snapshot_errors: List[Dict[str, Any]] = []
+    if not has_evaluated_ledger and pending_units and not live_pending:
+        snapshot_errors.append({"reason": "snapshot_missing_canonical_pending_contracts"})
+    if live_assembler is not None and not has_evaluated_ledger:
         allocator = getattr(live_assembler, "allocator", None)
         if allocator is not None:
             ledger["available_ids_by_su"] = {
@@ -528,6 +514,46 @@ def _stage3_runtime_snapshot(plan: Any) -> Dict[str, Any]:
             }
         ledger["completed_products"] = list(live_products)
         ledger["pending_contracts"] = list(live_pending)
+        # Some terminal recovery plans carry the live assembler without an
+        # iteration ledger. Freeze its concrete ownership now; an empty owner
+        # map would otherwise label every successfully assembled node unknown.
+        round_context = getattr(phase_eval, "round_context", None)
+        frozen = build_iteration_ledger(
+            list(live_assembler.nodes),
+            resource_ids_by_su=ledger["available_ids_by_su"],
+        )
+        context_owners = getattr(round_context, "ownership_by_node_id", {})
+        if context_owners:
+            for node_id, owner in context_owners.items():
+                actual = frozen.ownership_by_node_id.get(int(node_id))
+                if actual is None:
+                    continue
+                copied = deepcopy(owner)
+                copied.su_type = int(actual.su_type)
+                frozen.ownership_by_node_id[int(node_id)] = copied
+            frozen.conflicts = deepcopy(list(getattr(round_context, "conflicts", []) or []))
+            frozen.conflict_node_ids = [
+                int(node_id) for node_id, owner in frozen.ownership_by_node_id.items()
+                if owner.state == "unclassified_or_conflict"
+            ]
+            frozen.support_context_node_ids = [
+                int(node_id) for node_id, owner in frozen.ownership_by_node_id.items()
+                if owner.state == "support_context"
+            ]
+        frozen.generation_id = int(getattr(live_assembler, "generation_id", 0) or 0)
+        try:
+            frozen = seed_ledger_topology_state(
+                frozen, completed_products=live_products, pending_contracts=live_pending,
+            )
+        except (TypeError, ValueError) as exc:
+            # Snapshot errors must not replace the failure we are reporting.
+            # Keep the raw evidence and an explicit conflict; never certify it.
+            snapshot_errors.append({"reason": "snapshot_contract_invalid", "error": str(exc)})
+            frozen.completed_products = list(live_products)
+            frozen.pending_contracts = list(live_pending)
+        ledger = frozen.to_dict()
+        live_products = list(ledger["completed_products"])
+        live_pending = list(ledger["pending_contracts"])
     # A lone physical SU24 has no fragment contract, but it is still an
     # unfinished internal resource action. Keep it visible in the pending
     # export without changing its ownership state from resource_pool.
@@ -584,22 +610,11 @@ def _stage3_runtime_snapshot(plan: Any) -> Dict[str, Any]:
             "reason": "isolated_su24_requires_internal_12_or_13_conversion",
         } for node_id in remaining_su24)
         ledger["pending_contracts"] = list(live_pending)
-    pending_by_key: Dict[str, Dict[str, Any]] = {}
-    for item in list(live_pending):
-        payload_item = dict(item or {})
-        if not payload_item:
-            continue
-        raw_contract_id = payload_item.get("contract_id")
-        if raw_contract_id not in (None, "", -1, "-1"):
-            pending_key = f"contract:{raw_contract_id}"
-        else:
-            pending_key = (
-                f"{payload_item.get('pending_kind', '')}:"
-                f"{payload_item.get('real_gid', payload_item.get('real_node_partial', ''))}:"
-                f"{','.join(str(value) for value in list(payload_item.get('claimed_source_node_ids', []) or []))}"
-            )
-        pending_by_key[pending_key] = payload_item
-    live_pending = list(pending_by_key.values())
+    try:
+        live_pending = merge_stage3_contracts_by_owner(live_pending)
+    except (TypeError, ValueError) as exc:
+        snapshot_errors.append({"reason": "snapshot_contract_invalid", "error": str(exc)})
+    ledger["conflicts"].extend(snapshot_errors)
     ledger["pending_contracts"] = list(live_pending)
     ownership_states: Dict[str, List[int]] = {}
     for raw_owner in dict(ledger.get("ownership_by_node_id", {}) or {}).values():
@@ -683,6 +698,121 @@ def _stage3_runtime_snapshot(plan: Any) -> Dict[str, Any]:
             int(value)
             for value in list(resource_ledger.get("released_su24_ids", []) or [])
         ]
+
+    # The allocator ledger is a generation-start view. Internal residual
+    # products can claim resources after that view was created, so using its
+    # initial/consumed maps verbatim makes a valid terminal product appear to
+    # be outside the resource partition. Reconcile the identity maps from
+    # committed product claims and the live remaining pool before auditing.
+    def _normalize_resource_map(raw: Any) -> Dict[str, set[int]]:
+        result: Dict[str, set[int]] = {}
+        for raw_su, raw_ids in dict(raw or {}).items():
+            if not str(raw_su).lstrip("-").isdigit():
+                continue
+            result.setdefault(str(int(raw_su)), set()).update(
+                int(value) for value in list(raw_ids or [])
+            )
+        return result
+
+    initial_ids = _normalize_resource_map(
+        resource_ledger.get("initial_ids_by_su", {})
+    )
+    consumed_ids = _normalize_resource_map(
+        resource_ledger.get("consumed_ids_by_su", {})
+    )
+    topology_ids = _normalize_resource_map(
+        resource_ledger.get("topology_consumed_ids_by_su", {})
+    )
+    residual_ids = _normalize_resource_map(
+        resource_ledger.get("residual_consumed_ids_by_su", {})
+    )
+    remaining_ids = _normalize_resource_map(
+        resource_ledger.get("remaining_ids_by_su", {})
+    )
+
+    for raw_product in list(live_products):
+        product = dict(raw_product or {})
+        phase = str(product.get("phase", "") or "")
+        product_type = str(product.get("product_type", "") or "")
+        product_role = str(product.get("product_role", "") or "")
+        target = (
+            residual_ids
+            if phase == "residual_resource_self_closure"
+            or product_type.startswith("residual_")
+            or product_role.startswith("residual_")
+            else topology_ids
+        )
+        for raw_su, raw_node_ids in dict(
+            product.get("claimed_resource_ids_by_su", {}) or {}
+        ).items():
+            if not str(raw_su).lstrip("-").isdigit():
+                continue
+            su_key = str(int(raw_su))
+            node_ids = {
+                int(value) for value in list(raw_node_ids or [])
+            }
+            consumed_ids.setdefault(su_key, set()).update(node_ids)
+            target.setdefault(su_key, set()).update(node_ids)
+
+    # Every resource identity must be represented by exactly one side of the
+    # terminal partition. Including product claims here also covers resources
+    # created by a later residual pass that were absent from the allocator's
+    # generation-start initial map.
+    su_keys = sorted(
+        set(initial_ids)
+        | set(consumed_ids)
+        | set(topology_ids)
+        | set(residual_ids)
+        | set(remaining_ids),
+        key=lambda value: (
+            (0, int(value))
+            if str(value).lstrip("-").isdigit()
+            else (1, str(value))
+        ),
+    )
+    for su_key in su_keys:
+        consumed_ids.setdefault(su_key, set())
+        topology_ids.setdefault(su_key, set())
+        residual_ids.setdefault(su_key, set())
+        remaining_ids.setdefault(su_key, set())
+        initial_ids[su_key] = (
+            set(initial_ids.get(su_key, set()))
+            | set(consumed_ids.get(su_key, set()))
+            | set(remaining_ids.get(su_key, set()))
+        )
+        # Older ledgers did not always carry category maps for all consumed
+        # identities. Preserve explicit residual claims and classify any
+        # remaining consumed identity as topology-consumed for the audit.
+        topology_ids[su_key].update(
+            set(consumed_ids[su_key])
+            - set(residual_ids[su_key])
+            - set(topology_ids[su_key])
+        )
+
+    def _public_resource_map(mapping: Dict[str, set[int]]) -> Dict[str, List[int]]:
+        return {
+            str(key): sorted(
+                int(value) for value in mapping.get(str(key), set())
+            )
+            for key in su_keys
+        }
+
+    resource_ledger["initial_ids_by_su"] = _public_resource_map(initial_ids)
+    resource_ledger["consumed_ids_by_su"] = _public_resource_map(consumed_ids)
+    resource_ledger["topology_consumed_ids_by_su"] = _public_resource_map(topology_ids)
+    resource_ledger["residual_consumed_ids_by_su"] = _public_resource_map(residual_ids)
+    resource_ledger["remaining_ids_by_su"] = _public_resource_map(remaining_ids)
+    for map_name, count_name in (
+        ("initial_ids_by_su", "initial_counts"),
+        ("consumed_ids_by_su", "consumed_counts"),
+        ("topology_consumed_ids_by_su", "topology_consumed_counts"),
+        ("residual_consumed_ids_by_su", "residual_consumed_counts"),
+        ("remaining_ids_by_su", "remaining_counts"),
+    ):
+        resource_ledger[count_name] = {
+            str(key): len(resource_ledger[map_name].get(str(key), []))
+            for key in su_keys
+        }
     return {
         "generation_id": int(
             ledger.get(
@@ -698,6 +828,9 @@ def _stage3_runtime_snapshot(plan: Any) -> Dict[str, Any]:
         "products": list(live_products),
         "pending_contracts": list(live_pending),
         "ownership_ledger": ownership_ledger,
+        "pending_units": pending_units,
+        "snapshot_valid": not snapshot_errors,
+        "snapshot_errors": snapshot_errors,
     }
 
 
@@ -923,53 +1056,6 @@ def _mapping_payload(value: Any, *, field_name: str) -> Dict[str, Any]:
         if isinstance(converted, dict):
             return dict(converted)
     raise TypeError(f"{field_name} must be a mapping, got {type(value).__name__}")
-
-
-def _stage3_product_identity(product: Dict[str, Any]) -> str:
-    payload = dict(product or {})
-    node_ids = sorted({
-        int(value)
-        for value in list(payload.get("fixed_source_node_ids", []) or [])
-        + [
-            int(value)
-            for values in dict(
-                payload.get("claimed_resource_ids_by_su", {}) or {}
-            ).values()
-            for value in list(values or [])
-        ]
-    })
-    # A physical product is identified by the concrete nodes it owns.  The
-    # assembler and ledger may assign different product IDs while exporting
-    # the same materialized product; using those IDs as the primary key
-    # duplicates rings (and double-counts their SU24 resources) in the final
-    # snapshot.  Product IDs remain a fallback only for node-less diagnostics.
-    if node_ids:
-        return f"nodes:{','.join(str(value) for value in node_ids)}"
-    product_id = str(payload.get("product_id", "") or "")
-    if product_id:
-        return f"id:{product_id}"
-    return (
-        f"phase:{str(payload.get('phase', '') or '')}|"
-        f"contract:{int(payload.get('contract_id', -1) or -1)}|"
-        "nodes:"
-    )
-
-
-def _merge_stage3_committed_products(
-    current: List[Dict[str, Any]],
-    *collections: Any,
-) -> List[Dict[str, Any]]:
-    merged: Dict[str, Dict[str, Any]] = {
-        _stage3_product_identity(dict(product or {})): dict(product or {})
-        for product in list(current or [])
-        if dict(product or {})
-    }
-    for collection in collections:
-        for product in list(collection or []):
-            payload = dict(product or {})
-            if payload:
-                merged[_stage3_product_identity(payload)] = payload
-    return [merged[key] for key in sorted(merged)]
 
 
 def _target_h(E_target: Optional[torch.Tensor]) -> Optional[float]:
@@ -1430,6 +1516,12 @@ def _last_resource_step_signature(histogram_plan: Any) -> str:
     groups = list(getattr(histogram_plan, "groups", []) or [])
     if not groups:
         return ""
+    for group in reversed(groups):
+        diagnostics = dict(getattr(group, "scoring_diagnostics", {}) or {})
+        if diagnostics.get("candidate_bundle_signature"):
+            return str(diagnostics["candidate_bundle_signature"])
+        if diagnostics.get("plan_kind") != "pre_rebuild_su12_cap_recovery":
+            break
     H_state = getattr(histogram_plan, "H_before", None)
     if not isinstance(H_state, torch.Tensor):
         return ""
@@ -1491,6 +1583,10 @@ def _register_rejected_resource_candidate(
 
 
 def _rollback_stage3_plan_transactions(plan: Any, reason: str) -> List[int]:
+    runtime = getattr(plan, "runtime", {})
+    rollback_runtime = runtime.pop("rollback_runtime", None)
+    if rollback_runtime is not None:
+        plan.runtime = rollback_runtime
     phase_result = getattr(plan, "phase_result", None)
     rolled_back_contract_ids: List[int] = []
     for transaction in list(getattr(phase_result, "transactions", []) or []):
@@ -1503,7 +1599,10 @@ def _rollback_stage3_plan_transactions(plan: Any, reason: str) -> List[int]:
             or list(getattr(transaction, "conversion_path", []) or [])
             or list(getattr(transaction, "compensation_node_ids", []) or [])
         )
-        if not has_rebuild_effect and not is_current_candidate:
+        is_internal_trial = rollback_runtime is not None and str(
+            getattr(transaction, "phase", "")
+        ) in {"internal_topology", "residual_resource_self_closure"}
+        if not has_rebuild_effect and not is_current_candidate and not is_internal_trial:
             continue
         attempted = {
             "converted_node_ids": list(getattr(transaction, "converted_node_ids", []) or []),
@@ -1726,15 +1825,6 @@ def _append_stage3_parity_balance(
     node_types = {
         int(getattr(node, "global_id", -1)): int(getattr(node, "su_type", -1))
         for node in list(nodes or [])
-    }
-    # SU12/SU13 are legal balance donors even when the external allocator has
-    # consumed every closure resource and therefore reports an explicitly empty
-    # remaining ledger. Add them before the empty-ledger failure check.
-    for node_id, su_type in node_types.items():
-        if int(su_type) in {12, 13}:
-            remaining.setdefault(int(su_type), []).append(int(node_id))
-    remaining = {
-        int(key): sorted(set(values)) for key, values in remaining.items()
     }
     if not remaining:
         accounting = dict(
@@ -1999,11 +2089,20 @@ def _append_stage3_parity_balance(
         directions: Tuple[Tuple[int, int], ...],
         kind: str,
     ):
+        # The aromatic minimum protects ordinary topology/resource conversions.
+        # Port parity is the explicit consumer of that reserve: it may use one
+        # SU12/SU13 donor below the temporary minimum, after which a later
+        # Stage3 structural-unit adjustment restores the aromatic pool.
+        allows_aromatic_minimum_breakthrough = str(kind) in {
+            "total_port_parity",
+            "layer1_port_roles",
+        }
         for source, target in directions:
             if (
                 int(source) in {12, 13}
                 and int(H_balanced[int(source)].item())
                 <= int(MIN_STAGE3_AROMATIC_RESOURCE_COUNT)
+                and not allows_aromatic_minimum_breakthrough
             ):
                 attempted_directions.append({
                     "kind": str(kind),
@@ -2047,12 +2146,13 @@ def _append_stage3_parity_balance(
                     ):
                         continue
                 candidates.append(int(node_id))
-            attempted_directions.append({
+            attempt = {
                 "kind": str(kind),
                 "from_su": int(source),
                 "to_su": int(target),
                 "candidate_node_ids": sorted(candidates),
-            })
+            }
+            attempted_directions.append(attempt)
             if candidates:
                 preferred = sorted(
                     int(value)
@@ -2193,7 +2293,9 @@ def _append_stage3_parity_balance(
 
     # Either 13->12 or 12->13 flips the total degree parity. The cursor only
     # defines which direction is preferred; it must not make the other valid
-    # direction unavailable when the preferred donor pool is exhausted.
+    # direction unavailable when the preferred donor pool is exhausted. The
+    # protected SU12/SU13 reserve is intentionally consumable at this boundary;
+    # a later Stage3 structural-unit adjustment restores the aromatic pool.
     if fixed_flex_expansion:
         total_preferred = ((12, 13), (13, 12))
     elif int(balance_cursor) % 2 == 0:
@@ -2388,8 +2490,16 @@ def _append_stage3_parity_balance(
             **release_metadata,
         }
     else:
+        # Recovery plans carry only the recovered ring in their inventory.
+        # Once aromatic nodes are admitted as concrete balance donors above,
+        # include the same before-state identities in the count ledger too.
+        # Otherwise a valid SU12/SU13 balance falsely underflows an absent
+        # inventory bucket. Do not admit any additional closure resources.
+        inventory_before = dict(working_histogram.inventory_before or {})
+        for su_type in (12, 13):
+            inventory_before[su_type] = len(authorized_before.get(su_type, []))
         inventory_after, inventory_errors = apply_count_delta(
-            getattr(working_histogram, "inventory_before", {}) or {},
+            inventory_before,
             combined_group_delta(working_groups, extra_ops=balance_ops),
         )
         if inventory_errors:
@@ -2400,6 +2510,7 @@ def _append_stage3_parity_balance(
                 "before": audit_before,
                 "inventory_errors": inventory_errors,
             }
+        working_histogram.inventory_before = inventory_before
         working_histogram.inventory_after = inventory_after
 
     if internal_su24_reclassification:
@@ -2468,6 +2579,14 @@ def _append_stage3_parity_balance(
             else []
         ),
         "su12_cap": dict(su12_generation_cap(H_balanced)),
+        "aromatic_minimum_breakthrough": bool(
+            any(
+                int(op.from_su) in {12, 13}
+                and int(H_balanced[int(op.from_su)].item())
+                <= int(MIN_STAGE3_AROMATIC_RESOURCE_COUNT)
+                for op in balance_ops
+            )
+        ),
         "next_cursor": int(balance_cursor) + (1 if balance_ops else 0),
     }
     parity_op = getattr(working_histogram, "parity_balance_op", None)
@@ -2580,6 +2699,50 @@ def _apply_deferred_port_balance(
         if op is not None
     ]
     return nodes_out, H_out, diagnostics
+
+
+def _rebuild_external_generation(
+    *, plan, nodes, H, special_degree_meta, balance_cursor, E_target,
+    h_tolerance, rebuild_fn, validate_fn, cycle_number,
+    context_snapshot_fn=None, context_restore_fn=None,
+) -> Dict[str, Any]:
+    """Stage boundary balance and rebuilding without mutating retained state."""
+    context_before = deepcopy(context_snapshot_fn()) if callable(context_snapshot_fn) else None
+    committed = False
+    balance: Dict[str, Any] = {}
+    try:
+        trial_nodes, trial_H, balance = _apply_deferred_port_balance(
+            plan=plan, nodes=deepcopy(nodes), H=H.detach().clone(),
+            special_degree_meta=special_degree_meta, balance_cursor=balance_cursor,
+            E_target=E_target, h_tolerance=h_tolerance,
+        )
+        if balance.get("reason", "") not in {"pre_rebuild_ports_balanced", ""}:
+            return {"ok": False, "reason": "pre_rebuild_port_feasibility_failed",
+                    "failure_domain": "histogram", "balance": balance}
+        if rebuild_fn is None or validate_fn is None:
+            return {"ok": False, "reason": "layer12_rebuild_unavailable", "balance": balance}
+        cand_nodes, cand_H, cand_diff, cand_r2 = rebuild_fn(
+            H_seed=trial_H.detach().clone(), phase="external_topology",
+            cycle_idx=cycle_number - 1, nodes_seed=trial_nodes,
+        )
+        _clear_stage3_node_runtime_state(cand_nodes)
+        if not torch.equal(torch.clamp(cand_H.detach().cpu(), min=0).long(), trial_H.cpu()):
+            return {"ok": False, "reason": "fresh_rebuild_histogram_mismatch",
+                    "failure_domain": "histogram", "balance": balance}
+        validation = validate_fn(
+            nodes=cand_nodes, H=cand_H, tag=f"BlockC:external-generation-rebuild #{cycle_number}",
+        )
+        if not validation["ok"]:
+            return {**validation, "balance": balance}
+        context = deepcopy(context_snapshot_fn()) if callable(context_snapshot_fn) else None
+        committed = True
+        return {"ok": True, "nodes": cand_nodes, "H": cand_H, "difference": cand_diff,
+                "r2": cand_r2, "context": context, "balance": balance}
+    except Exception as exc:
+        return {**rebuild_exception_proof(exc), "balance": balance}
+    finally:
+        if not committed and callable(context_restore_fn):
+            context_restore_fn(context_before)
 
 
 def _prepare_spectrum_candidate_for_rebuild(
@@ -3038,8 +3201,8 @@ def _stage3_terminal_infeasibility_proof(
         "claim_trace": [dict(item or {}) for item in claim_trace],
         "recovery_proof": recovery_proof,
         "attempted_conversions": planned_conversions,
-        "h_or_element_rejections": list(
-            prior_proof.get("h_or_element_rejections", []) or rejection_reasons
+        "conversion_rejections": list(
+            prior_proof.get("conversion_rejections", []) or rejection_reasons
         ),
         "template_checks": {
             **_mapping_payload(
@@ -3242,9 +3405,6 @@ def run_block_c_resource_adjustment_loop_impl(
     )
     adjuster._h_tolerance = h_tolerance
     outer_cycle = int(kwargs.pop("outer_cycle", 0))
-    # Kept in the accepted call shape for replay compatibility, but deliberately
-    # ignored: Stage3 cycle numbering is local to each Outer Cycle invocation.
-    kwargs.pop("iteration_offset", None)
     enable_post_external_spectrum = bool(kwargs.pop("enable_post_external_spectrum", True))
     spectrum_active_through_cycle = int(
         kwargs.pop(
@@ -3281,6 +3441,7 @@ def run_block_c_resource_adjustment_loop_impl(
     cycles: List[Stage3WorkflowCycleRecord] = []
     accepted_cycles = 0
     stop_reason = "stage3_not_completed"
+    rebuild_failure: Dict[str, Any] = {}
     progress_phase = Stage3ProgressPhase.FLEX_RECONCILIATION
     # The primary-conversion budget is shared by all external roles in one
     # Layer1/2 generation (flex, fatty ring, and side chain).  Recovery is
@@ -3348,12 +3509,11 @@ def run_block_c_resource_adjustment_loop_impl(
     while True:
         attempt_idx += 1
         if generation_cycle_number is None:
+            rebuild_failure = {}
             cycle_idx += 1
             # Stage3 cycle numbers are local to this invocation.  Every Outer
             # Cycle creates an independent Stage3 generation and must restart
             # both the cycle counter and the spectrum cutoff from Cycle 1.
-            # ``iteration_offset`` is retained only as a legacy call-shape
-            # parameter; it must never affect routing or spectrum enablement.
             generation_cycle_number = int(cycle_idx)
             generation_attempt_number = 0
             spectrum_trial_count = 0
@@ -3694,11 +3854,13 @@ def run_block_c_resource_adjustment_loop_impl(
                         nodes_seed=candidate_nodes,
                     )
                     _clear_stage3_node_runtime_state(cand_nodes)
-                    valid, valid_reason = validate_fn(
+                    validation = validate_fn(
                         nodes=cand_nodes,
                         H=cand_H,
                         tag=f"BlockC:spectrum #{cycle_number}/{getattr(candidate, 'candidate_id', '')}",
                     )
+                    valid, valid_reason = bool(validation["ok"]), str(validation["reason"])
+                    record["validation"] = deepcopy(validation)
                     candidate_source = str(dict(cand_diff or {}).get("source_stage", "") or "")
                     candidate_contract = str(
                         dict(cand_diff or {}).get("spectral_contract", "") or ""
@@ -3719,6 +3881,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     valid_reason = f"spectrum_candidate_rebuild_failed:{exc}"
                     cand_nodes = cand_H = cand_diff = None
                     cand_r2 = float("nan")
+                    record["validation"] = rebuild_exception_proof(exc)
                 profile_stats = (
                     adjuster._get_su_common_stats()
                     if callable(getattr(adjuster, "_get_su_common_stats", None))
@@ -4256,7 +4419,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     histogram_plan
                 ),
             ))
-            if retry_signature and verbose:
+            if retry_signature:
                 print(
                     f"[Block C:resource #{cycle_number}] retry next conversion "
                     f"variant after planner accounting failure: "
@@ -4273,11 +4436,14 @@ def run_block_c_resource_adjustment_loop_impl(
         ):
             stop_reason = "phase_topology_materialization_invalid"
             terminal_proof = _stage3_terminal_infeasibility_proof(plan)
+            failed_contract = dict(terminal_proof.get("failed_contract", {}) or {})
+            failed_proof = dict(failed_contract.get("proof", {}) or {})
             print(
                 f"[Block C:resource #{cycle_number}] topology invalid "
                 f"phase={str(terminal_proof.get('phase', phase) or phase)} "
                 f"reason={str(terminal_proof.get('reason', stop_reason) or stop_reason)} "
-                f"failed_contract={terminal_proof.get('failed_contract', {})}",
+                f"contract_id={failed_contract.get('contract_id')} "
+                f"detail={failed_proof.get('assembler_reason') or failed_proof.get('reason', '')}",
                 flush=True,
             )
             _rollback_stage3_plan_transactions(plan, stop_reason)
@@ -4405,7 +4571,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 h_compensation_count=_histogram_h_compensation_count(histogram_plan),
                 parity_balance_count=_histogram_parity_balance_count(histogram_plan),
             ))
-            if retry_signature and verbose:
+            if retry_signature:
                 print(
                     f"[Block C:resource #{cycle_number}] retry next conversion variant "
                     f"after port preflight failure: rejected={retry_signature}",
@@ -4514,37 +4680,6 @@ def run_block_c_resource_adjustment_loop_impl(
                 # Any accepted external primary conversion makes the current
                 # Layer1/2 graph stale. Balance ports once at this generation
                 # boundary, then rebuild from the balanced histogram.
-                balanced_nodes, balanced_H, balance_diagnostics = (
-                    _apply_deferred_port_balance(
-                        plan=plan,
-                        nodes=list(nodes_current or []),
-                        H=H_current.detach().clone(),
-                        special_degree_meta=special_degree_meta,
-                        balance_cursor=int(parity_cursor_before),
-                        E_target=E_target,
-                        h_tolerance=h_tolerance,
-                    )
-                )
-                balance_reason = str(balance_diagnostics.get("reason", ""))
-                if balance_reason not in {"pre_rebuild_ports_balanced", ""}:
-                    stop_reason = "pre_rebuild_port_feasibility_failed"
-                    _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
-                        cycle=cycle_number,
-                        phase="external_topology",
-                        **_cycle_internal_accounting_fields(histogram_plan),
-                        applied=False,
-                        stop_reason=stop_reason,
-                        accepted_state_retained=True,
-                        blocked_reason=balance_reason,
-                        accepted=False,
-                        acceptance_reason=stop_reason,
-                    ))
-                    break
-                nodes_current = list(balanced_nodes or nodes_current)
-                H_current = torch.clamp(balanced_H.detach().clone(), min=0).long()
-                console_reporter.record_balance_operations(
-                    balance_diagnostics.get("operations", [])
-                )
                 console_reporter.finish(
                     boundary=(
                         "external_budget_exhausted"
@@ -4552,72 +4687,74 @@ def run_block_c_resource_adjustment_loop_impl(
                         else "external_generation_complete"
                     ),
                 )
-                if rebuild_fn is None or validate_fn is None:
-                    stop_reason = "layer12_rebuild_invalid"
-                    external_generation_rebuild_pending = False
-                    _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
-                        cycle=cycle_number,
-                        phase="external_topology",
-                        **_cycle_internal_accounting_fields(histogram_plan),
-                        applied=True,
-                        stop_reason=stop_reason,
-                        accepted_state_retained=True,
-                        accepted=False,
-                        acceptance_reason=stop_reason,
-                        fresh_rebuild=False,
-                    ))
-                    break
-                try:
-                    external_rebuild_started = time.perf_counter()
-                    console_reporter.rebuild_start(
-                        "external_generation_boundary"
+                external_rebuild_started = time.perf_counter()
+                console_reporter.rebuild_start("external_generation_boundary")
+                rebuild_result = _rebuild_external_generation(
+                    plan=plan, nodes=nodes_current, H=H_current,
+                    special_degree_meta=special_degree_meta, balance_cursor=int(parity_cursor_before),
+                    E_target=E_target, h_tolerance=h_tolerance,
+                    rebuild_fn=rebuild_fn, validate_fn=validate_fn, cycle_number=cycle_number,
+                    context_snapshot_fn=context_snapshot_fn, context_restore_fn=context_restore_fn,
+                )
+                if not rebuild_result["ok"]:
+                    rebuild_failure = {**rebuild_result, "cycle": cycle_number,
+                                       "generation_id": graph_generation,
+                                       "balance_committed": False}
+                    stop_reason = (
+                        "pre_rebuild_port_feasibility_failed"
+                        if rebuild_result["reason"] == "pre_rebuild_port_feasibility_failed"
+                        else "layer12_rebuild_invalid"
                     )
-                    cand_nodes, cand_H, cand_diff, cand_r2 = rebuild_fn(
-                        H_seed=H_current.detach().clone(),
-                        phase="external_topology",
-                        cycle_idx=cycle_number - 1,
-                        nodes_seed=list(nodes_current or []),
-                    )
-                    _clear_stage3_node_runtime_state(cand_nodes)
-                    candidate_histogram = torch.clamp(
-                        cand_H.detach().cpu(), min=0
-                    ).long()
-                    if not torch.equal(candidate_histogram, H_current):
-                        raise ValueError("fresh_rebuild_histogram_mismatch")
-                    valid, valid_reason = validate_fn(
-                        nodes=cand_nodes,
-                        H=cand_H,
-                        tag=f"BlockC:external-generation-rebuild #{cycle_number}",
-                    )
-                    if not valid:
-                        raise ValueError(str(valid_reason))
-                    external_rebuild_context = (
-                        deepcopy(context_snapshot_fn())
-                        if callable(context_snapshot_fn)
-                        else None
-                    )
-                except Exception as exc:
-                    stop_reason = "layer12_rebuild_invalid"
-                    external_generation_rebuild_pending = False
                     print(
                         f"[Block C:resource #{cycle_number}] external generation rebuild failed: "
-                        f"{type(exc).__name__}: {exc}",
+                        f"{rebuild_result['reason']}; retained pre-balance state",
                         flush=True,
                     )
+                    retry_signature = _register_rejected_resource_candidate(
+                        plan,
+                        histogram_plan,
+                        rejected_resource_conversion_signatures,
+                    )
+                    _rollback_stage3_plan_transactions(
+                        plan,
+                        f"{stop_reason}:{rebuild_result['reason']}",
+                    )
+                    _restore_stage3_rotation_cursor(
+                        adjuster,
+                        rotation_cursor_before,
+                    )
+                    _restore_stage3_parity_cursor(
+                        adjuster,
+                        parity_cursor_before,
+                    )
+                    if callable(context_restore_fn):
+                        context_restore_fn(deepcopy(cycle_context_before))
                     _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
                         cycle=cycle_number,
                         phase="external_topology",
                         **_cycle_internal_accounting_fields(histogram_plan),
-                        applied=True,
+                        applied=False,
                         stop_reason=stop_reason,
                         accepted_state_retained=True,
                         rebuild_valid=False,
-                        blocked_reason=str(exc),
+                        blocked_reason=str(rebuild_result["reason"]),
                         accepted=False,
                         acceptance_reason=stop_reason,
                         fresh_rebuild=True,
                     ))
+                    if retry_signature:
+                        print(
+                            f"[Block C:resource #{cycle_number}] retry next conversion variant "
+                            f"after external rebuild failure: rejected={retry_signature}",
+                            flush=True,
+                        )
+                        continue
                     break
+                cand_nodes, cand_H = rebuild_result["nodes"], rebuild_result["H"]
+                cand_diff, cand_r2 = rebuild_result["difference"], rebuild_result["r2"]
+                external_rebuild_context = rebuild_result["context"]
+                console_reporter.record_balance_operations(rebuild_result["balance"].get("operations", []))
+                rebuild_failure = {}
                 nodes_current = list(cand_nodes or [])
                 H_current = torch.clamp(cand_H.detach().clone(), min=0).long()
                 diff_current = dict(cand_diff or {})
@@ -4676,22 +4813,27 @@ def run_block_c_resource_adjustment_loop_impl(
                 generation_cycle_number = None
                 continue
             complete_diagnostics = dict(getattr(plan, "diagnostics", {}) or {})
+            completion_snapshot = _stage3_runtime_snapshot(plan)
+            completion_snapshot["state_consistency"] = validate_snapshot_state(
+                nodes_current, completion_snapshot, H_current, require_complete=True,
+            )
+            if not completion_snapshot["snapshot_valid"] or not completion_snapshot["state_consistency"]["ok"]:
+                stop_reason = "stage3_snapshot_invalid"
+                terminal_proof = {
+                    "reason": stop_reason,
+                    "failure_domain": "resource_accounting",
+                    "snapshot_errors": completion_snapshot["snapshot_errors"],
+                    "state_consistency": completion_snapshot["state_consistency"],
+                }
+                rebuild_failure = terminal_proof
+                break
             stop_reason = "stage3_complete"
             console_reporter.finish(
                 boundary="stage3_complete",
                 complete=True,
             )
-            completion_snapshot = _stage3_runtime_snapshot(plan)
-            # The runtime snapshot already merges the live assembler and the
-            # iteration ledger.  Merge only genuinely new residual products;
-            # no parallel product cache is allowed to replace this authority.
-            snapshot_products = _merge_stage3_committed_products(
-                list(completion_snapshot.get("products", []) or []),
-                complete_diagnostics.get("committed_residual_products", []),
-            )
             completion_snapshot.update({
                 "stage3_complete": True,
-                "products": list(snapshot_products),
                 "generation_count": int(graph_generation - int(max(0, outer_cycle)) * 1_000_000 + 1),
                 "internal_physical_conversion_count": int(
                     complete_diagnostics.get(
@@ -4941,7 +5083,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 h_compensation_count=_histogram_h_compensation_count(histogram_plan),
                 parity_balance_count=_histogram_parity_balance_count(histogram_plan),
             ))
-            if retry_signature and verbose:
+            if retry_signature:
                 print(
                     f"[Block C:resource #{cycle_number}] retry next conversion "
                     f"variant after histogram apply rejection: "
@@ -5092,6 +5234,8 @@ def run_block_c_resource_adjustment_loop_impl(
             )
         except Exception as exc:
             stop_reason = "layer12_rebuild_invalid"
+            rebuild_failure = {**rebuild_exception_proof(exc), "cycle": cycle_number,
+                               "generation_id": graph_generation}
             rollback_reason = f"{stop_reason}:{exc}"
             print(
                 f"[Block C:resource #{cycle_number}] fresh Layer1/2 rebuild failed: "
@@ -5125,7 +5269,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 parity_balance_count=_histogram_parity_balance_count(histogram_plan),
                 fresh_rebuild=True,
             ))
-            if retry_signature and verbose:
+            if retry_signature:
                 print(
                     f"[Block C:resource #{cycle_number}] retry next conversion variant "
                     f"after rebuild failure: rejected={retry_signature}",
@@ -5136,6 +5280,8 @@ def run_block_c_resource_adjustment_loop_impl(
         candidate_histogram = torch.clamp(cand_H.detach().cpu(), min=0).long()
         if not torch.equal(candidate_histogram, H_seed):
             valid_reason = "fresh_rebuild_histogram_mismatch"
+            rebuild_failure = {"ok": False, "reason": valid_reason,
+                               "failure_domain": "histogram", "cycle": cycle_number}
             retry_signature = _register_rejected_resource_candidate(
                 plan,
                 histogram_plan,
@@ -5160,7 +5306,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 acceptance_reason="layer12_rebuild_invalid",
                 fresh_rebuild=True,
             ))
-            if retry_signature and verbose:
+            if retry_signature:
                 print(
                     f"[Block C:resource #{cycle_number}] retry next conversion variant "
                     f"after histogram mismatch: rejected={retry_signature}",
@@ -5172,7 +5318,8 @@ def run_block_c_resource_adjustment_loop_impl(
         validate_started = time.perf_counter()
         if verbose:
             print(f"[Block C:resource #{cycle_number}] rebuilt state validation start", flush=True)
-        valid, valid_reason = validate_fn(nodes=cand_nodes, H=cand_H, tag=f"BlockC:resource #{cycle_number}")
+        validation = validate_fn(nodes=cand_nodes, H=cand_H, tag=f"BlockC:resource #{cycle_number}")
+        valid, valid_reason = bool(validation["ok"]), str(validation["reason"])
         if verbose:
             print(
                 f"[Block C:resource #{cycle_number}] rebuilt state validation done "
@@ -5180,6 +5327,8 @@ def run_block_c_resource_adjustment_loop_impl(
                 flush=True,
             )
         if not valid:
+            rebuild_failure = {**validation, "cycle": cycle_number,
+                               "generation_id": graph_generation}
             retry_signature = _register_rejected_resource_candidate(
                 plan,
                 histogram_plan,
@@ -5204,7 +5353,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 acceptance_reason="layer12_rebuild_invalid",
                 fresh_rebuild=True,
             ))
-            if retry_signature and verbose:
+            if retry_signature:
                 print(
                     f"[Block C:resource #{cycle_number}] retry next conversion variant "
                     f"after validation failure: rejected={retry_signature}",
@@ -5214,6 +5363,7 @@ def run_block_c_resource_adjustment_loop_impl(
             stop_reason = "all_histogram_adjustment_variants_invalid"
             break
 
+        rebuild_failure = {}
         candidate_context = (
             deepcopy(context_snapshot_fn())
             if callable(context_snapshot_fn)
@@ -5269,7 +5419,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 blocked_reason=cycle_reason,
                 fresh_rebuild=True,
             ))
-            if retry_signature and verbose:
+            if retry_signature:
                 print(
                     f"[Block C:resource #{cycle_number}] retry next conversion variant "
                     f"after full-state cycle: rejected={retry_signature}",
@@ -5361,6 +5511,13 @@ def run_block_c_resource_adjustment_loop_impl(
         else None
     )
     terminal_proof = _stage3_terminal_infeasibility_proof(plan)
+    if rebuild_failure:
+        terminal_proof = {
+            "reason": str(rebuild_failure["reason"]),
+            "failure_domain": rebuild_failure.get("failure_domain", "candidate_selection"),
+            "rebuild_failure": rebuild_failure,
+            "retained_plan": terminal_proof,
+        }
     terminal_proof["external_budget"] = {
         "used": int(external_primary_adjustments_used),
         "limit": int(external_primary_limit),
@@ -5371,18 +5528,28 @@ def run_block_c_resource_adjustment_loop_impl(
         ),
     }
     terminal_runtime = _stage3_runtime_snapshot(plan)
+    terminal_requires_complete_audit = bool(
+        str(stop_reason) == "stage3_snapshot_invalid"
+    )
+    terminal_runtime["state_consistency"] = validate_snapshot_state(
+        nodes_current,
+        terminal_runtime,
+        H_current,
+        require_complete=terminal_requires_complete_audit,
+    )
     terminal_products = list(
         terminal_runtime.get("products", [])
         or []
     )
-    terminal_pending = list(
-        terminal_runtime.get("pending_contracts", [])
-        or getattr(plan, "pending_contracts", [])
-        or []
-    )
+    terminal_pending = list(terminal_runtime["pending_contracts"])
     terminal_snapshot = {
         **terminal_runtime,
         "stage3_complete": False,
+        "rebuild_required": bool(
+            external_generation_rebuild_pending
+            or (rebuild_failure and not terminal_requires_complete_audit)
+        ),
+        "rebuild_failure": rebuild_failure,
         "node_ids": sorted({
             int(getattr(node, "global_id", -1))
             for node in list(nodes_current or [])

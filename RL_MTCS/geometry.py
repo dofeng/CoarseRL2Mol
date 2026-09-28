@@ -43,6 +43,19 @@ def valid_hex_directions(axial: Axial) -> Tuple[Axial, ...]:
     return ()
 
 
+def hex_edge_valid(source: Axial, target: Axial, *, honeycomb: bool = False) -> bool:
+    """Six-neighbour coarse lattice, or its stricter ordinary-carbon subgraph.
+
+    These are distinct constraints: SU25 and coarse hetero connectors can use
+    lattice edges outside the three ordinary honeycomb directions.
+    """
+    delta = (target[0] - source[0], target[1] - source[1])
+    return delta in HEX_DIRECTIONS and (not honeycomb or (
+        delta in valid_hex_directions(source)
+        and (-delta[0], -delta[1]) in valid_hex_directions(target)
+    ))
+
+
 def axial_add(left: Axial, right: Axial) -> Axial:
     return int(left[0]) + int(right[0]), int(left[1]) + int(right[1])
 
@@ -516,4 +529,5 @@ __all__ = [
     "transform_direction",
     "unit_sort_key",
     "valid_hex_directions",
+    "hex_edge_valid",
 ]

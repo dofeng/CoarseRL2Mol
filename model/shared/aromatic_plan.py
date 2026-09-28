@@ -10,6 +10,24 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
+MAX_IDLE_AROMATIC_NODES = 5
+MAX_FLEX_WINDOW_WIDTH = 6
+
+
+def flex_count_window(cluster_count: int, su10_count: int) -> Dict[str, Any]:
+    """One quantity rule for inverse planning and conversion scoring."""
+    x, n10 = int(cluster_count), int(su10_count)
+    y = n10 // 2
+    lower, upper = x - y + 1, 4 * x // 5
+    width = upper - lower
+    return {
+        "X": x, "Y": y, "Z": x - y,
+        "flex_lower": lower, "flex_upper": upper,
+        "flex_window_width": width,
+        "flex_window_width_ok": 0 <= width <= MAX_FLEX_WINDOW_WIDTH,
+        "flex_window_ok": n10 >= 0 and n10 % 2 == 0 and lower <= upper,
+    }
+
 
 AROMATIC_CLUSTER_RING_COUNTS: Dict[str, int] = {
     "benzene": 1,
@@ -183,14 +201,16 @@ def exact_aromatic_cluster_plan(
     non_bridgehead_count: int,
     *,
     preferred_kinds: Iterable[str] = (),
-    max_staging_topup: int = 2,
+    max_idle_aromatic: int = MAX_IDLE_AROMATIC_NODES,
 ) -> Dict[str, object]:
-    """Find a bounded exact bridgehead cover with minimal staging top-up.
+    """Cover bridgeheads with complete templates and bounded idle perimeter nodes.
 
-    Cluster costs are exact for SU12 bridgeheads.  A one- or two-site
-    non-bridgehead top-up is retained explicitly in the plan instead of
-    silently dropping inverse nodes.  Larger residuals indicate that the
-    cluster model cannot represent the current histogram and are rejected.
+    Cluster costs are exact for SU12 bridgeheads.  A small non-bridgehead
+    residual, up to five sites, remains outside the assembled graph.
+    Six non-bridgehead sites form a complete benzene template, so a six-site
+    residual is absorbed by the dynamic-programming plan. Larger residuals
+    indicate that the cluster model cannot
+    represent the current histogram and are rejected.
     """
 
     target_12 = int(bridgehead_count)
@@ -205,7 +225,7 @@ def exact_aromatic_cluster_plan(
     kinds = _representative_kinds(tuple(preferred_kinds or ()))
     # One shortest multiset per resource state is sufficient.  Selecting the
     # largest reachable SU13 total afterwards gives the smallest explicit
-    # staging top-up; shortest paths favor compact fused templates.
+    # idle remainder; shortest paths favor compact fused templates.
     states: Dict[Tuple[int, int], Tuple[str, ...]] = {(0, 0): ()}
     for used_12 in range(target_12 + 1):
         for used_13 in range(available_13 + 1):
@@ -238,12 +258,12 @@ def exact_aromatic_cluster_plan(
         candidates,
         key=lambda item: (item[0], -len(item[1])),
     )
-    staging_topup = int(available_13 - used_13)
-    if staging_topup > int(max_staging_topup):
+    idle_count = int(available_13 - used_13)
+    if idle_count > int(max_idle_aromatic):
         raise ValueError(
             "aromatic cluster plan leaves too many non-bridgehead sites: "
             f"SU12={target_12}, available={available_13}, used={used_13}, "
-            f"topup={staging_topup}"
+            f"idle={idle_count}"
         )
     return {
         "kinds": list(selected),
@@ -251,7 +271,7 @@ def exact_aromatic_cluster_plan(
         "non_bridgehead_count": available_13,
         "used_bridgehead_count": target_12,
         "used_non_bridgehead_count": int(used_13),
-        "staging_topup_count": staging_topup,
+        "idle_aromatic_count": idle_count,
         "cluster_count": int(len(selected)),
         "ring_count": int(sum(AROMATIC_CLUSTER_RING_COUNTS[kind] for kind in selected)),
         "complete": True,
@@ -259,6 +279,9 @@ def exact_aromatic_cluster_plan(
 
 
 __all__ = [
+    "MAX_IDLE_AROMATIC_NODES",
+    "MAX_FLEX_WINDOW_WIDTH",
+    "flex_count_window",
     "AROMATIC_CLUSTER_COST",
     "AROMATIC_CLUSTER_RING_COUNTS",
     "SU12_CAP_TYPES",

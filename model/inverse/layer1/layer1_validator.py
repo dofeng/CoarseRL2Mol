@@ -12,6 +12,7 @@ from ...shared.inverse_common import (
     has_forbidden_fixed_connector_special_combo,
 )
 from .hop1_adjuster import can_match_ports_exact, can_match_ports_partial
+from .terminal_paths import terminal_path_reason
 
 
 class Layer1GraphValidator:
@@ -29,6 +30,9 @@ class Layer1GraphValidator:
     ) -> Tuple[bool, List[str]]:
         a = self.assigner
         errors: List[str] = []
+        terminal_reason = terminal_path_reason(nodes)
+        if terminal_reason:
+            errors.append(terminal_reason)
 
         expected_total = int(H.sum().item())
         if len(nodes) != expected_total:

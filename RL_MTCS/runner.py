@@ -1,64 +1,43 @@
 """Inverse-driven Monte-Carlo topology assembly entry point.
 
-Only placement is searched here.  Aromatic clusters and topology products are
-immutable input units supplied by :func:`RL_MTCS.input.initialize`; no allocator,
-structure synthesis, SU conversion, branch allocation, or substitution is
-performed by this module.
+Placement uses immutable aromatic clusters and topology products supplied by
+:func:`RL_MTCS.input.initialize`; this module does not allocate or synthesize
+topology units.  Rigid SU10 partners are chosen dynamically. Final
+heteroaromatic SU26/SU30 substitution is applied only
+after rigid, flex, and side placement have completed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import copy
-import csv
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional
 
 from .input import initialize, inspect_csv_initialization
-from .state import HexAssemblyState
-from .models import InverseInputError, MCTSConfig
+from .state import HexAssemblyState, stage_snapshot
+from .models import AssemblyConfig, AssemblySearchError, InverseInputError
+from .search import SearchGuidance
 from .rigid import (
     SearchResult,
     TopologyPlacementStage,
-    _pack_rigid_components,
-    _rigid_unit_components,
     search_phase,
+    _rigid_unit_components,
+    _rigid_component_metrics,
 )
 from .output import export_final_state
 from .flex import run_planned_flex_search
 from .side import run_planned_side_search
 from .substitution import run_substitution_stage
-from .geometry import HEX_DIRECTIONS
-from .output import save_state_png
+from .output import export_rigid_views, save_state_png
 
 
 def _write_json(path: Path, value: Any) -> None:
     path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, default=str),
+        json.dumps(value, ensure_ascii=False, indent=2, default=_json_default),
         encoding="utf-8",
     )
-
-
-def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    if not rows:
-        path.write_text("", encoding="utf-8")
-        return
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({
-                key: (
-                    json.dumps(value, ensure_ascii=False, sort_keys=True)
-                    if isinstance(value, (dict, list, tuple))
-                    else value
-                )
-                for key, value in row.items()
-            })
-
-
-DEFAULT_CONFIG = MCTSConfig()
 
 
 @dataclass
@@ -71,12 +50,21 @@ class BeamCandidate:
     info: Dict[str, Any] = field(default_factory=dict)
 
 
+def _json_default(value):
+    # Molecules already have a dedicated export. Avoid serializing full state
+    # reprs once per beam candidate inside final.json.
+    if isinstance(value, BeamCandidate):
+        return {"score": value.score, "action_count": len(value.action_sequence),
+                "contracts_done": len(value.state.satisfied_contracts)}
+    return str(value)
+
+
 def _candidate_from_result(result: SearchResult) -> BeamCandidate:
     return BeamCandidate(
         state=result.state,
         score=float(result.score),
         action_sequence=list(result.action_sequence),
-        info=copy.deepcopy(result.info),
+        info=copy.deepcopy({k: v for k, v in result.info.items() if k != 'stage_states'}),
     )
 
 
@@ -86,16 +74,56 @@ class MCTSRunner:
     def __init__(
         self,
         inverse_result: Any,
-        config: Optional[MCTSConfig] = None,
+        config: AssemblyConfig | None = None,
         topology_specs_csv: Any = None,
+        search_guidance: SearchGuidance | None = None,
     ):
         self.inverse_result = inverse_result
         self.topology_specs_csv = topology_specs_csv
-        self.config = config or DEFAULT_CONFIG
+        self.config = config if config is not None else AssemblyConfig()
+        self.search_guidance = search_guidance
         self.init_data = initialize(inverse_result, topology_specs_csv)
         self.initial_state: HexAssemblyState = self.init_data["state"].clone()
-        self.nmr_init_error: Optional[str] = None
+        self._print_input_summary()
         self.nmr_scorer = self._initialize_nmr_scorer()
+
+    def _print_input_summary(self) -> None:
+        """Print the immutable inverse topology inventory once per run.
+
+        This is deliberately based on the parsed CSV objects rather than on
+        search results, so the report remains useful when the first stage
+        stops before making any progress.
+        """
+        if not bool(getattr(self.config, "verbose", True)):
+            return
+        units = list(self.init_data.get("units", ()))
+        contracts = list(self.init_data.get("contracts", ()))
+        unit_counts: Dict[str, int] = {}
+        for unit in units:
+            key = str(getattr(unit, "product_type", "aromatic"))
+            unit_counts[key] = unit_counts.get(key, 0) + 1
+        contract_counts: Dict[str, int] = {}
+        for contract in contracts:
+            key = str(getattr(contract, "kind", "unknown"))
+            contract_counts[key] = contract_counts.get(key, 0) + 1
+        print(
+            "[RL_MTCS][input] "
+            f"units={len(units)} "
+            f"aromatic={sum(getattr(unit, 'phase', '') == 'aromatic' for unit in units)} "
+            f"flex_chain={unit_counts.get('flex_chain', 0)} "
+            f"aliphatic_ring={unit_counts.get('aliphatic_ring', 0)} "
+            f"side_chain={unit_counts.get('side_chain', 0)}",
+            flush=True,
+        )
+        print(
+            "[RL_MTCS][input] "
+            f"rigid_mode=dynamic_su10_sites "
+            f"rigid_ports={sum(su == 10 for _node_id, su in self.initial_state.problem.node_su_types)} "
+            f"source_pairs={len(self.initial_state.problem.source_rigid_contracts)} "
+            f"flex:{contract_counts.get('flex', 0)} "
+            f"side:{contract_counts.get('side', 0)}",
+            flush=True,
+        )
 
     def _initialize_nmr_scorer(self):
         spectrum_csv = getattr(self.config, "spectrum_csv", None)
@@ -136,25 +164,27 @@ class MCTSRunner:
                 device=str(getattr(self.config, "nmr_device", "auto")),
                 batch_size=int(getattr(self.config, "nmr_batch_size", 512)),
                 hwhm=float(getattr(self.config, "nmr_hwhm", 1.0)),
+                graph_cache_limit=int(getattr(self.config, "nmr_graph_cache_limit", 256)),
+                node_cache_limit=int(getattr(self.config, "nmr_node_cache_limit", 2048)),
+                record_limit=int(getattr(self.config, "nmr_record_limit", 5000)),
+                model_call_limit=int(getattr(self.config, "nmr_model_call_limit", 1)),
+                center_limit=int(getattr(self.config, "nmr_center_limit", 1)),
             )
         except ImportError as exc:
-            # NMR guidance is optional.  The geometry pipeline must remain
-            # usable in lightweight environments where torch (or another G2S
-            # runtime dependency) is not installed; report the reason in the
-            # result instead of failing before the first assembly stage.
-            self.nmr_init_error = str(exc)
-            return None
+            raise InverseInputError(
+                f"requested NMR guidance could not load its dependencies: {exc}"
+            ) from exc
 
     def _run_phase(self, state: HexAssemblyState, phase: str) -> SearchResult:
         if phase == "rigid":
-            iterations = self.config.iterations
-            max_steps = self.config.rigid_max_steps
+            iterations = self.config.rigid_iterations
+            max_steps = self.config.max_steps
         elif phase == "flex":
-            iterations = self.config.flex_iterations
-            max_steps = self.config.flex_max_steps
+            iterations = 1
+            max_steps = self.config.max_steps
         else:
-            iterations = self.config.side_iterations
-            max_steps = self.config.side_max_steps
+            iterations = 1
+            max_steps = self.config.max_steps
         return search_phase(
             TopologyPlacementStage(state, phase),
             iterations=iterations,
@@ -163,67 +193,202 @@ class MCTSRunner:
             beam_width=self.config.beam_width,
             c_puct=self.config.c_puct,
             seed=self.config.seed,
+            search_guidance=getattr(self, 'search_guidance', None),
+            max_tree_nodes=self.config.max_tree_nodes,
         )
 
     @staticmethod
     def _stage_payload(result: SearchResult) -> Dict[str, Any]:
+        candidates = result.candidate_states or [result.state]
         return {
             "state": result.state,
             "best_candidate": _candidate_from_result(result),
-            "beam_candidates": [_candidate_from_result(result)],
+            "beam_candidates": [BeamCandidate(
+                state, float(TopologyPlacementStage(state, result.info.get("phase", state.stage)).score()),
+                list(state.action_history), {},
+            ) for state in candidates],
             "summaries": [copy.deepcopy(result.info.get("result", {}))],
             "result": copy.deepcopy(result.info.get("result", {})),
             "molecule": result.state.to_dict(),
         }
 
     def run_rigid_stage(self, output_dir: Optional[str] = None) -> Dict[str, Any]:
+        initial_views = None
+        if output_dir and self.config.save_stage_images:
+            initial_views = export_rigid_views(
+                self.initial_state, Path(output_dir) / "aromatic_initial", initial=True
+            )
         result = self._run_phase(self.initial_state.clone(), "rigid")
         payload = self._stage_payload(result)
         self._write_stage_output(payload, output_dir, "rigid")
+        if output_dir:
+            self._write_rigid_detail(payload, output_dir, initial_views)
+        self._print_stage_summary("rigid", payload)
         return payload
 
-    def run_flex_stage(self, rigid_result: Dict[str, Any], output_dir: Optional[str] = None) -> Dict[str, Any]:
-        state = self._state_from_result(rigid_result)
-        result, plan = run_planned_flex_search(
-            state,
-            iterations=self.config.flex_iterations,
-            candidate_k=self.config.candidate_k,
-            max_steps=self.config.flex_max_steps,
-            beam_width=self.config.beam_width,
-            c_puct=self.config.c_puct,
-            seed=self.config.seed,
-            strict=bool(getattr(self.config, "strict_geometry", False)),
-            nmr_scorer=self.nmr_scorer,
-            nmr_weight=float(getattr(self.config, "nmr_weight", 1.0)),
-            geometry_weight=float(getattr(self.config, "geometry_weight", 0.05)),
-            contact_weight=float(getattr(self.config, "contact_weight", 0.02)),
-        )
+    def _write_rigid_detail(self, payload: Dict[str, Any], output_dir: str,
+                            initial_views: Optional[Dict[str, Any]] = None) -> None:
+        state = payload["state"]
+        directory = Path(output_dir)
+        actual = [contract for contract in state.problem.contracts if contract.kind == "rigid"
+                  and contract.contract_id in state.satisfied_contracts]
+        source = state.problem.source_rigid_contracts
+        source_pairs = {tuple(sorted((c.source_node_id, c.target_node_id))) for c in source}
+        realized_pairs = {tuple(sorted((c.source_node_id, c.target_node_id))) for c in actual}
+        directions: Dict[str, int] = {}
+        axes: Dict[str, int] = {}
+        for edge in state.edges:
+            if edge.kind != "rigid" or edge.direction is None:
+                continue
+            direction = tuple(int(value) for value in edge.direction)
+            axis = min(direction, (-direction[0], -direction[1]))
+            directions[str(direction)] = directions.get(str(direction), 0) + 1
+            axes[str(axis)] = axes.get(str(axis), 0) + 1
+        metrics = _rigid_component_metrics(state, _rigid_unit_components(state))
+        payload['result']['rigid_component_metrics'] = metrics
+        sizes = sorted((len(metric['unit_ids']) for metric in metrics), reverse=True)
+        target_sizes = sorted((sum(sizes) // len(sizes) + int(i < sum(sizes) % len(sizes))
+                               for i in range(len(sizes))), reverse=True) if sizes else []
+        comparison = {
+            "pairing_mode": "dynamic_su10_sites",
+            "source_pairs": [list(pair) for pair in sorted(source_pairs)],
+            "realized_pairs": [list(pair) for pair in sorted(realized_pairs)],
+            "retained_source_pairs": [list(pair) for pair in sorted(source_pairs & realized_pairs)],
+            "replaced_source_pairs": [list(pair) for pair in sorted(source_pairs - realized_pairs)],
+            "new_pairs": [list(pair) for pair in sorted(realized_pairs - source_pairs)],
+            "source_is_constraint": False,
+            "component_sizes": sizes,
+            "target_component_sizes": target_sizes,
+            "balance_deviation": sum(abs(a - b) for a, b in zip(sizes, target_sizes)),
+            "actual_site_bindings": state.aromatic_site_bindings(),
+            "balance_deviation_from_6_6_5": (
+                sum(abs(actual_size - ideal) for actual_size, ideal in zip(sizes, (6, 6, 5)))
+                if len(sizes) == 3 else None
+            ),
+            "direction_counts": directions,
+            "axis_counts": axes,
+        }
+        comparison_path = directory / "rigid_pairing_comparison.json"
+        self._write_json(comparison, str(comparison_path))
+        outputs = payload.get("stage_outputs", {})
+        outputs["pairing_comparison_json"] = str(comparison_path)
+        if initial_views:
+            outputs["aromatic_initial"] = initial_views
+        if self.config.save_stage_images and actual:
+            outputs["rigid_clusters"] = export_rigid_views(
+                state, directory / "rigid_clusters"
+            )
+        payload["result"]["stage_outputs"] = outputs
+        self._write_json(payload["result"], str(directory / "rigid_summary.json"))
+
+    def run_flex_stage(self, rigid_result: Dict[str, Any], output_dir: Optional[str] = None,
+                       *, search_budget: Optional[int] = None) -> Dict[str, Any]:
+        if not bool(dict(rigid_result.get("result", {})).get("done", False)):
+            return self._finish_failed_stage("flex", rigid_result, output_dir, None)
+        candidates = [c.state for c in rigid_result.get("beam_candidates", [])]
+        if not candidates:
+            candidates = [self._state_from_result(rigid_result)]
+        def search(state, budget, roots=None):
+            return run_planned_flex_search(
+                state, iterations=1,
+                candidate_k=self.config.candidate_k, max_steps=self.config.max_steps,
+                beam_width=self.config.beam_width, c_puct=self.config.c_puct,
+                seed=self.config.seed, strict=False, nmr_scorer=self.nmr_scorer,
+                nmr_weight=self.config.nmr_weight, geometry_weight=self.config.geometry_weight,
+                contact_weight=self.config.contact_weight, search_budget=budget,
+                conformer_limit=self.config.conformer_limit,
+                rigid_candidates=roots,
+                search_guidance=getattr(self, 'search_guidance', None),
+                max_tree_nodes=self.config.max_tree_nodes,
+                domain_check_limit=self.config.domain_check_limit,
+                domain_pose_limit=self.config.domain_pose_limit,
+                max_domain_check_limit=self.config.max_domain_check_limit,
+                max_domain_pose_limit=self.config.max_domain_pose_limit,
+            )
+        result, plan = search(candidates[0], search_budget or self.config.search_budget, candidates)
+        self._write_flex_checkpoints(result.info.get('stage_states', {}), result.info['result'], output_dir)
+        index = result.info['result'].get('selected_rigid_candidate_index', 0)
         payload = self._stage_payload(result)
         payload["flex_plan"] = plan.to_dict()
+        payload['selected_rigid_state'] = candidates[index]
         self._write_stage_output(payload, output_dir, "flex")
+        if output_dir:
+            selected_dir = Path(output_dir).parent / "rigid" / "selected_by_flex"
+            selected = payload['selected_rigid_state']
+            if self.config.save_stage_images:
+                payload['result']['selected_rigid_views'] = export_rigid_views(
+                    selected, selected_dir
+                )
+            else:
+                selected_dir.mkdir(parents=True, exist_ok=True)
+            self._write_json({
+                "selected_rigid_candidate_index": index,
+                "flex_complete": bool(payload['result'].get('done')),
+                "realized_pairs": sorted([
+                    sorted((c.source_node_id, c.target_node_id))
+                    for c in selected.problem.contracts
+                    if c.kind == "rigid" and c.contract_id in selected.satisfied_contracts
+                ]),
+            }, str(selected_dir / "selection.json"))
+            self._write_json(payload['result'], str(Path(output_dir) / "flex_summary.json"))
+        if not payload['result'].get('done'):
+            payload['result']['partial'] = True
+        self._print_stage_summary("flex", payload)
         return payload
 
-    def run_side_stage(self, flex_result: Dict[str, Any], output_dir: Optional[str] = None) -> Dict[str, Any]:
+    def _write_flex_checkpoints(self, states, summary_row, output_dir):
+        for name, snapshot in states.items():
+            units = [u for u in snapshot.problem.units if u.product_type == name]
+            ids = {u.unit_id for u in units}
+            contracts = [c for c in snapshot.problem.contracts
+                         if c.source_unit_id in ids or c.target_unit_id in ids]
+            done = (all(snapshot.is_placed(u.unit_id) for u in units)
+                    and all(c.contract_id in snapshot.satisfied_contracts for c in contracts))
+            summary = {'phase': name, 'done': done, 'partial': not done,
+                       'status': 'complete' if done else summary_row['status'],
+                       'placed_units': sum(snapshot.is_placed(u.unit_id) for u in units),
+                       'phase_units_total': len(units),
+                       'contracts_done': sum(c.contract_id in snapshot.satisfied_contracts for c in contracts),
+                       'contracts_total': len(contracts),
+                       'selected_rigid_candidate_index': summary_row.get('selected_rigid_candidate_index', 0)}
+            checkpoint = {'state': snapshot, 'molecule': snapshot.to_dict(), 'result': summary}
+            self._write_stage_output(checkpoint, str(Path(output_dir).parent / name) if output_dir else None, name)
+            self._print_stage_summary(name, checkpoint)
+
+    def run_side_stage(self, flex_result: Dict[str, Any], output_dir: Optional[str] = None,
+                       *, search_budget: Optional[int] = None) -> Dict[str, Any]:
+        if not bool(dict(flex_result.get("result", {})).get("done", False)):
+            return self._finish_failed_stage("side", flex_result, output_dir, None)
         state = self._state_from_result(flex_result)
         result = run_planned_side_search(
             state,
-            iterations=self.config.side_iterations,
+            iterations=1,
             candidate_k=self.config.candidate_k,
-            max_steps=self.config.side_max_steps,
+            max_steps=self.config.max_steps,
             beam_width=self.config.beam_width,
             c_puct=self.config.c_puct,
             seed=self.config.seed,
-            strict=bool(getattr(self.config, "strict_geometry", False)),
+            strict=False,
             nmr_scorer=self.nmr_scorer,
             nmr_weight=float(getattr(self.config, "nmr_weight", 1.0)),
             geometry_weight=float(getattr(self.config, "geometry_weight", 0.05)),
             contact_weight=float(getattr(self.config, "contact_weight", 0.02)),
+            search_budget=search_budget or self.config.search_budget,
+            search_guidance=getattr(self, 'search_guidance', None),
+            max_tree_nodes=self.config.max_tree_nodes,
         )
         payload = self._stage_payload(result)
         self._write_stage_output(payload, output_dir, "side")
+        if not payload['result'].get('done'):
+            payload['result']['partial'] = True
+        self._print_stage_summary("side", payload)
         return payload
 
     def run_substitution_stage(self, side_result: Dict[str, Any], output_dir: Optional[str] = None) -> Dict[str, Any]:
+        if not bool(dict(side_result.get("result", {})).get("done", False)):
+            return self._finish_failed_stage(
+                "substitution", side_result, output_dir, None
+            )
         state = self._state_from_result(side_result)
         final_state, summary = run_substitution_stage(
             state,
@@ -241,6 +406,7 @@ class MCTSRunner:
             "molecule": final_state.to_dict(),
         }
         self._write_stage_output(payload, output_dir, "substitution")
+        self._print_stage_summary("substitution", payload)
         return payload
 
     def run_all_stages(self, output_dir: Optional[str] = None) -> Dict[str, Any]:
@@ -252,25 +418,119 @@ class MCTSRunner:
             base = Path(self.inverse_result).resolve().parent / "rl_mtcs_outputs"
         else:
             base = None
-        rigid = self.run_rigid_stage(str(base / "rigid") if base else None)
+        try:
+            rigid = self.run_rigid_stage(str(base / "rigid") if base else None)
+        except AssemblySearchError as exc:
+            return self._finish_failed_stage("rigid", {"result": {
+                "status": "search_failed", "failure_scope": "rigid",
+                "planning_errors": [str(exc)], "diagnostics": exc.diagnostics,
+            }}, str(base / "rigid") if base else None, base)
         if not rigid["result"].get("done", False):
-            return self._failed_result("rigid", rigid)
-        flex = self.run_flex_stage(rigid, str(base / "flex") if base else None)
+            return self._finish_failed_stage(
+                "rigid", rigid, str(base / "rigid") if base else None, base
+            )
+        try:
+            flex = self.run_flex_stage(rigid, str(base / "flex") if base else None)
+        except (AssemblySearchError, InverseInputError) as exc:
+            return self._finish_failed_stage("flex", {
+                "state": rigid.get("state"),
+                "result": {
+                    "status": "candidate_space_exhausted",
+                    "failure_scope": "flex",
+                    "planning_errors": [str(exc)],
+                    "partial": True,
+                },
+            }, str(base / "flex") if base else None, base)
         if not flex["result"].get("done", False):
-            return self._failed_result("flex", flex)
-        side = self.run_side_stage(flex, str(base / "side") if base else None)
+            return self._finish_failed_stage(
+                "flex", flex, str(base / "flex") if base else None, base
+            )
+        retained_rigid = list(rigid.get('beam_candidates', []))
+        selected_rigid = flex.get('selected_rigid_state', rigid['state'])
+        if selected_rigid is not rigid['state']:
+            rigid = self._stage_payload(SearchResult(
+                selected_rigid, float(TopologyPlacementStage(selected_rigid, 'rigid').score()),
+                list(selected_rigid.action_history),
+                {'phase': 'rigid', 'result': TopologyPlacementStage(selected_rigid, 'rigid').get_result()},
+            ))
+            self._write_stage_output(rigid, str(base / 'rigid') if base else None, 'rigid')
+            if base:
+                self._write_rigid_detail(rigid, str(base / 'rigid'))
+        try:
+            side = self.run_side_stage(flex, str(base / "side") if base else None)
+        except (AssemblySearchError, InverseInputError) as exc:
+            return self._finish_failed_stage("side", {
+                "state": flex.get("state"),
+                "result": {
+                    "status": "candidate_space_exhausted",
+                    "failure_scope": "side",
+                    "planning_errors": [str(exc)],
+                    "partial": True,
+                },
+            }, str(base / "side") if base else None, base)
         if not side["result"].get("done", False):
-            return self._failed_result("side", side)
-        substitution = self.run_substitution_stage(
-            side, str(base / "substitution") if base else None
-        )
+            # A side dead end can be caused by early ring/chain placement.
+            # Retry bounded retained rigid alternatives; never reallocate topology.
+            feedback = []
+            alternatives = [c for c in retained_rigid
+                            if c.state.state_signature() != selected_rigid.state_signature()]
+            for index, candidate in enumerate(alternatives[:min(self.config.stage_retry_limit, self.config.search_budget)]):
+                retry_dir = base / 'retries' / f'candidate_{index + 1:02d}' if base else None
+                retry_rigid = {'state': candidate.state, 'beam_candidates': [candidate],
+                               'result': {'done': True}}
+                retry_budget = max(1, self.config.search_budget // max(1, self.config.stage_retry_limit))
+                trial_flex = self.run_flex_stage(retry_rigid, str(retry_dir / 'flex') if retry_dir else None,
+                                                 search_budget=retry_budget)
+                if not trial_flex['result'].get('done'):
+                    feedback.append({'candidate': index + 1, 'stage': 'flex', 'status': trial_flex['result']['status']})
+                    continue
+                trial_side = self.run_side_stage(trial_flex, str(retry_dir / 'side') if retry_dir else None,
+                                                 search_budget=retry_budget)
+                feedback.append({'candidate': index + 1, 'stage': 'side', 'status': trial_side['result']['status']})
+                if trial_side['result'].get('done') or trial_side['result'].get('contracts_done', 0) > side['result'].get('contracts_done', 0):
+                    flex, side, selected_rigid = trial_flex, trial_side, candidate.state
+                    rigid = self._stage_payload(SearchResult(
+                        selected_rigid, 0.0, list(selected_rigid.action_history),
+                        {'phase': 'rigid', 'result': TopologyPlacementStage(selected_rigid, 'rigid').get_result()}))
+                    self._write_stage_output(rigid, str(base / 'rigid') if base else None, 'rigid')
+                    self._write_stage_output(flex, str(base / 'flex') if base else None, 'flex')
+                    self._write_stage_output(side, str(base / 'side') if base else None, 'side')
+                    if base:
+                        self._write_rigid_detail(rigid, str(base / 'rigid'))
+                        self._write_flex_checkpoints(
+                            {name: stage_snapshot(flex['state'], name)
+                             for name in ('flex_chain', 'aliphatic_ring')},
+                            flex['result'], str(base / 'flex'))
+                if side['result'].get('done'):
+                    break
+            if base:
+                self._write_json(feedback, str(base / 'stage_backtracking.json'))
+        if not side["result"].get("done", False):
+            return self._finish_failed_stage(
+                "side", side, str(base / "side") if base else None, base
+            )
+        try:
+            substitution = self.run_substitution_stage(
+                side, str(base / "substitution") if base else None
+            )
+        except (AssemblySearchError, InverseInputError) as exc:
+            return self._finish_failed_stage("substitution", {
+                "state": side.get("state"),
+                "result": {
+                    "status": "candidate_space_exhausted",
+                    "failure_scope": "substitution",
+                    "planning_errors": [str(exc)],
+                    "partial": True,
+                },
+            }, str(base / "substitution") if base else None, base)
         if not substitution["result"].get("complete", False):
-            return self._failed_result("substitution", substitution)
+            return self._finish_failed_stage(
+                "substitution", substitution,
+                str(base / "substitution") if base else None, base
+            )
         final_state = substitution["state"]
         outputs = export_final_state(final_state, base) if base else {}
         nmr_result: Dict[str, Any] = {"enabled": False}
-        if self.nmr_init_error:
-            nmr_result["disabled_reason"] = self.nmr_init_error
         if self.nmr_scorer is not None:
             final_nmr_score = self.nmr_scorer.score_state(
                 final_state, stage="final_selection"
@@ -289,8 +549,7 @@ class MCTSRunner:
         )
         complete = bool(
             topology_complete
-            and audit.get("shape_valid", False)
-            and audit.get("side_distribution_valid", False)
+            and audit.get("geometry_valid", False)
         )
         result = {
             "ok": complete,
@@ -300,12 +559,36 @@ class MCTSRunner:
                 else "incomplete"
             ),
             "topology_complete": topology_complete,
+            "failure_scope": "none" if complete else "assembly",
+            "candidate_space_complete": bool(
+                flex["result"].get("candidate_space_complete", False)
+            ),
+            "feasibility_audit": flex["result"].get(
+                "search_diagnostics", {}
+            ).get("feasibility_audit", {}),
+            "best_partial_state": flex["result"].get(
+                "best_partial_state", {}
+            ),
+            "zero_domain_units": list(
+                flex["result"].get("zero_domain_units", [])
+            ),
+            "completed_contract_count": int(
+                len(final_state.satisfied_contracts)
+            ),
             "stage": "substitution",
             "init": self.init_data["diagnostics"],
             "rigid": rigid["result"],
             "flex": flex["result"],
             "side": side["result"],
             "substitution": substitution["result"],
+            "stage_outputs": {
+                "rigid": dict(rigid.get("stage_outputs", {}) or {}),
+                "flex": dict(flex.get("stage_outputs", {}) or {}),
+                "side": dict(side.get("stage_outputs", {}) or {}),
+                "substitution": dict(
+                    substitution.get("stage_outputs", {}) or {}
+                ),
+            },
             "nmr": nmr_result,
             "best_candidate": substitution["best_candidate"],
             "beam_candidates": substitution["beam_candidates"],
@@ -314,18 +597,90 @@ class MCTSRunner:
             "outputs": outputs,
         }
         self._write_json(result, str(base / "final.json") if base else None)
+        self._print_final_summary(result)
         return result
+
+    def _finish_failed_stage(
+        self,
+        stage: str,
+        payload: Dict[str, Any],
+        stage_output_dir: Optional[str],
+        base: Optional[Path],
+    ) -> Dict[str, Any]:
+        """Persist and report a failed/partial stage before returning.
+
+        Search failures are expected outcomes of a bounded MCTS run.  They
+        must therefore leave the same molecule JSON, PNG and summary as a
+        successful stage, plus a top-level ``final.json`` describing why the
+        pipeline stopped.
+        """
+        failed = self._failed_result(stage, payload)
+        state = payload.get("state")
+        stage_payload = dict(payload)
+        stage_payload["result"] = dict(failed.get("result", {}))
+        if isinstance(state, HexAssemblyState):
+            stage_payload.setdefault("molecule", state.to_dict())
+            if not stage_payload.get("best_candidate"):
+                stage_payload["best_candidate"] = BeamCandidate(state, 0.0, [], {})
+            if stage_output_dir and not stage_payload.get("stage_outputs"):
+                self._write_stage_output(stage_payload, stage_output_dir, stage)
+            failed["stage_outputs"] = dict(stage_payload.get("stage_outputs", {}))
+            if not payload.get("stage_outputs"):
+                self._print_stage_summary(stage, stage_payload)
+        elif bool(getattr(self.config, "verbose", True)):
+            print(
+                f"[RL_MTCS][{stage}] status={failed.get('status', 'incomplete')} "
+                f"done=False (no state available)",
+                flush=True,
+            )
+        if base is not None:
+            self._write_json(failed, str(base / "final.json"))
+        return failed
+
+    def _print_final_summary(self, result: Mapping[str, Any]) -> None:
+        if not bool(getattr(self.config, "verbose", True)):
+            return
+        outputs = dict(result.get("outputs", {}) or {})
+        audit = dict(result.get("audit", {}) or {})
+        print(
+            "[RL_MTCS][final] "
+            f"status={result.get('status', 'unknown')} "
+            f"ok={bool(result.get('ok', False))} "
+            f"contracts={result.get('completed_contract_count', 0)} "
+            f"components={audit.get('component_count', '?')}",
+            flush=True,
+        )
+        if outputs.get("png"):
+            print(f"[RL_MTCS][final] image={outputs['png']}", flush=True)
 
     @staticmethod
     def _failed_result(stage: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         state = payload.get("state")
+        summary = dict(payload.get("result", {}) or {})
+        status = str(summary.get("status", "incomplete"))
+        summary.setdefault("partial", True)
         return {
             "ok": False,
-            "status": "failed",
+            "status": status,
             "stage": str(stage),
+            "failure_scope": summary.get("failure_scope", str(stage)),
             "best_candidate": payload.get("best_candidate"),
             "beam_candidates": payload.get("beam_candidates", []),
-            "result": payload.get("result", {}),
+            "result": summary,
+            "stage_result": summary,
+            "candidate_space_complete": bool(
+                summary.get("candidate_space_complete", False)
+            ),
+            "feasibility_audit": summary.get("feasibility_audit", {}),
+            "best_partial_state": summary.get("best_partial_state", {}),
+            "zero_domain_units": list(summary.get("zero_domain_units", [])),
+            "completed_contract_count": int(
+                summary.get("completed_contract_count", 0)
+            ),
+            "stage_outputs": dict(
+                payload.get("stage_outputs", summary.get("stage_outputs", {}))
+                or {}
+            ),
             "molecule": state.to_dict() if isinstance(state, HexAssemblyState) else {},
             "audit": state.audit() if isinstance(state, HexAssemblyState) else {},
         }
@@ -346,7 +701,59 @@ class MCTSRunner:
             return
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        target.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
+
+    def _print_stage_summary(self, stage: str, payload: Mapping[str, Any]) -> None:
+        """Print a compact, stable report after every assembly stage."""
+        if not bool(getattr(self.config, "verbose", True)):
+            return
+        summary = dict(payload.get("result", {}) or {})
+        state = payload.get("state")
+        audit = state.audit() if isinstance(state, HexAssemblyState) else {}
+        done = summary.get("done", summary.get("complete", False))
+        status = summary.get("status", "complete" if done else "incomplete")
+        contracts_done = summary.get(
+            "contracts_done",
+            summary.get("completed_contract_count", len(
+                state.satisfied_contracts if isinstance(state, HexAssemblyState) else ()
+            )),
+        )
+        contracts_total = summary.get("contracts_total", "?")
+        placed = summary.get("placed_units", "?")
+        total = summary.get("phase_units_total", "?")
+        components = summary.get("components", audit.get("component_count", "?"))
+        outputs = dict(payload.get("stage_outputs", {}) or {})
+        image = outputs.get("png", "")
+        print(
+            f"[RL_MTCS][{stage}] status={status} done={bool(done)} "
+            f"units={placed}/{total} contracts={contracts_done}/{contracts_total} "
+            f"components={components}",
+            flush=True,
+        )
+        if summary.get("flex_chain_units_total") is not None:
+            print(
+                f"[RL_MTCS][{stage}] flex_chain="
+                f"{summary.get('flex_chain_units_placed', 0)}/"
+                f"{summary.get('flex_chain_units_total', 0)} "
+                f"aliphatic_ring={summary.get('aliphatic_ring_units_placed', 0)}/"
+                f"{summary.get('aliphatic_ring_units_total', 0)}",
+                flush=True,
+            )
+        if summary.get("failure_scope") and summary.get("failure_scope") != "none":
+            print(
+                f"[RL_MTCS][{stage}] failure_scope="
+                f"{summary.get('failure_scope')} "
+                f"zero_domain_units={summary.get('zero_domain_units', [])}",
+                flush=True,
+            )
+        if image:
+            print(f"[RL_MTCS][{stage}] image={image}", flush=True)
+        summary_path = outputs.get("summary_json", "")
+        if summary_path:
+            print(
+                f"[RL_MTCS][{stage}] summary={summary_path}",
+                flush=True,
+            )
 
     def _write_stage_output(self, payload: Dict[str, Any], output_dir: Optional[str], stage: str) -> None:
         if not output_dir:
@@ -354,841 +761,85 @@ class MCTSRunner:
         directory = Path(output_dir)
         directory.mkdir(parents=True, exist_ok=True)
         self._write_json(payload["molecule"], str(directory / f"{stage}_molecule.json"))
+        stage_outputs: Dict[str, str] = {
+            "directory": str(directory),
+            "molecule_json": str(directory / f"{stage}_molecule.json"),
+            "summary_json": str(directory / f"{stage}_summary.json"),
+        }
+        if bool(getattr(self.config, "save_stage_images", True)):
+            state = payload.get("state")
+            if isinstance(state, HexAssemblyState) and state.node_axial:
+                image_path = directory / f"{stage}_molecule.png"
+                try:
+                    audit = state.audit()
+                    save_state_png(
+                        state,
+                        image_path,
+                        title=(
+                            f"RL_MTCS {stage} | nodes={len(state.node_axial)} "
+                            f"edges={len(state.edges)} "
+                            f"components={audit.get('component_count', '?')}"
+                        ),
+                    )
+                    stage_outputs["png"] = str(image_path)
+                except Exception as exc:
+                    stage_outputs["visualization_error"] = str(exc)
+                    self._write_json(
+                        {"visualization_error": str(exc)},
+                        str(directory / f"{stage}_visualization_error.json"),
+                    )
+        payload["stage_outputs"] = stage_outputs
+        payload["result"]["stage_outputs"] = dict(stage_outputs)
+        # Write the summary after visualization so the PNG path and any
+        # visualization error are present in the persisted stage report.
         self._write_json(payload["result"], str(directory / f"{stage}_summary.json"))
-
-
-def assemble_from_inverse(inverse_result: Any, config: Optional[MCTSConfig] = None) -> Dict[str, Any]:
-    """Functional API for inverse pipeline integration."""
-    runner = MCTSRunner(inverse_result, config=config)
-    return runner.run_all_stages()
+        if 'search_diagnostics' in payload['result']:
+            self._write_json({
+                'actions': payload['best_candidate'].action_sequence,
+                'plan': payload.get('flex_plan', {}),
+                'diagnostics': payload['result']['search_diagnostics'],
+                'rigid_search_attempts': payload['result'].get('rigid_search_attempts', []),
+            }, str(directory / f'{stage}_search_trace.json'))
 
 
 def assemble_from_csv(
     nodes_csv: Any,
     topology_specs_csv: Any,
-    config: Optional[MCTSConfig] = None,
+    config: AssemblyConfig | None = None,
     output_dir: Optional[str] = None,
+    search_guidance: SearchGuidance | None = None,
 ) -> Dict[str, Any]:
     """Assemble directly from the two final inverse CSV exports."""
-    runner = MCTSRunner(
-        nodes_csv,
-        config=config,
-        topology_specs_csv=topology_specs_csv,
-    )
-    return runner.run_all_stages(output_dir)
-
-
-def _connection_row(step: int, action: Mapping[str, Any], before, after) -> Dict[str, Any]:
-    source_node_id = int(action["source_node_id"])
-    target_node_id = int(action["target_node_id"])
-    source_axial = after.node_axial[source_node_id]
-    target_axial = after.node_axial[target_node_id]
-    direction = (
-        int(target_axial[0]) - int(source_axial[0]),
-        int(target_axial[1]) - int(source_axial[1]),
-    )
-    moved_ids = sorted(
-        node_id
-        for node_id, axial in before.node_axial.items()
-        if after.node_axial.get(int(node_id)) != axial
-    )
-    component_translation = action.get("component_translation", (0, 0))
-    source_translation = action.get("source_translation", (0, 0))
-    return {
-        "step": int(step),
-        "contract_id": str(action.get("contract_id", "")),
-        "source_unit_id": str(action.get("source_unit_id", "")),
-        "source_node_id": source_node_id,
-        "source_port_id": str(action.get("source_port_id", "")),
-        "target_unit_id": str(action.get("target_unit_id", "")),
-        "target_node_id": target_node_id,
-        "target_port_id": str(action.get("target_port_id", "")),
-        "move_component_unit_id": str(action.get("move_component_unit_id", "")),
-        "component_rotation": int(action.get("component_rotation", 0)),
-        "component_translation_q": int(component_translation[0]),
-        "component_translation_r": int(component_translation[1]),
-        "source_rotation": int(action.get("source_rotation", 0)),
-        "source_translation_q": int(source_translation[0]),
-        "source_translation_r": int(source_translation[1]),
-        "reported_moved_node_count": int(action.get("moved_node_count", 0)),
-        "actual_moved_node_count": len(moved_ids),
-        "source_q": int(source_axial[0]),
-        "source_r": int(source_axial[1]),
-        "target_q": int(target_axial[0]),
-        "target_r": int(target_axial[1]),
-        "direction_q": int(direction[0]),
-        "direction_r": int(direction[1]),
-        "hex_neighbor": direction in HEX_DIRECTIONS,
-        "component_count_after_step": int(after.component_count()),
-        "rigid_contracts_done_after_step": sum(
-            1
-            for contract in after.problem.contracts
-            if contract.kind == "rigid"
-            and contract.contract_id in after.satisfied_contracts
-        ),
-    }
-
-
-def _unplace_rigid_replay_unit(state: HexAssemblyState, unit_id: str) -> None:
-    """Mirror the isolated-root setup used by the rigid solver replay.
-
-    CSV initialization keeps every aromatic unit in a distant staging pose.
-    A rigid search action contains the placement for the one unit that was
-    temporarily removed during tree growth.  Remove that unit before
-    replaying the action so ``connect`` can apply the recorded placement
-    instead of treating both endpoints as already placed.
-    """
-    unit_id = str(unit_id)
-    if unit_id not in state.placements:
-        return
-    node_ids = {
-        int(node.node_id) for node in state.unit(unit_id).nodes
-    }
-    state.placements.pop(unit_id, None)
-    for node_id in node_ids:
-        axial = state.node_axial.pop(node_id, None)
-        state.final_node_positions.pop(node_id, None)
-        if axial is not None and state.occupied_axial.get(axial) == node_id:
-            state.occupied_axial.pop(axial, None)
-
-
-def _final_component_rows(state, output_dir: Path) -> tuple[list[Dict[str, Any]], list[str]]:
-    """Save one readable image for every final rigid-stage component."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ownership = state.problem.ownership_map()
-    su_map = state.current_node_map()
-    remaining_unit_ids = set(state.placements)
-    components = []
-    while remaining_unit_ids:
-        seed_unit_id = min(remaining_unit_ids)
-        unit_ids = state.component_unit_ids(seed_unit_id)
-        remaining_unit_ids.difference_update(unit_ids)
-        node_ids = sorted(
-            int(node_id)
-            for node_id in state.node_axial
-            if ownership.get(int(node_id), "") in unit_ids
+    try:
+        runner = MCTSRunner(
+            nodes_csv,
+            config=config,
+            topology_specs_csv=topology_specs_csv,
+            search_guidance=search_guidance,
         )
-        node_id_set = set(node_ids)
-        edges = [
-            edge for edge in state.edges
-            if int(edge.source_node_id) in node_id_set
-            and int(edge.target_node_id) in node_id_set
-        ]
-        rigid_edges = [edge for edge in edges if str(edge.kind) == "rigid"]
-        rigid_contract_ids = sorted({
-            str(edge.contract_id) for edge in rigid_edges if edge.contract_id
-        })
-        components.append({
-            "unit_ids": sorted(unit_ids),
-            "node_ids": node_ids,
-            "su10_node_ids": sorted(
-                node_id for node_id in node_ids
-                if int(su_map.get(node_id, -1)) == 10
-            ),
-            "edge_count": len(edges),
-            "aromatic_edge_count": sum(
-                1 for edge in edges if str(edge.kind) == "aromatic"
-            ),
-            "rigid_connection_count": len(rigid_edges),
-            "rigid_contract_ids": rigid_contract_ids,
-        })
-
-    def contract_sort_key(contract_id: str) -> tuple[int, str]:
-        parts = str(contract_id).split(":", 2)
-        try:
-            return int(parts[1]), str(contract_id)
-        except (IndexError, ValueError):
-            return 10**9, str(contract_id)
-
-    components.sort(key=lambda item: (
-        not bool(item["rigid_contract_ids"]),
-        tuple(contract_sort_key(value) for value in item["rigid_contract_ids"]),
-        item["node_ids"],
-    ))
-    rows: list[Dict[str, Any]] = []
-    pngs: list[str] = []
-    for index, component in enumerate(components, start=1):
-        cluster_id = f"rigid_cluster_{index:02d}"
-        kind = (
-            "rigid_connected_aromatic_cluster"
-            if component["rigid_contract_ids"]
-            else "standalone_aromatic_cluster"
-        )
-        display_kind = (
-            "rigid-connected"
-            if component["rigid_contract_ids"]
-            else "standalone aromatic"
-        )
-        png_path = output_dir / f"{cluster_id}.png"
-        contract_text = (
-            ", ".join(component["rigid_contract_ids"])
-            if component["rigid_contract_ids"]
-            else "none"
-        )
-        save_state_png(
-            state,
-            png_path,
-            title=f"{cluster_id} | {display_kind} | {contract_text}",
-            visible_node_ids=component["node_ids"],
-        )
-        row = {
-            "cluster_index": index,
-            "cluster_id": cluster_id,
-            "cluster_kind": kind,
-            "unit_count": len(component["unit_ids"]),
-            "node_count": len(component["node_ids"]),
-            "edge_count": component["edge_count"],
-            "aromatic_edge_count": component["aromatic_edge_count"],
-            "rigid_connection_count": component["rigid_connection_count"],
-            "unit_ids": component["unit_ids"],
-            "node_ids": component["node_ids"],
-            "su10_node_ids": component["su10_node_ids"],
-            "rigid_contract_ids": component["rigid_contract_ids"],
-            "png": str(png_path),
+    except InverseInputError as exc:
+        payload = {
+            "ok": False,
+            "status": "input_geometry_invalid",
+            "failure_scope": "input",
+            "candidate_space_complete": False,
+            "feasibility_audit": {},
+            "best_partial_state": {},
+            "zero_domain_units": [],
+            "completed_contract_count": 0,
+            "errors": [str(exc)],
+            "diagnostics": exc.diagnostics,
         }
-        rows.append(row)
-        pngs.append(str(png_path))
-    return rows, pngs
-
-
-def run_rigid_mcts(
-    nodes_csv: str | Path,
-    topology_specs_csv: str | Path,
-    output_dir: str | Path | None = None,
-    *,
-    iterations: int = 16,
-    candidate_k: int = 16,
-    max_steps: int = 128,
-    beam_width: int = 1,
-    c_puct: float = 1.414,
-    seed: int | None = 7,
-) -> Dict[str, Any]:
-    """Run and audit only the prescribed aromatic rigid connections."""
-    nodes_path = Path(nodes_csv).resolve()
-    topology_path = Path(topology_specs_csv).resolve()
-    directory = (
-        Path(output_dir).resolve()
-        if output_dir is not None
-        else nodes_path.parent / "rl_mtcs_rigid"
-    )
-    steps_dir = directory / "steps"
-    steps_dir.mkdir(parents=True, exist_ok=True)
-
-    config = MCTSConfig(
-        iterations=iterations,
-        candidate_k=candidate_k,
-        rigid_max_steps=max_steps,
-        beam_width=beam_width,
-        c_puct=c_puct,
-        seed=seed,
-    )
-    runner = MCTSRunner(nodes_path, config=config, topology_specs_csv=topology_path)
-    initial_state = runner.initial_state.clone()
-    rigid_contracts = [
-        contract for contract in initial_state.problem.contracts
-        if contract.kind == "rigid"
-    ]
-    aromatic_node_ids = {
-        int(node.node_id)
-        for unit in initial_state.problem.units
-        if unit.phase == "aromatic"
-        for node in unit.nodes
-    }
-    initial_png = directory / "rigid_initial.png"
-    save_state_png(
-        initial_state,
-        initial_png,
-        title=(
-            f"Rigid MCTS initial state | aromatic clusters={len(initial_state.placements)} "
-            f"nodes={len(initial_state.node_axial)} components={initial_state.component_count()}"
-        ),
-    )
-
-    payload = runner.run_rigid_stage()
-    actions = list(payload["best_candidate"].action_sequence)
-    replay_state = initial_state.clone()
-    connection_rows = []
-    step_pngs = []
-    replay_errors = []
-    for step, action in enumerate(actions, start=1):
-        before = replay_state.clone()
-        # Rigid tree actions carry ``source_translation`` for the unplaced
-        # side.  The serialized CSV initializer, unlike the isolated search
-        # base, still has that unit in its staging pose.  Remove only a
-        # singleton source component; cycle-closure actions move a complete
-        # component and are marked with ``move_component_unit_id``.
-        if not action.get("move_component_unit_id"):
-            source_unit_id = str(action.get("source_unit_id", ""))
-            if (
-                source_unit_id in replay_state.placements
-                and len(replay_state.component_unit_ids(source_unit_id)) == 1
-                and action.get("source_translation") is not None
-            ):
-                _unplace_rigid_replay_unit(replay_state, source_unit_id)
-        ok, reason = replay_state.connect(copy.deepcopy(action))
-        if not ok:
-            replay_errors.append(
-                f"replay_failed:step={step}:contract={action.get('contract_id', '')}:reason={reason}"
-            )
-            break
-        row = _connection_row(step, action, before, replay_state)
-        connection_rows.append(row)
-        step_png = steps_dir / f"rigid_step_{step:02d}.png"
-        connected_node_ids = replay_state.component_node_ids(
-            str(action["source_unit_id"])
-        )
-        save_state_png(
-            replay_state,
-            step_png,
-            title=(
-                f"Rigid MCTS step {step}/{len(rigid_contracts)} | "
-                f"contract={row['contract_id']} | "
-                f"SU10 GIDs {row['source_node_id']}-{row['target_node_id']} | "
-                f"components={row['component_count_after_step']}"
-            ),
-            visible_node_ids=connected_node_ids,
-        )
-        step_pngs.append(str(step_png))
-
-    # Keep the diagnostic replay identical to the production rigid result,
-    # including the compact placement of independently solved components.
-    _pack_rigid_components(replay_state, _rigid_unit_components(replay_state))
-    final_state = replay_state
-    final_audit = final_state.audit()
-    final_png = directory / "rigid_final.png"
-    save_state_png(
-        final_state,
-        final_png,
-        title=(
-            f"Rigid MCTS final state | contracts={len(final_state.satisfied_contracts & {contract.contract_id for contract in rigid_contracts})}"
-            f"/{len(rigid_contracts)} nodes={len(final_state.node_axial)} "
-            f"components={final_state.component_count()}"
-        ),
-    )
-    cluster_rows, cluster_pngs = _final_component_rows(
-        final_state, directory / "rigid_clusters"
-    )
-
-    expected_contract_ids = {str(contract.contract_id) for contract in rigid_contracts}
-    completed_contract_ids = expected_contract_ids & final_state.satisfied_contracts
-    pending_contract_ids = expected_contract_ids - final_state.satisfied_contracts
-    expected_component_count = initial_state.component_count() - len(rigid_contracts)
-    rigid_endpoint_ids = {
-        int(node_id)
-        for contract in rigid_contracts
-        for node_id in (contract.source_node_id, contract.target_node_id)
-    }
-    initial_su_map = initial_state.current_node_map()
-    final_su_map = final_state.current_node_map()
-    placed_non_aromatic = sorted(
-        unit_id
-        for unit_id in final_state.placements
-        if final_state.unit(unit_id).phase != "aromatic"
-    )
-    validation_errors = list(replay_errors)
-    initial_aromatic_types = {
-        int(initial_su_map[node_id]) for node_id in aromatic_node_ids
-    }
-    if initial_aromatic_types - {12, 13}:
-        validation_errors.append(
-            f"initial_aromatic_su_types:{sorted(initial_aromatic_types)}:expected_only_12_13"
-        )
-    activated_rigid_ids = {
-        node_id for node_id in aromatic_node_ids
-        if int(final_su_map[node_id]) == 10
-    }
-    if activated_rigid_ids != rigid_endpoint_ids:
-        validation_errors.append(
-            "activated_su10_nodes_do_not_match_rigid_endpoints:"
-            f"actual={sorted(activated_rigid_ids)}:expected={sorted(rigid_endpoint_ids)}"
-        )
-    unexpected_rigid_stage_types = sorted(
-        {
-            int(final_su_map[node_id])
-            for node_id in aromatic_node_ids
-        } - {10, 12, 13}
-    )
-    if unexpected_rigid_stage_types:
-        validation_errors.append(
-            "premature_aromatic_substitution_types:"
-            + ",".join(str(value) for value in unexpected_rigid_stage_types)
-        )
-    if pending_contract_ids:
-        validation_errors.append(
-            "pending_rigid_contracts:" + ",".join(sorted(pending_contract_ids))
-        )
-    if len(actions) != len(rigid_contracts):
-        validation_errors.append(
-            f"rigid_action_count:{len(actions)}:expected={len(rigid_contracts)}"
-        )
-    if set(final_state.node_axial) != aromatic_node_ids:
-        validation_errors.append(
-            f"placed_node_set_is_not_aromatic_only:{len(final_state.node_axial)}:expected={len(aromatic_node_ids)}"
-        )
-    if placed_non_aromatic:
-        validation_errors.append(
-            "non_aromatic_units_placed:" + ",".join(placed_non_aromatic)
-        )
-    if final_audit.get("duplicate_axials"):
-        validation_errors.append("duplicate_axial_coordinates")
-    if final_audit.get("non_hex_edges"):
-        validation_errors.append("non_hexagonal_edges")
-    if final_state.component_count() != expected_component_count:
-        validation_errors.append(
-            f"component_count:{final_state.component_count()}:expected={expected_component_count}"
-        )
-    if final_state.state_signature() != payload["state"].state_signature():
-        validation_errors.append("replayed_state_differs_from_mcts_result")
-    if len(cluster_rows) != final_state.component_count():
-        validation_errors.append(
-            f"rigid_cluster_image_count:{len(cluster_rows)}:expected={final_state.component_count()}"
-        )
-    if final_audit.get("geometry_fallback_contract_ids"):
-        validation_errors.append("geometry_fallback_used")
-    if any(not row["hex_neighbor"] for row in connection_rows):
-        validation_errors.append("rigid_endpoints_are_not_hex_neighbors")
-
-    report: Dict[str, Any] = {
-        "ok": not validation_errors,
-        "stage": "rigid",
-        "scope": "rigid_only_no_flex_no_side_no_force_finish",
-        "inputs": {
-            "nodes_csv": str(nodes_path),
-            "topology_specs_csv": str(topology_path),
-        },
-        "config": {
-            "iterations": config.iterations,
-            "candidate_k": config.candidate_k,
-            "max_steps": config.rigid_max_steps,
-            "beam_width": config.beam_width,
-            "c_puct": config.c_puct,
-            "seed": config.seed,
-        },
-        "summary": {
-            "aromatic_cluster_count": sum(
-                1 for unit in initial_state.problem.units if unit.phase == "aromatic"
-            ),
-            "placed_node_count": len(final_state.node_axial),
-            "rigid_contract_count": len(rigid_contracts),
-            "rigid_action_count": len(actions),
-            "rigid_contracts_done": len(completed_contract_ids),
-            "rigid_contracts_pending": len(pending_contract_ids),
-            "initial_component_count": initial_state.component_count(),
-            "final_component_count": final_state.component_count(),
-            "expected_final_component_count": expected_component_count,
-            "final_rigid_cluster_count": len(cluster_rows),
-            "rigid_connected_cluster_count": sum(
-                row["cluster_kind"] == "rigid_connected_aromatic_cluster"
-                for row in cluster_rows
-            ),
-            "standalone_aromatic_cluster_count": sum(
-                row["cluster_kind"] == "standalone_aromatic_cluster"
-                for row in cluster_rows
-            ),
-            "geometry_valid": bool(final_audit.get("geometry_valid", False)),
-            "activated_su10_node_count": len(activated_rigid_ids),
-            "initial_aromatic_su_types": sorted(initial_aromatic_types),
-            "final_aromatic_su_types": sorted({
-                int(final_su_map[node_id]) for node_id in aromatic_node_ids
-            }),
-        },
-        "mcts_result": dict(payload.get("result", {})),
-        "connections": connection_rows,
-        "action_sequence": copy.deepcopy(actions),
-        "final_audit": final_audit,
-        "validation": {
-            "ok": not validation_errors,
-            "errors": validation_errors,
-            "completed_rigid_contract_ids": sorted(completed_contract_ids),
-            "pending_rigid_contract_ids": sorted(pending_contract_ids),
-            "placed_non_aromatic_unit_ids": placed_non_aromatic,
-        },
-        "outputs": {
-            "directory": str(directory),
-            "initial_png": str(initial_png),
-            "step_pngs": step_pngs,
-            "final_png": str(final_png),
-            "clusters_directory": str(directory / "rigid_clusters"),
-            "cluster_pngs": cluster_pngs,
-            "clusters_csv": str(directory / "rigid_clusters.csv"),
-            "connections_csv": str(directory / "rigid_connections.csv"),
-            "molecule_json": str(directory / "rigid_molecule.json"),
-            "audit_json": str(directory / "rigid_audit.json"),
-            "report_json": str(directory / "rigid_report.json"),
-        },
-    }
-    _write_csv(directory / "rigid_connections.csv", connection_rows)
-    _write_csv(directory / "rigid_clusters.csv", cluster_rows)
-    _write_json(directory / "rigid_molecule.json", final_state.to_dict())
-    _write_json(directory / "rigid_audit.json", final_audit)
-    _write_json(directory / "rigid_report.json", report)
-    return report
-
-
-def print_rigid_report(report: Mapping[str, Any]) -> None:
-    """Print a compact rigid-stage report for scripts and notebooks."""
-    summary = dict(report.get("summary", {}))
-    print("[RL_MTCS rigid-only MCTS]")
-    print(f"ok={bool(report.get('ok', False))}")
-    for key in (
-        "aromatic_cluster_count",
-        "placed_node_count",
-        "rigid_contract_count",
-        "rigid_action_count",
-        "rigid_contracts_done",
-        "rigid_contracts_pending",
-        "initial_component_count",
-        "final_component_count",
-        "expected_final_component_count",
-        "final_rigid_cluster_count",
-        "rigid_connected_cluster_count",
-        "standalone_aromatic_cluster_count",
-        "geometry_valid",
-        "activated_su10_node_count",
-        "initial_aromatic_su_types",
-        "final_aromatic_su_types",
-    ):
-        print(f"{key}={summary.get(key)}")
-    print("\n[connections]")
-    for row in report.get("connections", []):
         print(
-            f"  step={row['step']:02d} contract={row['contract_id']} "
-            f"nodes={row['source_node_id']}-{row['target_node_id']} "
-            f"direction=({row['direction_q']},{row['direction_r']}) "
-            f"components={row['component_count_after_step']}"
+            f"[RL_MTCS][input] status=input_geometry_invalid error={exc}",
+            flush=True,
         )
-    for error in report.get("validation", {}).get("errors", []):
-        print(f"ERROR: {error}")
-    outputs = dict(report.get("outputs", {}))
-    print(f"\noutputs={outputs.get('directory', '')}")
-    print(f"rigid_clusters={outputs.get('clusters_directory', '')}")
-    print(f"rigid_clusters_csv={outputs.get('clusters_csv', '')}")
-
-
-
-
-def run_flex_mcts(
-    nodes_csv: str | Path,
-    topology_specs_csv: str | Path,
-    output_dir: str | Path | None = None,
-    *,
-    rigid_iterations: int = 16,
-    flex_iterations: int = 4,
-    candidate_k: int = 8,
-    max_steps: int = 128,
-    beam_width: int = 1,
-    c_puct: float = 1.414,
-    seed: int | None = 7,
-) -> Dict[str, Any]:
-    """Run through flex only and save an auditable partial or complete state."""
-    nodes_path = Path(nodes_csv).resolve()
-    topology_path = Path(topology_specs_csv).resolve()
-    directory = (
-        Path(output_dir).resolve()
-        if output_dir is not None
-        else nodes_path.parent / "rl_mtcs_flex"
-    )
-    directory.mkdir(parents=True, exist_ok=True)
-
-    runner = MCTSRunner(
-        nodes_path,
-        config=MCTSConfig(
-            iterations=rigid_iterations,
-            flex_iterations=flex_iterations,
-            candidate_k=candidate_k,
-            flex_max_steps=max_steps,
-            beam_width=beam_width,
-            c_puct=c_puct,
-            seed=seed,
-        ),
-        topology_specs_csv=topology_path,
-    )
-    rigid = runner.run_rigid_stage()
-    flex = runner.run_flex_stage(rigid)
-    state = flex["state"]
-    summary = dict(flex["result"])
-    audit = state.audit()
-    plan = dict(flex["flex_plan"])
-
-    png_path = directory / "flex_result.png"
-    save_state_png(
-        state,
-        png_path,
-        title=(
-            "Flex MCTS result | "
-            f"backbone={summary.get('backbone_contracts_done', 0)}/"
-            f"{summary.get('backbone_contracts', 0)} "
-            f"interior={summary.get('interior_contracts_done', 0)}/"
-            f"{summary.get('interior_contracts', 0)} "
-            f"components={audit.get('component_count')}"
-        ),
-    )
-
-    ownership = state.problem.ownership_map()
-    slot_assignments = {
-        int(boundary_id): int(site_id)
-        for boundary_id, site_id in dict(
-            summary.get("slot_geometry", {}).get(
-                "boundary_site_assignments", {}
-            )
-        ).items()
-    }
-    contract_rows = []
-    for contract in state.problem.contracts:
-        if contract.kind != "flex":
-            continue
-        if state.unit(contract.source_unit_id).phase == "aromatic":
-            boundary_node_id = int(contract.source_node_id)
-        else:
-            boundary_node_id = int(contract.target_node_id)
-        contract_rows.append({
-            "contract_id": str(contract.contract_id),
-            "satisfied": str(contract.contract_id) in state.satisfied_contracts,
-            "source_unit_id": str(contract.source_unit_id),
-            "source_node_id": int(contract.source_node_id),
-            "target_unit_id": str(contract.target_unit_id),
-            "target_node_id": int(contract.target_node_id),
-            "source_owner": ownership.get(int(contract.source_node_id), ""),
-            "target_owner": ownership.get(int(contract.target_node_id), ""),
-            "aromatic_boundary_node_id": boundary_node_id,
-            "selected_physical_site_id": slot_assignments.get(
-                boundary_node_id, ""
-            ),
-            "selected_aromatic_unit_id": ownership.get(
-                boundary_node_id, ""
-            ),
-            "boundary_axial": list(
-                state.node_axial.get(boundary_node_id, ())
-            ),
-            "backbone_contract": str(contract.contract_id)
-            in set(plan.get("backbone_contract_ids", [])),
-            "interior_contract": str(contract.contract_id)
-            in set(plan.get("interior_contract_ids", [])),
-        })
-
-    action_rows = []
-    for step, action in enumerate(flex["best_candidate"].action_sequence, start=1):
-        contract_ids = [
-            str(value) for value in action.get("contract_ids", [])
-        ]
-        if not contract_ids and action.get("contract_id"):
-            contract_ids = [str(action["contract_id"])]
-        action_rows.append({
-            "step": int(step),
-            "contract_id": contract_ids[0] if len(contract_ids) == 1 else "",
-            "contract_ids": contract_ids,
-            "topology_unit_id": str(action.get("topology_unit_id", "")),
-            "move_component_unit_id": str(
-                action.get("move_component_unit_id", "")
-            ),
-            "topology_reembedded": bool(action.get("topology_reembedded", False)),
-            "planned_backbone_merge": bool(
-                action.get("planned_flex_backbone_merge", False)
-            ),
-            "planned_internal_closure": bool(
-                action.get("planned_internal_closure", False)
-            ),
-            "attachment_contract_id": str(
-                action.get("attachment_contract_id", "")
-            ),
-            "merge_contract_ids": list(
-                action.get("merge_contract_ids", [])
-            ),
-            "boundary_site_assignments": dict(
-                action.get("boundary_site_assignments", {})
-            ),
-            "topology_rotation": action.get("topology_rotation", ""),
-            "topology_reflection": action.get("topology_reflection", ""),
-            "topology_translation": action.get("topology_translation", ""),
-            "component_moves": list(action.get("component_moves", [])),
-            "action": dict(action),
-        })
-
-    _write_json(directory / "flex_summary.json", summary)
-    _write_json(directory / "flex_plan.json", plan)
-    _write_json(directory / "flex_audit.json", audit)
-    _write_json(directory / "flex_molecule.json", state.to_dict())
-    _write_csv(directory / "flex_contracts.csv", contract_rows)
-    _write_csv(directory / "flex_actions.csv", action_rows)
-
-    result = {
-        "ok": bool(summary.get("done", False)),
-        "state": state,
-        "rigid": dict(rigid["result"]),
-        "flex": summary,
-        "audit": audit,
-        "plan": plan,
-        "outputs": {
-            "directory": str(directory),
-            "png": str(png_path),
-            "summary_json": str(directory / "flex_summary.json"),
-            "plan_json": str(directory / "flex_plan.json"),
-            "audit_json": str(directory / "flex_audit.json"),
-            "molecule_json": str(directory / "flex_molecule.json"),
-            "contracts_csv": str(directory / "flex_contracts.csv"),
-            "actions_csv": str(directory / "flex_actions.csv"),
-        },
-    }
-    return result
-
-
-
-
-def run_side_mcts(
-    nodes_csv: str | Path,
-    topology_specs_csv: str | Path,
-    output_dir: str | Path | None = None,
-    *,
-    rigid_iterations: int = 16,
-    flex_iterations: int = 4,
-    side_iterations: int = 4,
-    candidate_k: int = 2,
-    max_steps: int = 128,
-    beam_width: int = 1,
-    c_puct: float = 1.414,
-    seed: int | None = 7,
-) -> Dict[str, Any]:
-    """Run all connection stages and save the completed side-chain state."""
-    nodes_path = Path(nodes_csv).resolve()
-    topology_path = Path(topology_specs_csv).resolve()
-    directory = (
-        Path(output_dir).resolve()
-        if output_dir is not None
-        else nodes_path.parent / "rl_mtcs_side"
-    )
-    directory.mkdir(parents=True, exist_ok=True)
-
-    runner = MCTSRunner(
-        nodes_path,
-        config=MCTSConfig(
-            iterations=rigid_iterations,
-            flex_iterations=flex_iterations,
-            side_iterations=side_iterations,
-            candidate_k=candidate_k,
-            flex_max_steps=max_steps,
-            side_max_steps=max_steps,
-            beam_width=beam_width,
-            c_puct=c_puct,
-            seed=seed,
-        ),
-        topology_specs_csv=topology_path,
-    )
-    rigid = runner.run_rigid_stage()
-    flex = runner.run_flex_stage(rigid)
-    side = runner.run_side_stage(flex)
-    state = side["state"]
-    summary = dict(side["result"])
-    audit = state.audit()
-
-    png_path = directory / "side_result.png"
-    save_state_png(
-        state,
-        png_path,
-        title=(
-            "Complete side-chain result | "
-            f"side={summary.get('contracts_done', 0)}/"
-            f"{summary.get('contracts_total', 0)} "
-            f"nodes={audit.get('placed_node_count')}/"
-            f"{audit.get('expected_node_count')}"
-        ),
-    )
-
-    assignments = {
-        int(boundary_id): int(site_id)
-        for boundary_id, site_id in dict(
-            summary.get("slot_geometry", {}).get(
-                "boundary_site_assignments", {}
-            )
-        ).items()
-    }
-    ownership = state.problem.ownership_map()
-    contract_rows = []
-    for contract in state.problem.contracts:
-        if contract.kind != "side":
-            continue
-        source = state.unit(contract.source_unit_id)
-        if source.phase == "aromatic":
-            boundary_id = int(contract.source_node_id)
-            topology_id = int(contract.target_node_id)
-        else:
-            boundary_id = int(contract.target_node_id)
-            topology_id = int(contract.source_node_id)
-        contract_rows.append({
-            "contract_id": str(contract.contract_id),
-            "satisfied": str(contract.contract_id) in state.satisfied_contracts,
-            "topology_node_id": topology_id,
-            "aromatic_boundary_node_id": boundary_id,
-            "selected_physical_site_id": assignments.get(boundary_id, ""),
-            "selected_aromatic_unit_id": ownership.get(boundary_id, ""),
-            "boundary_axial": list(state.node_axial.get(boundary_id, ())),
-            "topology_axial": list(state.node_axial.get(topology_id, ())),
-        })
-
-    action_rows = []
-    for step, action in enumerate(
-        side["best_candidate"].action_sequence, start=1
-    ):
-        boundary_id = int(action.get("boundary_node_id", -1))
-        action_rows.append({
-            "step": int(step),
-            "contract_id": str(action.get("contract_id", "")),
-            "topology_unit_id": str(action.get("topology_unit_id", "")),
-            "topology_node_id": int(action.get("topology_node_id", -1)),
-            "aromatic_boundary_node_id": boundary_id,
-            "selected_physical_site_id": int(
-                action.get("physical_site_id", -1)
-            ),
-            "final_boundary_axial": list(
-                state.node_axial.get(boundary_id, ())
-            ),
-            "topology_rotation": int(action.get("topology_rotation", 0)),
-            "topology_reflection": bool(
-                action.get("topology_reflection", False)
-            ),
-            "topology_translation": list(
-                action.get("topology_translation", ())
-            ),
-            "allowed_nonbonded_contact_count": int(
-                action.get("allowed_nonbonded_contact_count", 0)
-            ),
-            "action": dict(action),
-        })
-
-    _write_json(directory / "side_summary.json", summary)
-    _write_json(directory / "side_audit.json", audit)
-    _write_json(directory / "side_molecule.json", state.to_dict())
-    _write_csv(directory / "side_contracts.csv", contract_rows)
-    _write_csv(directory / "side_actions.csv", action_rows)
-    final_outputs = export_final_state(state, directory)
-
-    return {
-        "ok": bool(
-            summary.get("done", False)
-            and audit.get("complete", False)
-            and audit.get("shape_valid", False)
-            and audit.get("side_distribution_valid", False)
-        ),
-        "state": state,
-        "rigid": dict(rigid["result"]),
-        "flex": dict(flex["result"]),
-        "side": summary,
-        "audit": audit,
-        "outputs": {
-            "directory": str(directory),
-            "side_png": str(png_path),
-            "side_summary_json": str(directory / "side_summary.json"),
-            "side_audit_json": str(directory / "side_audit.json"),
-            "side_molecule_json": str(directory / "side_molecule.json"),
-            "side_contracts_csv": str(directory / "side_contracts.csv"),
-            "side_actions_csv": str(directory / "side_actions.csv"),
-            "summary_json": str(directory / "side_summary.json"),
-            "contracts_csv": str(directory / "side_contracts.csv"),
-            "actions_csv": str(directory / "side_actions.csv"),
-            **final_outputs,
-        },
-    }
-
-
+        if output_dir:
+            target = Path(output_dir)
+            target.mkdir(parents=True, exist_ok=True)
+            _write_json(target / "final.json", payload)
+        return payload
+    return runner.run_all_stages(output_dir)
 
 
 def main() -> Dict[str, Any]:
@@ -1197,21 +848,27 @@ def main() -> Dict[str, Any]:
     parser = argparse.ArgumentParser(
         description="Fixed-topology hex-grid coarse-molecule assembly"
     )
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--inverse-json", help="Complete inverse topology JSON export")
-    source.add_argument("--nodes-csv", help="final_nodes_by_global_id.csv")
+    parser.add_argument("--nodes-csv", required=True, help="final_nodes_by_global_id.csv")
     parser.add_argument("--topology-specs-csv", help="final_topology_specs.csv (required with --nodes-csv)")
     parser.add_argument(
         "--stage",
-        choices=("init", "rigid", "flex", "all"),
+        choices=("init", "rigid", "flex", "side", "all"),
         default="all",
     )
     parser.add_argument("--rigid-iterations", "--iterations", type=int, default=16)
-    parser.add_argument("--flex-iterations", type=int, default=4)
-    parser.add_argument("--side-iterations", type=int, default=4)
     parser.add_argument("--candidate-k", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=128)
     parser.add_argument("--beam-width", type=int, default=1)
+    parser.add_argument("--search-budget", type=int, default=2000)
+    parser.add_argument("--conformer-limit", type=int, default=12)
+    parser.add_argument("--max-tree-nodes", type=int, default=64)
+    parser.add_argument("--domain-check-limit", type=int, default=64)
+    parser.add_argument("--domain-pose-limit", type=int, default=16)
+    parser.add_argument("--max-domain-check-limit", type=int, default=512)
+    parser.add_argument("--max-domain-pose-limit", type=int, default=64)
+    parser.add_argument(
+        "--strict-geometry", action=argparse.BooleanOptionalAction, default=True,
+    )
     parser.add_argument("--substitution-beam-width", type=int, default=4)
     parser.add_argument("--substitution-candidate-k", type=int, default=32)
     parser.add_argument("--substitution-nmr-weight", type=float, default=1.0)
@@ -1219,92 +876,47 @@ def main() -> Dict[str, Any]:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
-    if args.nodes_csv and not args.topology_specs_csv:
+    if not args.topology_specs_csv:
         parser.error("--topology-specs-csv is required with --nodes-csv")
-    if args.inverse_json:
-        if args.stage != "all":
-            parser.error("--inverse-json currently supports only --stage all")
-        result = MCTSRunner(
-            args.inverse_json,
-            config=MCTSConfig(
-                iterations=args.rigid_iterations,
-                flex_iterations=args.flex_iterations,
-                side_iterations=args.side_iterations,
-                candidate_k=args.candidate_k,
-                beam_width=args.beam_width,
-                rigid_max_steps=args.max_steps,
-                flex_max_steps=args.max_steps,
-                side_max_steps=args.max_steps,
-                c_puct=args.c_puct,
-                seed=args.seed,
-                substitution_beam_width=args.substitution_beam_width,
-                substitution_candidate_k=args.substitution_candidate_k,
-                substitution_nmr_weight=args.substitution_nmr_weight,
-            ),
-        ).run_all_stages(args.output)
-    elif args.stage == "init":
+    config = AssemblyConfig(
+        rigid_iterations=args.rigid_iterations,
+        candidate_k=args.candidate_k,
+        max_steps=args.max_steps,
+        beam_width=args.beam_width,
+        search_budget=args.search_budget,
+        conformer_limit=args.conformer_limit,
+        max_tree_nodes=args.max_tree_nodes,
+        domain_check_limit=args.domain_check_limit,
+        domain_pose_limit=args.domain_pose_limit,
+        max_domain_check_limit=args.max_domain_check_limit,
+        max_domain_pose_limit=args.max_domain_pose_limit,
+        strict_geometry=args.strict_geometry,
+        c_puct=args.c_puct,
+        seed=args.seed,
+        substitution_beam_width=args.substitution_beam_width,
+        substitution_candidate_k=args.substitution_candidate_k,
+        substitution_nmr_weight=args.substitution_nmr_weight,
+    )
+    if args.stage == "init":
         result = inspect_csv_initialization(
             args.nodes_csv, args.topology_specs_csv, args.output
         )
-    elif args.stage == "rigid":
-        result = run_rigid_mcts(
-            args.nodes_csv,
-            args.topology_specs_csv,
-            args.output,
-            iterations=args.rigid_iterations,
-            candidate_k=args.candidate_k,
-            max_steps=args.max_steps,
-            beam_width=args.beam_width,
-            c_puct=args.c_puct,
-            seed=args.seed,
-        )
-    elif args.stage == "flex":
-        result = run_flex_mcts(
-            args.nodes_csv,
-            args.topology_specs_csv,
-            args.output,
-            rigid_iterations=args.rigid_iterations,
-            flex_iterations=args.flex_iterations,
-            candidate_k=args.candidate_k,
-            max_steps=args.max_steps,
-            beam_width=args.beam_width,
-            c_puct=args.c_puct,
-            seed=args.seed,
-        )
-    elif args.stage == "all":
-        result = MCTSRunner(
-            args.nodes_csv,
-            config=MCTSConfig(
-                iterations=args.rigid_iterations,
-                flex_iterations=args.flex_iterations,
-                side_iterations=args.side_iterations,
-                candidate_k=args.candidate_k,
-                beam_width=args.beam_width,
-                rigid_max_steps=args.max_steps,
-                flex_max_steps=args.max_steps,
-                side_max_steps=args.max_steps,
-                c_puct=args.c_puct,
-                seed=args.seed,
-                substitution_beam_width=args.substitution_beam_width,
-                substitution_candidate_k=args.substitution_candidate_k,
-                substitution_nmr_weight=args.substitution_nmr_weight,
-            ),
-            topology_specs_csv=args.topology_specs_csv,
-        ).run_all_stages(args.output)
     else:
-        result = run_side_mcts(
-            args.nodes_csv,
-            args.topology_specs_csv,
-            args.output,
-            rigid_iterations=args.rigid_iterations,
-            flex_iterations=args.flex_iterations,
-            side_iterations=args.side_iterations,
-            candidate_k=args.candidate_k,
-            max_steps=args.max_steps,
-            beam_width=args.beam_width,
-            c_puct=args.c_puct,
-            seed=args.seed,
+        runner = MCTSRunner(
+            args.nodes_csv, config=config,
+            topology_specs_csv=args.topology_specs_csv,
         )
+        if args.stage == "all":
+            result = runner.run_all_stages(args.output)
+        elif args.stage == "rigid":
+            result = runner.run_rigid_stage(args.output)
+        elif args.stage == "flex":
+            rigid = runner.run_rigid_stage()
+            result = runner.run_flex_stage(rigid, args.output)
+        else:
+            rigid = runner.run_rigid_stage()
+            flex = runner.run_flex_stage(rigid)
+            result = runner.run_side_stage(flex, args.output)
     print(json.dumps(
         {
             "ok": result.get("ok", result.get("status") == "complete"),

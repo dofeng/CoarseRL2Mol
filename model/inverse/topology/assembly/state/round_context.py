@@ -158,14 +158,9 @@ def build_stage3_round_context(
     recycled_ids = {
         int(value) for value in list(recycled_su24_to_23_ids or [])
     }
-    # A ring recovery is an irreversible resource event at this boundary:
-    # every released SU24 is immediately an ordinary SU23 resource and is
-    # never exposed as a ring or conversion-only SU24 pool.
-    recycled_ids.update(released_by_su.get(SU24_RING_RESOURCE_TYPE, set()))
-    released_by_su.setdefault(SU24_RING_RESOURCE_TYPE, set()).difference_update(
-        recycled_ids
-    )
-    released_by_su.setdefault(23, set()).update(recycled_ids)
+    # Recovery history identifies nodes released from classifier fragments.
+    # Their current identity comes exclusively from this transaction's nodes;
+    # a recovered SU23 may subsequently become SU11, SU22 or an aromatic donor.
 
     fragment_owner_by_id: Dict[int, int] = {}
     fixed_ids: Set[int] = set()
@@ -218,7 +213,7 @@ def build_stage3_round_context(
         int(value)
         for values in released_by_su.values()
         for value in values
-    }
+    } | recycled_ids
     # Released nodes are no longer fixed/context/conflict nodes. Their actual
     # physical SU type is authoritative, so a malformed caller map cannot
     # turn a node into a different resource type.
@@ -237,9 +232,9 @@ def build_stage3_round_context(
         node = node_by_id.get(int(node_id))
         if node is None:
             continue
-        su_type = 23 if int(node_id) in recycled_ids else int(
-            getattr(node, "su_type", -1)
-        )
+        su_type = int(getattr(node, "su_type", -1))
+        closure_ids.discard(int(node_id))
+        donor_ids.discard(int(node_id))
         if su_type in GENERIC_CLOSURE_RESOURCE_TYPES:
             closure_ids.add(int(node_id))
         elif su_type in AROMATIC_DONOR_TYPES:
@@ -258,9 +253,7 @@ def build_stage3_round_context(
     normalized_donor: Dict[int, List[int]] = defaultdict(list)
     ownership: Dict[int, Stage3NodeOwnership] = {}
     for node_id, node in sorted(node_by_id.items()):
-        su_type = 23 if int(node_id) in recycled_ids else int(
-            getattr(node, "su_type", -1)
-        )
+        su_type = int(getattr(node, "su_type", -1))
         if int(node_id) in conflict_ids:
             state = Stage3OwnershipState.UNCLASSIFIED_OR_CONFLICT.value
             reason = "classification_conflict_or_reject"
@@ -456,8 +449,22 @@ def claim_round_product(
     }
     all_ids = fixed_ids | resource_ids
     unavailable: List[Dict[str, Any]] = []
+    expected_su = dict(product.expected_su_type_by_node_id or {})
+    for su_key, values in dict(product.claimed_resource_ids_by_su or {}).items():
+        for node_id in values:
+            previous = expected_su.get(int(node_id))
+            if previous is not None and int(previous) != int(su_key):
+                unavailable.append({"node_id": int(node_id), "reason": "product_su_declaration_conflict"})
+            expected_su[int(node_id)] = int(su_key)
     for node_id in sorted(all_ids):
         owner = working.ownership_by_node_id.get(int(node_id))
+        if owner is not None and node_id in expected_su and int(owner.su_type) != int(expected_su[node_id]):
+            unavailable.append({
+                "node_id": int(node_id),
+                "reason": "product_su_type_mismatch",
+                "actual_su_type": int(owner.su_type),
+                "claimed_su_type": int(expected_su[node_id]),
+            })
         allowed = (
             {
                 Stage3OwnershipState.FIXED_TOPOLOGY_CORE.value,
@@ -479,6 +486,13 @@ def claim_round_product(
     if unavailable:
         return None, {"reason": "product_ownership_unavailable", "nodes": unavailable}
 
+    # All checks precede mutation, and every claimed ID leaves every bucket.
+    for pool in (working.generic_closure_pool_ids_by_su, working.aromatic_donor_ids_by_su):
+        for key, values in pool.items():
+            pool[key] = [node_id for node_id in values if node_id not in all_ids]
+    working.su24_ring_resource_ids = [
+        node_id for node_id in working.su24_ring_resource_ids if node_id not in all_ids
+    ]
     for node_id in sorted(fixed_ids):
         owner = working.ownership_by_node_id[int(node_id)]
         owner.state = Stage3OwnershipState.COMPLETED_TOPOLOGY.value
@@ -500,13 +514,12 @@ def claim_round_product(
                 if is_su24_ring_resource
                 else "symbolic_closure_resource"
             )
-            if int(node_id) in working.generic_closure_pool_ids_by_su.get(int(su_type), []):
-                working.generic_closure_pool_ids_by_su[int(su_type)].remove(int(node_id))
-            if is_su24_ring_resource and int(node_id) in working.su24_ring_resource_ids:
-                working.su24_ring_resource_ids.remove(int(node_id))
-            if int(node_id) in working.aromatic_donor_ids_by_su.get(int(su_type), []):
-                working.aromatic_donor_ids_by_su[int(su_type)].remove(int(node_id))
-    working.products.append(deepcopy(product))
+    committed_product = deepcopy(product)
+    committed_product.expected_su_type_by_node_id = {
+        node_id: int(working.ownership_by_node_id[node_id].su_type)
+        for node_id in all_ids
+    }
+    working.products.append(committed_product)
     return working, {}
 
 
@@ -529,17 +542,62 @@ def mark_round_pending_contracts(
             int(value) for value in list(contract.get("source_fragment_ids", []) or [])
         ]
         source_ids = _ids(contract.get("claimed_source_node_ids", []) or [])
+        existing_same_contract = [
+            dict(item or {})
+            for item in list(working.pending_contracts or [])
+            if int(dict(item or {}).get("contract_id", -1) or -1) == int(contract_id)
+        ]
+        if existing_same_contract:
+            existing_source_sets = {
+                frozenset(
+                    int(value)
+                    for value in list(item.get("claimed_source_node_ids", []) or [])
+                )
+                for item in existing_same_contract
+            }
+            if frozenset(source_ids) in existing_source_sets:
+                continue
+            working.conflicts.append({
+                "reason": "pending_contract_id_reused_with_different_sources",
+                "contract_id": int(contract_id),
+                "existing_source_node_ids": sorted(next(iter(existing_source_sets))),
+                "requested_source_node_ids": sorted(source_ids),
+            })
+            continue
         invalid: List[Dict[str, Any]] = []
         for node_id in sorted(source_ids):
             owner = working.ownership_by_node_id.get(int(node_id))
-            if owner is None or str(owner.state) not in {
+            owner_state = None if owner is None else str(owner.state)
+            owner_contract_id = (
+                None
+                if owner is None or owner.owner_contract_id is None
+                else int(owner.owner_contract_id)
+            )
+            # A source node may belong to one pending contract only.  The old
+            # code accepted an already-pending node and overwrote its
+            # ``owner_contract_id`` with the later contract, leaving the first
+            # contract apparently valid but physically unowned.
+            duplicate_pending_owner = (
+                owner_state == Stage3OwnershipState.PENDING_TOPOLOGY.value
+                and owner_contract_id != int(contract_id)
+            )
+            if owner is None or owner_state not in {
                 Stage3OwnershipState.FIXED_TOPOLOGY_CORE.value,
                 Stage3OwnershipState.PENDING_TOPOLOGY.value,
                 Stage3OwnershipState.SUPPORT_CONTEXT.value,
-            }:
+            } or duplicate_pending_owner:
                 invalid.append({
                     "node_id": int(node_id),
-                    "state": None if owner is None else str(owner.state),
+                    "state": owner_state,
+                    **(
+                        {
+                            "existing_contract_id": owner_contract_id,
+                            "requested_contract_id": int(contract_id),
+                            "reason": "pending_source_owned_by_other_contract",
+                        }
+                        if duplicate_pending_owner
+                        else {}
+                    ),
                 })
         if invalid:
             working.conflicts.append({

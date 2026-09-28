@@ -32,6 +32,7 @@ from .hop1_adjuster import (
     hop1_counter_to_multiset,
 )
 from .layer1_validator import Layer1GraphValidator
+from .terminal_paths import terminal_path_reason
 from .port_role_balance import (
     LAYER1_AROMATIC_RING_TYPES,
     audit_layer1_port_roles,
@@ -2930,6 +2931,9 @@ class Layer1Assigner:
         if int(node1.global_id) in set(node2.hop1_ids or []):
             return False
         if int(node1.remaining_hop1_slots()) <= 0 or int(node2.remaining_hop1_slots()) <= 0:
+            return False
+        # Whole-path state is not represented by the local port cache key.
+        if terminal_path_reason(nodes, proposed_edge=(int(node1.global_id), int(node2.global_id))):
             return False
         key = (
             self._can_add_state_signature(nodes, node1),

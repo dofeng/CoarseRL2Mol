@@ -2798,10 +2798,19 @@ def apply_spectrum_candidate(
             }
         if source < 0 or target < 0 or source >= H_out.numel() or target >= H_out.numel() or int(H_out[source].item()) <= 0:
             return None, None, {"reason": "spectrum_candidate_histogram_invalid", "operation": op}
+        # Spectrum operations still obey the aromatic reserve. A parity/role
+        # operation appended at the rebuild boundary is different: it is the
+        # deliberate consumer of one reserved SU12/SU13 donor; a later Stage3
+        # structural-unit adjustment is expected to restore the staging minimum.
+        balance_operation = str(op.get("operation_kind", "") or "") in {
+            "parity_balance",
+            "port_role_balance",
+        }
         if (
             source in {12, 13}
             and int(H_out[source].item())
             <= int(MIN_STAGE3_AROMATIC_RESOURCE_COUNT)
+            and not balance_operation
         ):
             return None, None, {
                 "reason": "spectrum_candidate_aromatic_minimum_preserved",

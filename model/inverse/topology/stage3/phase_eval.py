@@ -699,15 +699,16 @@ def build_stage3_phase_evaluation(
     classification: Optional[TopologyClassificationResult] = None,
     fixed_partition_meta: Optional[Dict[str, Any]] = None,
     generation_id: int = 0,
+    generation_flex_audit: Optional[Dict[str, Any]] = None,
 ) -> Stage3PhaseEvaluation:
     classification_obj = classification or classify_topology_units(
         list(nodes or []),
         fixed_partition_meta=fixed_partition_meta,
     )
-    flex_audit = _compute_flex_audit(
-        list(nodes or []),
-        classification_obj,
-        enforce=True,
+    flex_audit = (
+        deepcopy(generation_flex_audit)
+        if generation_flex_audit is not None
+        else _compute_flex_audit(list(nodes or []), classification_obj, enforce=True)
     )
     classification_dict = classification_obj.to_dict()
     flex_bounds = _flex_bounds_from_audit(flex_audit)

@@ -5,6 +5,11 @@ from __future__ import annotations
 from ..core.fragment import AssemblyFragmentView
 
 
+# SU24 is a concrete ring-closure resource.  The external conversion planner
+# may move ordinary 11/12/13/22/23 resources, but it cannot synthesize SU24.
+NON_CONVERTIBLE_RING_RESOURCE_SU_TYPES = frozenset({24})
+
+
 def view_requires_ring(view: AssemblyFragmentView) -> bool:
     return bool(
         bool(getattr(view, "can_ring", False))
@@ -32,6 +37,14 @@ def view_requires_ring_resource_retry(view: AssemblyFragmentView) -> bool:
     )
 
 
+def view_allows_non_ring_fallback(view: AssemblyFragmentView) -> bool:
+    """Return whether a failed ring-first view has a legal chain route."""
+    return bool(
+        bool(getattr(view, "can_side", False))
+        or bool(getattr(view, "can_flex", False))
+    )
+
+
 def ring_candidate_pending_for_ring_stage(
     assembler,
     view: AssemblyFragmentView,
@@ -56,7 +69,9 @@ def ring_candidate_pending_for_ring_stage(
 
 
 __all__ = [
+    "NON_CONVERTIBLE_RING_RESOURCE_SU_TYPES",
     "ring_candidate_pending_for_ring_stage",
+    "view_allows_non_ring_fallback",
     "view_requires_ring",
     "view_requires_ring_resource_retry",
 ]

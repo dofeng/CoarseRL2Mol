@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from copy import deepcopy
+from copy import copy, deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from .....shared.inverse_common import _NodeV3
@@ -260,7 +260,169 @@ class ExternalTopologyAssembler:
 
         return self.continue_assembly()
 
+    def _completed_product_resource_su_by_node_id(self) -> Dict[int, int]:
+        """Return the committed resource identity for every product node."""
+        claims: Dict[int, int] = {}
+        for product in list(getattr(self, "products", []) or []):
+            for raw_su, raw_ids in dict(
+                getattr(product, "claimed_resource_ids_by_su", {}) or {}
+            ).items():
+                su_type = int(raw_su)
+                for raw_node_id in list(raw_ids or []):
+                    node_id = int(raw_node_id)
+                    previous = claims.get(node_id)
+                    if previous is not None and int(previous) != su_type:
+                        raise ValueError(
+                            "completed product declares multiple SU identities: "
+                            f"node={node_id} su={previous},{su_type}"
+                        )
+                    claims[node_id] = su_type
+        return claims
+
+    def _mark_allocator_node_consumed(
+        self,
+        node_id: int,
+        *,
+        su_type: int,
+    ) -> None:
+        """Retype an already-owned resource without making it available."""
+        node_id = int(node_id)
+        target_key = str(int(su_type))
+        allocator = self.allocator
+        for buckets in (
+            allocator.initial_ids_by_su,
+            allocator.remaining_ids_by_su,
+            allocator.consumed_ids_by_su,
+        ):
+            for key in list(buckets):
+                buckets[key] = [
+                    int(value)
+                    for value in list(buckets.get(key, []) or [])
+                    if int(value) != node_id
+                ]
+        allocator.initial_ids_by_su.setdefault(target_key, []).append(node_id)
+        allocator.initial_ids_by_su[target_key] = sorted(
+            set(allocator.initial_ids_by_su[target_key])
+        )
+        allocator.remaining_ids_by_su.setdefault(target_key, [])
+        allocator.consumed_ids_by_su.setdefault(target_key, []).append(node_id)
+        allocator.consumed_ids_by_su[target_key] = sorted(
+            set(allocator.consumed_ids_by_su[target_key])
+        )
+        allocator.su_key_by_node_id[node_id] = target_key
+        allocator._generic_claim_excluded_node_ids.discard(node_id)
+
+    def _sync_allocator_conversion(
+        self,
+        node_ids: Iterable[int],
+        *,
+        from_su: int,
+        to_su: int,
+    ) -> None:
+        """Apply one accepted conversion without resurrecting owned nodes."""
+        source = int(from_su)
+        target = int(to_su)
+        product_claims = self._completed_product_resource_su_by_node_id()
+        product_owned_ids = {
+            int(node_id)
+            for product in list(getattr(self, "products", []) or [])
+            for node_id in list(product.owned_node_ids())
+        }
+        product_owned_ids.update(
+            int(node_id)
+            for node_id in dict(
+                getattr(self, "product_owner_by_node_id", {}) or {}
+            )
+        )
+
+        for raw_node_id in sorted({int(value) for value in list(node_ids or [])}):
+            node_id = int(raw_node_id)
+            claimed_su = product_claims.get(node_id)
+            if node_id in product_owned_ids:
+                if claimed_su is None:
+                    raise ValueError(
+                        "cannot convert a fixed node of a completed product: "
+                        f"node={node_id} from_su={source} to_su={target}"
+                    )
+                if int(claimed_su) != target:
+                    raise ValueError(
+                        "accepted conversion conflicts with completed product: "
+                        f"node={node_id} product_su={claimed_su} "
+                        f"conversion={source}->{target}"
+                    )
+                # Ring recovery may materialize the replacement product before
+                # the outer histogram transaction is committed.  Its resource
+                # is already consumed under the target identity and must never
+                # be returned to the available pool during synchronization.
+                self._mark_allocator_node_consumed(node_id, su_type=target)
+                continue
+
+            current_key = self.allocator.su_key_for_node_id(node_id)
+            if current_key is not None and int(current_key) == target:
+                # The live assembler already applied this conversion. Preserve
+                # its current available/consumed state exactly as-is.
+                continue
+            if current_key is not None and int(current_key) != source:
+                raise ValueError(
+                    "allocator conversion source identity mismatch: "
+                    f"node={node_id} allocator_su={current_key} "
+                    f"conversion={source}->{target}"
+                )
+            moved = self.allocator.reclassify_ids(
+                [node_id],
+                from_su=source,
+                to_su=target,
+            )
+            if moved:
+                continue
+
+            # Aromatic donors are intentionally outside the closure allocator.
+            # Register a genuinely absent donor in its accepted target bucket,
+            # but never use this path for an allocator-owned consumed node.
+            if current_key is not None:
+                raise ValueError(
+                    "allocator conversion source is consumed without a "
+                    "completed product owner: "
+                    f"node={node_id} conversion={source}->{target}"
+                )
+            self.allocator.release_ids({target: [node_id]})
+
+    def _enforce_completed_product_allocator_ownership(self) -> None:
+        """Keep every committed resource out of all available buckets."""
+        for node_id, su_type in sorted(
+            self._completed_product_resource_su_by_node_id().items()
+        ):
+            self._mark_allocator_node_consumed(node_id, su_type=su_type)
+
     def sync_after_resource_adjustments(
+        self,
+        nodes: Sequence[_NodeV3],
+        H: Any = None,
+        applied_ops: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> None:
+        """Commit node, allocator and continuation changes as one transaction."""
+        staged = copy(self)
+        staged.nodes = [copy(node) for node in self.nodes]
+        staged.nodes_by_id = {int(node.global_id): node for node in staged.nodes}
+        fields = (
+            "allocator", "pending_recycled_resource_conversion_ops",
+            "released_resource_ids_by_su",
+            "pending_contracts", "pending_units", "ring_infeasible_contracts",
+            "ring_pending_attempts", "ring_pending_reasons",
+            "materialization_failure_by_fragment_id", "ring_exhausted_fragment_ids",
+            "completed_phases",
+        )
+        state = deepcopy({name: getattr(self, name) for name in fields})
+        for name, value in state.items():
+            setattr(staged, name, value)
+        staged._sync_after_resource_adjustments(nodes, H=H, applied_ops=applied_ops)
+        for node_id, node in staged.nodes_by_id.items():
+            self.nodes_by_id[node_id].su_type = node.su_type
+        for name in fields:
+            setattr(self, name, getattr(staged, name))
+        self.current_H = staged.current_H
+
+    def _sync_after_resource_adjustments(
         self,
         nodes: Sequence[_NodeV3],
         H: Any = None,
@@ -279,11 +441,21 @@ class ExternalTopologyAssembler:
             for node in incoming
             if int(getattr(node, "global_id", -1)) >= 0
         }
+        pending_recovery = {
+            int(op["node_id"]): op
+            for op in self.pending_recycled_resource_conversion_ops
+        }
         for node_id, incoming_node in incoming_by_id.items():
             local = self.nodes_by_id.get(int(node_id))
             if local is None:
                 continue
-            setattr(local, "su_type", int(getattr(incoming_node, "su_type", -1)))
+            incoming_su = int(getattr(incoming_node, "su_type", -1))
+            recovery = pending_recovery.get(node_id)
+            if recovery is not None and incoming_su == int(recovery["from_su"]):
+                # Caller has not committed this recovery yet. Preserve the
+                # local transaction's effective identity for materialization.
+                incoming_su = int(recovery["to_su"])
+            setattr(local, "su_type", incoming_su)
         # Keep the assembler's transaction-local node copies. Ring recovery
         # mutates those copies before Stage3 accepts the corresponding physical
         # conversion; aliasing caller nodes here would leak a provisional
@@ -329,49 +501,28 @@ class ExternalTopologyAssembler:
                     continue
                 if int(source) == 24 and int(target) == 23:
                     applied_recovery_ids.update(node_ids)
-                # The planner has already validated the concrete path.  The
-                # allocator is authoritative for availability; tolerate an
-                # already synchronized node so continuation remains idempotent.
-                moved = self.allocator.reclassify_ids(
+                self._sync_allocator_conversion(
                     node_ids,
                     from_su=int(source),
                     to_su=int(target),
                 )
-                if not moved:
-                    # Donors may be absent from the live allocator (aromatic
-                    # SU12/SU13 pools, or a planner transaction that already
-                    # consumed the source bucket). Re-register the concrete
-                    # node exactly once in its new target bucket.
-                    for node_id in node_ids:
-                        for bucket in list(self.allocator.remaining_ids_by_su):
-                            self.allocator.remaining_ids_by_su[bucket] = [
-                                int(value)
-                                for value in list(
-                                    self.allocator.remaining_ids_by_su.get(bucket, [])
-                                    or []
-                                )
-                                if int(value) != int(node_id)
-                            ]
-                        for bucket in list(self.allocator.initial_ids_by_su):
-                            self.allocator.initial_ids_by_su[bucket] = [
-                                int(value)
-                                for value in list(
-                                    self.allocator.initial_ids_by_su.get(bucket, [])
-                                    or []
-                                )
-                                if int(value) != int(node_id)
-                            ]
-                        for bucket in list(self.allocator.consumed_ids_by_su):
-                            self.allocator.consumed_ids_by_su[bucket] = [
-                                int(value)
-                                for value in list(
-                                    self.allocator.consumed_ids_by_su.get(bucket, [])
-                                    or []
-                                )
-                                if int(value) != int(node_id)
-                            ]
-                        self.allocator.su_key_by_node_id.pop(int(node_id), None)
-                    self.allocator.release_ids({int(target): node_ids})
+        for node_id, su_type in self._completed_product_resource_su_by_node_id().items():
+            node = self.nodes_by_id.get(node_id)
+            if node is None or int(node.su_type) != su_type:
+                raise ValueError(f"completed product node identity mismatch: node={node_id} expected={su_type}")
+        self._enforce_completed_product_allocator_ownership()
+        released_ids = {
+            int(value)
+            for values in self.released_resource_ids_by_su.values()
+            for value in values
+        }
+        released_by_su: Dict[str, Set[int]] = {}
+        for node_id in sorted(released_ids):
+            node = self.nodes_by_id.get(node_id)
+            if node is None:
+                raise ValueError(f"released resource node missing: node={node_id}")
+            released_by_su.setdefault(str(int(node.su_type)), set()).add(node_id)
+        self.released_resource_ids_by_su = released_by_su
         if applied_recovery_ids:
             # Durable recovery rows remain available for final diagnostics;
             # only the continuation queue is consumed.

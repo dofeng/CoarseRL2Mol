@@ -8,6 +8,7 @@ from pathlib import Path
 from dataclasses import dataclass
 
 try:
+    from .terminal_paths import terminal_path_reason
     from ...paths import Z_LIBRARY_DIR
     from ...shared.coarse_graph import PPM_AXIS, SU_DEFS
     from ...shared.inverse_common import (
@@ -26,6 +27,7 @@ try:
         reconstruction_peak_scale,
     )
 except ImportError:
+    from model.inverse.layer1.terminal_paths import terminal_path_reason
     from model.paths import Z_LIBRARY_DIR
     from model.shared.coarse_graph import PPM_AXIS, SU_DEFS
     from model.shared.inverse_common import (
@@ -1041,6 +1043,8 @@ class Hop1Adjuster:
             branch_limit = int(self.strict_swap_branch_limit)
 
             def _affected_valid() -> bool:
+                if terminal_path_reason(work_nodes, start_ids=sorted(affected_all)):
+                    return False
                 if Counter(self._get_neighbor_types(work_nodes, work_nodes[t])) != Counter(new_types):
                     return False
                 for node_id in sorted(affected_all):
@@ -1180,6 +1184,11 @@ class Hop1Adjuster:
             v_neighbors = [nodes[int(i)] for i in v_new_ids]
             w_neighbors = [nodes[int(i)] for i in w_new_ids]
 
+            if terminal_path_reason(nodes, neighbor_overrides={
+                t: t_new_ids, u: u_new_ids, v: v_new_ids, w: w_new_ids,
+            }, start_ids=[t, u, v, w]):
+                continue
+
             if not self._is_hop1_valid_types(int(t_node.su_type), t_types, E_target, center_node=t_node, neighbor_nodes=t_neighbors):
                 continue
             if not self._is_hop1_valid_types(int(u_node.su_type), u_types, E_target, center_node=u_node, neighbor_nodes=u_neighbors):
@@ -1242,6 +1251,8 @@ class Hop1Adjuster:
     
     def _add_hop1_edge(self, nodes: List, id1: int, id2: int) -> bool:
         """添加一条双向1-hop边"""
+        if terminal_path_reason(nodes, proposed_edge=(int(id1), int(id2))):
+            return False
         node1 = nodes[id1] if id1 < len(nodes) else None
         node2 = nodes[id2] if id2 < len(nodes) else None
         

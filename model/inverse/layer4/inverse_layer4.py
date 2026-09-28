@@ -1584,7 +1584,6 @@ class Layer4Adjuster:
                 'residual_side_min_23',
                 'h_tolerance',
                 'outer_cycle',
-                'iteration_offset',
                 'context_snapshot_fn',
                 'context_restore_fn',
                 'difference_spectrum',
@@ -1628,7 +1627,6 @@ class Layer4Adjuster:
                 outer_cycle=kwargs.get('outer_cycle', 0),
                 # Each Outer Cycle owns an independent Stage3 cycle counter;
                 # legacy offsets must not leak into spectrum cutoff routing.
-                iteration_offset=0,
                 context_snapshot_fn=kwargs.get('context_snapshot_fn'),
                 context_restore_fn=kwargs.get('context_restore_fn'),
                 difference_spectrum=kwargs.get('difference_spectrum'),
@@ -1703,7 +1701,6 @@ class Layer4Adjuster:
         residual_side_min_23: int = 1,
         h_tolerance: float = 0.08,
         outer_cycle: int = 0,
-        iteration_offset: int = 0,
         context_snapshot_fn: Any = None,
         context_restore_fn: Any = None,
         difference_spectrum: Optional[Dict[str, Any]] = None,
@@ -1740,9 +1737,6 @@ class Layer4Adjuster:
             residual_side_min_23=int(residual_side_min_23),
             h_tolerance=float(h_tolerance),
             outer_cycle=int(outer_cycle),
-            # ``iteration_offset`` is retained for old callers only.  Stage3
-            # always starts at local Cycle 1 for each Outer Cycle invocation.
-            iteration_offset=0,
             context_snapshot_fn=context_snapshot_fn,
             context_restore_fn=context_restore_fn,
             difference_spectrum=difference_spectrum,
