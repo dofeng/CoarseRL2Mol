@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
 from ....shared.aromatic_plan import (
+    MAX_FLEX_WINDOW_WIDTH,
     exact_aromatic_cluster_plan,
     flex_count_window,
     staging_aromatic_counts,
@@ -2254,6 +2256,128 @@ def _fixed_flex_capacity_candidate(
     }
 
 
+def validate_rebuilt_flex_window(nodes: Sequence[Any], fixed_partition_meta: Any = None) -> Dict[str, Any]:
+    """Recount physically materialized chains after a width conversion rebuild."""
+    from .phase_eval import build_stage3_phase_evaluation
+
+    classification = classify_topology_units(list(nodes), fixed_partition_meta=fixed_partition_meta)
+    phase = build_stage3_phase_evaluation(list(nodes), classification=classification,
+                                         fixed_partition_meta=fixed_partition_meta)
+    audit = phase.flex_audit
+    if (phase.flex_reconciliation_block_reason
+            or audit.get("scenario") == "above_range"
+            or not audit.get("flex_window_width_ok", False)):
+        return {"ok": False, "reason": "rebuilt_flex_window_invalid",
+                "flex_audit": audit}
+    phase.flex_audit = {**audit, "stop_after_flex": True}
+    phase = _evaluate_external_phases(phase_eval=phase, nodes=nodes, classification=classification)
+    count = int(phase.flex_counts.get("final", 0))
+    errors = _external_product_materialization_errors(phase)
+    ok = (not errors and "external_flex_closure" in phase.completed_phases
+          and int(audit["flex_lower"]) <= count <= int(audit["flex_upper"]))
+    return {"ok": ok, "reason": "ok" if ok else "rebuilt_flex_count_invalid",
+            "completed_flex_count": count, "flex_lower": audit["flex_lower"],
+            "flex_upper": audit["flex_upper"], "materialization_errors": errors}
+
+
+def _preview_narrowed_flex_completion(
+    phase_eval: Any, window: Dict[str, Any], H: torch.Tensor,
+) -> Dict[str, Any]:
+    """Materialize the new lower-bound gap without changing the live generation.
+
+    SU10-pair retirement affects the aromatic window, not the fixed fragments
+    or closure pool used here. The fresh Layer1/2 rebuild must still repeat
+    this physical check against its own graph before the conversion commits.
+    """
+    from ..assembly.closure import chain
+    from ..assembly.state.ownership import fragment_available
+    from ..assembly.state.snapshot import validate_snapshot_state
+
+    before_count = int(phase_eval.flex_counts.get("final", 0))
+    lower, upper = int(window["flex_lower"]), int(window["flex_upper"])
+    diagnostic = {
+        "commit_scope": "candidate_preview",
+        "completed_flex_count_before": before_count,
+        "completed_flex_count_after": before_count,
+        "required_additional_flex_count": max(0, lower - before_count),
+        "assembled_additional_flex_count": 0,
+        "flex_lower": lower, "flex_upper": upper,
+    }
+    if before_count > upper:
+        return {**diagnostic, "ok": False, "reason": "completed_flex_above_new_window"}
+    if before_count >= lower:
+        return {**diagnostic, "ok": True, "reason": "existing_flex_count_in_range"}
+    live = getattr(phase_eval, "external_assembler", None)
+    if live is None:
+        return {**diagnostic, "ok": False, "reason": "flex_completion_runtime_unavailable"}
+
+    trial = deepcopy(live)
+    groups = [
+        deepcopy(group)
+        for group in trial.flex_audit.get("supplemental_flex_candidate_groups", [])
+        if group.get("fragment_ids") and all(
+            fragment_available(trial, int(fragment_id))
+            for fragment_id in group["fragment_ids"]
+        )
+    ][:lower - before_count]
+    trial.selected_flex_candidate_groups = groups
+    trial.selected_flex_candidate_ids = {
+        int(fragment_id) for group in groups for fragment_id in group["fragment_ids"]
+    }
+    trial.flex_audit.update({
+        **window, "scenario": "below_range", "stop_after_flex": True,
+        "target_flex_count": lower, "flex_target": lower,
+        "selected_candidate_groups": groups,
+        "selected_candidate_fragment_ids": sorted(trial.selected_flex_candidate_ids),
+    })
+    trial.flex_bounds.update({"min": lower, "max": upper, "target": lower})
+    before_resources = trial.allocator.available_counts()
+    before_products = len(trial.products)
+    # Run only chain materialization. Ring and side allocation must wait until
+    # the quantity transaction has passed the fresh-generation checks.
+    branch_donors = chain.available_branch_donors(trial)
+    if groups:
+        chain.assemble_selected_supplemental_flex(trial, branch_donors)
+    else:
+        # Earlier products may have consumed one member of each canonical
+        # group. The remaining eligible fragments can still form new groups.
+        chain.assemble_remaining_flex(trial, branch_donors)
+    chain.release_satisfied_flex_selection(trial)
+    products = [
+        normalize_stage3_product(raw, generation_id=trial.generation_id, index=index).to_dict()
+        for index, raw in enumerate(trial.products)
+    ]
+    snapshot = {"products": products, "resource_ledger": trial.allocator.build_ledger({}).to_dict()}
+    identity = validate_snapshot_state(trial.nodes, snapshot, H)
+    product_errors = _external_product_materialization_errors(
+        SimpleNamespace(assembly_view=snapshot)
+    )
+    count = int(chain.current_flex_product_count(trial))
+    after_resources = trial.allocator.available_counts()
+    pending_flex = [
+        dict(contract) for contract in trial.pending_contracts
+        if str(contract.get("target_role", "")) == "flex_chain"
+    ]
+    ok = bool(lower <= count <= upper and identity["ok"] and not product_errors
+              and not pending_flex and not trial.product_ownership_conflict_count)
+    return {
+        **diagnostic, "ok": ok,
+        "reason": "ok" if ok else "supplemental_flex_completion_failed",
+        "completed_flex_count_after": count,
+        "assembled_additional_flex_count": count - before_count,
+        "selected_candidate_group_ids": [str(group.get("group_id", "")) for group in groups],
+        "products": products[before_products:],
+        "consumed_resource_counts": {
+            str(su): int(value) - int(after_resources.get(str(su), 0))
+            for su, value in before_resources.items()
+            if int(value) > int(after_resources.get(str(su), 0))
+        },
+        "materialization_errors": product_errors,
+        "snapshot_errors": identity["errors"],
+        "pending_flex_contracts": pending_flex,
+    }
+
+
 def _narrow_flex_window_plan(
     *, phase_eval: Any, H: torch.Tensor, nodes: Sequence[Any],
     max_primary_adjustments: int, special_degree_meta: Optional[Dict[str, Any]],
@@ -2265,7 +2389,7 @@ def _narrow_flex_window_plan(
     closure-resource conversion pool. Stop at the smallest feasible bundle.
     """
     audit = dict(phase_eval.flex_audit or {})
-    fixed_count = int(audit.get("explicit_flex_count", 0))
+    fixed_count = int(phase_eval.flex_counts.get("final", 0))
     by_id = {int(node.global_id): node for node in nodes}
     su10 = {key for key, node in by_id.items() if int(node.su_type) == 10}
     neighbors = {
@@ -2296,16 +2420,28 @@ def _narrow_flex_window_plan(
         except ValueError:
             continue
         window = flex_count_window(aromatic["cluster_count"], trial[10])
-        attempts.append({"converted_pairs": pair_count, **window})
-        if not (window["flex_window_ok"] and window["flex_window_width_ok"]
-                and window["flex_lower"] <= fixed_count <= window["flex_upper"]
-                and su12_transition_diagnostics(H, after)["generation_allowed"]):
+        su12_allowed = bool(su12_transition_diagnostics(H, after)["generation_allowed"])
+        attempt = {"converted_pairs": pair_count, **window,
+                   "completed_flex_count_before": fixed_count,
+                   "su12_generation_allowed": su12_allowed}
+        attempts.append(attempt)
+        if not (window["flex_window_ok"] and window["flex_window_width_ok"]):
+            attempt["rejection_reason"] = "flex_window_invalid"
+            continue
+        if not su12_allowed:
+            attempt["rejection_reason"] = "su12_generation_cap_reached"
             continue
         ids = [key for pair in pairs[:pair_count] for key in pair]
         operation = HistogramConversion(from_su=10, to_su=12, count=count,
                                         node_ids=ids, reason="narrow_flex_window")
         signature = _stateful_conversion_bundle_signature(H, [operation])
         if signature in set(forbidden_signatures or ()):
+            attempt["rejection_reason"] = "conversion_candidate_previously_rejected"
+            continue
+        completion = _preview_narrowed_flex_completion(phase_eval, window, H)
+        attempt["supplemental_flex_completion"] = completion
+        if not completion["ok"]:
+            attempt["rejection_reason"] = completion["reason"]
             continue
         h_before = _h_total(H, special_degree_meta)
         h_after = _h_total(after, special_degree_meta)
@@ -2339,11 +2475,15 @@ def _narrow_flex_window_plan(
                 )],
             ),
             diagnostics={"realized_flex_before": audit, "realized_flex_after": window,
+                         "completed_flex_count_before_rebuild": fixed_count,
+                         "completed_flex_count_after_supplement": completion["completed_flex_count_after"],
+                         "supplemental_flex_completion": completion,
                          "retired_su10_pairs": pairs[:pair_count],
                          "idle_aromatic_count": aromatic["idle_aromatic_count"],
                          "candidate_alternatives_enabled": True,
                          "fresh_layer12_rebuild_required": True,
                          "restart_stage3_after_rebuild": True},
+            runtime=_runtime_with_pool(phase_eval, _resource_ids(phase_eval)),
         )
     proof = {"reason": "flex_window_coordination_exhausted", "attempts": attempts,
              "available_pair_count": len(pairs), "primary_adjustment_limit": max_primary_adjustments,
@@ -2354,6 +2494,7 @@ def _narrow_flex_window_plan(
         phase_result=Stage3PhaseResult(active_phase="flex_range_reconciliation",
                                       stop_reason=proof["reason"], infeasibility_proof=proof),
         diagnostics=proof,
+        runtime=_runtime_with_pool(phase_eval, _resource_ids(phase_eval)),
     )
 
 
@@ -6301,13 +6442,6 @@ def plan_stage3_state_machine(
     }
     restore_external_resource_context = progress_phase is Stage3ProgressPhase.INTERNAL_TOPOLOGY
     flex_block = str(getattr(phase_eval, "flex_reconciliation_block_reason", "") or "")
-    if external_phases_pending and flex_block == "flex_window_too_wide":
-        return _narrow_flex_window_plan(
-            phase_eval=phase_eval, H=H, nodes=nodes,
-            max_primary_adjustments=flex_max_primary_adjustments,
-            special_degree_meta=special_degree_meta,
-            forbidden_signatures=forbidden_resource_conversion_signatures,
-        )
     if external_phases_pending and flex_block:
         flex_contracts = [
             dict(item or {})
@@ -6428,6 +6562,34 @@ def plan_stage3_state_machine(
             },
             runtime=_runtime_with_pool(phase_eval, _resource_ids(phase_eval)),
         ), h_tolerance)
+    if external_phases_pending:
+        audit = dict(phase_eval.flex_audit or {})
+        final_flex = int(phase_eval.flex_counts.get("final", 0))
+        if (audit.get("enforced", False)
+                and int(audit.get("flex_window_width", 0)) > MAX_FLEX_WINDOW_WIDTH
+                and int(audit["flex_lower"]) <= final_flex <= int(audit["flex_upper"])
+                and "external_flex_closure" in phase_eval.completed_phases):
+            return _narrow_flex_window_plan(
+                phase_eval=phase_eval, H=H, nodes=nodes,
+                max_primary_adjustments=flex_max_primary_adjustments,
+                special_degree_meta=special_degree_meta,
+                forbidden_signatures=forbidden_resource_conversion_signatures,
+            )
+        if (audit.get("enforced", False)
+                and int(audit.get("flex_window_width", 0)) > MAX_FLEX_WINDOW_WIDTH
+                and final_flex < int(audit["flex_lower"])
+                and not phase_eval.canonical_contracts):
+            proof = {"reason": "flex_chain_candidates_exhausted",
+                     "completed_flex_count": final_flex,
+                     "required_flex_count": int(audit["flex_lower"]),
+                     "missing_flex_count": int(audit["flex_lower"]) - final_flex}
+            return Stage3AdjustmentPlan(
+                ok=False, reason="phase_resource_infeasible", blocked_reason=proof["reason"],
+                phase="flex_range_reconciliation", plan_kind="flex_count_infeasible",
+                phase_result=Stage3PhaseResult(active_phase="flex_range_reconciliation",
+                                              infeasibility_proof=proof),
+                diagnostics=proof, runtime=_runtime_with_pool(phase_eval, _resource_ids(phase_eval)),
+            )
     # A recovery-enabled external pass reports its forced SU24->SU23
     # operations in the assembly ledger. The caller applies that operation as
     # part of the current external transaction; it is deliberately not an

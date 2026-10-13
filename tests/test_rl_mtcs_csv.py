@@ -1,3 +1,4 @@
+from itertools import islice
 from pathlib import Path
 import sys
 
@@ -5,19 +6,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from RL_MTCS import AssemblyConfig
 from test_rl_mtcs_sites import synthetic_hsq_fixture
-from RL_MTCS.conformers import topology_conformer_info
-from RL_MTCS.flex import (
+from RL_MTCS.actions.conformers import iter_topology_conformers
+from RL_MTCS.actions.flex import (
     _append_site_contract,
-    secondary_flex_displacement_candidates,
 )
-from RL_MTCS.search import domain_conflict_check
 from RL_MTCS.geometry import HEX_DIRECTIONS
-from RL_MTCS.rigid import TopologyPlacementStage, search_phase
-from RL_MTCS.output import export_rigid_views
-from RL_MTCS.state import relabel_aromatic_sites
-from RL_MTCS.side import _aromatic_component_map
-from RL_MTCS.models import InverseInputError
-from RL_MTCS.input import NodeRow, _rigid_pairs
+from RL_MTCS.actions.rigid_geometry import RigidPoseGenerator
+from RL_MTCS.policy.checkpoints import StageController
+from RL_MTCS.io.output import export_rigid_views
+from RL_MTCS.mdp.transition import relabel_aromatic_sites
+from RL_MTCS.mdp.types import InverseInputError
+from RL_MTCS.io.input import NodeRow, _rigid_pairs
 
 
 HSQ_OUTPUTS = (
@@ -30,7 +29,7 @@ HSQ_OUTPUTS = (
 
 
 def test_hsq_inverse_counts_and_contract_phases():
-    from RL_MTCS.input import build_csv_inverse_input
+    from RL_MTCS.io.input import build_csv_inverse_input
     problem = build_csv_inverse_input(HSQ_OUTPUTS / "final_nodes_by_global_id.csv",
                                       HSQ_OUTPUTS / "final_topology_specs.csv")
     data = {"units": problem.units, "contracts": problem.contracts, "problem": problem,
@@ -45,7 +44,8 @@ def test_hsq_inverse_counts_and_contract_phases():
     assert sum(contract.kind == "rigid" for contract in contracts) == 0
     assert sum(port.phase == "rigid" for unit in data["aromatic_units"]
                for port in unit.ports) == 28
-    assert sum(contract.kind == "flex" for contract in contracts) == 44
+    assert sum(contract.kind == "flex" for contract in contracts) == 18
+    assert sum(contract.kind == "ring" for contract in contracts) == 26
     assert sum(contract.kind == "side" for contract in contracts) == 34
 
 
@@ -68,7 +68,7 @@ def test_su10_pairing_is_selected_at_rigid_placement_time():
                      if port.phase == "rigid" and port.node_id == source.source_node_id)
     right_port = next(port for port in right.ports
                       if port.phase == "rigid" and port.node_id == source.target_node_id)
-    actions = TopologyPlacementStage(state, "rigid")._candidate_for_pair(
+    actions = RigidPoseGenerator(state)._candidate_for_pair(
         left, left_port, right, right_port
     )
     assert actions
@@ -84,8 +84,7 @@ def test_su10_pairing_is_selected_at_rigid_placement_time():
                 if contract.kind == "rigid"]) == 1
     assert state.connect(action)[1] == "port_already_used"
     assert not state.phase_done("rigid")
-    component_map = _aromatic_component_map(state)
-    assert component_map[left.unit_id] == component_map[right.unit_id]
+    assert right.unit_id in state.component_unit_ids(left.unit_id)
 
 
 def test_dynamic_rigid_contract_survives_aromatic_relabel():
@@ -98,7 +97,7 @@ def test_dynamic_rigid_contract_survives_aromatic_relabel():
                      and port.node_id == source.source_node_id)
     right_port = next(port for port in right.ports if port.phase == "rigid"
                       and port.node_id == source.target_node_id)
-    action = TopologyPlacementStage(state, "rigid")._candidate_for_pair(
+    action = RigidPoseGenerator(state)._candidate_for_pair(
         left, left_port, right, right_port
     )[0]
     action["contract_id"] = (
@@ -121,44 +120,28 @@ def test_initial_aromatic_views_are_individual_and_exact(tmp_path):
     assert len(list(tmp_path.glob("aromatic_*.json"))) == 17
 
 
-def test_rigid_search_respects_tree_node_limit():
-    data = synthetic_hsq_fixture()
-    result = search_phase(
-        TopologyPlacementStage(data["state"], "rigid"),
-        iterations=1, candidate_k=1, beam_width=1, max_steps=128,
-        max_tree_nodes=16,
-    )
-    diagnostics = result.info["result"]
-    assert diagnostics["pairing_search"]["tree_nodes"] <= 16
-    assert all(row["tree_nodes"] <= 16
-               for row in diagnostics.get("mcts_searches", []))
-    if not diagnostics["done"]:
-        assert diagnostics["status"] in {
-            "budget_exhausted", "candidate_space_exhausted"
-        }
-        assert diagnostics["candidate_space_complete"] is False
+def test_rigid_search_selects_from_limited_result_candidates():
+    from test_rl_mtcs_sites import aromatic_fixture
+    state, info = StageController(AssemblyConfig(
+        connection_candidate_limit=2,forward_max_rollbacks=0,verbose=False)).run(aromatic_fixture(3), 'rigid')
+    attempt=info['retry_selection']['attempts'][0]
+    assert attempt['search']['result_candidate_count'] == 2
+    assert attempt['search']['stop_reason'] == 'result_candidates_ready'
+    assert not attempt['search']['search_exhausted']
+    assert state.audit()['geometry_valid']
 
 
-def test_bounded_domain_conflict_is_soft_until_complete():
-    domains = {"a": [(1,)], "b": [(1,)]}
-    bounded = domain_conflict_check(domains, complete=False)
-    complete = domain_conflict_check(domains, complete=True)
-    assert bounded["bounded"] is True
-    assert bounded["hard"] is False
-    assert complete["hard"] is True
 
 
-def test_config_caps_memory_parameters():
-    config = AssemblyConfig(
-        search_budget=10**9,
-        max_tree_nodes=10**9,
-        domain_check_limit=10**9,
-        domain_pose_limit=10**9,
-    )
-    assert config.search_budget <= 20000
-    assert config.max_tree_nodes <= 256
-    assert config.domain_check_limit <= 512
-    assert config.domain_pose_limit <= 64
+def test_config_has_only_legal_candidate_cap_and_checkpoint_retry_count():
+    from dataclasses import fields
+    config=AssemblyConfig(connection_candidate_limit=11)
+    assert config.connection_candidate_limit==11
+    assert config.forward_checkpoint_interval==4 and config.clearance_radius==3
+    names={f.name for f in fields(config)}
+    assert not names & {'search_budget','max_tree_nodes','max_steps','domain_check_limit',
+                        'nmr_model_call_limit','strict_geometry','nmr_weight','nmr_stage_weights'}
+    assert AssemblyConfig(nmr_batch_size=4).nmr_batch_size == 4
 
 
 def test_conformer_identity_is_preserved():
@@ -167,7 +150,7 @@ def test_conformer_identity_is_preserved():
         unit for unit in data["topology_units"]
         if unit.product_type == "aliphatic_ring"
     )
-    variants, _complete = topology_conformer_info(ring, 4)
+    variants = list(islice(iter_topology_conformers(ring), 4))
     original_nodes = {node.node_id for node in ring.nodes}
     original_edges = {
         frozenset((edge.source_node_id, edge.target_node_id))
@@ -181,31 +164,21 @@ def test_conformer_identity_is_preserved():
         } == original_edges
 
 
-def test_secondary_flex_displacement_rules_cover_horizontal_and_vertical_paths():
-    horizontal = secondary_flex_displacement_candidates(
-        (0, 0), (4, 2), (1, 1), (-1, 0)
-    )
-    assert [(row["direction"], row["chain_length"])
-            for row in horizontal] == [("horizontal", 3)]
-    vertical = secondary_flex_displacement_candidates(
-        (0, 0), (1, 3), (0, 1), (0, -1)
-    )
-    assert [(row["direction"], row["chain_length"])
-            for row in vertical] == [("vertical", 2)]
-    assert secondary_flex_displacement_candidates(
-        (0, 0), (2, 2), (1, 1), (-1, -1)
-    ) == []
 
 
-def test_flex_chain_does_not_generate_independent_bent_ports():
+def test_generated_two_endpoint_chain_enumerates_valid_conformers():
+    from RL_MTCS.actions.conformers import validate_conformer, _embedding_phases
     data = synthetic_hsq_fixture()
     chain = next(
         unit for unit in data["topology_units"]
         if unit.product_type == "flex_chain"
     )
-    variants, complete = topology_conformer_info(chain, 12)
-    assert complete is True
-    assert len(variants) == 1
+    variants = list(iter_topology_conformers(chain))
+    assert len(variants) > 1
+    for variant in variants:
+        validate_conformer(chain, variant)
+        assert _embedding_phases(variant, {n.node_id: n.local_axial for n in variant.nodes},
+                                 [p.direction for p in variant.ports])
 
 
 def test_flex_site_commit_uses_inverse_endpoint_su_and_is_single_use():
@@ -231,8 +204,12 @@ def test_flex_site_commit_uses_inverse_endpoint_su_and_is_single_use():
                 topology.unit_id,
                 0,
                 target,
-                allowed_contacts=[(482, int(site_id))],
+                attachment_edges=[(482, int(site_id))],
             ):
+                continue
+            try:
+                _append_site_contract(trial.clone(), contract, 482, int(site_id))
+            except InverseInputError:
                 continue
             placed = (trial, int(site_id))
             break

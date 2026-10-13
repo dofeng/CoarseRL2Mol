@@ -2927,16 +2927,24 @@ def can_create_more_flex(assembler: Any) -> bool:
 
 def release_satisfied_flex_selection(assembler: Any) -> List[int]:
     """Release unused selected fragments once the planned flex target is met."""
-    if not assembler.selected_flex_candidate_ids:
-        return []
     target_count = int(
         dict(assembler.flex_bounds or {}).get("target", flex_limit(assembler, "min")) or 0
     )
     if int(current_flex_product_count(assembler, )) < int(target_count):
         return []
+    # Backfill can fail on one optional source before a different source
+    # reaches the target. Its unused flex contract must not keep the phase
+    # blocked or reserve resources needed by the subsequent ring/side pass.
+    unused_flex_ids = {
+        int(fragment_id)
+        for contract in list(assembler.pending_contracts or [])
+        if str(contract.get("target_role", "")) == "flex_chain"
+        for fragment_id in list(contract.get("source_fragment_ids", []) or [])
+        if int(fragment_id) in assembler.supplemental_flex_candidate_ids
+    }
     released_ids = sorted(
         int(fragment_id)
-        for fragment_id in assembler.selected_flex_candidate_ids
+        for fragment_id in set(assembler.selected_flex_candidate_ids) | unused_flex_ids
         if ownership_module.fragment_available(assembler, int(fragment_id))
     )
     if not released_ids:
@@ -3025,7 +3033,8 @@ def assemble_selected_supplemental_flex(
     # those canonical groups first; the wider candidate pool is only a
     # deterministic backfill when a selected group cannot materialize.
     for raw_group in list(assembler.selected_flex_candidate_groups or []):
-        if not can_create_more_flex(assembler, ):
+        if (int(current_flex_product_count(assembler, )) >= target_count
+                or not can_create_more_flex(assembler, )):
             break
         group = dict(raw_group or {})
         fragment_ids = [

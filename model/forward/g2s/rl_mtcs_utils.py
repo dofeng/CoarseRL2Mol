@@ -16,7 +16,6 @@ import hashlib
 import json
 import math
 from pathlib import Path
-import re
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -36,14 +35,6 @@ from model.shared.inverse_common import (
 
 
 ELEMENT_NAMES = ("C", "H", "O", "N", "S", "X")
-
-
-def _unit_sort_key(value: str) -> Tuple[Any, ...]:
-    return tuple(
-        int(token) if token.isdigit() else token
-        for token in re.split(r"(\d+)", str(value))
-        if token != ""
-    )
 
 
 def parse_element_composition(value: Any) -> torch.Tensor:
@@ -170,6 +161,39 @@ def _bond_features(
     return 1.0, float(aliphatic_ring)
 
 
+def _cycle_edges(edges):
+    """Return graph cycle edges, excluding pendant branches (iterative DFS)."""
+    adjacency = defaultdict(set)
+    for a, b in edges:
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+    order, low, parent, bridges = {}, {}, {}, set()
+    for root in adjacency:
+        if root in order:
+            continue
+        order[root] = low[root] = len(order)
+        parent[root] = None
+        stack = [(root, iter(adjacency[root]))]
+        while stack:
+            a, neighbors = stack[-1]
+            b = next(neighbors, None)
+            if b is None:
+                stack.pop()
+                p = parent[a]
+                if p is not None:
+                    low[p] = min(low[p], low[a])
+                    if low[a] > order[p]:
+                        bridges.add(tuple(sorted((p, a))))
+            elif b != parent[a]:
+                if b in order:
+                    low[a] = min(low[a], order[b])
+                else:
+                    parent[b] = a
+                    order[b] = low[b] = len(order)
+                    stack.append((b, iter(adjacency[b])))
+    return {tuple(sorted(e)) for e in edges} - bridges
+
+
 class NMRGuidanceScorer:
     """Batch G2S scorer with graph-level and rooted k-hop caches."""
 
@@ -180,13 +204,13 @@ class NMRGuidanceScorer:
         elements: Any,
         model_checkpoint: str | Path,
         device: str = "auto",
-        batch_size: int = 512,
+        batch_size: int = 1,
         hwhm: float = 1.0,
         graph_cache_limit: int = 2048,
         node_cache_limit: int = 8192,
         record_limit: int = 10000,
-        model_call_limit: int = 2,
-        center_limit: int = 2,
+        center_limit: int = 8,
+        aromatic_response_scale: float = 1.0,
     ) -> None:
         requested = str(device or "auto").lower()
         if requested == "auto":
@@ -200,17 +224,13 @@ class NMRGuidanceScorer:
             model_checkpoint, device=self.device
         )
         self.k_hop = int(self.model_config.k_hop)
-        # Keep the GNN collation at one rooted graph.  The surrounding search
-        # already bounds how many roots are evaluated, and a larger batch can
-        # exceed a notebook kernel's RSS before Python gets a chance to free
-        # the temporary PyG tensors.
-        self.batch_size = 1
+        # Batch size controls collation memory, never the number of scored roots.
+        self.batch_size = max(1, int(batch_size))
         self.graph_cache_limit = min(256, max(1, int(graph_cache_limit)))
         self.node_cache_limit = min(2048, max(1, int(node_cache_limit)))
         self.record_limit = min(5000, max(0, int(record_limit)))
-        self.model_call_limit = min(2, max(1, int(model_call_limit)))
-        self.center_limit = min(1, max(1, int(center_limit)))
-        self.model_call_limit_reached = False
+        self.center_limit = min(32, max(1, int(center_limit)))
+        self.aromatic_response_scale = float(aromatic_response_scale)
         self.hwhm = float(hwhm)
         self.elements = parse_element_composition(elements)
         self.target_spectrum = load_target_spectrum_from_csv(
@@ -229,89 +249,20 @@ class NMRGuidanceScorer:
     @staticmethod
     def _effective_su_map(
         state: Any,
-        boundary_site_ids: Optional[Mapping[int, int]] = None,
-        protected_aromatic_ids: Iterable[int] = (),
     ) -> Dict[int, int]:
         current = {
             int(node_id): int(su)
             for node_id, su in state.current_node_map().items()
         }
-        planned = state.problem.node_map()
-        if boundary_site_ids is None:
-            if state.is_complete():
-                return {int(node_id): int(su) for node_id, su in planned.items()}
-            return current
-
-        # Fixed bridgehead/protected slots do not participate in the GID
-        # permutation, but G2S must still see their completed inverse labels.
-        current = {int(node_id): int(su) for node_id, su in planned.items()}
-
-        protected = {int(value) for value in protected_aromatic_ids}
-        aromatic_units = [
-            unit for unit in state.problem.units if unit.phase == "aromatic"
-        ]
-        movable = {
-            int(node.node_id)
-            for unit in aromatic_units
-            for node in unit.nodes
-            if int(node.node_id) not in protected and int(node.su_type) != 12
-        }
-        assignments = {
-            int(boundary_id): int(physical_site_id)
-            for boundary_id, physical_site_id in boundary_site_ids.items()
-        }
-        if not set(assignments) <= movable:
-            raise ValueError(
-                "NMR aromatic boundary IDs are not movable: "
-                f"{sorted(set(assignments) - movable)[:12]}"
-            )
-        if len(set(assignments.values())) != len(assignments):
-            raise ValueError("NMR aromatic assignments reuse a physical site")
-        if not set(assignments.values()) <= movable:
-            raise ValueError(
-                "NMR aromatic assignments select protected sites: "
-                f"{sorted(set(assignments.values()) - movable)[:12]}"
-            )
-
-        slots = [
-            (str(unit.unit_id), tuple(node.local_axial), int(node.node_id))
-            for unit in aromatic_units
-            for node in unit.nodes
-            if int(node.node_id) in movable
-        ]
-        slot_by_old_id = {old_id: (unit_id, coordinate) for unit_id, coordinate, old_id in slots}
-        new_gid_by_slot: Dict[Tuple[str, Tuple[int, int]], int] = {}
-        for boundary_id, physical_site_id in assignments.items():
-            new_gid_by_slot[slot_by_old_id[physical_site_id]] = boundary_id
-        remaining_gids = sorted(movable - set(assignments))
-        remaining_slots = sorted(
-            (
-                (unit_id, coordinate)
-                for unit_id, coordinate, old_id in slots
-                if old_id not in set(assignments.values())
-            ),
-            key=lambda row: (_unit_sort_key(row[0]), row[1]),
-        )
-        if len(remaining_gids) != len(remaining_slots):
-            raise ValueError("NMR aromatic GID permutation is not bijective")
-        new_gid_by_slot.update(zip(remaining_slots, remaining_gids))
-        for unit_id, coordinate, physical_old_id in slots:
-            new_gid = int(new_gid_by_slot[(unit_id, coordinate)])
-            current[int(physical_old_id)] = int(planned[new_gid])
         return current
 
     def _graph_descriptor(
         self,
         state: Any,
-        boundary_site_ids: Optional[Mapping[int, int]],
-        protected_aromatic_ids: Iterable[int] = (),
     ) -> Dict[str, Any]:
-        su_map = self._effective_su_map(
-            state, boundary_site_ids, protected_aromatic_ids
-        )
-        all_nodes = sorted(
-            int(node.node_id) for unit in state.problem.units for node in unit.nodes
-        )
+        all_nodes = sorted(state.node_axial)
+        labels = self._effective_su_map(state)
+        su_map = {n: labels[n] for n in all_nodes if n in labels}
         if set(all_nodes) != set(su_map):
             missing = sorted(set(all_nodes) - set(su_map))
             raise ValueError(f"assembly SU map is incomplete; missing={missing[:12]}")
@@ -319,26 +270,20 @@ class NMRGuidanceScorer:
         ownership = state.problem.ownership_map()
         units = {str(unit.unit_id): unit for unit in state.problem.units}
         edge_map: Dict[Tuple[int, int], Tuple[float, float]] = {}
-        for unit in state.problem.units:
-            aromatic = unit.phase == "aromatic"
-            ring = aromatic or "ring" in str(unit.product_type).lower()
-            for edge in unit.internal_edges:
-                left, right = sorted((
-                    int(edge.source_node_id), int(edge.target_node_id)
-                ))
-                edge_map[(left, right)] = _bond_features(
-                    su_map[left], su_map[right],
-                    aromatic_ring=aromatic,
-                    aliphatic_ring=bool(ring and not aromatic),
-                )
         for edge in state.edges:
             left, right = sorted((
                 int(edge.source_node_id), int(edge.target_node_id)
             ))
-            if ownership.get(left) == ownership.get(right) and (left, right) in edge_map:
-                continue
-            edge_map[(left, right)] = _bond_features(su_map[left], su_map[right])
+            unit = units[ownership[left]]
+            internal = ownership[left] == ownership[right]
+            aromatic = internal and unit.phase == 'aromatic'
+            ring = internal and unit.phase == 'ring'
+            edge_map[(left, right)] = _bond_features(su_map[left], su_map[right],
+                aromatic_ring=aromatic, aliphatic_ring=ring)
 
+        cycle_edges = _cycle_edges(edge_map)
+        edge_map = {edge: (attr[0], float(edge in cycle_edges))
+                    for edge, attr in edge_map.items()}
         labels = tuple((node_id, int(su_map[node_id])) for node_id in all_nodes)
         edges = tuple(
             (left, right, float(attr[0]), float(attr[1]))
@@ -456,14 +401,16 @@ class NMRGuidanceScorer:
         root_keys: Sequence[Dict[int, Tuple[Any, ...]]],
         *,
         stage: str,
-    ) -> None:
+    ) -> Dict[Tuple[Any, ...], float]:
+        predictions = {key:self._node_cache[key] for keys in root_keys for key in keys.values()
+                       if key in self._node_cache}
         representatives: Dict[Tuple[Any, ...], Tuple[int, int]] = {}
         for graph_index, keys in enumerate(root_keys):
             for center, key in keys.items():
                 if key not in self._node_cache:
                     representatives.setdefault(key, (graph_index, int(center)))
         if not representatives:
-            return
+            return predictions
         centers_by_graph: Dict[int, list[int]] = defaultdict(list)
         key_by_graph_center: Dict[Tuple[int, int], Tuple[Any, ...]] = {}
         for key, (graph_index, center) in representatives.items():
@@ -486,7 +433,7 @@ class NMRGuidanceScorer:
         # Keep each PyG collation small.  A k-hop graph around an HSQ centre
         # can still be large, so eight roots per batch creates a high
         # allocator watermark even when the model batch is bounded.
-        root_limit = max(1, min(2, self.batch_size))
+        root_limit = self.center_limit
         center_chunks: list[Tuple[int, list[int]]] = []
         for graph_index in graph_indices:
             graph_centers = centers_by_graph[graph_index]
@@ -496,9 +443,6 @@ class NMRGuidanceScorer:
             )
 
         for graph_index, chunk_centers in center_chunks:
-            if self._stats["model_calls"] >= self.model_call_limit:
-                self.model_call_limit_reached = True
-                break
             raw_list = [self._raw_graph(
                 descriptors[graph_index], chunk_centers
             )]
@@ -509,9 +453,6 @@ class NMRGuidanceScorer:
                 dataset, batch_size=self.batch_size, shuffle=False
             )
             for batch in loader:
-                if self._stats["model_calls"] >= self.model_call_limit:
-                    self.model_call_limit_reached = True
-                    break
                 self._stats["model_calls"] += 1
                 self._stage_stats[stage]["model_calls"] += 1
                 batch = batch.to(self.device)
@@ -531,26 +472,32 @@ class NMRGuidanceScorer:
                             "unexpected graph index in chunked NMR inference"
                         )
                     key = key_by_graph_center[(graph_index, int(center))]
+                    predictions[key] = float(value)
                     self._node_cache[key] = float(value)
                     if len(self._node_cache) > self.node_cache_limit:
                         # Evict an arbitrary oldest insertion.  Cache entries
                         # are an optimization only; dropping one never
                         # changes the assembly result.
                         self._node_cache.pop(next(iter(self._node_cache)))
-                if self._stats["model_calls"] >= self.model_call_limit:
-                    self.model_call_limit_reached = True
                 del batch, mu_pred, mol_ids, centers, _pi, _latent
             del loader, dataset, raw_list
             gc.collect()
             if self.device.type == "cuda":
                 torch.cuda.empty_cache()
+        return predictions
 
     def _spectrum_metrics(
         self,
         shifts: torch.Tensor,
+        su_types: Optional[torch.Tensor] = None,
     ) -> Tuple[Dict[str, float], torch.Tensor]:
+        weights = torch.ones_like(shifts).float()
+        if su_types is not None:
+            from model.shared.inverse_common import reconstruction_peak_scale
+            weights = torch.tensor([reconstruction_peak_scale(int(su), self.aromatic_response_scale)
+                                    for su in su_types])
         predicted = lorentzian_spectrum(
-            shifts.float(), torch.ones_like(shifts).float(), PPM_AXIS.cpu(),
+            shifts.float(), weights, PPM_AXIS.cpu(),
             hwhm=self.hwhm,
         ).cpu()
         target = self.target_spectrum[: predicted.numel()].float()
@@ -583,56 +530,22 @@ class NMRGuidanceScorer:
         *,
         stage: str,
         depth: int,
-        assignments_getter: Optional[Any] = None,
-        protected_getter: Optional[Any] = None,
     ) -> list[Dict[str, Any]]:
         """Score one geometrically valid search layer in a single G2S batch."""
-        if self.model_call_limit_reached:
-            # Once the hard inference budget is consumed, avoid even building
-            # graph descriptors for later MCTS layers.  This is important for
-            # CPU PyTorch: tensor arenas may retain freed allocations, so
-            # repeated descriptor construction can otherwise grow RSS despite
-            # bounded Python caches.
-            neutral = {
-                "loss": 0.0,
-                "cosine_similarity": 0.0,
-                "r2": 0.0,
-                "rmse": 0.0,
-                "normalized_rmse": 0.0,
-                "mae": 0.0,
-                "carbon_centers": int(round(float(self.elements[0].item()))),
-            }
-            outputs = []
-            for index, _candidate in enumerate(candidates):
-                result = dict(neutral, graph_key=f"nmr-neutral:{stage}:{depth}:{index}")
-                outputs.append(result)
-                if self.record_limit:
-                    self._records.append({
-                        "stage": stage,
-                        "depth": int(depth),
-                        "candidate_index": int(index),
-                        "graph_key": result["graph_key"],
-                        "graph_cache_hit": False,
-                        **neutral,
-                    })
-                    if len(self._records) > self.record_limit:
-                        del self._records[:len(self._records) - self.record_limit]
-            self._stats["candidate_evaluations"] += len(candidates)
-            self._stage_stats[stage]["candidate_evaluations"] += len(candidates)
-            return outputs
+        if stage == "rigid":
+            raise ValueError("rigid stage must not request NMR guidance")
+        # Bound live graph descriptors independently of the number of proposals.
+        if len(candidates) > 1:
+            return [self.score_candidates(
+                [candidate], stage=stage, depth=depth,
+            )[0] for candidate in candidates]
         stage = str(stage)
         descriptors = []
         cached_results: Dict[int, Dict[str, Any]] = {}
         graph_cache_before: Dict[int, bool] = {}
         for index, candidate in enumerate(candidates):
             state = getattr(candidate, "state", candidate)
-            assignments = (
-                assignments_getter(candidate) if assignments_getter is not None else None
-            )
-            protected = (
-                protected_getter(candidate) if protected_getter is not None else ()
-            )
-            descriptor = self._graph_descriptor(state, assignments, protected)
+            descriptor = self._graph_descriptor(state)
             descriptors.append(descriptor)
             cached = self._graph_cache.get(descriptor["graph_key"])
             graph_cache_before[index] = cached is not None
@@ -667,9 +580,6 @@ class NMRGuidanceScorer:
             centers = torch.nonzero(
                 descriptor["is_carbon"], as_tuple=False
             ).view(-1).tolist()
-            if len(centers) > self.center_limit:
-                step = max(1, math.ceil(len(centers) / self.center_limit))
-                centers = centers[::step][:self.center_limit]
             keys = {center: self._root_key(descriptor, center) for center in centers}
             root_keys.append(keys)
             self._stats["node_cache_hits"] += sum(
@@ -678,7 +588,8 @@ class NMRGuidanceScorer:
             self._stage_stats[stage]["node_cache_hits"] += sum(
                 key in self._node_cache for key in keys.values()
             )
-        self._predict_missing_roots(descriptors, root_keys, stage=stage)
+        predictions = self._predict_missing_roots(descriptors, root_keys, stage=stage)
+        predictions = self._node_cache if predictions is None else predictions
 
         outputs = []
         for index, descriptor in enumerate(descriptors):
@@ -686,27 +597,25 @@ class NMRGuidanceScorer:
                 descriptor["graph_key"]
             )
             if cached is None:
-                if root_keys[index]:
-                    # Missing roots can occur after the bounded inference
-                    # budget is reached.  A neutral shift keeps the scorer
-                    # total and deterministic without allocating another
-                    # graph/model batch.
-                    shifts = torch.tensor(
-                        [self._node_cache.get(root_keys[index][center], 120.0)
-                         for center in root_keys[index]],
-                        dtype=torch.float,
-                    )
-                    missing_centers = max(
-                        0, int(descriptor["carbon_count"]) - int(shifts.numel())
-                    )
-                    if missing_centers:
-                        shifts = torch.cat((
-                            shifts,
-                            torch.full((missing_centers,), 120.0),
-                        ))
-                else:
-                    shifts = torch.empty(0, dtype=torch.float)
-                metrics, spectrum = self._spectrum_metrics(shifts)
+                keys = root_keys[index]
+                available = sum(key in predictions for key in keys.values())
+                coverage = available / max(1, descriptor["carbon_count"])
+                if available != descriptor["carbon_count"] or not keys:
+                    result = dict(scored=False, coverage=coverage, loss=None,
+                                  reason="missing_nmr_predictions",
+                                  carbon_centers=available, graph_key=descriptor["graph_key"])
+                    outputs.append(result)
+                    self._stats["unscored_candidates"] += 1
+                    self._stage_stats[stage]["unscored_candidates"] += 1
+                    if self.record_limit:
+                        self._records.append(dict(stage=stage, depth=depth,
+                                                  candidate_index=index, **result))
+                        del self._records[:-self.record_limit]
+                    continue
+                shifts = torch.tensor([predictions[key] for key in keys.values()])
+                su_types = descriptor["su_indices"][list(keys)]
+                metrics, spectrum = self._spectrum_metrics(shifts, su_types)
+                metrics.update(scored=True, coverage=1.0, reason="")
                 cached = {
                     "metrics": metrics,
                     "spectrum": spectrum,
@@ -753,8 +662,8 @@ class NMRGuidanceScorer:
             "node_cache_hits": int(values.get("node_cache_hits", 0)),
             "node_predictions": int(values.get("node_predictions", 0)),
             "model_calls": int(values.get("model_calls", 0)),
-            "model_call_limit": int(self.model_call_limit),
-            "model_call_limit_reached": bool(self.model_call_limit_reached),
+            "unscored_candidates": int(values.get("unscored_candidates", 0)),
+            "aromatic_response_scale": self.aromatic_response_scale,
             "center_limit": int(self.center_limit),
         }
 
@@ -763,30 +672,13 @@ class NMRGuidanceScorer:
         directory.mkdir(parents=True, exist_ok=True)
         final_metrics = self.score_state(final_state, stage="final")
         cached = self._graph_cache.get(final_metrics["graph_key"])
-        if cached is None:
-            # A bounded cache may evict the final graph immediately after it
-            # is scored.  Reconstruct the deterministic spectrum from the
-            # retained shifts rather than treating cache eviction as failure.
-            descriptor = self._graph_descriptor(final_state, None)
-            centers = torch.nonzero(
-                descriptor["is_carbon"], as_tuple=False
-            ).view(-1).tolist()
-            if len(centers) > self.center_limit:
-                step = max(1, math.ceil(len(centers) / self.center_limit))
-                centers = centers[::step][:self.center_limit]
-            root_keys = {center: self._root_key(descriptor, center) for center in centers}
-            shifts = torch.tensor(
-                [self._node_cache.get(root_keys[center], 120.0) for center in root_keys],
-                dtype=torch.float,
-            )
-            missing_centers = max(
-                0, int(descriptor["carbon_count"]) - int(shifts.numel())
-            )
-            if missing_centers:
-                shifts = torch.cat((shifts, torch.full((missing_centers,), 120.0)))
-            _metrics, spectrum = self._spectrum_metrics(shifts)
-        else:
-            spectrum = cached["spectrum"].cpu()
+        if cached is None or not final_metrics.get("scored", False):
+            path = directory / "summary.json"
+            path.write_text(json.dumps(dict(final_metrics=final_metrics,
+                                           statistics=self.statistics()), indent=2),
+                            encoding="utf-8")
+            return {"nmr_summary_json": str(path)}
+        spectrum = cached["spectrum"].cpu()
         target = self.target_spectrum[: spectrum.numel()].cpu()
         spectrum_csv = directory / "final_spectrum.csv"
         with spectrum_csv.open("w", newline="", encoding="utf-8") as handle:
@@ -799,7 +691,7 @@ class NMRGuidanceScorer:
         candidate_csv = directory / "candidate_scores.csv"
         if self._records:
             with candidate_csv.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=list(self._records[0]))
+                writer = csv.DictWriter(handle, fieldnames=sorted({key for row in self._records for key in row}))
                 writer.writeheader()
                 writer.writerows(self._records)
         summary_json = directory / "summary.json"

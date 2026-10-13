@@ -295,7 +295,8 @@ def _compute_flex_audit(
     rigid10_pairs = y_value = window["Y"]
     z_value = window["Z"]
     flex_lower, flex_upper_raw = window["flex_lower"], window["flex_upper"]
-    window_ok = window["flex_window_ok"] and window["flex_window_width_ok"]
+    # Width is a later coordination step, not a gate on chain completion.
+    window_ok = window["flex_window_ok"]
     window_applicable = cluster_count > 0
 
     fixed_route_status = preflight_classification_fixed_routes(nodes, classification)
@@ -390,8 +391,7 @@ def _compute_flex_audit(
     selected_groups: List[Dict[str, Any]] = []
     blocked_reason = ""
     if enforce and window_applicable and not window_ok:
-        blocked_reason = ("flex_window_too_wide" if window["flex_window_ok"]
-                          else "flex_window_invalid")
+        blocked_reason = "flex_window_invalid"
         target_flex_count = explicit_flex_count
     if invalid_explicit_profiles:
         blocked_reason = "topology_materialization_invalid"

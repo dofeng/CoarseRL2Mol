@@ -13,7 +13,45 @@ from collections.abc import Mapping
 from typing import Any, Iterable, Sequence, Tuple
 
 
+def convex_hull(points):
+    points = sorted(set(points))
+    if len(points) <= 2:
+        return tuple(points)
+    def cross(a, b, c):
+        return (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])
+    def half(rows):
+        result = []
+        for point in rows:
+            while len(result) >= 2 and cross(result[-2], result[-1], point) <= 1e-9:
+                result.pop()
+            result.append(point)
+        return result
+    return tuple(half(points)[:-1] + half(points[::-1])[:-1])
+
+
+def outside_hull(hull, axial):
+    p = axial_to_cartesian(axial)
+    if len(hull) < 3:
+        return p not in hull
+    return any((b[0]-a[0])*(p[1]-a[1])-(b[1]-a[1])*(p[0]-a[0]) < -1e-9
+               for a, b in zip(hull, hull[1:]+hull[:1]))
+
+
+def hull_region(hull, points):
+    outside = [outside_hull(hull, p) for p in points]
+    if outside and all(outside):
+        return 'outside'
+    if any(outside):
+        return 'crossing'
+    return 'inside'
+
+
 Axial = Tuple[int, int]
+
+
+def connection_axis(direction):
+    """World-coordinate axis class under the repository's hex projection."""
+    return 'V' if int(direction[0]) == 0 else 'H'
 
 HEX_DIRECTIONS: Tuple[Axial, ...] = (
     (1, 1),
@@ -44,16 +82,63 @@ def valid_hex_directions(axial: Axial) -> Tuple[Axial, ...]:
 
 
 def hex_edge_valid(source: Axial, target: Axial, *, honeycomb: bool = False) -> bool:
-    """Six-neighbour coarse lattice, or its stricter ordinary-carbon subgraph.
+    """Triangular lattice adjacency, optionally requiring honeycomb vertices.
 
-    These are distinct constraints: SU25 and coarse hetero connectors can use
-    lattice edges outside the three ordinary honeycomb directions.
+    Ordinary molecular bonds use ``honeycomb=True``. A declared SU25 fixed
+    SU22 branch also uses a unit edge, with its SU22 endpoint at a face centre.
     """
     delta = (target[0] - source[0], target[1] - source[1])
     return delta in HEX_DIRECTIONS and (not honeycomb or (
         delta in valid_hex_directions(source)
         and (-delta[0], -delta[1]) in valid_hex_directions(target)
     ))
+
+
+def su25_center_branch_errors(unit: Any) -> list[dict[str, Any]]:
+    """Validate the narrow geometry declaration independently of coordinates."""
+    if not unit.su25_center_branches and not any(n.su_type == 25 for n in unit.nodes):
+        return []
+    nodes = unit.node_map()
+    neighbors = {gid: set() for gid in nodes}
+    for edge in unit.internal_edges:
+        if edge.source_node_id in nodes and edge.target_node_id in nodes:
+            neighbors[edge.source_node_id].add(edge.target_node_id)
+            neighbors[edge.target_node_id].add(edge.source_node_id)
+    port_counts = {gid: sum(p.node_id == gid for p in unit.ports) for gid in nodes}
+    errors, parents, children = [], set(), set()
+    for parent, child in unit.su25_center_branches:
+        if (parent in parents or child in children or parent not in nodes or child not in nodes
+                or nodes[parent].su_type != 25 or nodes[child].su_type != 22
+                or neighbors.get(child) != {parent} or port_counts.get(child)
+                or len(neighbors.get(parent, ())) + port_counts.get(parent, 0) != 4):
+            errors.append(dict(reason='invalid_su25_center_branch', unit_id=unit.unit_id,
+                               parent_node_id=parent, branch_node_id=child))
+        parents.add(parent)
+        children.add(child)
+    for gid, node in nodes.items():
+        if (node.su_type == 25 and len(neighbors[gid]) + port_counts[gid] == 4
+                and gid not in parents):
+            errors.append(dict(reason='missing_su25_center_branch', unit_id=unit.unit_id,
+                               parent_node_id=gid))
+    return errors
+
+
+def topology_site_valid(node_id: int, point: Axial, center_parents: Mapping[int, int]) -> bool:
+    phase = (point[0] + point[1]) % 3
+    return phase == 0 if node_id in center_parents else phase != 0
+
+
+def topology_edge_valid(source_id: int, target_id: int, source: Axial, target: Axial,
+                        center_parents: Mapping[int, int]) -> bool:
+    """Ordinary honeycomb bonds plus precisely one registered branch per SU25."""
+    if source_id in center_parents:
+        return (center_parents[source_id] == target_id
+                and topology_site_valid(source_id, source, center_parents)
+                and topology_site_valid(target_id, target, center_parents)
+                and hex_edge_valid(source, target))
+    if target_id in center_parents:
+        return topology_edge_valid(target_id, source_id, target, source, center_parents)
+    return hex_edge_valid(source, target, honeycomb=True)
 
 
 def axial_add(left: Axial, right: Axial) -> Axial:
@@ -69,6 +154,27 @@ def axial_distance(left: Axial, right: Axial) -> int:
     dq = int(right[0]) - int(left[0])
     dr = int(right[1]) - int(left[1])
     return (abs(dq) + abs(dr) + abs(dq - dr)) // 2
+
+
+def honeycomb_ball(site: Axial, radius: int = 3):
+    """Global honeycomb vertices, excluding the site and every face centre."""
+    for q in range(site[0] - radius, site[0] + radius + 1):
+        for r in range(site[1] - radius, site[1] + radius + 1):
+            if (q + r) % 3 and 0 < axial_distance(site, (q, r)) <= radius:
+                yield q, r
+
+
+def segments_intersect(a, b, c, d, tolerance=1e-9):
+    """Closed segment intersection; callers exempt edges sharing a node ID."""
+    def cross(p, q, r):
+        return (q[0]-p[0])*(r[1]-p[1]) - (q[1]-p[1])*(r[0]-p[0])
+    def on(p, q, r):
+        return (abs(cross(p, q, r)) <= tolerance
+                and min(p[0], q[0])-tolerance <= r[0] <= max(p[0], q[0])+tolerance
+                and min(p[1], q[1])-tolerance <= r[1] <= max(p[1], q[1])+tolerance)
+    x, y, z, w = cross(a,b,c), cross(a,b,d), cross(c,d,a), cross(c,d,b)
+    return ((x*y < -tolerance and z*w < -tolerance)
+            or on(a,b,c) or on(a,b,d) or on(c,d,a) or on(c,d,b))
 
 
 def rotate_axial(value: Axial, rotation: int) -> Axial:
@@ -394,7 +500,7 @@ def layout_metrics(
                 for r in range(min_r, max_r + 1, step)
             ]
         else:
-            # A small regular grid is cheap enough for beam search and, unlike
+            # A small regular grid bounds diagnostic sampling and, unlike
             # the former five-point probe, detects off-centre cavities.  At
             # most 49 points are tested regardless of molecule size.
             q_step = max(1, int(math.ceil(max(1, max_q - min_q) / 6.0)))
@@ -487,26 +593,6 @@ def state_layout_metrics(
     return layout_metrics(values, groups, full=full, include_void=include_void)
 
 
-def state_shape_rank(state: Any) -> Tuple[Any, ...]:
-    shape = state_layout_metrics(state, full=False, include_void=True)
-    q_span, r_span = int(shape["q_span"]), int(shape["r_span"])
-    return (
-        float(shape["layout_energy"]),
-        float(shape["violation"]),
-        float(shape["unit_density_cv"]),
-        float(shape["node_density_cv"]),
-        float(shape["largest_void_radius"]),
-        float(shape["principal_axis_ratio"]),
-        float(shape["linearity"]),
-        abs(float(shape["q_over_r"]) - 1.0),
-        abs(float(shape["width_over_height"]) - 1.0),
-        max(q_span, r_span),
-        abs(q_span - r_span),
-        int(shape["total_span"]),
-        q_span * r_span,
-    )
-
-
 __all__ = [
     "Axial",
     "HEX_DIRECTIONS",
@@ -523,11 +609,14 @@ __all__ = [
     "occupied_span",
     "reflect_axial",
     "rotate_axial",
-    "state_shape_rank",
     "state_layout_metrics",
     "transform_axial",
     "transform_direction",
     "unit_sort_key",
     "valid_hex_directions",
     "hex_edge_valid",
+    "su25_center_branch_errors",
+    "topology_site_valid",
+    "topology_edge_valid",
+    "site_space_profile",
 ]

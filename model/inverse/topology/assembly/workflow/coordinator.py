@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from .....shared.aromatic_plan import MAX_FLEX_WINDOW_WIDTH
 
 from ..closure import chain as chain_materializer_module
 from ..state import ownership as ownership_module
@@ -130,6 +131,18 @@ def run_external_assembly_phases(assembler: Any) -> ExternalAssemblyPhaseState:
     raw_flex_violation_reason = chain_materializer_module.flex_range_violation_reason(
         assembler
     )
+    if assembler.flex_audit.get("stop_after_flex", False) or (
+        flex_enforced and int(assembler.flex_audit.get("flex_window_width", 0)) > MAX_FLEX_WINDOW_WIDTH
+    ):
+        # Materialize chains before asking Stage3 to narrow the window. Do
+        # not spend the remaining pool on rings/sides before this boundary.
+        assembler.completed_phases = completed
+        assembler.current_phase = "flex_range_reconciliation"
+        consolidate_pending_owners(assembler)
+        return ExternalAssemblyPhaseState(
+            external_subphases=external_subphases,
+            flex_violation_reason=raw_flex_violation_reason,
+        )
     deferred_flex_shortfall = bool(
         raw_flex_violation_reason == "flex_range_below_minimum"
         and flex_stage_ok

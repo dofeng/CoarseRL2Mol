@@ -7,13 +7,15 @@ import sys
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from RL_MTCS.input import _make_cluster_template, initialize, build_csv_inverse_input
-from RL_MTCS.models import InverseAssemblyInput, UnitNode, UnitPort, UnitEdge, TopologyUnit, InverseInputError, ExternalContract
+from RL_MTCS.io.input import _make_cluster_template, initialize, build_csv_inverse_input
+from RL_MTCS.mdp.types import InverseAssemblyInput, UnitNode, UnitPort, UnitEdge, TopologyUnit, InverseInputError, ExternalContract
 from RL_MTCS.geometry import aromatic_slot_direction
-from RL_MTCS.state import HexAssemblyState, aromatic_template_errors, aromatic_perimeter_ids, stage_snapshot
-from RL_MTCS.rigid_sites import bind_su10_sites
-from RL_MTCS.rigid import TopologyPlacementStage, search_phase
-from RL_MTCS.output import export_rigid_views
+from RL_MTCS.mdp.state import HexAssemblyState
+from RL_MTCS.mdp.sites import aromatic_template_errors, aromatic_perimeter_ids
+from RL_MTCS.actions.rigid import bind_su10_sites
+from RL_MTCS.actions.rigid_geometry import RigidPoseGenerator
+from RL_MTCS.policy.checkpoints import StageController
+from RL_MTCS.io.output import export_rigid_views
 
 HSQ = Path(__file__).resolve().parents[1] / 'test_results/HSQ-1/outer_cycle_1/final_outputs'
 
@@ -110,7 +112,7 @@ def test_one_aromatic_unit_connects_four_distinct_neighbors():
                 left, right = bound.unit('aromatic:0'), bound.unit(leaf)
                 pa = next(p for p in left.ports if p.node_id == a)
                 pb = next(p for p in right.ports if p.node_id == b)
-                for action in TopologyPlacementStage(bound, 'rigid')._candidate_for_pair(left, pa, right, pb):
+                for action in RigidPoseGenerator(bound)._candidate_for_pair(left, pa, right, pb):
                     trial = bound.clone()
                     action['contract_id'] = f'rigid:dynamic:{min(a,b)}-{max(a,b)}'
                     ok, _ = trial.connect(action)
@@ -134,7 +136,7 @@ def test_one_aromatic_unit_connects_four_distinct_neighbors():
 def test_initial_images_use_only_staging_types(tmp_path, monkeypatch):
     state = aromatic_fixture(2)
     labels = []
-    import RL_MTCS.output as output
+    import RL_MTCS.io.output as output
     real = output.save_state_png
     def capture(s, path, **kwargs):
         labels.extend((kwargs.get('su_types') or s.current_su_types).values())
@@ -146,15 +148,13 @@ def test_initial_images_use_only_staging_types(tmp_path, monkeypatch):
     assert len(list(tmp_path.glob('aromatic_*.png'))) == 2
 
 
-def test_dynamic_site_mcts_is_bounded():
-    result = search_phase(TopologyPlacementStage(aromatic_fixture(3), 'rigid'),
-                          iterations=2, candidate_k=2, beam_width=2, max_steps=10,
-                          max_tree_nodes=24, seed=7)
-    row = result.info['result']
-    assert row['pairing_search']['tree_nodes'] <= 24
-    assert row['candidate_space_complete'] is False
-    assert result.state.audit()['geometry_valid']
-    assert row['done'], row
+def test_dynamic_site_mcts_selects_one_result():
+    from RL_MTCS import AssemblyConfig
+    state, info = StageController(AssemblyConfig(
+        connection_candidate_limit=2,forward_max_rollbacks=0,verbose=False)).run(aromatic_fixture(3), 'rigid')
+    assert isinstance(state, HexAssemblyState)
+    assert state.audit()['geometry_valid']
+    assert info['done']
 
 
 def ring_side_fixture():
@@ -181,7 +181,7 @@ def ring_side_fixture():
                              aromatic_slot_direction(aromatic,c.target_node_id)) for c in contracts))
     units = (aromatic, ring, side)
     types = {n.node_id:n.su_type for u in units for n in u.nodes}
-    types.update({4:11,5:11,0:5})
+    types.update({4:11,5:11,0:11})
     problem = InverseAssemblyInput(units, contracts, tuple(sorted(types.items())),
                                    tuple((n.node_id,u.unit_id) for u in units for n in u.nodes))
     state = HexAssemblyState(problem)
@@ -194,74 +194,78 @@ def test_ring_then_side_runs_and_exports_consistent_stages(tmp_path):
     from RL_MTCS import AssemblyConfig
     runner = MCTSRunner.__new__(MCTSRunner)
     runner.initial_state = ring_side_fixture()
-    runner.config = AssemblyConfig(rigid_iterations=1,candidate_k=2,search_budget=80,max_tree_nodes=32,
-                                   domain_check_limit=128,domain_pose_limit=16,verbose=False)
+    runner.config = AssemblyConfig(connection_candidate_limit=2,forward_max_rollbacks=0,verbose=False)
     runner.nmr_scorer = None
     runner.inverse_result = None
     runner.init_data = {'diagnostics': {'fixture': 'explicit external ring and side'}}
     result = runner.run_all_stages(str(tmp_path))
     assert result['ok'], result.get('result', result.get('audit'))
     assert result['audit']['geometry_valid']
-    for name in ('flex_chain','aliphatic_ring','side','substitution'):
+    assert 'subst_png' not in result['outputs']
+    assert not (tmp_path/'subst_result.png').exists()
+    for name in ('rigid','flex','ring','side','substitution'):
+        trace=json.loads((tmp_path/name/f'{name}_search_trace.json').read_text())
+        assert trace['actions'] == json.loads(json.dumps(result['stages'][name]['state'].action_history))
+        assert 'plan' not in trace and 'rigid_search_attempts' not in trace
+        if name in ('rigid','flex'):
+            assert trace['checkpoints']
+        else:
+            diagnostics = trace['diagnostics']
+            assert diagnostics['stop_reason'] in {'tree_exhausted', 'result_candidates_ready'}
+            assert 1 <= diagnostics['result_candidate_count'] <= 2
+    for name in ('flex','ring','side','substitution'):
         assert (tmp_path/name/f'{name}_molecule.png').is_file()
         molecule=json.loads((tmp_path/name/f'{name}_molecule.json').read_text())
         assert molecule['audit']['geometry_valid']
-    ring_summary=json.loads((tmp_path/'aliphatic_ring/aliphatic_ring_summary.json').read_text())
-    assert ring_summary['contracts_done'] == 2
-    assert result['side']['contracts_done'] == 1
+    ring_summary=json.loads((tmp_path/'ring/ring_summary.json').read_text())
+    assert ring_summary['units_done'] == 1
+    assert result['stages']['side']['result']['units_done'] == 1
 
 
-def test_flex_budget_visits_each_rigid_candidate_with_its_own_problem(monkeypatch):
-    import RL_MTCS.flex as flex
-    from RL_MTCS.rigid import SearchResult
-    roots = [aromatic_fixture(2) for _ in range(3)]
-    calls = []
-    def search(state, **kwargs):
-        index = next(i for i, root in enumerate(roots) if root is state)
-        calls.append((index, kwargs['search_budget']))
-        assert kwargs['rigid_candidates'] == [state]
-        return SearchResult(state, 0, [], {'result': {'done': False,
-            'status': 'proven_infeasible' if index == 2 else 'budget_exhausted', 'contracts_done': index}}), None
-    monkeypatch.setattr(flex, '_run_csv_site_flex_search', search)
-    result, _ = flex.run_planned_flex_search(roots[0], iterations=1, candidate_k=3,
-        max_steps=128, search_budget=8, rigid_candidates=roots)
-    assert calls == [(0,3),(1,3),(2,2)]
-    assert result.info['result']['selected_rigid_candidate_index'] == 2
-    assert result.info['result']['candidate_space_complete'] is False
-    assert result.info['result']['status'] == 'candidate_space_exhausted'
+def test_flex_driver_does_not_retry_retained_rigid_skeletons(monkeypatch):
+    from RL_MTCS import AssemblyConfig
+    from RL_MTCS.policy.checkpoints import StageController
+    from RL_MTCS.runner import MCTSRunner
+    calls=[]
+    def run(self,state,phase):
+        calls.append((state,phase))
+        return state,{'rewards':{'total':.5},'legal':True,'status':'partial'}
+    monkeypatch.setattr(StageController,'run',run)
+    state=ring_side_fixture()
+    runner=MCTSRunner.__new__(MCTSRunner)
+    runner.config=AssemblyConfig(verbose=False)
+    runner.nmr_scorer=None
+    result=runner.run_flex_stage({'state':state})
+    assert calls==[(state,'flex')]
+    assert result['state'] is state
+    assert 'best_candidate' not in result and 'summaries' not in result
 
 
-def test_seeded_puct_can_replace_an_early_dead_end():
-    from RL_MTCS.search import PersistentMCTS, SearchBudget
-    graph = {0: [1,3], 1: [2], 2: [], 3: [4], 4: []}
-    tree = PersistentMCTS(0, expand=lambda s: iter(graph[s]), accept=lambda s: s == 4,
-                          signature=lambda s: s, evaluate=lambda s: 0.1*s,
-                          max_nodes=8, seed=7)
-    tree.seed_path([1,2])
-    assert tree.run(SearchBudget(40)) == 4
-    leaf = next(n for n in tree.nodes if n.state == 4)
-    assert leaf.parent.state == 3 and leaf.parent.parent.state == 0
-    assert len(tree.nodes) <= 8
+def test_puct_can_replace_an_early_dead_end():
+    from RL_MTCS.policy.mcts import MCTS
+    graph={0:[1,3],1:[2],2:[],3:[4],4:[]}
+    tree=MCTS(0,expand=lambda s:iter(graph[s]),accept=lambda s:s==4,
+        signature=lambda s:s,evaluate=lambda s:.1*s,seed=7)
+    assert tree.run()==4
+    assert tree.diagnostics()['visited_states']==5
+    assert tree.diagnostics()['retained_nodes']==1
+    assert tree.diagnostics()['search_exhausted']
 
 
 def test_partial_flex_snapshot_commits_actual_contract_endpoints():
-    from RL_MTCS.flex import _append_site_contract
-    from RL_MTCS.state import relabel_aromatic_sites
+    from RL_MTCS.actions.flex import _append_site_contract
+    from RL_MTCS.mdp.transition import relabel_aromatic_sites
     state = ring_side_fixture()
     # Deliberately bind the logical start to a different physical ring atom.
     state = relabel_aromatic_sites(state, {4:0,0:4}, [])
     contract = state.problem.contracts[0]
-    state.place_unit('topology:0', 0, (2,0), allowed_contacts=[(100,0),(103,5)])
+    state.place_unit('topology:0', 0, (2,0), attachment_edges=[(100,0),(103,5)])
     assert state.is_placed('topology:0')
     _append_site_contract(state, contract, 100, 0)
     _append_site_contract(state, state.problem.contracts[1], 103, 5)
     assert state.audit_port_direction_errors()
     committed = relabel_aromatic_sites(state, {4:0,5:5}, [])
-    snapshot = stage_snapshot(committed, 'aliphatic_ring')
+    snapshot = committed.clone()
     assert snapshot.audit()['geometry_valid']
     assert not snapshot.audit()['complete']  # Side still pending.
     assert len(snapshot.satisfied_contracts) == 2
-    chains = stage_snapshot(committed, 'flex_chain')
-    assert not chains.is_placed('topology:0')
-    assert not chains.satisfied_contracts
-    assert chains.audit()['geometry_valid']

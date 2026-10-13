@@ -37,6 +37,7 @@ from ..shared.topology_contract import (
     MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
     TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES,
 )
+from ..shared.port_rules import HOP1_PORT_COMBINATIONS, can_match_ports_exact
 from .layer0.inverse_layer0 import Layer0Estimator
 from .layer1.inverse_layer1 import Layer1Assigner
 from .layer2.inverse_layer2 import Layer2Estimator
@@ -2398,7 +2399,10 @@ class InversePipelineV3:
         if su_identity_audit.get('ok') is False:
             summary['ok'] = False
             summary['coverage_valid'] = False
-            summary['diagnostics']['solver_reason'] = 'final_su_identity_mismatch'
+            summary['topology_plan_feasible'] = False
+            summary['diagnostics']['solver_reason'] = (
+                'final_topology_port_rules_mismatch' if su_identity_audit.get('port_rule_errors')
+                else 'final_su_identity_mismatch')
         return public_rows, summary
 
     @staticmethod
@@ -5178,7 +5182,7 @@ class InversePipelineV3:
 
         # Local import keeps the inverse model independent of RL_MTCS at
         # module-import time while sharing one exact materialization contract.
-        from RL_MTCS.input import (
+        from RL_MTCS.io.input import (
             build_csv_inverse_input,
             serialize_aromatic_plan,
         )
@@ -5927,6 +5931,19 @@ class InversePipelineV3:
             for node_id, node in node_by_id.items()
             if int(getattr(node, 'su_type', -1)) == 24
         }
+        port_rule_errors = []
+        for node_id in sorted(product_owner_by_node):
+            node = node_by_id.get(node_id)
+            if node is None or node.su_type in set(range(5, 14)) | {26, 30}:
+                continue
+            neighbor_ids = list(node.hop1_ids)
+            if (len(neighbor_ids) != len(set(neighbor_ids))
+                    or any(gid not in node_by_id for gid in neighbor_ids)
+                    or not can_match_ports_exact([node_by_id[gid] for gid in neighbor_ids if gid in node_by_id],
+                        HOP1_PORT_COMBINATIONS.get(node.su_type), center_node=node)):
+                port_rule_errors.append(dict(reason='committed_topology_port_rule_mismatch',
+                    node_id=node_id, su_type=node.su_type, neighbor_ids=neighbor_ids,
+                    product_index=product_owner_by_node[node_id]))
         if expected_su24_ids != actual_su24_ids:
             mismatches.append({
                 'reason': 'su24_identity_set_mismatch',
@@ -5934,7 +5951,8 @@ class InversePipelineV3:
                 'actual_su24_ids': sorted(actual_su24_ids),
             })
         return {
-            'ok': not bool(conflicts or mismatches),
+            'ok': not bool(conflicts or mismatches or port_rule_errors),
+            'port_rule_errors': port_rule_errors,
             'expected_su24_ids': sorted(expected_su24_ids),
             'actual_su24_ids': sorted(actual_su24_ids),
             'product_expected_node_count': int(len(expected)),

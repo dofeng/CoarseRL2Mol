@@ -8,12 +8,27 @@ collapse two adjacent staging SU13 nodes into one final SU26/SU30 node.
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from .models import HeteroAromaticRequest, InverseAssemblyInput, InverseInputError
-from .state import AssemblyEdge, HexAssemblyState
+from RL_MTCS.mdp.types import HeteroAromaticRequest, InverseAssemblyInput, InverseInputError
+from RL_MTCS.mdp.state import HexAssemblyState
+from RL_MTCS.mdp.types import AssemblyEdge
+from RL_MTCS.reporting.diagnostics import note_unit
+from RL_MTCS.mdp.transition import relabel_aromatic_sites
+
+
+def iter_substitution_outcomes(state):
+    done = {a.get('request_target') for a in state.action_history if a.get('kind') == 'substitution'}
+    for request in _request_rows(state):
+        if request.target_node_id in done or request.target_node_id not in state.node_axial:
+            continue
+        note_unit(f'substitution:{request.target_node_id}')
+        for row in _candidate_rows(state,request):
+            child = apply_candidate(state,row)
+            child.action_history[-1]['request_target'] = request.target_node_id
+            child.stage = 'substitution'
+            yield child
 
 
 @dataclass(frozen=True)
@@ -52,7 +67,8 @@ def _adjacency(unit: Any) -> Dict[int, Set[int]]:
 
 
 def _aromatic_units(state: HexAssemblyState) -> Sequence[Any]:
-    return tuple(unit for unit in state.problem.units if unit.phase == "aromatic")
+    return tuple(unit for unit in state.problem.units if unit.phase == "aromatic"
+                 and unit.unit_id in state.placements)
 
 
 def _pair_neighbor_types(unit: Any, left: int, right: int, su_map: Mapping[int, int]) -> Tuple[int, ...]:
@@ -71,10 +87,8 @@ def _pair_neighbor_types(unit: Any, left: int, right: int, su_map: Mapping[int, 
 def _single_neighbor_types(unit: Any, node_id: int, su_map: Mapping[int, int]) -> Tuple[int, ...]:
     """Return aromatic SU labels around one staging site.
 
-    ``hop1_ids`` in the inverse CSV is a list of global IDs, whereas the
-    legacy substitutor compared the corresponding SU labels.  Candidate
-    discovery therefore keeps the graph-ID layer and scoring uses this
-    normalized SU-label layer.
+    These labels are retained in candidate diagnostics; candidate ordering
+    does not score hop-1 similarity.
     """
     values = [
         int(su_map[neighbor])
@@ -84,35 +98,8 @@ def _single_neighbor_types(unit: Any, node_id: int, su_map: Mapping[int, int]) -
     return tuple(sorted(values))
 
 
-def _hop1_match(neighbor_types: Sequence[int], request_hop1: Sequence[int]) -> int:
-    """Return a multiset mismatch count (zero means an exact containment)."""
-    pool = Counter(int(value) for value in neighbor_types)
-    wanted = Counter(int(value) for value in request_hop1 if 5 <= int(value) <= 13)
-    return int(sum(max(0, count - pool.get(value, 0)) for value, count in wanted.items()))
-
-
-def _request_hop1_types(state: HexAssemblyState, request: HeteroAromaticRequest) -> Tuple[int, ...]:
-    """Resolve request hop-1 global IDs to SU labels.
-
-    A few programmatic callers historically supplied SU labels directly, so
-    values which are not present as node IDs are retained when they already
-    look like aromatic SU types.
-    """
-    planned = state.problem.node_map()
-    result: List[int] = []
-    for value in request.hop1_ids:
-        value = int(value)
-        if value in planned:
-            su = int(planned[value])
-            if 5 <= su <= 13:
-                result.append(su)
-        elif 5 <= value <= 13:
-            result.append(value)
-    return tuple(result)
-
-
 def _request_rows(state: HexAssemblyState) -> List[HeteroAromaticRequest]:
-    explicit = tuple(getattr(state.problem, "hetero_requests", ()) or ())
+    explicit = state.problem.hetero_requests
     if explicit:
         rows: List[HeteroAromaticRequest] = []
         node_units = {
@@ -135,33 +122,11 @@ def _request_rows(state: HexAssemblyState) -> List[HeteroAromaticRequest]:
                 continue
             rows.append(request)
         return rows
-    # CSV staging is the only supported runtime input and requires this final
-    # reconstruction pass for SU26/SU30 requests.
-    planned = state.problem.node_map()
-    n26 = sum(value == 26 for value in planned.values())
-    n30 = sum(value == 30 for value in planned.values())
-    # Integer quota: floor(n26/3) is five-membered, with all SU30 assigned to
-    # thiophene.  A request is tied to its inverse GID so six-member labels
-    # remain stable in exports.
-    n26_five = n26 // 3
-    rows: List[HeteroAromaticRequest] = []
-    for index, node_id in enumerate(sorted(node_id for node_id, su in planned.items() if su == 26)):
-        rows.append(HeteroAromaticRequest(26, 5 if index < n26_five else 6, int(node_id)))
-    rows.extend(
-        HeteroAromaticRequest(30, 5, int(node_id))
-        for node_id in sorted(node_id for node_id, su in planned.items() if su == 30)
-    )
-    return rows
+    return []
 
 
 def _candidate_rows(state: HexAssemblyState, request: HeteroAromaticRequest) -> List[SubstitutionCandidate]:
     su_map = state.current_node_map()
-    # Side completion restores the planned 26/30 label before this stage.
-    # Those atoms still occupy a carbon staging site, so treat the requested
-    # target GID as SU13 while discovering a five-membered pair.
-    if int(request.ring_size) in {5, 6}:
-        su_map = dict(su_map)
-        su_map[int(request.target_node_id)] = 13
     reserved = {
         int(value)
         for other in _request_rows(state)
@@ -173,7 +138,7 @@ def _candidate_rows(state: HexAssemblyState, request: HeteroAromaticRequest) -> 
         reserved.discard(int(request.synthetic_node_id))
     contract_nodes = {
         int(node_id)
-        for contract in state.problem.contracts
+        for contract in state.problem.contracts if contract.contract_id in state.satisfied_contracts
         for node_id in (contract.source_node_id, contract.target_node_id)
     }
     target_id = int(request.target_node_id)
@@ -267,15 +232,11 @@ def _remap_problem(
             if not any(int(node.node_id) == node_id for node in nodes):
                 continue
             ports.append(replace(port, node_id=node_id))
-        units.append(replace(unit, nodes=tuple(nodes), internal_edges=tuple(edges), ports=tuple(ports)))
+        removed_coordinate = unit.node_map()[removed].local_axial
+        rings = tuple(tuple(p for p in ring if p != removed_coordinate) for ring in unit.local_rings)
+        units.append(replace(unit, nodes=tuple(nodes), internal_edges=tuple(edges), ports=tuple(ports),
+                             local_rings=rings))
 
-    contracts = []
-    for contract in state.problem.contracts:
-        source = representative if int(contract.source_node_id) == removed else int(contract.source_node_id)
-        target = representative if int(contract.target_node_id) == removed else int(contract.target_node_id)
-        if source == target:
-            continue
-        contracts.append(replace(contract, source_node_id=source, target_node_id=target))
     node_su = state.problem.node_map()
     node_su.pop(int(removed), None)
     node_su[int(representative)] = int(target_su)
@@ -285,69 +246,31 @@ def _remap_problem(
     return replace(
         state.problem,
         units=tuple(units),
-        contracts=tuple(contracts),
         node_su_types=tuple(sorted(node_su.items())),
         ownership=tuple(sorted(ownership.items())),
     )
 
 
-def _permute_aromatic_ids(state: HexAssemblyState, mapping: Mapping[int, int]) -> None:
-    """Permute aromatic GID identities between already placed physical slots."""
+def _rebind_substitution_sites(state: HexAssemblyState, mapping: Mapping[int, int]) -> HexAssemblyState:
+    """Move logical identities without retargeting pending input contracts."""
     mapping = {int(old): int(new) for old, new in mapping.items()}
     if not mapping:
-        return
+        return state.clone()
     affected = set(mapping) | set(mapping.values())
     if set(mapping) != set(mapping.values()) or len(mapping) != len(affected):
         raise InverseInputError("aromatic identity permutation is not bijective")
     if any(node_id not in state.node_axial for node_id in affected):
         raise InverseInputError("aromatic identity permutation contains an unplaced site")
     if all(old == new for old, new in mapping.items()):
-        return
-
-    def remap(value: int) -> int:
-        return int(mapping.get(int(value), int(value)))
-
-    units = []
-    for unit in state.problem.units:
-        if unit.phase != "aromatic":
-            units.append(unit)
-            continue
-        units.append(replace(
-            unit,
-            nodes=tuple(replace(node, node_id=remap(node.node_id)) for node in unit.nodes),
-            internal_edges=tuple(replace(edge, source_node_id=remap(edge.source_node_id), target_node_id=remap(edge.target_node_id)) for edge in unit.internal_edges),
-            ports=tuple(replace(port, node_id=remap(port.node_id)) for port in unit.ports),
-            source_node_ids=tuple(remap(node_id) for node_id in unit.source_node_ids),
-        ))
-    owner = {remap(node_id): unit_id for node_id, unit_id in state.problem.ownership_map().items()}
-    contracts = tuple(replace(
-        contract,
-        source_node_id=remap(contract.source_node_id),
-        target_node_id=remap(contract.target_node_id),
-        source_unit_id=owner.get(remap(contract.source_node_id), contract.source_unit_id),
-        target_unit_id=owner.get(remap(contract.target_node_id), contract.target_unit_id),
-    ) for contract in state.problem.contracts)
-    state.problem = replace(state.problem, units=tuple(units), contracts=contracts, ownership=tuple(sorted(owner.items())))
-    state._units = {unit.unit_id: unit for unit in state.problem.units}
-    state._ports = {f"{unit.unit_id}:{port.port_id}": port for unit in state.problem.units for port in unit.ports}
-    state.node_axial = {remap(node_id): axial for node_id, axial in state.node_axial.items()}
-    state.occupied_axial = {axial: remap(node_id) for axial, node_id in state.occupied_axial.items()}
-    state.final_node_positions = {remap(node_id): position for node_id, position in state.final_node_positions.items()}
-    # Restore assembly-time labels from the logical inverse GIDs.  The
-    # permutation only changes which physical slot carries a GID; it must not
-    # carry a hetero label over to another logical node.
-    previous_current = dict(state.current_su_types)
-    planned = state.problem.node_map()
-    state.current_su_types = {
-        remap(node_id): int(planned.get(remap(node_id), su)) if node_id in affected else int(su)
-        for node_id, su in previous_current.items()
-    }
-    state.edges = [AssemblyEdge(
-        remap(edge.source_node_id), remap(edge.target_node_id), edge.kind, edge.contract_id,
-        state._edge_direction(state.node_axial[remap(edge.source_node_id)], state.node_axial[remap(edge.target_node_id)]),
-    ) for edge in state.edges]
-    state.allowed_unbonded_contacts = {frozenset(remap(node_id) for node_id in pair) for pair in state.allowed_unbonded_contacts}
-    state.substitution_relaxed_edges = {frozenset(remap(node_id) for node_id in pair) for pair in state.substitution_relaxed_edges}
+        return state.clone()
+    protected = {n for e in state.edges if e.contract_id
+                 for n in (e.source_node_id, e.target_node_id)}
+    return relabel_aromatic_sites(
+        state, {new: old for old, new in mapping.items() if old != new},
+        state.action_history, protected_aromatic_ids=protected,
+        movable_hetero_ids=affected, replay_contract_kinds=('rigid', 'flex', 'ring', 'side'),
+        stage='substitution', validate_geometry=False,
+    )
 
 
 def _pair_identity_mapping(left: int, right: int, target: int, synthetic: int) -> Dict[int, int]:
@@ -366,6 +289,39 @@ def _pair_identity_mapping(left: int, right: int, target: int, synthetic: int) -
 
 def apply_candidate(state: HexAssemblyState, candidate: SubstitutionCandidate) -> HexAssemblyState:
     """Apply one candidate transactionally and return a new state."""
+    if candidate.ring_size not in {5, 6} or candidate.target_su not in {26, 30}:
+        raise InverseInputError('unsupported substitution request')
+    unit = state.unit(candidate.unit_id)
+    if unit.phase != 'aromatic' or any(gid not in unit.node_map() for gid in candidate.site_ids):
+        raise InverseInputError('substitution sites do not belong to the selected aromatic unit')
+    if any(state.current_su_types.get(gid) != 13 for gid in candidate.site_ids):
+        raise InverseInputError('substitution requires available staging SU13 sites')
+    target = candidate.representative_node_id
+    requests = [r for r in state.problem.hetero_requests
+                if (r.target_node_id, r.target_su, r.ring_size, r.synthetic_node_id) ==
+                (target, candidate.target_su, candidate.ring_size, candidate.synthetic_node_id)]
+    if len(requests) != 1 or state.source_problem.node_map().get(target) != candidate.target_su:
+        raise InverseInputError('substitution candidate does not match an original request')
+    if len(candidate.site_ids) != (2 if candidate.ring_size == 5 else 1):
+        raise InverseInputError('substitution site count mismatch')
+    reserved = {gid for r in state.problem.hetero_requests if r.target_node_id != target
+                for gid in (r.target_node_id, r.synthetic_node_id) if gid is not None}
+    if reserved.intersection(candidate.site_ids):
+        raise InverseInputError('substitution uses another request identity')
+    adjacency = _adjacency(unit)
+    if any(len(adjacency.get(gid, ())) != 2 for gid in candidate.site_ids):
+        raise InverseInputError('substitution requires degree-two ring perimeter sites')
+    moved = set(candidate.site_ids) | {target}
+    if candidate.ring_size == 5:
+        synthetic = candidate.synthetic_node_id
+        if (synthetic is None or synthetic == target
+                or state.source_problem.node_map().get(synthetic) != 13
+                or any(synthetic in {c.source_node_id, c.target_node_id} for c in state.problem.contracts)
+                or candidate.site_ids[1] not in adjacency.get(candidate.site_ids[0], ())):
+            raise InverseInputError('five-member substitution requires its adjacent synthetic staging site')
+        moved.add(synthetic)
+    if any(moved.intersection((e.source_node_id, e.target_node_id)) for e in state.edges if e.contract_id):
+        raise InverseInputError('substitution cannot move a committed external endpoint')
     if candidate.ring_size == 6:
         trial = state.clone()
         target = int(candidate.representative_node_id if candidate.representative_node_id is not None else candidate.site_ids[0])
@@ -373,11 +329,12 @@ def apply_candidate(state: HexAssemblyState, candidate: SubstitutionCandidate) -
         if site != target:
             # Swap the selected physical site with the inverse target GID;
             # only uncontracted aromatic sites are admitted as destinations.
-            _permute_aromatic_ids(trial, {site: target, target: site})
+            trial = _rebind_substitution_sites(trial, {site: target, target: site})
         trial.current_su_types[target] = int(candidate.target_su)
         trial.action_history.append({
             "kind": "substitution", "target_su": int(candidate.target_su),
-            "ring_size": 6, "site_ids": [target],
+            "ring_size": 6, "site_ids": [target], "unit_id": candidate.unit_id,
+            "request_target": target,
             "selected_physical_site_id": site,
         })
         return trial
@@ -390,7 +347,7 @@ def apply_candidate(state: HexAssemblyState, candidate: SubstitutionCandidate) -
     # Place the requested target and synthetic IDs at the selected physical
     # pair.  This permits NMR-guided selection among every eligible 13-13 edge
     # instead of forcing the pair chosen by initialization.
-    _permute_aromatic_ids(
+    trial = _rebind_substitution_sites(
         trial, _pair_identity_mapping(left, right, representative, synthetic)
     )
     representative, removed = int(candidate.representative_node_id if candidate.representative_node_id is not None else representative), synthetic
@@ -401,6 +358,7 @@ def apply_candidate(state: HexAssemblyState, candidate: SubstitutionCandidate) -
     trial._units = {unit.unit_id: unit for unit in trial.problem.units}
     trial._ports = {f"{unit.unit_id}:{port.port_id}": port for unit in trial.problem.units for port in unit.ports}
     removed_axial = trial.node_axial[removed]
+    removed_local = unit.node_map()[removed].local_axial
     trial.node_axial.pop(removed, None)
     if trial.occupied_axial.get(removed_axial) == removed:
         trial.occupied_axial.pop(removed_axial, None)
@@ -430,7 +388,6 @@ def apply_candidate(state: HexAssemblyState, candidate: SubstitutionCandidate) -
     rewritten: List[AssemblyEdge] = []
     seen: Set[Tuple[int, int, str, str]] = set()
     for edge in trial.edges:
-        touched_removed = removed in {int(edge.source_node_id), int(edge.target_node_id)}
         source = representative if int(edge.source_node_id) == removed else int(edge.source_node_id)
         target = representative if int(edge.target_node_id) == removed else int(edge.target_node_id)
         if source == target:
@@ -441,197 +398,18 @@ def apply_candidate(state: HexAssemblyState, candidate: SubstitutionCandidate) -
         seen.add(key)
         direction = trial._edge_direction(trial.node_axial.get(source, (0, 0)), trial.node_axial.get(target, (0, 0)))
         rewritten.append(AssemblyEdge(source, target, edge.kind, edge.contract_id, direction))
-        if touched_removed:
+        if representative in {source, target}:
             trial.substitution_relaxed_edges.add(_edge_key(source, target))
-            if edge.contract_id:
-                trial.substitution_relaxed_contracts.add(str(edge.contract_id))
-    for contract in state.problem.contracts:
-        if removed in {int(contract.source_node_id), int(contract.target_node_id)}:
-            trial.substitution_relaxed_contracts.add(str(contract.contract_id))
     trial.edges = rewritten
-    trial.allowed_unbonded_contacts = {
-        frozenset(representative if int(node_id) == removed else int(node_id) for node_id in pair)
-        for pair in trial.allowed_unbonded_contacts
-        if removed not in pair or representative not in pair
-    }
     trial.action_history.append({
         "kind": "substitution", "target_su": int(candidate.target_su), "ring_size": 5,
+        "unit_id": candidate.unit_id,
+        "request_target": representative,
+        "affected_edge_pairs": sorted(sorted(pair) for pair in trial.substitution_relaxed_edges
+                                      if representative in pair),
         "site_ids": [representative, removed], "selected_physical_site_ids": [left, right], "representative_node_id": representative,
         "removed_node_id": removed, "mean_position": list(trial.final_node_positions[representative]),
+        "removed_local_axial": list(removed_local),
         "source_positions": [list(left_pos), list(right_pos)],
     })
     return trial
-
-
-def run_substitution_stage(
-    state: HexAssemblyState,
-    *,
-    nmr_scorer: Any = None,
-    candidate_k: int = 32,
-    beam_width: int = 4,
-    nmr_weight: float = 1.0,
-) -> Tuple[HexAssemblyState, Dict[str, Any]]:
-    """Apply all final SU26/SU30 requests with a bounded beam.
-
-    Each beam item is a complete state after the requests processed so far.
-    This matters for five-membered substitutions because a pair consumes two
-    staging sites and can make a later pair unavailable.  NMR scoring is
-    performed in one batch per request layer whenever the scorer exposes the
-    batch API; a small compatibility fallback keeps lightweight test scorers
-    working as well.
-    """
-    requests = _request_rows(state)
-    beam: List[Dict[str, Any]] = [{
-        "state": state.clone(),
-        "objective": 0.0,
-        "mismatch": 0,
-        "selected": [],
-        "unresolved": [],
-    }]
-    candidate_records: List[Dict[str, Any]] = []
-    for request_index, request in enumerate(requests):
-        expansions: List[Dict[str, Any]] = []
-        for item in beam:
-            current = item["state"]
-            target_id = int(request.target_node_id)
-            # Make the stage idempotent for callers which resume from a final
-            # JSON/state export.
-            if any(
-                action.get("kind") == "substitution"
-                and int(action.get("ring_size", 0)) == int(request.ring_size)
-                and int(action.get("target_su", -1)) == int(request.target_su)
-                and target_id in {int(value) for value in action.get("site_ids", [])}
-                for action in current.action_history
-            ):
-                trial = current.clone()
-                selected = list(item["selected"])
-                selected.append({"request": request.__dict__, "mode": "already_substituted"})
-                expansions.append({**item, "state": trial, "selected": selected})
-                continue
-
-            all_candidates = _candidate_rows(current, request)
-            hop_types = _request_hop1_types(current, request)
-            candidates = sorted(
-                all_candidates,
-                key=lambda value: (
-                    _hop1_match(value.neighbor_types, hop_types),
-                    value.unit_id, value.site_ids,
-                ),
-            )[: max(1, int(candidate_k))]
-            if not candidates:
-                unresolved = list(item["unresolved"])
-                unresolved.append({"request": request.__dict__, "reason": "no_candidate"})
-                expansions.append({
-                    **item,
-                    "unresolved": unresolved,
-                    "mismatch": int(item["mismatch"]) + 1,
-                    "objective": float(item["objective"]) + 1e6,
-                })
-                continue
-
-            trials: List[HexAssemblyState] = []
-            valid_candidates: List[SubstitutionCandidate] = []
-            errors: List[Optional[str]] = []
-            for candidate in candidates:
-                try:
-                    trials.append(apply_candidate(current, candidate))
-                    valid_candidates.append(candidate)
-                    errors.append(None)
-                except Exception as exc:
-                    errors.append(str(exc))
-
-            if not valid_candidates:
-                unresolved = list(item["unresolved"])
-                unresolved.append({
-                    "request": request.__dict__,
-                    "reason": "candidate_application_failed",
-                    "errors": [value for value in errors if value],
-                })
-                expansions.append({
-                    **item,
-                    "unresolved": unresolved,
-                    "mismatch": int(item["mismatch"]) + 1,
-                    "objective": float(item["objective"]) + 1e6,
-                })
-                continue
-
-            scores: List[Dict[str, Any]] = []
-            if trials and nmr_scorer is not None:
-                try:
-                    if hasattr(nmr_scorer, "score_candidates"):
-                        scores = [dict(value) for value in nmr_scorer.score_candidates(
-                            trials, stage="substitution", depth=int(request_index)
-                        )]
-                    else:
-                        scores = [dict(nmr_scorer.score_state(value, stage="substitution")) for value in trials]
-                except Exception as exc:
-                    scores = [{"loss": float("inf"), "error": str(exc)} for _ in trials]
-            else:
-                scores = [{"loss": 0.0} for _ in trials]
-
-            for index, candidate in enumerate(valid_candidates):
-                score = scores[index] if index < len(scores) else {"loss": float("inf")}
-                mismatch = _hop1_match(candidate.neighbor_types, hop_types)
-                record = {
-                    "request": request.__dict__,
-                    "candidate": candidate.to_dict(),
-                    "score": score,
-                    "hop1_mismatch": int(mismatch),
-                }
-                candidate_records.append(record)
-                selected = list(item["selected"])
-                selected.append({"request": request.__dict__, "candidate": candidate.to_dict(), "score": score, "hop1_mismatch": int(mismatch)})
-                expansions.append({
-                    "state": trials[index],
-                    "objective": float(item["objective"]) + float(nmr_weight) * float(score.get("loss", float("inf"))) + 1000.0 * float(mismatch),
-                    "mismatch": int(item["mismatch"]) + int(mismatch),
-                    "selected": selected,
-                    "unresolved": list(item["unresolved"]),
-                })
-            # Invalid candidates should not silently erase an otherwise valid
-            # beam.  They are recorded for diagnostics but are not expanded.
-            for candidate, error in zip(candidates, errors):
-                if error is not None:
-                    candidate_records.append({
-                        "request": request.__dict__,
-                        "candidate": candidate.to_dict(),
-                        "score": {"loss": float("inf"), "error": error},
-                        "hop1_mismatch": None,
-                    })
-        if not expansions:
-            break
-        expansions.sort(key=lambda item: (
-            len(item["unresolved"]), int(item["mismatch"]),
-            float(item["objective"]),
-            item["state"].state_signature(),
-        ))
-        beam = expansions[: max(1, int(beam_width))]
-
-    best = min(
-        beam,
-        key=lambda item: (
-            len(item["unresolved"]), int(item["mismatch"]),
-            float(item["objective"]), item["state"].state_signature(),
-        ),
-    )
-    current = best["state"]
-    selected = best["selected"]
-    unresolved = best["unresolved"]
-    current.stage = "substitution"
-    current.action_history.append({"kind": "substitution_stage", "request_count": len(requests), "selected_count": len(selected), "unresolved_count": len(unresolved), "beam_width": int(beam_width)})
-    applied = sum(
-        1 for row in selected
-        if "candidate" in row
-    )
-    return current, {
-        "requests": [request.__dict__ for request in requests],
-        "selected": selected,
-        "candidates": candidate_records,
-        "unresolved": unresolved,
-        "selected_count": len(selected),
-        "applied_count": int(applied),
-        "complete": not unresolved,
-    }
-
-
-__all__ = ["SubstitutionCandidate", "apply_candidate", "run_substitution_stage"]

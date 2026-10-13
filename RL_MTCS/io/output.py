@@ -5,10 +5,30 @@ from __future__ import annotations
 import csv
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable
+from RL_MTCS.geometry import hex_edge_valid
 
 REFERENCE_NODE_RADIUS = 0.22
+
+def contract_rows(contracts):
+    return [
+        {
+            "contract_id": str(contract.contract_id),
+            "kind": str(contract.kind),
+            "source_unit_id": str(contract.source_unit_id),
+            "source_node_id": int(contract.source_node_id),
+            "source_port_id": str(contract.source_port_id),
+            "target_unit_id": str(contract.target_unit_id),
+            "target_node_id": int(contract.target_node_id),
+            "target_port_id": str(contract.target_port_id),
+            "mandatory": bool(contract.mandatory),
+            "fixed": bool(contract.fixed),
+        }
+        for contract in contracts
+    ]
+
 REFERENCE_FONT_SIZE = 7
 REFERENCE_LABEL_ROTATION_DEGREES = 0.0
 # Keep the coarse-graph palette without importing its molecule/NMR stack
@@ -212,7 +232,7 @@ def save_state_png(
             pad_inches=0.1,
         )
     finally:
-        # Stage snapshots can be rendered repeatedly during a bounded search.
+        # Stage snapshots can be rendered repeatedly during search.
         # Clear the figure even when writing the PNG fails so the renderer does
         # not retain the full graph until the notebook cell exits.
         fig.clear()
@@ -274,6 +294,85 @@ def export_rigid_views(state, directory: str | Path, *, initial: bool = False) -
     return {"directory": str(base), "manifest": str(manifest), "count": len(rows)}
 
 
+def composition_report(state, source_problem, pre_substitution=None, output_dir=None):
+    """Reconcile input identities, intentional idle nodes and staging merges."""
+    synthetic = {r.synthetic_node_id for r in source_problem.hetero_requests
+                 if r.synthetic_node_id is not None}
+    source = {gid: su for gid, su in source_problem.input_node_map().items()
+              if gid not in synthetic}
+    # The inverse identity already declares the final hetero SU, even though
+    # the staging aromatic template displays one/two SU13 sites.
+    source.update({r.target_node_id: r.target_su for r in source_problem.hetero_requests})
+    final = {gid: su for gid, su in state.current_node_map().items() if gid in state.node_axial}
+    idle = dict(source_problem.idle_aromatic_nodes)
+    residual = source_problem.unassembled_resource_map()
+    merged = {a['removed_node_id']: a['representative_node_id'] for a in state.action_history
+              if a.get('kind') == 'substitution' and 'removed_node_id' in a}
+    before_state = pre_substitution or state
+    before = {gid: su for gid, su in before_state.current_node_map().items()
+              if gid in before_state.node_axial}
+    absent = set(source)-set(final)-set(idle)-set(residual)-set(merged)
+    owner = state.problem.ownership_map()
+    missing_required = {gid for gid in absent if owner.get(gid) in state.placements}
+    unconnected = sorted(absent-missing_required)
+    rows = []
+    for gid in sorted(set(source) | set(final) | synthetic):
+        disposition = ('assembled' if gid in final else 'idle_aromatic' if gid in idle
+                       else 'unassembled_resource' if gid in residual
+                       else 'substitution_merged' if gid in merged else 'missing_required' if gid in missing_required else 'unconnected')
+        rows.append(dict(node_id=gid, source_su=source.get(gid), final_su=final.get(gid),
+                         disposition=disposition, synthetic=gid in synthetic,
+                         representative_node_id=merged.get(gid, gid if gid in final else None)))
+    counts, placed, pre = Counter(source.values()), Counter(final.values()), Counter(before.values())
+    idle_counts, residual_counts = Counter(idle.values()), Counter(residual.values())
+    pending_ids = {r.target_node_id for r in source_problem.hetero_requests}
+    pending_ids.update(n for c in state.mandatory_contracts() for n in (c.source_node_id,c.target_node_id))
+    aromatic_ids = {n.node_id for u in state.problem.units if u.phase == 'aromatic' for n in u.nodes}
+    pending_ids.update(n for n, su in state.problem.node_su_types
+                       if n in aromatic_ids and (5 <= su <= 11 or su in {26, 30}))
+    mismatches = sorted(gid for gid in set(final)&set(source) if final[gid]!=source[gid])
+    pending_labels = {gid for gid in mismatches if final[gid]==13 and gid in pending_ids}
+    pending_delta = Counter(final[gid] for gid in pending_labels)
+    pending_delta.subtract(source[gid] for gid in pending_labels)
+    pending_delta.update(final[gid] for gid in set(final)&synthetic)
+    unconnected_counts = Counter(source[gid] for gid in unconnected)
+    comparison = []
+    for su in sorted(set(counts) | set(placed) | set(pre)):
+        target = counts[su] - idle_counts[su] - residual_counts[su]
+        comparison.append(dict(su_type=su, inverse_count=counts[su], assembly_target_count=target,
+            pre_substitution_count=pre[su], final_count=placed[su],
+            idle_aromatic_count=idle_counts[su], other_unassembled_count=residual_counts[su],
+            substitution_delta=placed[su]-pre[su], unconnected_count=unconnected_counts[su],
+            pending_label_delta=pending_delta[su],
+            unexplained_delta=placed[su]-target+unconnected_counts[su]-pending_delta[su]))
+    unexpected = sorted(set(final) - set(source) - synthetic)
+    mismatches = sorted(gid for gid in set(final) & set(source) if final[gid] != source[gid])
+    # Partial assembly is an accounted disposition, not lost input identity.
+    reconciled = not (missing_required or unexpected or (set(mismatches)-pending_labels))
+    summary = dict(assembly_complete=bool(state.is_complete()),
+        identity_valid=not state.audit_identity_errors(), label_valid=not state.audit_label_errors(),
+        input_valid=not state.problem.input_issues,
+        input_errors=[json.loads(issue) for issue in state.problem.input_issues],
+        all_input_nodes_used=set(source) <= set(final), composition_reconciled=reconciled,
+        source_node_count=len(source), assembled_node_count=len(final),
+        idle_aromatic_count=len(idle), other_unassembled_count=len(residual),
+        missing_required_ids=sorted(missing_required), unconnected_node_ids=unconnected,
+        pending_label_ids=sorted(pending_labels), unexpected_ids=unexpected, su_mismatch_ids=mismatches,
+        synthetic_merged_ids=sorted(set(merged) & synthetic), su_comparison=comparison)
+    if output_dir is not None:
+        directory = Path(output_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        for name, records in [('final_su_comparison.csv', comparison),
+                              ('final_node_disposition.csv', rows)]:
+            with (directory / name).open('w', newline='', encoding='utf-8') as handle:
+                if records:
+                    writer = csv.DictWriter(handle, fieldnames=list(records[0]))
+                    writer.writeheader()
+                    writer.writerows(records)
+        _write_json(summary, directory / 'final_composition_summary.json')
+    return summary
+
+
 def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
     """Save PNG plus complete node/edge/audit files for a final state."""
     directory = Path(output_dir)
@@ -291,7 +390,11 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
         writer.writerow([
             "node_id", "su_type", "planned_su_type", "unit_id",
             "q", "r", "final_q", "final_r", "x", "y",
+            "logical_gid", "physical_slot_id", "source_unit_id", "original_su_type",
+            "actual_degree", "label_state", "satisfied_contract_ids",
+            "su25_center_parent_id",
         ])
+        node_details = {row['node_id']: row for row in molecule['nodes']}
         for node_id, axial in sorted(state.node_axial.items()):
             final_position = state.final_node_positions.get(
                 int(node_id), (float(axial[0]), float(axial[1]))
@@ -305,15 +408,40 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
                 f"{state.final_node_positions.get(int(node_id), (float(axial[0]), float(axial[1])))[0]:.6f}",
                 f"{state.final_node_positions.get(int(node_id), (float(axial[0]), float(axial[1])))[1]:.6f}",
                 f"{x:.6f}", f"{y:.6f}",
+                node_id, node_details[node_id]['physical_slot_id'],
+                node_details[node_id]['source_unit_id'], node_details[node_id]['original_su_type'],
+                node_details[node_id]['actual_degree'], node_details[node_id]['label_state'],
+                json.dumps(node_details[node_id]['satisfied_contract_ids']),
+                node_details[node_id]['su25_center_parent_id'],
             ])
     with (directory / "final_edges.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["source_node_id", "target_node_id", "kind", "contract_id", "direction", "hex_neighbor"])
+        writer.writerow(["source_node_id", "target_node_id", "kind", "contract_id", "direction",
+                         "six_direction_neighbor", "honeycomb_edge_valid", "substitution_midpoint_edge",
+                         "su25_center_branch_edge",
+                         "actual_geometry_valid"])
+        bad_pairs, bad_nodes = set(), set()
+        for error in audit['actual_geometry_errors']:
+            bad_nodes.update(error.get('nodes', ()))
+            if 'node' in error:
+                bad_nodes.add(error['node'])
+            bad_pairs.update(frozenset(pair) for pair in error.get('edges', ()))
+            if 'edge' in error:
+                bad_pairs.add(frozenset(error['edge']))
         for edge in state.edges:
+            pair = frozenset((edge.source_node_id, edge.target_node_id))
             direction = "" if edge.direction is None else f"{edge.direction[0]},{edge.direction[1]}"
             writer.writerow([
                 int(edge.source_node_id), int(edge.target_node_id), str(edge.kind),
-                str(edge.contract_id), direction, bool(edge.direction is not None),
+                str(edge.contract_id), direction,
+                hex_edge_valid(state.node_axial[edge.source_node_id], state.node_axial[edge.target_node_id]),
+                hex_edge_valid(state.node_axial[edge.source_node_id], state.node_axial[edge.target_node_id], honeycomb=True),
+                pair in state.substitution_relaxed_edges,
+                (state._su25_center_parents.get(edge.source_node_id) == edge.target_node_id
+                 or state._su25_center_parents.get(edge.target_node_id) == edge.source_node_id),
+                state._edge_geometry_valid(edge.source_node_id, edge.target_node_id,
+                    state.node_axial[edge.source_node_id], state.node_axial[edge.target_node_id])
+                    and pair not in bad_pairs and not pair.intersection(bad_nodes),
             ])
 
     residual_path = directory / "final_unassembled_resources.csv"
@@ -331,6 +459,18 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
                 str(resource.reason),
             ])
 
+        already_reported = {r.node_id for r in state.problem.unassembled_closure_resources}
+        merged = {a['removed_node_id'] for a in state.action_history
+                  if a.get('kind') == 'substitution' and 'removed_node_id' in a}
+        for node_id,su in state.problem.input_node_map().items():
+            if node_id in state.node_axial or node_id in already_reported or node_id in merged:
+                continue
+            uid = ownership.get(node_id)
+            reason = 'outside_main_component' if uid in state.excluded_unit_ids else 'no_legal_connection'
+            if uid is not None:
+                reason = dict(state.unit(uid).metadata).get('assembly_unavailable_reason') or reason
+            writer.writerow([node_id,su,'unconnected','[]',reason])
+
     png_path = directory / "final_molecule.png"
     try:
         save_state_png(
@@ -338,13 +478,9 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
             png_path,
             title=(
                 f"Inverse-driven hexagonal coarse molecule | nodes={len(state.node_axial)} "
-                f"edges={len(state.edges)} components={audit.get('component_count')} "
-                f"fallbacks={len(audit.get('geometry_fallback_contract_ids', []))}"
+                f"edges={len(state.edges)} components={audit.get('component_count')}"
             ),
         )
-        # Keep the historical consumer filename as a compatibility alias.
-        subst_path = directory / "subst_result.png"
-        subst_path.write_bytes(png_path.read_bytes())
     except Exception as exc:
         _write_json({"visualization_error": str(exc)}, directory / "visualization_error.json")
 
@@ -356,7 +492,6 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
         "edges_csv": str(directory / "final_edges.csv"),
         "unassembled_resources_csv": str(residual_path),
         "audit_json": str(directory / "final_audit.json"),
-        "subst_png": str(directory / "subst_result.png"),
     }
 
 

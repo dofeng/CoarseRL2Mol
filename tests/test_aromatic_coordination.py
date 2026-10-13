@@ -10,15 +10,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from RL_MTCS.input import (
+from RL_MTCS.io.input import (
     build_csv_inverse_input, initialize, load_node_rows, serialize_aromatic_plan,
 )
-from RL_MTCS.models import InverseInputError
-from RL_MTCS.state import aromatic_template_errors
+from RL_MTCS.mdp.types import InverseInputError
+from RL_MTCS.mdp.sites import aromatic_template_errors
 from model.shared.aromatic_plan import exact_aromatic_cluster_plan, flex_count_window
 from model.inverse.topology.resources.conversion_solver import apply_stage3_node_adjustments
 from model.inverse.topology.resources.conversion_scoring import _flex_window_from_H
-from model.inverse.topology.stage3.state_machine import plan_stage3_state_machine
+from model.inverse.topology.stage3.state_machine import _narrow_flex_window_plan
 
 
 HSQ = Path(__file__).resolve().parents[1] / 'test_results/HSQ-1/outer_cycle_1/final_outputs'
@@ -34,10 +34,10 @@ def hsq_nodes():
 def coordinate(nodes, *, limit=10, rejected=()):
     h = torch.bincount(torch.tensor([n.su_type for n in nodes]), minlength=40)
     audit = {**flex_count_window(17, 28), 'explicit_flex_count': 9, 'enforced': True}
-    phase = SimpleNamespace(flex_audit=audit, flex_reconciliation_block_reason='flex_window_too_wide')
-    plan = plan_stage3_state_machine(
-        phase_eval=phase, H=h, nodes=nodes, flex_max_primary_adjustments=limit,
-        forbidden_resource_conversion_signatures=rejected,
+    phase = SimpleNamespace(flex_audit=audit, flex_counts={'final': 9})
+    plan = _narrow_flex_window_plan(
+        phase_eval=phase, H=h, nodes=nodes, max_primary_adjustments=limit,
+        special_degree_meta=None, forbidden_signatures=rejected,
     )
     return h, plan
 
@@ -60,7 +60,8 @@ def test_hsq_new_assignment_preserves_ports_and_substitution():
     assert 78 in problem.node_map()
     assert sum(su == 10 for su in problem.node_map().values()) == 28
     assert len(problem.source_rigid_contracts) == 14
-    assert sum(c.kind == 'flex' for c in problem.contracts) == 44
+    assert sum(c.kind == 'flex' for c in problem.contracts) == 18
+    assert sum(c.kind == 'ring' for c in problem.contracts) == 26
     assert len([u for u in problem.units if u.phase == 'aromatic']) == 17
     assert any(r.target_node_id == 493 and r.synthetic_node_id == -1000000
                for r in problem.hetero_requests)
@@ -167,10 +168,10 @@ def test_missing_real_su10_pair_does_not_invent_donors(hsq_nodes):
     assert plan.diagnostics['available_pair_count'] == 0
 
 
-def test_real_phase_evaluation_routes_wide_window_to_coordination():
+def test_wide_window_does_not_block_chain_phase():
     from collections import Counter
     from model.shared.inverse_common import _NodeV3
-    from model.inverse.topology.stage3.workflow import plan_stage3_resource_adjustments
+    from model.inverse.topology.stage3.phase_eval import build_stage3_phase_evaluation
 
     nodes = []
     with (HSQ / 'final_nodes_by_global_id.csv').open() as handle:
@@ -182,13 +183,9 @@ def test_real_phase_evaluation_routes_wide_window_to_coordination():
             node.hop2_su = Counter(ast.literal_eval(row['hop2_ms']))
             node.template_key = ast.literal_eval(row['template_key'])
             nodes.append(node)
-    h = torch.bincount(torch.tensor([n.su_type for n in nodes]), minlength=40)
-    plan = plan_stage3_resource_adjustments(H=h, nodes=nodes, enable_post_external_spectrum=False)
-    assert plan.ok and plan.plan_kind == 'narrow_flex_window'
-    phase = plan.runtime['phase_evaluation']
-    assert phase.flex_reconciliation_block_reason == 'flex_window_too_wide'
+    phase = build_stage3_phase_evaluation(nodes)
+    assert not phase.flex_reconciliation_block_reason
     assert phase.flex_audit['flex_window_width'] == 9
-    assert plan.diagnostics['realized_flex_after']['flex_window_width'] == 6
 
 
 def test_su10_stays_out_of_generic_conversion_pool(hsq_nodes):

@@ -670,14 +670,17 @@ def _stage3_runtime_snapshot(plan: Any) -> Dict[str, Any]:
         for key in ("resource_ledger", "flex_bounds", "flex_counts", "flex_target_plan")
     }
     resource_ledger = dict(assembly.get("resource_ledger", {}) or {})
-    resource_ledger["remaining_ids_by_su"] = {
-        str(key): [int(value) for value in list(values or [])]
-        for key, values in dict(ledger.get("available_ids_by_su", {}) or {}).items()
-    }
-    resource_ledger["remaining_counts"] = {
-        str(key): len(list(values or []))
-        for key, values in dict(ledger.get("available_ids_by_su", {}) or {}).items()
-    }
+    # Before an iteration ledger exists, the classification inventory is
+    # still authoritative. An explicitly empty live inventory is different.
+    if "available_ids_by_su" in raw_ledger or live_assembler is not None:
+        resource_ledger["remaining_ids_by_su"] = {
+            str(key): [int(value) for value in list(values or [])]
+            for key, values in dict(ledger["available_ids_by_su"] or {}).items()
+        }
+        resource_ledger["remaining_counts"] = {
+            str(key): len(values)
+            for key, values in resource_ledger["remaining_ids_by_su"].items()
+        }
     assembly["resource_ledger"] = resource_ledger
     if not ownership_ledger["released_resource_ids_by_su"]:
         ownership_ledger["released_resource_ids_by_su"] = {
@@ -5319,6 +5322,20 @@ def run_block_c_resource_adjustment_loop_impl(
         if verbose:
             print(f"[Block C:resource #{cycle_number}] rebuilt state validation start", flush=True)
         validation = validate_fn(nodes=cand_nodes, H=cand_H, tag=f"BlockC:resource #{cycle_number}")
+        if validation["ok"] and plan_kind == "narrow_flex_window":
+            from ..topology.stage3.state_machine import validate_rebuilt_flex_window
+
+            try:
+                flex_validation = validate_rebuilt_flex_window(
+                    cand_nodes, getattr(adjuster, "fixed_partition_meta", None),
+                )
+            except Exception as exc:
+                flex_validation = {"ok": False, "reason": "rebuilt_flex_validation_failed",
+                                   "error": f"{type(exc).__name__}: {exc}"}
+            if not flex_validation["ok"]:
+                validation = {**flex_validation, "failure_domain": "flex_reconciliation"}
+            else:
+                plan.diagnostics["rebuilt_flex_validation"] = flex_validation
         valid, valid_reason = bool(validation["ok"]), str(validation["reason"])
         if verbose:
             print(

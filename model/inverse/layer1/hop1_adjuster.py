@@ -14,12 +14,8 @@ try:
     from ...shared.inverse_common import (
         evaluate_mu_pi_assignments,
         get_port_pattern_degrees,
-        iter_port_signature_objects,
-        has_forbidden_fixed_connector_special_combo,
         multiset_from_counter as _common_multiset_from_counter,
         multiset_l1_distance as _common_multiset_l1_distance,
-        port_entry_matches,
-        signature_matches_center,
         save_node_peak_rows,
         save_spectrum_comparison,
         save_spectrum_figure,
@@ -33,12 +29,8 @@ except ImportError:
     from model.shared.inverse_common import (
         evaluate_mu_pi_assignments,
         get_port_pattern_degrees,
-        iter_port_signature_objects,
-        has_forbidden_fixed_connector_special_combo,
         multiset_from_counter as _common_multiset_from_counter,
         multiset_l1_distance as _common_multiset_l1_distance,
-        port_entry_matches,
-        signature_matches_center,
         save_node_peak_rows,
         save_spectrum_comparison,
         save_spectrum_figure,
@@ -50,72 +42,7 @@ def _normalize_hop1_tuple(values: Sequence[int]) -> Tuple[int, ...]:
     return tuple(sorted(int(x) for x in values))
 
 
-def can_match_ports_exact(neighbors: Sequence[Any],
-                          port_sets: Sequence[Set[Any]],
-                          center_node: Optional[Any] = None) -> bool:
-    return _can_match_ports_impl(neighbors, port_sets, require_full=True, center_node=center_node)
-
-
-def can_match_ports_partial(neighbors: Sequence[Any],
-                            port_sets: Sequence[Set[Any]],
-                            center_node: Optional[Any] = None) -> bool:
-    return _can_match_ports_impl(neighbors, port_sets, require_full=False, center_node=center_node)
-
-
-def _can_match_ports_impl(neighbors: Sequence[Any],
-                          port_sets: Sequence[Set[Any]],
-                          require_full: bool,
-                          center_node: Optional[Any] = None) -> bool:
-    neighbors_i = list(neighbors or [])
-    if has_forbidden_fixed_connector_special_combo(center_node, neighbors_i):
-        return False
-    signatures = iter_port_signature_objects(port_sets)
-
-    if not signatures:
-        return False
-
-    def _match_single_signature(signature) -> bool:
-        if not signature_matches_center(signature, center_node):
-            return False
-        ports = list(signature.ports)
-        if require_full:
-            if len(neighbors_i) != len(ports):
-                return False
-        elif len(neighbors_i) > len(ports):
-            return False
-
-        if not neighbors_i:
-            return True
-
-        options_by_neighbor = []
-        for idx, n in enumerate(neighbors_i):
-            options = [
-                pi for pi, allowed in enumerate(ports)
-                if any(port_entry_matches(entry, n) for entry in allowed)
-            ]
-            if not options:
-                return False
-            options_by_neighbor.append((idx, options))
-
-        options_by_neighbor.sort(key=lambda item: (len(item[1]), item[0]))
-        used_ports = [False] * len(ports)
-
-        def dfs(pos: int) -> bool:
-            if pos >= len(options_by_neighbor):
-                return True
-            _, options = options_by_neighbor[pos]
-            for port_idx in options:
-                if used_ports[port_idx]:
-                    continue
-                used_ports[port_idx] = True
-                if dfs(pos + 1):
-                    return True
-                used_ports[port_idx] = False
-            return False
-
-        return dfs(0)
-
-    return any(_match_single_signature(sig) for sig in signatures)
+from model.shared.port_rules import can_match_ports_exact, can_match_ports_partial
 
 
 def hop1_counter_to_multiset(hop1_su: Mapping[int, int]) -> Tuple[int, ...]:

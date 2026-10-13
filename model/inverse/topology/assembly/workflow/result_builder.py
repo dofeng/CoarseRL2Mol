@@ -166,6 +166,8 @@ def build_external_assembly_result(
         result_reason = "external_flex_range_below_minimum"
     elif flex_violation_reason is not None or flex_above_max:
         result_reason = "external_flex_range_exceeded"
+    elif self.current_phase == "flex_range_reconciliation":
+        result_reason = "flex_range_reconciliation_required"
     elif not has_external_pending:
         result_reason = "remaining_pool_spectrum_rebalance_ready"
     elif has_shortage_contract:
@@ -174,7 +176,8 @@ def build_external_assembly_result(
         result_reason = "external_ring_candidates_pending"
     else:
         result_reason = f"{active_external_phase}_pending"
-    if flex_violation_reason is not None or flex_above_max:
+    if (flex_violation_reason is not None or flex_above_max
+            or self.current_phase == "flex_range_reconciliation"):
         stage3_phase = "flex_range_reconciliation"
     elif has_external_pending:
         stage3_phase = str(active_external_phase)
