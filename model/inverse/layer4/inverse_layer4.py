@@ -18,6 +18,7 @@ from ...shared.inverse_common import (
     rebuild_su19_partition_meta,
 )
 from ..layer0.inverse_layer0 import Layer0Estimator
+from ..layer1.port_role_balance import audit_layer1_port_roles
 from ..topology import (
     apply_stage3_node_adjustments,
     assemble_topology_units,
@@ -1037,9 +1038,24 @@ class Layer4Adjuster:
                                             E_target: Optional[torch.Tensor],
                                             S_target: Optional[torch.Tensor] = None) -> Dict[str, Any]:
         H_cpu = torch.clamp(H, min=0).long().detach().cpu()
+        special_degree_meta = self._get_special_degree_meta(H_cpu)
+        role_audit = audit_layer1_port_roles(H_cpu, special_degree_meta)
+        nonnegative = not bool(torch.any(H < 0))
+        port_reasons = []
+        if not nonnegative:
+            port_reasons.append('negative_histogram')
+        if not role_audit['ok']:
+            port_reasons.append(
+                'layer1_port_roles_unbalanced('
+                f"total={role_audit['total_ports']},"
+                f"aromatic_internal={role_audit['aromatic_internal_ports']},"
+                f"non_aromatic_internal={role_audit['non_aromatic_internal_ports']})"
+            )
         if E_target is None:
             return {
-                'ok': True,
+                'ok': bool(nonnegative and role_audit['ok']),
+                'port_role_ok': bool(role_audit['ok']),
+                'port_role_audit': role_audit,
                 'h_ok': True,
                 'h_constraint_mode': 'soft',
                 'h_topology_gate': False,
@@ -1052,12 +1068,11 @@ class Layer4Adjuster:
                 'even10_ok': True,
                 'unsat_even_ok': True,
                 'unsat_total': 0,
-                'reason': 'ok',
-                'reasons': [],
+                'reason': '; '.join(port_reasons) if port_reasons else 'ok',
+                'reasons': port_reasons,
             }
 
         E_target_cpu = E_target.detach().cpu().float() if hasattr(E_target, 'detach') else torch.tensor(E_target, dtype=torch.float)
-        special_degree_meta = self._get_special_degree_meta(H_cpu)
         E_pred = get_effective_hist_element_vector(H_cpu, special_degree_meta=special_degree_meta, E_SU_tensor=self.E_SU.cpu())
         current_h = float(E_pred[1].item()) if int(E_pred.numel()) > 1 else 0.0
         target_h = float(E_target_cpu[1].item()) if int(E_target_cpu.numel()) > 1 else 0.0
@@ -1204,7 +1219,7 @@ class Layer4Adjuster:
         su11_external_ok = bool(layer1_hist_proxy.get('su11_external_ok', True))
         special_generic_ok = bool(layer1_hist_proxy.get('special_generic_ok', True))
 
-        reasons: List[str] = []
+        reasons: List[str] = list(port_reasons)
         if not bool(even10_ok):
             reasons.append("su10_odd")
         if not bool(unsat_even_ok):
@@ -1256,8 +1271,11 @@ class Layer4Adjuster:
         return {
             'ok': bool(
                 even10_ok and unsat_even_ok and fixed_connection_ok and
-                su11_external_ok and special_generic_ok
+                su11_external_ok and special_generic_ok and
+                nonnegative and role_audit['ok']
             ),
+            'port_role_ok': bool(role_audit['ok']),
+            'port_role_audit': role_audit,
             'h_ok': bool(h_ok),
             'h_constraint_mode': 'soft',
             'h_topology_gate': False,

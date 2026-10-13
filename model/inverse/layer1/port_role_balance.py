@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
+from ...shared.aromatic_plan import su12_transition_diagnostics
 from ...shared.inverse_common import (
     SPECIAL_DEGREE_PRIORS,
     SU_CONNECTION_DEGREE,
@@ -151,6 +152,11 @@ def select_layer1_port_balance(
         }
     for source, target in PORT_ROLE_BALANCE_DIRECTIONS:
         if _count(histogram, int(source)) > 0:
+            probe = histogram.clone()
+            probe[source] -= 1
+            probe[target] += 1
+            if not su12_transition_diagnostics(histogram, probe)['generation_allowed']:
+                continue
             return {
                 "required": True,
                 "possible": True,
@@ -197,6 +203,8 @@ def apply_layer1_port_balance(
     H_after = H_before.clone()
     H_after[source] -= count
     H_after[target] += count
+    if not su12_transition_diagnostics(H_before, H_after)['generation_allowed']:
+        raise RuntimeError('layer1_port_role_balance_su12_cap_exceeded')
     after = audit_layer1_port_roles(H_after, special_degree_meta)
     if not bool(after.get("ok", False)):
         raise RuntimeError(

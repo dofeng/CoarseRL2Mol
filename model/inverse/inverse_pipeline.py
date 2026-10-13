@@ -40,6 +40,7 @@ from ..shared.topology_contract import (
 from ..shared.port_rules import HOP1_PORT_COMBINATIONS, can_match_ports_exact
 from .layer0.inverse_layer0 import Layer0Estimator
 from .layer1.inverse_layer1 import Layer1Assigner
+from .layer1.port_role_balance import audit_layer1_port_roles
 from .layer2.inverse_layer2 import Layer2Estimator
 from .layer3.inverse_layer3 import Layer3Estimator
 from .layer4.inverse_layer4 import Layer4Adjuster
@@ -160,16 +161,16 @@ class InversePipelineV3:
     def _set_fixed_partition_meta(self, meta: Optional[Dict[str, Any]]) -> None:
         """Keep Layer4 and Layer0 on the same fixed-anchor metadata snapshot."""
         fixed_meta = copy.deepcopy(meta or {})
-        try:
-            self.layer4_adjuster.fixed_partition_meta = copy.deepcopy(fixed_meta)
-        except Exception:
-            pass
-        try:
-            self.layer0_estimator.fixed_partition_meta = copy.deepcopy(fixed_meta)
-            self.layer0_estimator.special_degree_meta = copy.deepcopy(fixed_meta.get('special_degree_meta', {}) or {})
-            self.layer0_estimator.special_partition_meta = copy.deepcopy(fixed_meta.get('special_partition_meta', {}) or {})
-        except Exception:
-            pass
+        self.layer4_adjuster.fixed_partition_meta = copy.deepcopy(fixed_meta)
+        self.layer0_estimator.fixed_partition_meta = copy.deepcopy(fixed_meta)
+        for attribute, key in (
+            ('special_degree_meta', 'special_degree_meta'),
+            ('special_partition_meta', 'special_partition_meta'),
+            ('special_anchor_mode_meta', 'special_anchor_mode_meta'),
+            ('degree_parity_adjustment', 'degree_parity_adjustment'),
+            ('port_role_balance_adjustment', 'layer1_port_role_balance'),
+        ):
+            setattr(self.layer0_estimator, attribute, copy.deepcopy(fixed_meta.get(key, {}) or {}))
 
     def _sync_fixed_partition_meta_from_nodes(self, nodes: List[_NodeV3]) -> None:
         """Derive special-degree and fixed-anchor mode metadata from a real graph."""
@@ -255,8 +256,84 @@ class InversePipelineV3:
         }
         fixed_meta['o_base_19'] = int(sum(int(v) for v in ether_by_degree.values()))
         fixed_meta['s_reserved_19'] = int(sum(int(v) for v in thio_by_degree.values()))
-        fixed_meta['n19_total'] = int(fixed_meta['o_base_19'] + fixed_meta['s_reserved_19'])
+        for part, key in (('ether', 'o_fixed_edges_19'), ('thio', 's_fixed_edges_19')):
+            fixed_meta[key] = sum(
+                int(count) * (2 if mode.endswith('_double') else 1)
+                for mode, counts in anchor_mode_meta[19].items()
+                if mode.startswith(f'{part}_')
+                for count in counts.values()
+            )
+        actual_H = torch.zeros(NUM_SU_TYPES, dtype=torch.long)
+        for node in nodes:
+            actual_H[int(node.su_type)] += 1
+        for su in (5, 7, 9, 19):
+            fixed_meta[f'n{su}_total'] = int(actual_H[su])
+        role_audit = audit_layer1_port_roles(actual_H, special_degree_meta)
+        fixed_meta['layer1_port_role_balance'] = {
+            **fixed_meta.get('layer1_port_role_balance', {}),
+            'after': role_audit,
+            'audit_source': 'actual_layer12_nodes',
+        }
+        fixed_meta['degree_parity_adjustment'] = {
+            **fixed_meta.get('degree_parity_adjustment', {}),
+            'target_degree_sum_after': role_audit['total_ports'],
+            'audit_source': 'actual_layer12_nodes',
+        }
         self._set_fixed_partition_meta(fixed_meta)
+
+    def _iter_block_a_candidates(
+        self,
+        H: torch.Tensor,
+        nodes: List[_NodeV3],
+        difference: Dict[str, Any],
+        E_target: torch.Tensor,
+        S_target: torch.Tensor,
+        config: Dict[str, Any],
+        tag: str,
+    ):
+        """Try distinct shorter bundles from one committed histogram snapshot.
+
+        The caller may reject a yielded candidate after Layer1/2 evaluation.
+        Advancing the iterator always restores the original metadata. Breaking
+        after acceptance preserves the caller's newly committed metadata.
+        """
+        original_meta = copy.deepcopy(self.layer4_adjuster.fixed_partition_meta)
+
+        def signature(histogram: torch.Tensor):
+            semantic_meta = {
+                key: self.layer4_adjuster.fixed_partition_meta.get(key, {})
+                for key in ('special_degree_meta', 'special_partition_meta', 'special_anchor_mode_meta')
+            }
+            return (
+                tuple(histogram.detach().cpu().long().tolist()),
+                json.dumps(self._restore_numeric_json_keys(semantic_meta), sort_keys=True),
+            )
+
+        seen = {signature(H)}
+        full_length = min(max(0, int(config.get('carbonyl_max_moves', 2))), max(0, int(config.get('max_moves', 6))))
+        for length in range(full_length, -1, -1):
+            self._set_fixed_partition_meta(original_meta)
+            candidate_config = {**config, 'carbonyl_max_moves': length}
+            try:
+                candidate, moves, diagnostic = self.layer4_adjuster.adjust_by_stage(
+                    H=H.detach().clone(),
+                    nodes=copy.deepcopy(nodes),
+                    ppm=difference.get('ppm'),
+                    diff=difference.get('diff'),
+                    E_target=E_target,
+                    S_target=S_target,
+                    stage='block_a',
+                    **candidate_config,
+                )
+            except Exception as error:
+                print(f'[{tag}] 羰基组合 length={length} 失败: {error}')
+                continue
+            candidate_signature = signature(candidate)
+            if not moves or candidate_signature in seen:
+                continue
+            seen.add(candidate_signature)
+            yield candidate, moves, diagnostic
+        self._set_fixed_partition_meta(original_meta)
 
     def _build_layer_runtime_configs(
         self,
@@ -3826,62 +3903,38 @@ class InversePipelineV3:
                 nodes_block_a_base = copy.deepcopy(current_nodes)
                 diff_block_a_base = copy.deepcopy(current_diff)
                 meta_block_a_base = copy.deepcopy(getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {})
-                try:
-                    H_block_a, moves_a, _meta_a = self.layer4_adjuster.adjust_by_stage(
-                        H=H_block_a_base,
-                        ppm=diff_block_a_base.get('ppm'),
-                        diff=diff_block_a_base.get('diff'),
-                        E_target=E_target,
-                        S_target=S_target,
-                        stage='block_a',
-                        nodes=nodes_block_a_base,
-                        **block_a_cfg,
-                    )
-                except Exception as e:
+                accepted_a = False
+                candidates_a = self._iter_block_a_candidates(
+                    H_block_a_base, nodes_block_a_base, diff_block_a_base,
+                    E_target, S_target, block_a_cfg, f'Block A #{block_a_iter + 1}',
+                )
+                for H_block_a, moves_a, _meta_a in candidates_a:
+                    hist_ok, _hist_reason = _candidate_hist_feasible(H_block_a, tag=f'BlockA #{block_a_iter + 1}')
+                    if not hist_ok:
+                        continue
                     try:
+                        cand_nodes, cand_H, cand_diff, cand_r2 = self._run_layer12_cycle(
+                            H_seed=H_block_a.detach().clone(),
+                            S_target=S_target,
+                            E_target=E_target,
+                            eval_lib_path=eval_lib_path,
+                            layer1_runtime_cfg=layer1_runtime_cfg,
+                            eval_nmr=False,
+                        )
+                    except Exception as e:
                         self._set_fixed_partition_meta(meta_block_a_base)
-                    except Exception:
-                        pass
-                    H_block_a, moves_a = H_block_a_base, []
-                    print(f"[Block A #{block_a_iter + 1}] 失败: {e}")
-
-                if not moves_a:
-                    try:
-                        self._set_fixed_partition_meta(meta_block_a_base)
-                    except Exception:
-                        pass
-                    if int(block_a_iter) == 0:
-                        print("[Block A] 无有效调整")
-                    break
-
-                hist_ok, _hist_reason = _candidate_hist_feasible(H_block_a, tag=f'BlockA #{block_a_iter + 1}')
-                if not bool(hist_ok):
-                    try:
-                        self._set_fixed_partition_meta(meta_block_a_base)
-                    except Exception:
-                        pass
-                    break
-
-                try:
-                    cand_nodes, cand_H, cand_diff, cand_r2 = self._run_layer12_cycle(
-                        H_seed=H_block_a.detach().clone(),
-                        S_target=S_target,
-                        E_target=E_target,
-                        eval_lib_path=eval_lib_path,
-                        layer1_runtime_cfg=layer1_runtime_cfg,
-                        # After Layer4 changes the histogram, rebuild 1-hop
-                        # from the current constraints.
-                        eval_nmr=False,
-                    )
-                except Exception as e:
-                    try:
-                        self._set_fixed_partition_meta(meta_block_a_base)
-                    except Exception:
-                        pass
-                    print(f"[Block A #{block_a_iter + 1}] 回退: layer1/2 failed ({e})")
-                    break
-                cand_valid, cand_reason = _candidate_structurally_valid(cand_nodes, cand_H, tag='BlockA')
-                if cand_valid and float(cand_r2) > float(cycle_best_layer2_r2) + float(outer_improve_eps):
+                        print(f"[Block A #{block_a_iter + 1}] 回退并尝试其他组合: layer1/2 failed ({e})")
+                        continue
+                    cand_valid, cand_reason = _candidate_structurally_valid(cand_nodes, cand_H, tag='BlockA')
+                    if not cand_valid:
+                        print(f"[Block A #{block_a_iter + 1}] 回退并尝试其他组合: candidate invalid ({cand_reason})")
+                        continue
+                    if not float(cand_r2) > float(cycle_best_layer2_r2) + float(outer_improve_eps):
+                        print(
+                            f"[Block A #{block_a_iter + 1}] 回退并尝试其他组合: candidate_r2={cand_r2:.4f} "
+                            f"<= accept_ref_layer2_r2={cycle_best_layer2_r2:.4f}"
+                        )
+                        continue
                     current_nodes = cand_nodes
                     current_H = cand_H.detach().clone()
                     current_diff = copy.deepcopy(cand_diff)
@@ -3895,27 +3948,15 @@ class InversePipelineV3:
                     accepted_layer2_r2 = float(cand_r2)
                     historical_best_layer2_r2 = max(float(historical_best_layer2_r2), float(cand_r2))
                     cycle_best_layer2_r2 = float(cand_r2)
+                    accepted_a = True
                     print(f"[Block A #{block_a_iter + 1}] 接受: layer2_r2={cand_r2:.4f}")
                     self._print_histogram_and_elements(current_H, E_target, label=f'Block A #{block_a_iter + 1} Accepted', nodes=current_nodes)
                     self._print_effective_resource_summary(current_H, label=f'Block A #{block_a_iter + 1} Accepted')
-                    continue
-
-                if not bool(cand_valid):
-                    try:
-                        self._set_fixed_partition_meta(meta_block_a_base)
-                    except Exception:
-                        pass
-                    print(f"[Block A #{block_a_iter + 1}] 回退: candidate invalid ({cand_reason})")
                     break
-                try:
+                if not accepted_a:
                     self._set_fixed_partition_meta(meta_block_a_base)
-                except Exception:
-                    pass
-                print(
-                    f"[Block A #{block_a_iter + 1}] 回退: candidate_r2={cand_r2:.4f} "
-                    f"<= accept_ref_layer2_r2={cycle_best_layer2_r2:.4f}"
-                )
-                break
+                    print(f"[Block A #{block_a_iter + 1}] 无其他可接受调整，保留上次结果")
+                    break
 
             # Stage B: evaluate each hetero-anchor substage immediately.  The
             # following substage must see the accepted graph/diff from the

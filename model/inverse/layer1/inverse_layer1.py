@@ -3952,7 +3952,7 @@ class Layer1Assigner:
                 f"total={role_audit['total_ports']} "
                 f"aromatic_internal={role_audit['aromatic_internal_ports']} "
                 f"non_aromatic_internal={role_audit['non_aromatic_internal_ports']}; "
-                "Layer0/Stage3 must apply pre-Layer1 port-role balance"
+                "The upstream histogram must apply pre-Layer1 port-role balance"
             )
         nodes = (
             self._initialize_node_pool(H_local)

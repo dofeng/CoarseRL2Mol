@@ -1,6 +1,7 @@
 """
 Inverse Pipeline Layer0 Module - Layer0: SU直方图估计器
 """
+import copy
 import math
 import torch
 from typing import Tuple, Dict, Any, Optional
@@ -234,6 +235,7 @@ class Layer0Estimator:
         H: torch.Tensor,
         E_target: torch.Tensor,
         parity_preview: Dict[str, Any],
+        special_degree_meta: Optional[Dict[int, Dict[int, int]]] = None,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """Repair odd degree parity with an element-directed aromatic conversion."""
         H_new = torch.clamp(H.clone(), min=0).long()
@@ -255,6 +257,7 @@ class Layer0Estimator:
         try:
             current_elements = get_effective_hist_element_vector(
                 H_new.detach().cpu(),
+                special_degree_meta=special_degree_meta,
                 E_SU_tensor=self.E_SU.detach().cpu(),
                 device=torch.device('cpu'),
             )
@@ -326,6 +329,100 @@ class Layer0Estimator:
                 'target_degree': int(target_degree),
             },
         }
+
+    def _balance_existing_histogram_port_roles(
+        self,
+        H: torch.Tensor,
+        E_target: torch.Tensor,
+        fixed_partition_meta: Dict[str, Any],
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """Balance the actual converted histogram without reallocating its nodes.
+
+        Reallocating special degrees here would undo the degree-compatible
+        SU19/tail conversions. Work on copies and publish metadata only after
+        all port parities have passed.
+        """
+        H_work = H.detach().clone().long()
+        if bool(torch.any(H_work < 0)):
+            raise ValueError('negative_histogram')
+        fixed_meta = copy.deepcopy(fixed_partition_meta)
+        degrees = {
+            int(su): {int(deg): int(count) for deg, count in parts.items()}
+            for su, parts in fixed_meta.get('special_degree_meta', {}).items()
+        }
+        partitions = {
+            int(su): {
+                str(part): {int(deg): int(count) for deg, count in counts.items()}
+                for part, counts in parts.items()
+            }
+            for su, parts in fixed_meta.get('special_partition_meta', {}).items()
+        }
+        modes = {
+            int(su): {
+                str(mode): {int(deg): int(count) for deg, count in counts.items()}
+                for mode, counts in parts.items()
+            }
+            for su, parts in fixed_meta.get('special_anchor_mode_meta', {}).items()
+        }
+        for su in SPECIAL_DEGREE_PRIORS:
+            counts = degrees.get(su, {})
+            if (
+                any(count < 0 or (count > 0 and deg not in SPECIAL_DEGREE_PRIORS[su]) for deg, count in counts.items())
+                or sum(counts.values()) != int(H_work[su])
+            ):
+                raise ValueError(f'special_degree_meta_mismatch: SU{su}')
+            mode_counts = modes.get(su, {})
+            if any(count < 0 for bucket in mode_counts.values() for count in bucket.values()):
+                raise ValueError(f'special_anchor_mode_meta_mismatch: SU{su}')
+            for degree, count in counts.items():
+                if sum(bucket.get(degree, 0) for bucket in mode_counts.values()) != count:
+                    raise ValueError(f'special_anchor_mode_meta_mismatch: SU{su} degree={degree}')
+            if su == 19:
+                for part in ('ether', 'thio'):
+                    for degree in SPECIAL_DEGREE_PRIORS[19]:
+                        expected = sum(
+                            bucket.get(degree, 0)
+                            for mode, bucket in mode_counts.items()
+                            if mode.startswith(f'{part}_')
+                        )
+                        if partitions.get(19, {}).get(part, {}).get(degree, 0) != expected:
+                            raise ValueError(f'special_partition_meta_mismatch: SU19 {part} degree={degree}')
+
+        before = audit_layer1_port_roles(H_work, degrees)
+        H_work, parity = self._enforce_even_histogram_degree_sum(
+            H_work,
+            E_target,
+            {'target_degree_sum_before': before['total_ports']},
+            special_degree_meta=degrees,
+        )
+        if not before['total_even'] and not parity.get('adjusted', False):
+            parity = self._enforce_even_target_degree_sum(
+                H_work.detach().cpu(), degrees, partitions, modes,
+            )
+        total_audit = audit_layer1_port_roles(H_work, degrees)
+        if not total_audit['total_even']:
+            raise RuntimeError(f"total_port_degree_unbalanced: total={total_audit['total_ports']}")
+        conversion = select_layer1_port_balance(H_work, total_audit)
+        H_work, role_balance = apply_layer1_port_balance(H_work, conversion, degrees)
+        after = audit_layer1_port_roles(H_work, degrees)
+        if not after['ok']:
+            raise RuntimeError(f'layer1_port_roles_unbalanced: {after}')
+
+        fixed_meta.update({
+            'special_degree_meta': degrees,
+            'special_partition_meta': partitions,
+            'special_anchor_mode_meta': modes,
+            'degree_parity_adjustment': parity,
+            'layer1_port_role_balance': role_balance,
+            **{f'n{su}_total': int(H_work[su]) for su in (5, 7, 9, 19)},
+        })
+        self.fixed_partition_meta = copy.deepcopy(fixed_meta)
+        self.special_degree_meta = copy.deepcopy(degrees)
+        self.special_partition_meta = copy.deepcopy(partitions)
+        self.special_anchor_mode_meta = copy.deepcopy(modes)
+        self.degree_parity_adjustment = copy.deepcopy(parity)
+        self.port_role_balance_adjustment = copy.deepcopy(role_balance)
+        return H_work.to(H.device), copy.deepcopy(fixed_meta)
 
     def _allocate_special_degree_meta(self,
                                       H: torch.Tensor,
@@ -1115,6 +1212,7 @@ class Layer0Estimator:
             H_corrected,
             E_target,
             parity_preview,
+            special_degree_meta=special_degree_meta,
         )
         if bool(histogram_parity.get('adjusted', False)):
             H_corrected = torch.clamp(H_parity, min=0).long()
@@ -1733,6 +1831,7 @@ class Layer0Estimator:
             H_work,
             E_target,
             parity_preview,
+            special_degree_meta=special_degree_meta,
         )
         if bool(histogram_parity.get('adjusted', False)):
             H_work = torch.clamp(H_parity, min=0).long()
