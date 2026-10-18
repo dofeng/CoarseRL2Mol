@@ -1,9 +1,9 @@
 """Build hex-grid units and fixed non-rigid topology from inverse CSV exports.
 
-The node CSV supplies the final node identities/SU distribution and the
-aromatic bridgehead evidence.  The topology CSV supplies the authoritative
-flex/side trees.  In particular, topology edges are parsed from ``gid`` and
-are never reconstructed from the older ``hop1_ids`` cache.
+The node CSV supplies original identities/SU counts and aromatic bridgehead
+evidence. The topology CSV supplies authoritative connection tasks. Unused
+SU11 closure resources occupy aromatic slots as SU13, with explicit provenance.
+Topology edges come from ``gid``, never from the ``hop1_ids`` cache.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from RL_MTCS.geometry import (
     valid_hex_directions,
 )
 from RL_MTCS.mdp.types import (
+    ALIPHATIC_RING_KINDS,
     ExternalContract,
     InverseAssemblyInput,
     InverseInputError,
@@ -353,13 +354,7 @@ def load_topology_rows(path: str | Path) -> List[Dict[str, object]]:
 
 
 class _AromaticPlanner:
-    """Materialize one exact aromatic plan for CSV fallback inputs.
-
-    The inverse pipeline normally writes ``final_aromatic_clusters.json`` and
-    RL consumes that file directly.  Older CSV-only callers still need a
-    deterministic fallback, but they must use the same exact planner rather
-    than the removed heuristic/downgrade pass.
-    """
+    """Materialize the exact aromatic plan when exporting a fresh CSV snapshot."""
 
     def __init__(self, counts: Mapping[int, int]):
         self.counts = {int(key): int(value) for key, value in dict(counts).items()}
@@ -1034,9 +1029,9 @@ def _load_authoritative_aromatic_plan(
         raise InverseInputError(
             f"cannot read authoritative aromatic plan {path}: {exc}"
         ) from exc
-    if not isinstance(payload, dict) or not bool(payload.get("complete", False)):
+    if not isinstance(payload, dict):
         raise InverseInputError(
-            f"authoritative aromatic plan is incomplete: {path}"
+            f"invalid authoritative aromatic plan: {path}"
         )
     if int(payload.get("schema_version", -1)) != 1:
         raise InverseInputError(
@@ -1469,16 +1464,22 @@ def build_csv_inverse_input(
         parsed = raw["parsed"]
         assert isinstance(parsed, ParsedTopology)
         source_product_type = str(raw.get("product_type", "")).strip().lower()
-        attached_ring = source_product_type in {
-            "aliphatic_ring", "fatty_ring", "fatty_ring_fused",
-            "fatty_ring_side", "fatty_ring_upper_lower",
-        }
+        labelled_ring = source_product_type in ALIPHATIC_RING_KINDS
+        closure_cycles = _closure_cycle_nodes(parsed) if parsed.closure_edges else ()
+        # The public ring label covers both aromatic-edge rings (two
+        # termini) and explicitly closed internal rings, including the
+        # upper/lower template with a single aromatic attachment. Only the
+        # former needs a temporary aromatic edge to complete its embedding.
+        attached_ring = labelled_ring and len(boundaries) == 2
+        if labelled_ring and not attached_ring and not closure_cycles:
+            raise InverseInputError(
+                f"ring_label_geometry_mismatch: {raw['row_index']} requires two aromatic anchors "
+                f"or an explicit internal cycle; anchors={boundaries} "
+                f"product_type={source_product_type!r} "
+                f"gid={raw.get('gid', '')!r}"
+            )
         layout_graph = parsed
         if attached_ring:
-            if len(boundaries) != 2:
-                raise InverseInputError(
-                    f"ring_label_geometry_mismatch: {raw['row_index']} requires two aromatic anchors"
-                )
             # This temporary edge is the EXISTING aromatic edge the unit must
             # share. It constrains embedding, never adds a topology contract.
             aromatic_edge = tuple(boundaries)
@@ -1490,9 +1491,23 @@ def build_csv_inverse_input(
         if len(labels) != len(parsed.nodes):
             raise InverseInputError(f"SU/GID node count mismatch in topology row {raw['row_index']}")
         label_by_id = dict(zip(parsed.nodes, labels))
+        su_closures = re.findall(r"@\((\d+)\)", str(raw.get("actual_su", "")))
+        gid_closures = re.findall(r"@\((\d+)\)", str(raw.get("gid", "")))
+        if len(su_closures) != len(gid_closures):
+            raise InverseInputError(f"SU/GID closure count mismatch in topology row {raw['row_index']}")
+        for su_ref, gid_ref in zip(su_closures, gid_closures):
+            if int(su_ref) != su_by_id[int(gid_ref)]:
+                raise InverseInputError(
+                    f"SU/GID closure type mismatch in topology row {raw['row_index']}: "
+                    f"SU{su_ref} refers to GID {gid_ref} (SU{su_by_id[int(gid_ref)]})"
+                )
         gids = iter(parsed.nodes)
+        closure_gids = iter(gid_closures)
+        # @(24) in the SU notation names a type, while @(497) in the GID
+        # notation names the already-declared node. Translate both node
+        # declarations and closure references before comparing connectivity.
         translated = re.sub(r"@\(\d+\)|(?:double|single)?\d+(?:d\d+)?",
-            lambda m: m.group() if m.group().startswith('@') else str(next(gids)),
+            lambda m: f"@({next(closure_gids)})" if m.group().startswith('@') else str(next(gids)),
             str(raw.get('actual_su', '')))
         if parse_topology_notation(translated) != parsed:
             raise InverseInputError(f"SU/GID connectivity mismatch in topology row {raw['row_index']}")
@@ -1506,7 +1521,17 @@ def build_csv_inverse_input(
                 raise InverseInputError(f"SU/GID type mismatch at GID {gid}")
             target = re.search(r'd(\d+)$', label)
             if target and int(target.group(1)) != degree[gid]:
-                raise InverseInputError(f"topology target degree mismatch at GID {gid}")
+                neighbors = sorted(
+                    right if left == gid else left
+                    for left, right in parsed.edges if gid in (left, right)
+                )
+                raise InverseInputError(
+                    f"topology target degree mismatch at GID {gid}: "
+                    f"row={raw['row_index']} label={label} "
+                    f"expected={target.group(1)} actual={degree[gid]} "
+                    f"neighbors={neighbors} product_type={source_product_type!r} "
+                    f"gid={raw.get('gid', '')!r}"
+                )
             declared = dict(nodes[gid].metadata).get('target_hop1_degree')
             if gid not in boundaries and declared and int(declared) != degree[gid]:
                 raise InverseInputError(f"CSV target degree mismatch at GID {gid}")
@@ -1523,7 +1548,17 @@ def build_csv_inverse_input(
             # placement. Keep its identities and edges in the original inventory.
             layout = {gid: (index, 0) for index, gid in enumerate(parsed.nodes)}
         else:
-            layout = _layout_topology_tree(layout_graph, su_by_id, center_branches)
+            try:
+                layout = _layout_topology_tree(layout_graph, su_by_id, center_branches)
+            except InverseInputError as exc:
+                raise InverseInputError(
+                    f"topology row {raw['row_index']} geometry failed: "
+                    f"product_type={source_product_type!r} anchors={boundaries} "
+                    f"internal_cycles={len(closure_cycles)} "
+                    f"attaches_to_aromatic_edge={attached_ring} "
+                    f"gid={raw.get('gid', '')!r}: {exc}",
+                    diagnostics=exc.diagnostics,
+                ) from exc
         internal_ids = [node_id for node_id in parsed.nodes if node_id not in aromatic_ids]
         if not internal_ids:
             raise InverseInputError(f"topology row {raw['row_index']} has no non-aromatic body")
@@ -1534,7 +1569,6 @@ def build_csv_inverse_input(
             for node_id in internal_ids
         }
         internal_set = set(internal_ids)
-        closure_cycles = _closure_cycle_nodes(parsed) if parsed.closure_edges else ()
         local_rings = tuple(
             tuple(local[int(node_id)] for node_id in cycle)
             for cycle in closure_cycles
@@ -1550,7 +1584,6 @@ def build_csv_inverse_input(
                 su25_nodes.add(node_id)
 
         ports: List[UnitPort] = []
-        boundary_set = set(boundaries)
         for boundary_id in boundaries:
             cross_edges = [edge for edge in parsed.edges if boundary_id in edge]
             if len(cross_edges) != 1:
@@ -1588,17 +1621,13 @@ def build_csv_inverse_input(
                 target_port_id=aromatic_port_id,
             ))
 
-        source_product_type = str(raw.get("product_type", "")).strip().lower()
         if source_product_type in {"flex_chain", "bridge", "chain"} and local_rings:
             raise InverseInputError(
                 "ring_label_geometry_mismatch: topology row "
                 f"{raw['row_index']} is labelled {source_product_type!r} "
                 "but contains an explicit internal cycle"
             )
-        if source_product_type in {
-            "aliphatic_ring", "fatty_ring", "fatty_ring_fused",
-            "fatty_ring_side", "fatty_ring_upper_lower",
-        }:
+        if labelled_ring:
             product_type = source_product_type
         elif parsed.closure_edges:
             product_type = "aliphatic_ring"
@@ -1608,10 +1637,7 @@ def build_csv_inverse_input(
             "internal_cycle"
             if local_rings
             else "external_contract_ring"
-            if product_type in {
-                "aliphatic_ring", "fatty_ring", "fatty_ring_fused",
-                "fatty_ring_side", "fatty_ring_upper_lower",
-            }
+            if attached_ring
             else "tree"
         )
         topology_unit = TopologyUnit(
@@ -1634,11 +1660,11 @@ def build_csv_inverse_input(
             closed=True,
             local_rings=local_rings,
             su25_center_branches=center_branches,
+            attaches_to_aromatic_edge=attached_ring,
             metadata=(
                 ("csv_row", str(raw["row_index"])),
                 ("source_product_type", str(raw.get("product_type", ""))),
                 ("ring_geometry_mode", ring_geometry_mode),
-                ("aromatic_edge_attachment", "true" if attached_ring else "false"),
                 ("geometry_source", "generated_from_connectivity"),
                 ("assembly_unavailable_reason", unavailable),
             ),
@@ -1850,14 +1876,40 @@ def build_csv_inverse_input(
                 "topology, and aromatic-plan files are not from one snapshot"
             )
     covered = {n for c in contracts for n in (c.source_node_id, c.target_node_id)}
+    # The final topology table is authoritative. Unused SU11 closure resources
+    # remain in the aromatic template as SU13; they are not missing tasks.
+    aromatic_residual_ids = tuple(sorted(
+        gid for gid, su in su_by_id.items() if su == 11 and gid not in covered
+        and unit_by_id.get(ownership.get(gid)) is not None
+        and unit_by_id[ownership[gid]].phase == 'aromatic'
+    ))
+    if authoritative_plan is not None and 'aromatic_residual_nodes' in authoritative_plan:
+        declared = authoritative_plan['aromatic_residual_nodes']
+        if (sorted(row['node_id'] for row in declared) != list(aromatic_residual_ids)
+                or any(row['source_su_type'] != 11 or row['final_su_type'] != 13 for row in declared)):
+            raise InverseInputError('authoritative aromatic residual identity mismatch')
+    if authoritative_plan is not None:
+        targets = {**su_by_id, **{gid: 13 for gid in aromatic_residual_ids}}
+        for cluster in authoritative_plan['clusters']:
+            for row in cluster['nodes']:
+                if ('assembly_target_su_type' in row
+                        and row['assembly_target_su_type'] != targets[row['node_id']]):
+                    raise InverseInputError('authoritative aromatic assembly target mismatch')
+    if len(aromatic_residual_ids) + len(unassembled_resources) > MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES:
+        input_issues.append(json.dumps(dict(reason='closure_resource_limit_exceeded',
+            node_ids=sorted([*aromatic_residual_ids, *(r.node_id for r in unassembled_resources)]),
+            limit=MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES)))
+    allowed_unassembled_ids = {r.node_id for r in unassembled_resources}
     for gid, su in su_by_id.items():
-        if su in AROMATIC_EXTERNAL_SU_TYPES and su != 10 and gid not in covered:
+        if (su in AROMATIC_EXTERNAL_SU_TYPES and su != 10 and gid not in covered
+                and gid not in aromatic_residual_ids and gid not in allowed_unassembled_ids):
             input_issues.append(json.dumps(dict(reason='input_task_coverage_error',
                                                node_id=gid, planned_su_type=su)))
     return InverseAssemblyInput(
         units=tuple(units),
         contracts=tuple(contracts),
         input_issues=tuple(input_issues),
+        aromatic_residual_node_ids=aromatic_residual_ids,
         node_su_types=tuple(sorted(
             (node_id, su_type)
             for node_id, su_type in su_by_id.items()
@@ -1916,7 +1968,7 @@ def build_csv_inverse_input(
             ))),
             ("aliphatic_ring_unit_count", str(sum(
                 unit.phase == "ring" and dict(unit.metadata).get("source_product_type", "").lower()
-                in {"aliphatic_ring", "fatty_ring", "fatty_ring_fused", "fatty_ring_side", "fatty_ring_upper_lower"}
+                in ALIPHATIC_RING_KINDS
                 for unit in topology_units
             ))),
             ("internal_cycle_count", str(sum(
@@ -1971,6 +2023,7 @@ def serialize_aromatic_plan(
         )
 
     planned_su_by_id = problem.node_map()
+    assembly_targets = problem.assembly_target_node_map()
     clusters: List[Dict[str, Any]] = []
     serialized_ids: Set[int] = set()
     for unit in aromatic_units:
@@ -2004,6 +2057,7 @@ def serialize_aromatic_plan(
                 "slot_index": int(slot_index),
                 "node_id": node_id,
                 "planned_su_type": planned_su,
+                "assembly_target_su_type": assembly_targets[node_id],
                 "staging_su_type": int(node.su_type),
                 "local_axial": [
                     int(node.local_axial[0]), int(node.local_axial[1])
@@ -2120,7 +2174,9 @@ def serialize_aromatic_plan(
                   for node_id, su_type in problem.idle_aromatic_nodes]
     return {
         "schema_version": 1,
-        "complete": True,
+        "complete": not problem.input_issues,
+        "input_valid": not problem.input_issues,
+        "input_errors": [json.loads(issue) for issue in problem.input_issues],
         "generation_id": int(generation_id),
         "cluster_count": int(len(clusters)),
         "ring_count": int(sum(len(unit.local_rings) for unit in aromatic_units)),
@@ -2136,10 +2192,13 @@ def serialize_aromatic_plan(
         "unassembled_closure_resource_count": len(unassembled_resources),
         "idle_aromatic_nodes": idle_nodes,
         "idle_aromatic_count": len(idle_nodes),
+        "aromatic_residual_nodes": problem.aromatic_residual_rows(),
+        "aromatic_residual_count": len(problem.aromatic_residual_node_ids),
         "completion_mode": (
             "bounded_idle_aromatic" if idle_nodes else
             "tolerated_unassembled_closure_resources"
-            if unassembled_resources else "strict_all_nodes_assembled"
+            if unassembled_resources else 'retained_su11_as_su13'
+            if problem.aromatic_residual_node_ids else "strict_all_nodes_assembled"
         ),
         "diagnostics": diagnostics,
     }
@@ -2228,6 +2287,7 @@ def initialize(
             problem.unassembled_closure_resources
         ),
         "idle_aromatic_nodes": list(problem.idle_aromatic_nodes),
+        "aromatic_residual_nodes": problem.aromatic_residual_rows(),
         "current_node_su_types": state.current_node_map(),
         "anchor_unit_id": anchor_id,
         "state": state,
@@ -2240,10 +2300,12 @@ def initialize(
             "unassembled_closure_resource_count": len(
                 problem.unassembled_closure_resources
             ),
+            "aromatic_residual_count": len(problem.aromatic_residual_node_ids),
             "completion_mode": (
                 "bounded_idle_aromatic" if problem.idle_aromatic_nodes else
                 "tolerated_unassembled_closure_resources"
                 if problem.unassembled_closure_resources
+                else 'retained_su11_as_su13' if problem.aromatic_residual_node_ids
                 else "strict_all_nodes_assembled"
             ),
             "aromatic_unit_count": len(aromatic_units),

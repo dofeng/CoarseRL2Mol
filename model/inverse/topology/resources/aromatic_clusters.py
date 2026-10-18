@@ -18,14 +18,11 @@ class AromaticCluster:
 
 
 class AromaticClusterGenerator:
-    """Materialize the exact aromatic plan shared by inverse and RL stages.
+    """Materialize the shared exact aromatic plan from authoritative node counts.
 
-    Cluster selection used to run a second heuristic allocator here and was
-    then replaced by an exact plan at the end of ``generate``. Keeping both
-    allocators made the first pass dead work and allowed staging counts to
-    diverge. This wrapper now delegates directly to the shared planner.
-    ``bridgehead_info`` remains accepted for callers that already provide it,
-    but node counts are the authoritative input.
+    Direct generator users may inspect ``plan_diagnostics`` after ``generate``.
+    ``bridgehead_info`` is diagnostic context only and never changes allocation.
+    The convenience function returns clusters, not generator diagnostics.
     """
 
     def __init__(

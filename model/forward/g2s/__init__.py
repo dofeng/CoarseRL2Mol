@@ -7,7 +7,6 @@ from .g2s_model import (
     collect_pt_files,
     g2s_loss_function,
     load_raw_data,
-    vae_loss_function,
 )
 
 __all__ = [
@@ -17,5 +16,4 @@ __all__ = [
     "collect_pt_files",
     "g2s_loss_function",
     "load_raw_data",
-    "vae_loss_function",
 ]

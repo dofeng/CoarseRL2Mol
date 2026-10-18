@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 from ....shared.inverse_common import _NodeV3
 from ....shared.aromatic_plan import flex_count_window
 from ..resources.aromatic_clusters import generate_aromatic_clusters
+from ..resources.profiles import select_flex_candidate_groups
 from ..classification.classification_models import TopologyClassificationResult
 from ..assembly.state.iteration_ledger import required_counts_from_slots
 from ..fixed_routes import (
@@ -213,8 +214,8 @@ def _supplemental_flex_candidate_groups(
             },
         }
 
-    while len(b_like) >= 2:
-        pair = [b_like.pop(0), b_like.pop(0)]
+    for pair_index in range(0, len(b_like) - 1, 2):
+        pair = b_like[pair_index:pair_index + 2]
         resource_template: Counter[str] = Counter()
         for item in pair:
             resource_template.update(dict(item.get("branch_resource_template", {}) or {}))
@@ -396,9 +397,10 @@ def _compute_flex_audit(
     if invalid_explicit_profiles:
         blocked_reason = "topology_materialization_invalid"
     if scenario == "below_range" and not blocked_reason:
-        selected_groups = supplemental_candidate_groups[
-            :max(0, target_flex_count - explicit_flex_count)
-        ]
+        selected_groups = select_flex_candidate_groups(
+            supplemental_candidate_groups,
+            limit=max(0, target_flex_count - explicit_flex_count),
+        )
         selected_group_fragment_ids = [
             int(fragment_id)
             for group in selected_groups
@@ -486,10 +488,12 @@ def _compute_flex_audit(
         "minimum_flex_gap": max(0, flex_lower - explicit_flex_count),
         "preferred_flex_gap": max(0, target_flex_count - explicit_flex_count),
         "maximum_flex_capacity": max(0, flex_upper_raw - explicit_flex_count),
-        "external_candidate_capacity": len(supplemental_candidate_groups),
+        "external_candidate_capacity": len(select_flex_candidate_groups(
+            supplemental_candidate_groups, prefer_single_closures=True,
+        )),
         "external_planned_addition": len(selected_groups),
         "external_capacity_exhausted": bool(
-            len(supplemental_candidate_groups)
+            len(select_flex_candidate_groups(supplemental_candidate_groups, prefer_single_closures=True))
             < max(0, target_flex_count - explicit_flex_count)
         ),
         "above_range_excess": max(0, explicit_flex_count - flex_upper_raw),

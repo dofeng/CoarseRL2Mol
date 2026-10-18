@@ -9,7 +9,6 @@ from ..state import ownership as ownership_module
 from ..core.fragment import AssemblyFragmentView, is_aromatic_label as _is_aromatic_label
 from ..projection.engine import (
     _normalize_ring_backbone_node_ids,
-    _safe_int,
     _skeleton_allowed_name,
 )
 from . import materializer as ring_materializer_module

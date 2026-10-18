@@ -1,19 +1,16 @@
+from model.shared.port_rules import SPECIAL_DEGREE_PRIORS, TERMINAL_PORT_BASE_SU
 import torch
 import numpy as np
 import pandas as pd
 from typing import Tuple, Dict, Optional, List, Any
 from pathlib import Path
 from collections import Counter
-import math
 
 from ...paths import Z_LIBRARY_DIR
 from ...shared.inverse_common import (
-    E_SU, _NodeV3,
-    TERMINAL_PORT_BASE_SU,
-    SPECIAL_DEGREE_PRIORS,
-    get_aliphatic_carbon_policy,
+    E_SU,
+    _NodeV3,
     get_effective_hist_element_vector,
-    estimate_region_carbon_budgets,
     normalize_special_degree_meta,
     rebuild_su19_partition_meta,
 )
@@ -21,8 +18,6 @@ from ..layer0.inverse_layer0 import Layer0Estimator
 from ..layer1.port_role_balance import audit_layer1_port_roles
 from ..topology import (
     apply_stage3_node_adjustments,
-    assemble_topology_units,
-    classify_topology_units,
     plan_stage3_resource_adjustments,
     Stage3AdjustmentApplyResult,
     Stage3AdjustmentPlan,
@@ -49,7 +44,7 @@ class Layer4Adjuster:
         self.E_SU = E_SU.to(self.device)
         self.layer0_estimator = layer0_estimator
         self.fixed_partition_meta: Dict[str, Any] = {}
-        
+
         if su_common_ranges_path is None:
             default_common = Z_LIBRARY_DIR / 'su_nmr_common_range_filtered.csv'
             self.su_common_ranges_path = str(default_common) if default_common.exists() else None
@@ -113,95 +108,6 @@ class Layer4Adjuster:
             return restored
         return []
 
-    def _current_hop2_counter(self,
-                              node: _NodeV3,
-                              nodes: List[_NodeV3],
-                              node_lookup: Optional[Dict[int, _NodeV3]] = None) -> Counter:
-        if node_lookup is None:
-            node_lookup = self._build_node_lookup(nodes)
-
-        hop2 = Counter()
-        hop1_ids = list(getattr(node, 'hop1_ids', []) or [])
-        if hop1_ids:
-            center_id = int(getattr(node, 'global_id', -1))
-            for nb_id in hop1_ids:
-                try:
-                    nb = node_lookup.get(int(nb_id))
-                except Exception:
-                    nb = None
-                if nb is None:
-                    continue
-                for nb2_id in list(getattr(nb, 'hop1_ids', []) or []):
-                    try:
-                        nb2_id_i = int(nb2_id)
-                    except Exception:
-                        continue
-                    if nb2_id_i == center_id:
-                        continue
-                    nb2 = node_lookup.get(nb2_id_i)
-                    if nb2 is None:
-                        continue
-                    try:
-                        hop2[int(nb2.su_type)] += 1
-                    except Exception:
-                        continue
-            return hop2
-
-        hop2_counter = getattr(node, 'hop2_su', None)
-        if isinstance(hop2_counter, Counter):
-            return Counter({int(k): int(v) for k, v in hop2_counter.items()})
-        return hop2
-
-    def _refresh_node_counters(self, nodes: List[_NodeV3]) -> None:
-        """Refresh hop1_su/hop2_su after temporary SU-type conversions."""
-        node_lookup = self._build_node_lookup(nodes)
-        for node in nodes:
-            hop1_counter = Counter()
-            for su_type in self._current_neighbor_types(node, nodes, node_lookup=node_lookup):
-                hop1_counter[int(su_type)] += 1
-            node.hop1_su = hop1_counter
-
-        for node in nodes:
-            node.hop2_su = self._current_hop2_counter(node, nodes, node_lookup=node_lookup)
-
-    def _apply_final_structure_constraints(self, H: torch.Tensor) -> Tuple[torch.Tensor, List[Dict[str, int]], Dict[str, Any]]:
-        """
-        Final discrete constraints applied after Layer4 finishes.
-
-        Current rules:
-        1. SU10 count must be even; if odd, convert one SU10 to SU11.
-        2. SU14+SU15+SU16 total must be even; if odd, use count-preserving conversion:
-           prefer 15->13, else 16->23, else 14->11.
-        """
-        H_work = torch.clamp(H, min=0).long().clone()
-        moves: List[Dict[str, int]] = []
-
-        try:
-            unsat_total = int(H_work[14].item()) + int(H_work[15].item()) + int(H_work[16].item())
-        except Exception:
-            unsat_total = 0
-
-        if int(unsat_total) % 2 != 0:
-            for src_idx, dst_idx in ((15, 13), (16, 23), (14, 11)):
-                if int(H_work[src_idx].item()) > 0:
-                    H_work[src_idx] -= 1
-                    H_work[dst_idx] += 1
-                    moves.append({'op': 'final_even_14_15_16', 'from': int(src_idx), 'to': int(dst_idx)})
-                    break
-
-        try:
-            if int(H_work[10].item()) % 2 != 0 and int(H_work[10].item()) > 0:
-                H_work[10] -= 1
-                H_work[11] += 1
-                moves.append({'op': 'final_even_10', 'from': 10, 'to': 11})
-        except Exception:
-            pass
-
-        meta = {
-            'final_su10': int(H_work[10].item()) if int(H_work.numel()) > 10 else 0,
-            'final_unsat_141516': int(H_work[14].item()) + int(H_work[15].item()) + int(H_work[16].item()),
-        }
-        return H_work, moves, meta
 
     @staticmethod
     def _window_stats(ppm_arr: np.ndarray, diff_arr: np.ndarray, lo: float, hi: float) -> Dict[str, float]:
@@ -282,41 +188,6 @@ class Layer4Adjuster:
             hi = max(float(hi), float(mu + float(min_half_width)))
         return float(lo), float(hi), float(mu)
 
-    def _get_su_tail_core_window(self,
-                                 su_idx: int,
-                                 fallback_mu: Optional[float] = None,
-                                 pad: float = 0.0,
-                                 max_half_width: float = 8.0) -> Tuple[float, float, float]:
-        """
-        Tail-region core window for 22/23/24-like decisions.
-
-        We intentionally prefer q05-q95 over the broader common range and
-        then clamp around the median, because the full common ranges of
-        22/23/24 overlap heavily and can cause SU24 to be misread from
-        nearby 23/25 or 50-60 ppm features.
-        """
-        stats = self._get_su_common_stats().get(int(su_idx))
-        if stats is not None:
-            mu = float(stats['mu_median'])
-            lo = float(stats.get('mu_q05', stats.get('mu_common_min', mu)))
-            hi = float(stats.get('mu_q95', stats.get('mu_common_max', mu)))
-        else:
-            mu = float(fallback_mu or 0.0)
-            width = max(2.0, float(max_half_width))
-            lo = float(mu - width)
-            hi = float(mu + width)
-
-        if float(max_half_width) > 0.0:
-            lo = max(float(lo), float(mu - float(max_half_width)))
-            hi = min(float(hi), float(mu + float(max_half_width)))
-
-        lo = float(lo) - float(pad)
-        hi = float(hi) + float(pad)
-        if float(hi) <= float(lo):
-            width = max(2.0, float(max_half_width))
-            lo = float(mu - width)
-            hi = float(mu + width)
-        return float(lo), float(hi), float(mu)
 
     def _get_su_special_degree_stats(self) -> Dict[Tuple[int, int], Dict[str, float]]:
         if self._su_special_degree_stats_cache is not None:
@@ -583,10 +454,10 @@ class Layer4Adjuster:
         return out
 
     def _get_carb_joint_windows(self) -> Dict[str, Tuple[float, float]]:
-        lo_0, hi_0, mu_0 = self._get_su_common_window(0, fallback_mu=167.125, min_half_width=6.0)
-        lo_1, hi_1, mu_1 = self._get_su_common_window(1, fallback_mu=174.875, min_half_width=6.0)
+        lo_0, _, _ = self._get_su_common_window(0, fallback_mu=167.125, min_half_width=6.0)
+        _, hi_1, mu_1 = self._get_su_common_window(1, fallback_mu=174.875, min_half_width=6.0)
         lo_2, hi_2, mu_2 = self._get_su_common_window(2, fallback_mu=169.6288, min_half_width=6.0)
-        lo_3, hi_3, mu_3 = self._get_su_common_window(3, fallback_mu=195.8284, min_half_width=8.0)
+        lo_3, hi_3, _ = self._get_su_common_window(3, fallback_mu=195.8284, min_half_width=8.0)
 
         split_12 = float((mu_1 + mu_2) * 0.5)
         low_lo = float(min(lo_0, lo_2))
@@ -823,62 +694,7 @@ class Layer4Adjuster:
     # ========================================================================
     # 分阶段调整接口
     # ========================================================================
-    
-    def _estimate_aliphatic_upper_bound(self,
-                                        S_target: Optional[torch.Tensor],
-                                        E_target: Optional[torch.Tensor]) -> Optional[int]:
-        if S_target is None or E_target is None:
-            return None
-        try:
-            budgets = estimate_region_carbon_budgets(S_target, E_target)
-            x = float(budgets.get('x', 0.33))
-            target_c = float(budgets.get('N', 0.0))
-            policy = get_aliphatic_carbon_policy(E_target)
-            upper_scale = float(policy.get('layer4_aliphatic_upper_scale', 0.90))
-            return max(0, int(math.floor(float(upper_scale) * float(x) * float(target_c))))
-        except Exception:
-            return None
 
-    def _estimate_aliphatic_region_bounds(self,
-                                          S_target: Optional[torch.Tensor],
-                                          E_target: Optional[torch.Tensor]) -> Dict[str, int]:
-        if S_target is None or E_target is None:
-            return {
-                'ordinary_min': 0,
-                'ordinary_max': 10**9,
-                'oxygenated_min': 0,
-                'oxygenated_max': 10**9,
-                'total_min': 0,
-                'total_max': 10**9,
-            }
-        try:
-            budgets = estimate_region_carbon_budgets(S_target, E_target)
-            target_c = float(budgets.get('N', 0.0))
-            ordinary = float(budgets.get('ordinary_aliphatic_C', 0.0))
-            oxygenated = float(budgets.get('oxygenated_aliphatic_C', 0.0))
-            total = float(budgets.get('xN', 0.0))
-            policy = get_aliphatic_carbon_policy(E_target)
-            total_upper_scale = float(policy.get('layer4_aliphatic_upper_scale', 1.0))
-            return {
-                'ordinary_min': max(0, int(math.floor(0.50 * ordinary))),
-                'ordinary_max': max(0, int(math.ceil(1.20 * ordinary + 2.0))),
-                'oxygenated_min': max(0, int(math.floor(0.55 * oxygenated))),
-                'oxygenated_max': max(0, int(math.ceil(1.35 * oxygenated + 2.0))),
-                'total_min': max(0, int(math.floor(0.55 * total))),
-                'total_max': max(0, int(math.floor(float(total_upper_scale) * max(total, ordinary + oxygenated, 0.0) + 2.0))),
-                'target_c': int(round(target_c)),
-                'ordinary_target': int(round(ordinary)),
-                'oxygenated_target': int(round(oxygenated)),
-            }
-        except Exception:
-            return {
-                'ordinary_min': 0,
-                'ordinary_max': 10**9,
-                'oxygenated_min': 0,
-                'oxygenated_max': 10**9,
-                'total_min': 0,
-                'total_max': 10**9,
-            }
 
     @staticmethod
     def _count_map_entry(src: Dict[str, Any], key: int) -> int:
@@ -906,7 +722,6 @@ class Layer4Adjuster:
     def _estimate_layer1_hist_feasibility(self,
                                           H: torch.Tensor) -> Dict[str, Any]:
         H_cpu = torch.clamp(H.detach().cpu(), min=0).long()
-        special_degree_meta = self._get_special_degree_meta(H_cpu)
         anchor_mode_meta = self._get_special_anchor_mode_meta(H_cpu)
 
         n11 = int(H_cpu[11].item()) if int(H_cpu.numel()) > 11 else 0
@@ -969,74 +784,10 @@ class Layer4Adjuster:
             'special_generic_ok': bool(special_generic_ok),
         }
 
-    def _evaluate_runtime_layer1_proxy(self,
-                                       nodes: List[_NodeV3]) -> Dict[str, Any]:
-        node_lookup = self._build_node_lookup(nodes)
-
-        def _neighbor_types(node: _NodeV3) -> List[int]:
-            return [int(x) for x in self._current_neighbor_types(node, nodes, node_lookup=node_lookup)]
-
-        su11_missing_external = 0
-        special_missing_external = 0
-        special_fixed_anchor_gap = 0
-        special_degree_gap = 0
-
-        for node in list(nodes or []):
-            su_i = int(getattr(node, 'su_type', -1))
-            nb_types = _neighbor_types(node)
-            current_deg = int(len(nb_types))
-            try:
-                target_deg = getattr(node, 'target_hop1_degree', None)
-                target_deg_i = int(target_deg) if target_deg is not None else None
-            except Exception:
-                target_deg_i = None
-
-            if int(su_i) == 11:
-                if not any(int(x) in {15, 17, 19, 20, 21, 22, 23, 24, 25} for x in nb_types):
-                    su11_missing_external += 1
-
-            required_external: List[int] = []
-            if int(su_i) == 19:
-                part = str(getattr(node, 'special_anchor_partition', None) or '')
-                if str(part) == 'thio':
-                    required_external = [31]
-                elif str(part) == 'ether':
-                    if int(target_deg_i or 0) == 1:
-                        required_external = [2, 29]
-                    else:
-                        required_external = [2, 28, 29]
-            elif int(su_i) == 20:
-                required_external = [0, 27]
-            elif int(su_i) == 21:
-                required_external = [32]
-
-            target_fixed_cnt = 1
-            try:
-                raw_fixed_cnt = getattr(node, 'target_fixed_anchor_count', None)
-                if raw_fixed_cnt is not None:
-                    target_fixed_cnt = max(1, int(raw_fixed_cnt))
-            except Exception:
-                target_fixed_cnt = 1
-            fixed_cnt = int(sum(1 for x in nb_types if int(x) in set(required_external)))
-            if required_external and int(fixed_cnt) < int(target_fixed_cnt):
-                special_missing_external += 1
-                special_fixed_anchor_gap += int(target_fixed_cnt - fixed_cnt)
-            if int(su_i) in {19, 20, 21} and target_deg_i is not None and int(current_deg) < int(target_deg_i):
-                special_degree_gap += int(target_deg_i - int(current_deg))
-
-        runtime_ok = bool(int(su11_missing_external) == 0 and int(special_missing_external) == 0 and int(special_degree_gap) == 0)
-        return {
-            'runtime_layer1_ok': bool(runtime_ok),
-            'su11_missing_external': int(su11_missing_external),
-            'special_missing_external': int(special_missing_external),
-            'special_fixed_anchor_gap': int(special_fixed_anchor_gap),
-            'special_degree_gap': int(special_degree_gap),
-        }
 
     def _evaluate_required_hist_constraints(self,
                                             H: torch.Tensor,
-                                            E_target: Optional[torch.Tensor],
-                                            S_target: Optional[torch.Tensor] = None) -> Dict[str, Any]:
+                                            E_target: Optional[torch.Tensor]) -> Dict[str, Any]:
         H_cpu = torch.clamp(H, min=0).long().detach().cpu()
         special_degree_meta = self._get_special_degree_meta(H_cpu)
         role_audit = audit_layer1_port_roles(H_cpu, special_degree_meta)
@@ -1344,93 +1095,6 @@ class Layer4Adjuster:
             'reasons': list(reasons),
         }
 
-    def _print_allocation_details(self, alloc_res: Any, header: str = "候选完整资源分配结果（未验收）") -> None:
-        print(f"\n  [Topology-Alloc] {header}: 详见 final_topology_summary/specs/pending/resource_pool；完整诊断位于 debug/")
-
-    def _evaluate_full_allocation_balance(self,
-                                          nodes: List[_NodeV3],
-                                          S_target: Optional[torch.Tensor] = None,
-                                          E_target: Optional[torch.Tensor] = None) -> Dict[str, Any]:
-        nodes_local = list(nodes or [])
-        classification = classify_topology_units(
-            nodes_local,
-            fixed_partition_meta=getattr(self, "fixed_partition_meta", {}) or {},
-        )
-        assembly = assemble_topology_units(
-            nodes=nodes_local,
-            classification=classification,
-        )
-        classification_dict = classification.to_dict()
-        assembly_dict = assembly.to_dict()
-        assembly_public = assembly.to_public_dict() if hasattr(assembly, "to_public_dict") else dict(assembly_dict)
-        cls_summary = dict(classification_dict.get("summary", {}) or {})
-        resource_pool = dict(classification_dict.get("resource_pool", {}) or {})
-        assembly_ledger = dict(assembly_public.get("resource_ledger", {}) or {})
-        assembly_remaining = {
-            str(k): int(v)
-            for k, v in dict(assembly_ledger.get("remaining_counts", {}) or {}).items()
-        }
-        assembly_shortage = {
-            str(k): int(v)
-            for k, v in dict(assembly_ledger.get("shortage_counts", {}) or {}).items()
-        }
-        remaining_counts = {
-            str(k): int(v)
-            for k, v in dict(resource_pool.get("remaining_counts", {}) or {}).items()
-        }
-        shortages = list(resource_pool.get("shortages", []) or [])
-
-        def _shortage_count(su_type: int) -> int:
-            return int(sum(1 for item in shortages if int(dict(item).get("su_type", -1)) == int(su_type)))
-
-        unclassified_nodes = list(classification_dict.get("unclassified_nodes", []) or [])
-        unclassified_non_resource = [
-            rec for rec in unclassified_nodes
-            if not bool(dict(rec).get("resource_pool_member", False))
-        ]
-        pending_units = list(assembly_dict.get("pending_units", []) or [])
-        assembly_diag = dict(assembly_dict.get("diagnostics", {}) or {})
-        return {
-            "ok": bool(assembly.ok),
-            "reason": str(assembly.reason),
-            "warnings": [] if bool(assembly.ok) else [str(assembly.reason)],
-            "topology_assembly_ok": bool(assembly.ok),
-            "topology_plan_feasible": bool(assembly.feasible),
-            "unrecognized_topology_node_count": int(cls_summary.get("unclassified_non_resource_count", len(unclassified_non_resource)) or 0),
-            "unrecognized_topology_nodes": list(unclassified_non_resource),
-            "pending_closure_total_count": int(len(pending_units)),
-            "required_extra_11": int(assembly_shortage.get("11", _shortage_count(11))),
-            "required_extra_22": int(assembly_shortage.get("22", _shortage_count(22))),
-            "required_extra_23": int(assembly_shortage.get("23", _shortage_count(23))),
-            "required_extra_24": 0,
-            "required_extra_25": 0,
-            "remaining": {
-                "11": int(assembly_remaining.get("11", remaining_counts.get("11", 0))),
-                "22": int(assembly_remaining.get("22", remaining_counts.get("22", 0))),
-                "23": int(assembly_remaining.get("23", remaining_counts.get("23", 0))),
-                "24": int(assembly_remaining.get("24", 0)),
-                "25": 0,
-            },
-            "resource_ledger": assembly_ledger,
-            "topology_assembly_diagnostics": {
-                "fragment_count": int(cls_summary.get("fragment_count", 0) or 0),
-                "closed_fragment_count": int(cls_summary.get("closed_fragment_count", 0) or 0),
-                "open_fragment_count": int(cls_summary.get("open_fragment_count", 0) or 0),
-                "unrecognized_topology_node_count": int(cls_summary.get("unclassified_non_resource_count", len(unclassified_non_resource)) or 0),
-                "class_counts": dict(cls_summary.get("class_counts", {}) or {}),
-                "family_counts": dict(cls_summary.get("family_counts", {}) or {}),
-                "resource_pool": resource_pool,
-                "assembly_reason": str(assembly.reason),
-                "assembly_feasible": bool(assembly.feasible),
-                "flex_bounds": dict(assembly_dict.get("flex_bounds", {}) or {}),
-                "flex_counts": dict(assembly_dict.get("flex_counts", {}) or {}),
-                "product_count": int(len(assembly_dict.get("products", []) or [])),
-                "pending_unit_count": int(len(pending_units)),
-                "assembly": assembly_diag,
-            },
-            "planned_conversion_count": int(len(assembly_dict.get("planned_conversions", []) or [])),
-            "closed_topology_count": int(len(assembly_dict.get("products", []) or [])),
-        }
 
     def plan_topology_resource_adjustments(self,
                                            H: torch.Tensor,
@@ -1458,6 +1122,7 @@ class Layer4Adjuster:
                                            spectrum_max_primary_adjustments: int = 10,
                                            rejected_spectrum_histogram_signatures: Optional[Any] = None,
                                            rejected_spectrum_bundle_signatures: Optional[Any] = None,
+                                           rejected_spectrum_su24_signatures: Optional[Any] = None,
                                            forbidden_spectrum_inverse_signatures: Optional[Any] = None,
                                            forbidden_resource_conversion_signatures: Optional[Any] = None) -> Any:
         nodes_local = list(nodes or [])
@@ -1492,6 +1157,7 @@ class Layer4Adjuster:
             spectrum_hop1_template_options=self._spectrum_hop1_template_options,
             rejected_spectrum_histogram_signatures=rejected_spectrum_histogram_signatures,
             rejected_spectrum_bundle_signatures=rejected_spectrum_bundle_signatures,
+            rejected_spectrum_su24_signatures=rejected_spectrum_su24_signatures,
             forbidden_spectrum_inverse_signatures=forbidden_spectrum_inverse_signatures,
             forbidden_resource_conversion_signatures=forbidden_resource_conversion_signatures,
         )
@@ -1550,7 +1216,7 @@ class Layer4Adjuster:
             print(f"\n{'='*80}")
             print(f"Layer4 [{stage.upper()}阶段] 调整")
             print(f"{'='*80}")
-        
+
         H_input = torch.clamp(H, min=0).long().clone().cpu()
         H_work = H.clone()
         moves = []
@@ -1562,8 +1228,7 @@ class Layer4Adjuster:
                 self.layer0_estimator._current_S_target = self._current_S_target
             except Exception:
                 pass
-        region_bounds = self._estimate_aliphatic_region_bounds(S_target, E_target)
-        
+
         # 1. 执行对应阶段的调整
         if stage == 'block_a':
             H_work, moves, meta = self.adjust_block_a_carbonyl_anchor(
@@ -1766,4 +1431,3 @@ class Layer4Adjuster:
             spectrum_min_r2_gain=float(spectrum_min_r2_gain),
             verbose=bool(verbose),
         )
-    

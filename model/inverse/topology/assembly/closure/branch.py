@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ...fixed_routes import (
     FixedRouteResolution,
@@ -94,7 +94,6 @@ __all__ = [
     "claim_closure_tail_after_prefix",
     "claim_pool_sequence",
     "consume_branch_placeholder",
-    "fixed_contract_flat_route_reason",
     "fixed_contract_nested_fragment_reason",
     "fixed_contract_nested_fragment_reason_for_assembler",
     "fixed_contract_required_counts",
@@ -380,15 +379,6 @@ def fixed_contract_nested_fragment_reason_for_assembler(
         node_owner_by_id=dict(assembler.fixed_node_owner_by_id or {}),
         view_by_id=dict(assembler.view_by_id or {}),
     )
-
-
-def fixed_contract_flat_route_reason(
-    assembler,
-    contract: Dict[str, Any],
-    owner_view: Optional[AssemblyFragmentView],
-) -> Optional[str]:
-    resolution = resolve_fixed_contract_route(assembler, contract, owner_view)
-    return str(resolution.reason) if not resolution.ok else None
 
 
 def resolve_fixed_contract_route(

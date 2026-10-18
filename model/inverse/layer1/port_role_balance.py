@@ -1,4 +1,5 @@
 """Pre-Layer1 port-role accounting and SU11/SU12 balancing."""
+from model.shared.port_rules import SPECIAL_DEGREE_PRIORS
 
 from typing import Any, Dict, Optional, Tuple
 
@@ -6,7 +7,6 @@ import torch
 
 from ...shared.aromatic_plan import su12_transition_diagnostics
 from ...shared.inverse_common import (
-    SPECIAL_DEGREE_PRIORS,
     SU_CONNECTION_DEGREE,
     normalize_special_degree_meta,
 )

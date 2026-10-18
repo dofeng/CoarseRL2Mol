@@ -4,22 +4,8 @@ from typing import Any, Dict, List, Set
 
 
 ALIPHATIC_OPEN_NEIGHBORS: Set[int] = {14, 15, 17, 19, 20, 21, 23, 24, 25}
-AROMATIC_NEIGHBORS: Set[int] = {5, 6, 7, 8, 9, 11}
 TERMINAL_NEIGHBORS: Set[int] = {1, 4, 16, 18, 22, 28, 32}
-SPECIAL_CONNECTOR_NEIGHBORS: Set[int] = {0, 2, 27, 29, 31}
 
-GENERIC_OPEN_BASE_SU: Set[int] = {0, 2, 3, 14, 15, 17, 23, 24, 25}
-GENERIC_OPEN_SUBTYPES: Set[str] = {
-    "single19d2",
-    "single20d2",
-    "double19d2",
-    "double20d2",
-    "single19d3",
-    "single20d3",
-    "double19d3",
-    "double20d3",
-    "21d3",
-}
 TERMINAL_SUBTYPES: Set[str] = {"19d1", "20d1", "21d2"}
 
 BASIC_A_AROMATIC_BY_CENTER: Dict[int, List[int]] = {

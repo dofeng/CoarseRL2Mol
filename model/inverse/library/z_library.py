@@ -1,10 +1,18 @@
+from model.shared.port_rules import (
+    HOP1_PORT_COMBINATIONS,
+    SPECIAL_DEGREE_PRIORS,
+    SU_FIXED_CONNECTIONS,
+    TERMINAL_PORT_BASE_SU,
+    get_port_pattern_degrees,
+    terminal_neighbor_count,
+)
 import torch
+from model.forward.checkpoints import load_g2s_checkpoint
 import argparse
 from collections import defaultdict, Counter
 from tqdm import tqdm
 from torch_geometric.loader import DataLoader
 import numpy as np
-import torch.nn.functional as F
 import pandas as pd
 import os
 import pickle
@@ -22,26 +30,19 @@ from torch_geometric.utils import k_hop_subgraph, to_undirected
 # 从inverse_common导入化学规则（统一定义，避免重复）
 try:
     from ...shared.inverse_common import (
-        SU_CONNECTION_DEGREE, HOP1_PORT_COMBINATIONS,
-        SPECIAL_DEGREE_PRIORS,
-        SU_EXTERNAL_CONNECTIONS, SU_FIXED_CONNECTIONS, TERMINAL_PORT_BASE_SU,
-        validate_connection,
-        check_external_connection_requirement, get_port_pattern_degrees,
-        terminal_neighbor_count,
+        SU_CONNECTION_DEGREE,
+        SU_EXTERNAL_CONNECTIONS,
+        validate_connection as validate_single_connection,
+        check_external_connection_requirement as check_external_requirement,
     )
 except ImportError:
     from model.shared.inverse_common import (
-        SU_CONNECTION_DEGREE, HOP1_PORT_COMBINATIONS,
-        SPECIAL_DEGREE_PRIORS,
-        SU_EXTERNAL_CONNECTIONS, SU_FIXED_CONNECTIONS, TERMINAL_PORT_BASE_SU,
-        validate_connection,
-        check_external_connection_requirement, get_port_pattern_degrees,
-        terminal_neighbor_count,
+        SU_CONNECTION_DEGREE,
+        SU_EXTERNAL_CONNECTIONS,
+        validate_connection as validate_single_connection,
+        check_external_connection_requirement as check_external_requirement,
     )
-try:
-    from ..layer1.hop1_adjuster import can_match_ports_exact
-except ImportError:
-    from model.inverse.layer1.hop1_adjuster import can_match_ports_exact
+from model.shared.port_rules import can_match_ports_exact
 
 
 MIN_SOURCE_GRAPH_NODES = 5
@@ -76,61 +77,20 @@ def _filter_source_graphs(raw_graphs: List[Any],
     return kept, excluded
 
 
-def _normalize_g2s_state_dict(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    normalized: Dict[str, torch.Tensor] = {}
-    for key, value in dict(state_dict or {}).items():
-        key_s = str(key)
-        if key_s.startswith('decoder.decoder.'):
-            key_s = 'decoder.' + key_s[len('decoder.decoder.'):]
-        normalized[key_s] = value
-    return normalized
-
-
-def _predict_intensity_from_state_dict(state_dict: Dict[str, torch.Tensor],
-                                       fallback: bool) -> bool:
-    decoder_weight = state_dict.get('decoder.net.5.weight')
-    if decoder_weight is None:
-        return bool(fallback)
-    return bool(int(decoder_weight.shape[0]) > 1)
-
-
 def _load_library_g2s_checkpoint(g2s_ckpt: str,
                                  device: str,
                                  k_hop: int,
                                  hid_dim: int,
                                  latent_dim: int) -> Tuple[NMR_VAE, G2SConfig, Dict[str, Any]]:
-    checkpoint = torch.load(g2s_ckpt, map_location=device, weights_only=False)
-    metadata: Dict[str, Any]
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        state_dict = checkpoint['model_state_dict']
-        metadata = dict(checkpoint)
-        config = G2SConfig.from_dict(checkpoint.get('config'))
-    elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
-        metadata = dict(checkpoint)
-        config = G2SConfig.from_dict(checkpoint.get('config'))
-    else:
-        state_dict = checkpoint
-        metadata = {'legacy_state_dict_only': True}
-        config = G2SConfig(
-            k_hop=int(k_hop),
-            hid=int(hid_dim),
-            latent_dim=int(latent_dim),
-        )
-
-    state_dict = _normalize_g2s_state_dict(state_dict)
-    config.predict_intensity = _predict_intensity_from_state_dict(
-        state_dict,
-        fallback=bool(config.predict_intensity),
+    vae, config, metadata = load_g2s_checkpoint(
+        g2s_ckpt,
+        device=device,
+        fallback_config=G2SConfig(k_hop=int(k_hop), hid=int(hid_dim), latent_dim=int(latent_dim)),
     )
     if int(config.k_hop) != int(k_hop):
         raise ValueError(
             f"G2S checkpoint k_hop={int(config.k_hop)} does not match requested k_hop={int(k_hop)}"
         )
-
-    vae = NMR_VAE.from_config(config).to(device)
-    vae.load_state_dict(state_dict, strict=True)
-    vae.eval()
     return vae, config, metadata
 
 # ============================================================================
@@ -143,27 +103,7 @@ def _can_match_ports(neighbors: List[int], port_sets: List[Set[int]]) -> bool:
 
 
 # ============================================================================
-# 向后兼容的别名函数
 # ============================================================================
-
-def validate_single_connection(center_su: int, neighbor_su: int) -> bool:
-    """向后兼容：调用inverse_common.validate_connection"""
-    return validate_connection(center_su, neighbor_su)
-
-
-def check_external_requirement(center_su: int, hop1_counter: Counter) -> Tuple[bool, str]:
-    """向后兼容：调用inverse_common.check_external_connection_requirement"""
-    # 检查是否至少有一个外接结构
-    if center_su not in SU_EXTERNAL_CONNECTIONS:
-        return True, ""
-    
-    required_external = SU_EXTERNAL_CONNECTIONS[center_su]
-    hop1_types = set(hop1_counter.keys())
-    
-    if not any(ext_su in hop1_types for ext_su in required_external):
-        return False, f"SU {center_su} requires external connection to {required_external}"
-    
-    return True, ""
 
 
 def validate_hop1_multiset(center_su: int, hop1_multiset: tuple) -> Tuple[bool, List[str]]:
@@ -178,13 +118,13 @@ def validate_hop1_multiset(center_su: int, hop1_multiset: tuple) -> Tuple[bool, 
         Tuple[bool, List[str]]: (是否合法, 违规信息列表)
     """
     violations = []
-    
+
     # 将多重集转为Counter
     hop1_counter = Counter(hop1_multiset)
-    
+
     # 1. 检查度数约束
     total_degree = len(hop1_multiset)
-    
+
     if center_su in HOP1_PORT_COMBINATIONS:
         port_sets = HOP1_PORT_COMBINATIONS[center_su]
         allowed_degrees = get_port_pattern_degrees(port_sets)
@@ -193,7 +133,7 @@ def validate_hop1_multiset(center_su: int, hop1_multiset: tuple) -> Tuple[bool, 
         else:
             if not _can_match_ports(list(hop1_multiset), port_sets):
                 violations.append(f"Port combination mismatch for SU {center_su}")
-    
+
         if int(terminal_neighbor_count(hop1_multiset)) > 1:
             violations.append(f"SU {center_su} has more than one terminal neighbor")
     else:
@@ -202,18 +142,18 @@ def validate_hop1_multiset(center_su: int, hop1_multiset: tuple) -> Tuple[bool, 
             max_degree = max_degree[1]
         if total_degree > max_degree:
             violations.append(f"Degree {total_degree} > max {max_degree}")
-    
+
         for neighbor_su in hop1_counter.keys():
             if not validate_single_connection(center_su, neighbor_su):
                 violations.append(f"Invalid connection: {center_su} -> {neighbor_su}")
-    
+
         valid_ext, ext_msg = check_external_requirement(center_su, hop1_counter)
         if not valid_ext:
             violations.append(ext_msg)
-    
+
         if int(terminal_neighbor_count(hop1_multiset)) > 1:
             violations.append(f"SU {center_su} has more than one terminal neighbor")
-    
+
     return len(violations) == 0, violations
 
 
@@ -257,7 +197,6 @@ def _free_neighbor_multiset(center_su: int, hop1_multiset: tuple) -> tuple:
 def filter_subgraph_library(
     input_lib_path: str,
     output_lib_path: str,
-    strict_mode: bool = True,
     verbose: bool = True,
     min_samples: int = 3,
 ) -> dict:
@@ -267,7 +206,6 @@ def filter_subgraph_library(
     Args:
         input_lib_path: 输入库文件路径
         output_lib_path: 输出库文件路径
-        strict_mode: 严格模式（True=只保留完全合法的模板）
         verbose: 是否输出详细信息
     
     Returns:
@@ -278,19 +216,18 @@ def filter_subgraph_library(
     print(f"{'='*60}")
     print(f"输入库: {input_lib_path}")
     print(f"输出库: {output_lib_path}")
-    print(f"严格模式: {strict_mode}")
     min_samples = int(min_samples)
     if min_samples < 1:
         raise ValueError("min_samples must be at least 1")
     print(f"最小模板样本数: {min_samples}")
-    
+
     # 1. 加载原始库
     lib = torch.load(input_lib_path, map_location='cpu')
     templates = lib.get('templates', {})
     su_names = [name for name, _ in SU_DEFS]
-    
+
     print(f"\n原始模板数: {len(templates)}")
-    
+
     # 2. 统计信息
     stats = {
         'total': len(templates),
@@ -300,13 +237,13 @@ def filter_subgraph_library(
         'violation_types': Counter(),
         'invalid_examples': []
     }
-    
+
     # 3. 筛选模板
     filtered_templates = {}
-    
+
     for tpl_key, tpl_info in tqdm(templates.items(), desc="验证1-hop连接规则"):
         center_su, hop1_multiset, hop2_multiset = tpl_key
-        
+
         stats['by_su'][center_su]['total'] += 1
 
         sample_count = int(tpl_info.get('sample_count', 0))
@@ -327,7 +264,7 @@ def filter_subgraph_library(
 
         # 验证1-hop多重集
         is_valid, violations = validate_hop1_multiset(center_su, hop1_multiset)
-        
+
         if is_valid:
             stats['valid'] += 1
             stats['by_su'][center_su]['valid'] += 1
@@ -335,10 +272,10 @@ def filter_subgraph_library(
         else:
             stats['invalid'] += 1
             stats['by_su'][center_su]['invalid'] += 1
-            
+
             for v in violations:
                 stats['violation_types'][v] += 1
-            
+
             # 记录无效示例（最多100个）
             if len(stats['invalid_examples']) < 100:
                 stats['invalid_examples'].append({
@@ -348,7 +285,7 @@ def filter_subgraph_library(
                     'violations': violations,
                     'sample_count': tpl_info.get('sample_count', 0)
                 })
-    
+
     # 4. 输出统计信息
     print(f"\n{'='*60}")
     print("筛选结果统计")
@@ -356,7 +293,7 @@ def filter_subgraph_library(
     total_templates = max(int(stats['total']), 1)
     print(f"有效模板: {stats['valid']} / {stats['total']} ({100*stats['valid']/total_templates:.1f}%)")
     print(f"无效模板: {stats['invalid']} / {stats['total']} ({100*stats['invalid']/total_templates:.1f}%)")
-    
+
     print(f"\n按SU类型统计:")
     for su_idx in sorted(stats['by_su'].keys()):
         su_stats = stats['by_su'][su_idx]
@@ -365,12 +302,12 @@ def filter_subgraph_library(
             valid_pct = 100 * su_stats['valid'] / su_stats['total']
             print(f"  SU{su_idx:02d} ({su_name:25s}): "
                   f"有效 {su_stats['valid']:4d} / {su_stats['total']:4d} ({valid_pct:5.1f}%)")
-    
+
     if verbose and stats['violation_types']:
         print(f"\n违规类型统计 (Top 20):")
         for violation, count in stats['violation_types'].most_common(20):
             print(f"  {count:5d}x: {violation}")
-    
+
     if verbose and stats['invalid_examples']:
         print(f"\n无效模板示例 (前10个):")
         for i, ex in enumerate(stats['invalid_examples'][:10]):
@@ -378,23 +315,23 @@ def filter_subgraph_library(
                   f"hop1={ex['hop1_multiset']}, samples={ex['sample_count']}")
             for v in ex['violations']:
                 print(f"       -> {v}")
-    
+
     # 5. 重建库结构
     # 重建center_index
     new_center_index = defaultdict(list)
     for tpl_key in filtered_templates.keys():
         center_su = tpl_key[0]
         new_center_index[center_su].append(tpl_key)
-    
+
     # 排序
     for center_su in new_center_index:
         new_center_index[center_su] = sorted(new_center_index[center_su])
-    
+
     # 重建role_index（只保留有效模板相关的）
     old_role_index = lib.get('role_index', {})
     new_role_index = {}
     valid_tpl_keys = set(filtered_templates.keys())
-    
+
     for role_key, role_samples in old_role_index.items():
         # 只保留与有效模板相关的角色索引
         filtered_role_samples = [
@@ -403,7 +340,7 @@ def filter_subgraph_library(
         ]
         if filtered_role_samples:
             new_role_index[role_key] = filtered_role_samples
-    
+
     # 构建新库
     filtered_lib = {
         'templates': filtered_templates,
@@ -418,11 +355,11 @@ def filter_subgraph_library(
             'original_count': stats['total'],
             'filtered_count': stats['valid'],
             'removed_count': stats['invalid'],
-            'strict_mode': strict_mode,
+            'strict_mode': True,
             'min_samples': int(min_samples),
         }
     }
-    
+
     # 6. 保存筛选后的库
     output_dir = os.path.dirname(output_lib_path) or '.'
     os.makedirs(output_dir, exist_ok=True)
@@ -436,7 +373,7 @@ def filter_subgraph_library(
     print(f"\n筛选后的库已保存: {output_lib_path}")
     print(f"  -> 有效模板数: {len(filtered_templates)}")
     print(f"  -> 筛选后的索引已保存: {index_dir}/")
-    
+
     # 7. 生成筛选后的CSV统计
     out_dir = output_dir
     rows = []
@@ -454,14 +391,14 @@ def filter_subgraph_library(
             'mu_max': float(tpl_info.get('mu_max', 0)),
             'center_mu_median': float(tpl_info.get('center_mu', 0))
         })
-    
+
     if rows:
         rows_sorted = sorted(rows, key=lambda r: (r['center_su_idx'], r['hop1_multiset'], r['hop2_multiset']))
         df = pd.DataFrame(rows_sorted)
         csv_path = os.path.join(out_dir, 'su_multiset_distribution_filtered.csv')
         df.to_csv(csv_path, index=False)
         print(f"  -> 筛选后的多重集统计已保存: {csv_path}")
-    
+
     def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
         idx = np.argsort(values)
         v = values[idx]
@@ -544,7 +481,7 @@ def filter_subgraph_library(
         su_mu_csv_path = os.path.join(out_dir, 'su_nmr_common_range_filtered.csv')
         su_mu_df.to_csv(su_mu_csv_path, index=False)
         print(f"  -> 筛选后各SU常见NMR位移范围已保存: {su_mu_csv_path}")
-    
+
     # 8. 按 (center_su, hop1_multiset) 统计NMR范围
     hop1_mu_agg: Dict[Tuple[int, Tuple], List[Dict]] = defaultdict(list)
     for tpl_key, tpl_info in filtered_templates.items():
@@ -558,18 +495,18 @@ def filter_subgraph_library(
             'mu_max': float(tpl_info.get('mu_max', mu)),
             'sample_count': int(tpl_info.get('sample_count', 1))
         })
-    
+
     hop1_nmr_rows = []
     for (su_idx, hop1_ms), items in hop1_mu_agg.items():
         mu_values = [it['mu'] for it in items]
         weights = [it['sample_count'] for it in items]
         all_mu_min = [it['mu_min'] for it in items]
         all_mu_max = [it['mu_max'] for it in items]
-        
+
         stats_hop1 = _compute_common_mu_stats(mu_values, weights)
         if stats_hop1 is None:
             continue
-        
+
         hop1_str = f"[{','.join(str(i) for i in hop1_ms)}]"
         hop1_nmr_rows.append({
             'center_su_idx': int(su_idx),
@@ -585,7 +522,7 @@ def filter_subgraph_library(
             'n_templates': len(items),
             'sample_count_total': sum(weights),
         })
-    
+
     if hop1_nmr_rows:
         hop1_nmr_rows_sorted = sorted(hop1_nmr_rows, key=lambda r: (r['center_su_idx'], r['hop1_multiset']))
         hop1_nmr_df = pd.DataFrame(hop1_nmr_rows_sorted)
@@ -728,7 +665,7 @@ def filter_subgraph_library(
         anchor_mode_detail_csv_path = os.path.join(out_dir, 'su_special_anchor_mode_detail_filtered.csv')
         anchor_mode_detail_df.to_csv(anchor_mode_detail_csv_path, index=False)
         print(f"  -> 筛选后特殊SU单/双固定外接明细已保存: {anchor_mode_detail_csv_path}")
-    
+
     # 9. 保存无效模板列表（用于分析）
     if stats['invalid_examples']:
         invalid_rows = []
@@ -744,7 +681,7 @@ def filter_subgraph_library(
         invalid_csv_path = os.path.join(out_dir, 'invalid_templates_hop1.csv')
         invalid_df.to_csv(invalid_csv_path, index=False)
         print(f"  -> 无效模板列表已保存: {invalid_csv_path}")
-    
+
     return filtered_lib
 
 
@@ -764,7 +701,7 @@ def get_allowed_hop1_neighbors(center_su: int) -> Set[int]:
         if center_su in TERMINAL_PORT_BASE_SU:
             allowed -= TERMINAL_PORT_BASE_SU
         return allowed
-    
+
     allowed = SU_FIXED_CONNECTIONS[center_su]
     if isinstance(allowed, dict):
         all_allowed = set()
@@ -778,24 +715,24 @@ def get_allowed_hop1_neighbors(center_su: int) -> Set[int]:
 def print_connection_rules_summary():
     """打印连接规则摘要"""
     su_names = [name for name, _ in SU_DEFS]
-    
+
     print("\n" + "="*80)
     print("SU连接规则摘要")
     print("="*80)
-    
+
     for su_idx in range(NUM_SU_TYPES):
         su_name = su_names[su_idx] if su_idx < len(su_names) else f"SU{su_idx}"
         max_deg = SU_CONNECTION_DEGREE.get(su_idx, 4)
         is_terminal = su_idx in TERMINAL_PORT_BASE_SU
-        
+
         allowed = get_allowed_hop1_neighbors(su_idx)
         allowed_str = ', '.join(str(x) for x in sorted(allowed)[:10])
         if len(allowed) > 10:
             allowed_str += f"... ({len(allowed)} total)"
-        
+
         external_req = SU_EXTERNAL_CONNECTIONS.get(su_idx, None)
         external_str = str(external_req) if external_req else "无"
-        
+
         print(f"\nSU{su_idx:02d} ({su_name}):")
         print(f"  最大度数: {max_deg}, 末端: {is_terminal}")
         print(f"  允许连接: [{allowed_str}]")
@@ -811,57 +748,57 @@ def get_3hop_template_key_v2(subgraph, su_types_in_subgraph):
     """
     center_id = subgraph.center_id.item()
     center_su_type = su_types_in_subgraph[center_id].item()
-    
+
     # 使用BFS找到不同hop层的节点
     edge_index = subgraph.edge_index
     row, col = edge_index
-    
+
     # 构建邻接表
     adj_list = defaultdict(list)
     for i in range(len(row)):
         adj_list[row[i].item()].append(col[i].item())
         adj_list[col[i].item()].append(row[i].item())
-    
+
     # BFS分层
     visited = set()
     hop_1_nodes = set()
     hop_2_nodes = set()
     hop_3_nodes = set()
-    
+
     # 1-hop邻居
     for neighbor in adj_list[center_id]:
         if neighbor not in visited:
             hop_1_nodes.add(neighbor)
             visited.add(neighbor)
-    
+
     # 2-hop邻居
     for node_1hop in hop_1_nodes:
         for neighbor in adj_list[node_1hop]:
             if neighbor not in visited and neighbor != center_id:
                 hop_2_nodes.add(neighbor)
                 visited.add(neighbor)
-    
+
     # 3-hop邻居
     for node_2hop in hop_2_nodes:
         for neighbor in adj_list[node_2hop]:
             if neighbor not in visited and neighbor != center_id:
                 hop_3_nodes.add(neighbor)
                 visited.add(neighbor)
-    
+
     # V2关键改进：使用多重集计数，保留SU类型的重复度信息
     hop_1_su_types = [su_types_in_subgraph[node].item() for node in hop_1_nodes]
     hop_2_su_types = [su_types_in_subgraph[node].item() for node in hop_2_nodes]
-    
+
     # 转换为Counter并转为有序元组(保持多重集的重复信息)
     hop1_counter = Counter(hop_1_su_types)
     hop2_counter = Counter(hop_2_su_types)
-    
+
     # 将Counter转为排序后的多重集元组
     hop1_multiset = tuple(sorted(hop1_counter.elements()))
     hop2_multiset = tuple(sorted(hop2_counter.elements()))
-    
+
     template_key = (center_su_type, hop1_multiset, hop2_multiset)
-    
+
     node_layers = {
         'center': center_id,
         'hop_1': list(hop_1_nodes),
@@ -870,13 +807,13 @@ def get_3hop_template_key_v2(subgraph, su_types_in_subgraph):
         'hop1_counter': hop1_counter,
         'hop2_counter': hop2_counter
     }
-    
+
     return template_key, node_layers
 
 
 def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
                          latent_dim: int = 16, hid_dim: int = 384, batch_size: int = 32, device: str = 'cuda',
-                         num_workers: int = 4, mols_per_chunk: int = 2000, skip_role_index: bool = False,
+                         num_workers: int = 4, mols_per_chunk: int = 2000, skip_role_index: bool = True,
                          amp: bool = False, prefetch_factor: int = 2,
                          allow_missing_shifts: bool = False,
                          min_template_samples: int = 3):
@@ -892,7 +829,7 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
     min_template_samples = int(min_template_samples)
     if min_template_samples < 1:
         raise ValueError("min_template_samples must be at least 1")
-    
+
     # 1. 加载数据和预训练模型
     raw_loaded = load_raw_data(pt_dir)
     raw_all, excluded_small_graphs = _filter_source_graphs(raw_loaded)
@@ -979,7 +916,6 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
 
                     center_id = node_layers['center']
                     center_su_type = su_types_in_subgraph[center_id].item()
-                    center_su_name = su_names[center_su_type]
                     mu_ppm = float(mu_pred_batch[i].item())
                     pi_center = float(pi_pred_unnorm_batch[i].item())
                     z_sample = mu_latent_batch[i].detach().cpu()
@@ -1044,7 +980,7 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
             for center in range(num_nodes):
                 if bool(is_carbon_mask[center]):
                     continue
-                sub_nodes, sub_edge_index, mapping, mask = k_hop_subgraph(
+                sub_nodes, sub_edge_index, mapping, _ = k_hop_subgraph(
                     center, k_hop, edge_index, relabel_nodes=True, num_nodes=num_nodes)
                 # 构造最小 subgraph 结构供键生成函数使用
                 class _Mini:
@@ -1083,7 +1019,7 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
 
     # 3. 聚合桶级统计并构建最终库
     templates = {}
-    
+
     for template_key, samples in tqdm(template_buckets.items(), desc="阶段2/2: 构建桶级统计"):
         if len(samples) < min_template_samples:
             continue
@@ -1113,7 +1049,7 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
         hop2_counter = samples[0]['hop2_counter']
 
         center_su_type = template_key[0]
-        
+
         # 为外层粗选找到"居中"的z（最接近μ中位数的样本）
         if has_numeric:
             mu_median = float(mu_samples.median().item())
@@ -1123,7 +1059,7 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
             center_pi = float(pi_samples[center_sample_idx].item())
         else:
             center_sample_idx, center_z, center_mu, center_pi = -1, None, 0.0, 0.0
-        
+
         # 预存按 μ 升序的样本索引，便于逆向阶段定点选择 z
         sorted_idx_by_mu = torch.argsort(mu_samples) if has_numeric else None
 
@@ -1140,7 +1076,7 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
             'center_mu': center_mu,
             'center_pi': center_pi,
             'nmr_range': (mu_min, mu_max),  # 核磁范围
-            
+
             'center_su': int(center_su_type),
             'hop1_counts': hop1_counter,
             'hop2_counts': hop2_counter,
@@ -1170,7 +1106,7 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
     # 4. 构建最终库和索引
     su_names = [name for name, _ in SU_DEFS]
     su_max_degrees = torch.tensor([SU_MAX_DEGREE.get(name, 4) for name in su_names], dtype=torch.long)
-    
+
     # 只保留最终模板对应的索引，避免低频桶被删除后出现悬空键。
     valid_template_keys = set(templates.keys())
     center_index_dict = {
@@ -1211,7 +1147,7 @@ def build_3hop_library_v2(pt_dir: str, g2s_ckpt: str, k_hop: int = 3,
             'min_template_samples': int(min_template_samples),
         },
     }
-    
+
     print("V2版本3-hop模板库构建完成！")
     return final_library
 
@@ -1305,7 +1241,7 @@ def merge_3hop_libraries_v2(base_lib: dict, add_lib: dict) -> dict:
         a['sorted_idx_by_mu'] = sorted_idx_by_mu if has_numeric else None
         a['nmr_range'] = (mu_min, mu_max)
         a['sample_count'] = sample_count
-        # 其余字段（center_su, hop1_counts, hop2_counts, nmr_range）保持不变
+        # 其余字段（center_su, hop1_counts, hop2_counts）保持不变
 
     base_lib['templates'] = base_templates
 
@@ -1369,10 +1305,10 @@ if __name__ == '__main__':
         description="Build or filter a V2 3-hop enhanced subgraph template library.",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    
+
     # 子命令
-    subparsers = parser.add_subparsers(dest='command', help='可用命令')
-    
+    subparsers = parser.add_subparsers(dest='command', required=True, help='可用命令')
+
     # ========== build 子命令 ==========
     build_parser = subparsers.add_parser('build', help='构建新的模板库')
     build_parser.add_argument('--pt_dir', required=True,
@@ -1387,7 +1323,12 @@ if __name__ == '__main__':
     build_parser.add_argument('--batch_size', type=int, default=32, help='Batch size for processing.')
     build_parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
     build_parser.add_argument('--mols_per_chunk', type=int, default=2000, help='分块规模（分子数），避免一次性占满内存')
-    build_parser.add_argument('--skip_role_index', action='store_true', help='跳过 hop1/hop2 角色索引采样以提速降内存')
+    role_options = build_parser.add_mutually_exclusive_group()
+    role_options.add_argument('--role_index', dest='skip_role_index', action='store_false',
+                              help='额外生成非反推主链使用的 hop1/hop2 角色索引')
+    role_options.add_argument('--skip_role_index', action='store_true',
+                              help='不生成角色索引（默认）')
+    build_parser.set_defaults(skip_role_index=True)
     build_parser.add_argument('--amp', action='store_true', help='启用半精度推理（需要GPU）')
     build_parser.add_argument('--prefetch_factor', type=int, default=2, help='DataLoader 预取批次数（workers>0时生效）')
     build_parser.add_argument(
@@ -1402,70 +1343,39 @@ if __name__ == '__main__':
                       help='已有库文件路径；提供则将此次构建的库合并进该库')
     build_parser.add_argument('--merge_in_place', action='store_true',
                       help='与 --base_lib 配合使用；合并结果直接覆盖保存到该路径')
-    
+
     # ========== filter 子命令 ==========
     filter_parser = subparsers.add_parser('filter', help='根据1-hop连接规则筛选现有模板库')
     filter_parser.add_argument('--input', '-i', required=True,
                       help='输入库文件路径 (subgraph_library.pt)')
     filter_parser.add_argument('--output', '-o', required=True,
                       help='输出筛选后的库文件路径')
-    filter_parser.add_argument('--strict', action='store_true', default=True,
-                      help='严格模式（默认开启，只保留完全合法的模板）')
-    filter_parser.add_argument('--verbose', '-v', action='store_true', default=True,
+    filter_parser.add_argument('--verbose', '-v', action=argparse.BooleanOptionalAction, default=True,
                       help='输出详细信息')
     filter_parser.add_argument(
         '--min_samples', type=int, default=3,
         help='最终库中每个模板的最小样本数（默认3）。'
     )
-    
+
     # ========== rules 子命令 ==========
     rules_parser = subparsers.add_parser('rules', help='打印SU连接规则摘要')
-    
+
     args = parser.parse_args()
-    
+
     # 处理filter命令
     if args.command == 'filter':
         filter_subgraph_library(
             input_lib_path=args.input,
             output_lib_path=args.output,
-            strict_mode=args.strict,
             verbose=args.verbose,
             min_samples=args.min_samples,
         )
         exit(0)
-    
+
     # 处理rules命令
     if args.command == 'rules':
         print_connection_rules_summary()
         exit(0)
-    
-    # 处理build命令（或无子命令的旧式调用）
-    if args.command == 'build':
-        pass  # 继续执行下面的build逻辑
-    elif args.command is None:
-        # 向后兼容：无子命令时检查是否有旧式参数
-        # 重新解析为旧式参数
-        parser_legacy = argparse.ArgumentParser()
-        parser_legacy.add_argument('--pt_dir', required=True)
-        parser_legacy.add_argument('--g2s_ckpt', required=True)
-        parser_legacy.add_argument('--out', default='subgraph_library_3hop_v2.pt')
-        parser_legacy.add_argument('--hid_dim', type=int, default=384)
-        parser_legacy.add_argument('--latent_dim', type=int, default=16)
-        parser_legacy.add_argument('--k_hop', type=int, default=3)
-        parser_legacy.add_argument('--batch_size', type=int, default=32)
-        parser_legacy.add_argument('--num_workers', type=int, default=4)
-        parser_legacy.add_argument('--mols_per_chunk', type=int, default=2000)
-        parser_legacy.add_argument('--skip_role_index', action='store_true')
-        parser_legacy.add_argument('--amp', action='store_true')
-        parser_legacy.add_argument('--prefetch_factor', type=int, default=2)
-        parser_legacy.add_argument('--allow_missing_shifts', action='store_true')
-        parser_legacy.add_argument('--min_template_samples', type=int, default=3)
-        parser_legacy.add_argument('--base_lib', type=str, default=None)
-        parser_legacy.add_argument('--merge_in_place', action='store_true')
-        args = parser_legacy.parse_args()
-    else:
-        parser.print_help()
-        exit(1) 
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
@@ -1487,7 +1397,7 @@ if __name__ == '__main__':
         allow_missing_shifts=args.allow_missing_shifts,
         min_template_samples=args.min_template_samples,
     )
-    
+
     # 若存在 base_lib，则执行合并
     out_path = args.out
     if getattr(args, 'base_lib', None):
@@ -1508,18 +1418,18 @@ if __name__ == '__main__':
     print(f"\nV2 3-hop模板库已保存到: {out_path}")
     print(f" -> 找到 {lib['total_templates']} 个独特的多重集模板桶")
     print(f" -> 库类型: {lib['library_type']}")
-    
+
     # 打印一些统计信息
     template_sizes = [info['sample_count'] for info in lib['templates'].values()]
     print(f" -> 模板样本数统计: 最小={min(template_sizes)}, 最大={max(template_sizes)}, 平均={np.mean(template_sizes):.1f}")
-    
+
     # V2: 分析center_index覆盖度
     center_index = lib['center_index']
     print(f" -> 中心SU覆盖度: {len(center_index)} 种中心SU类型")
     for center_su, template_keys in center_index.items():
         su_name = [name for name, _ in SU_DEFS][center_su]
         print(f"   {su_name}: {len(template_keys)} 个模板桶")
-    
+
     # 生成并保存多重集统计CSV
     su_names = [name for name, _ in SU_DEFS]
     rows = []
@@ -1546,11 +1456,11 @@ if __name__ == '__main__':
         csv_path = os.path.join(out_dir, 'su_multiset_distribution.csv')
         df.to_csv(csv_path, index=False)
         print(f" -> 多重集模板统计已保存(已排序): {csv_path}")
-        
+
     # 保存索引文件（便于快速加载）
     index_dir = os.path.join(out_dir, 'indexes')
     os.makedirs(index_dir, exist_ok=True)
-    
+
     with open(os.path.join(index_dir, 'center_index.pkl'), 'wb') as f:
         pickle.dump(lib['center_index'], f)
     with open(os.path.join(index_dir, 'role_index.pkl'), 'wb') as f:

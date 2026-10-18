@@ -5,7 +5,6 @@ from pathlib import Path
 import torch
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib import cm
 from tqdm import tqdm
 from torch_geometric.data import Data
 import random
@@ -54,14 +53,14 @@ def _plot_su_distribution(su_df: pd.DataFrame, output_path: Path):
     colors = [_node_color(int(idx)) for idx in su_df['SU_Index']]
     labels = [f"{idx}" for idx in su_df['SU_Index']]
     bars = ax.bar(range(len(su_df)), su_df['Total_Count'], color=colors, edgecolor='white', linewidth=0.5)
-    
+
     # 在柱状图顶部添加数值标签
-    for i, (bar, count) in enumerate(zip(bars, su_df['Total_Count'])):
+    for bar, count in zip(bars, su_df['Total_Count']):
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
                 f'{int(count)}',
                 ha='center', va='bottom', fontsize=16)
-    
+
     ax.set_xticks(range(len(su_df)))
     ax.set_xticklabels(labels, rotation=0, fontsize=10)
     ax.set_ylabel('Count', fontsize=24)
@@ -78,22 +77,22 @@ def _plot_node_count_distribution(node_df: pd.DataFrame, output_path: Path):
     fig, ax = plt.subplots(figsize=(18, 6))
     counts = node_df['Molecule_Count'].to_numpy()
     num_sus = node_df['Num_SUs'].to_numpy()
-    
+
     # 统一颜色，不使用渐变；对稀有值（count < 10）使用不同颜色突出显示
     colors = ['#d62728' if c < 10 else '#1f77b4' for c in counts]
-    
+
     ax.bar(num_sus, counts, color=colors, edgecolor='white', linewidth=0.4, width=0.8)
-    
+
     # 使用对数刻度y轴以便更好地显示稀有值
     ax.set_yscale('log')
     ax.set_ylim(bottom=0.5)  # 设置下限，避免log(0)
-    
+
     ax.set_xlabel('Number of Structural Units per Molecule', fontsize=24)
     ax.set_ylabel('Molecule Count (log scale)', fontsize=24)
     ax.set_title('Molecule Size Distribution', fontsize=24, pad=12)
     ax.tick_params(axis='both', labelsize=18)  # 调整坐标轴刻度数值大小
     ax.grid(False)
-    
+
     # 添加图例说明颜色含义
     from matplotlib.patches import Patch
     legend_elements = [
@@ -101,7 +100,7 @@ def _plot_node_count_distribution(node_df: pd.DataFrame, output_path: Path):
         Patch(facecolor='#d62728', edgecolor='white', label='Count < 10 (rare)')
     ]
     ax.legend(handles=legend_elements, loc='upper right', fontsize=16)
-    
+
     fig.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
@@ -458,13 +457,11 @@ def split_by_intensity(
         try:
             data_dict = torch.load(f, weights_only=False)
             data = Data.from_dict(data_dict)
-        except Exception as e:
+        except Exception:
             file_bad = True
-            reason = f"load_error: {e}"
         else:
             if not hasattr(data, 'real_intensity') or not hasattr(data, 'is_carbon'):
                 file_bad = True
-                reason = "missing_required_attributes"
             else:
                 try:
                     is_carbon_mask = data.is_carbon.bool()
@@ -536,16 +533,14 @@ def split_by_su_ppm(
         try:
             data_dict = torch.load(f, weights_only=False)
             data = Data.from_dict(data_dict)
-        except Exception as e:
+        except Exception:
             # 解析失败直接归为 bad
             file_bad = True
-            reason = f"load_error: {e}"
         else:
             # 必要属性存在性检查
             required_attrs = ['real_ppm', 'real_intensity', 'su_type_indices', 'is_carbon']
             if not all(hasattr(data, attr) for attr in required_attrs):
                 file_bad = True
-                reason = "missing_required_attributes"
             else:
                 # 构造有效节点掩码：仅检查碳节点且有有效强度
                 try:
@@ -563,7 +558,6 @@ def split_by_su_ppm(
                             su_idx = int(data.su_type_indices[idx])
                             if su_idx < 0 or su_idx >= len(su_ranges):
                                 file_bad = True
-                                reason = f"invalid_su_index:{su_idx}"
                                 break
                             low, high = su_ranges[su_idx]
                             low = float(low) - margin
@@ -577,14 +571,12 @@ def split_by_su_ppm(
                                     print(f"[标注异常] {os.path.basename(f)} | SU={su_name} (idx={su_idx}) | ppm={ppm_val:.2f} ∉ [{low:.2f}, {high:.2f}]")
                                     bad_examples += 1
                                 break
-                        except Exception as e:
+                        except Exception:
                             file_bad = True
-                            reason = f"node_check_error:{e}"
                             break
                 else:
                     # 若没有任何有效碳节点（无真实标注），默认归为 bad 以便人工复核
                     file_bad = True
-                    reason = "no_valid_carbon_nodes"
 
         # 复制文件到对应目录
         dst_dir = bad_dir if file_bad else ok_dir
@@ -1009,7 +1001,10 @@ def split_and_batch_merge_graphs(data_dir: Path,
 
 def batch_merge_graphs(data_dir: Path, output_dir: Path, target_node_counts: list[int], num_per_target: int, upsample_sus: list[str], upsample_factor: float):
     """
-    Automated batch merging of graphs to create larger datasets with specific properties.
+    Merge graphs for a single, already-isolated source partition.
+
+    This command does not create train/validation/test splits. For training data,
+    use split_and_batch_merge_graphs so source molecules cannot cross splits.
     """
     output_dir.mkdir(exist_ok=True)
     print("--- Starting Batch Merge ---")
@@ -1045,7 +1040,7 @@ def batch_merge_graphs(data_dir: Path, output_dir: Path, target_node_counts: lis
         except Exception as e:
             print(f"Warning: Skipping file {f_path} due to error: {e}")
             continue
-    
+
     if not graph_metadata:
         print("Error: No valid graph files could be indexed. Aborting.")
         return
@@ -1064,15 +1059,15 @@ def batch_merge_graphs(data_dir: Path, output_dir: Path, target_node_counts: lis
         for i in range(num_per_target):
             files_to_merge = []
             current_nodes = 0
-            
+
             # Use a copy of available indices to sample without replacement for each large graph
             available_indices = list(range(len(graph_metadata)))
-            
+
             while current_nodes < target_size:
                 if not available_indices:
                     print("Warning: Ran out of unique graphs to sample from. Merged graph may be smaller than target.")
                     break
-                
+
                 # Create weights corresponding to the currently available indices
                 current_weights = [weights[idx] for idx in available_indices]
 
@@ -1082,18 +1077,18 @@ def batch_merge_graphs(data_dir: Path, output_dir: Path, target_node_counts: lis
                     weights=current_weights,
                     k=1
                 )[0]
-                
+
                 # Get the original index from the list of available indices
                 original_idx = available_indices.pop(chosen_relative_idx)
                 graph_to_add = graph_metadata[original_idx]
-                
+
                 files_to_merge.append(Path(graph_to_add["path"]))
                 current_nodes += graph_to_add["num_nodes"]
 
             print(f"  Generating graph {i+1}/{num_per_target} with {current_nodes} nodes from {len(files_to_merge)} files.")
-            
+
             output_filename = output_dir / f"{target_size}_{i+1:02d}.pt"
-            
+
             # Use the existing merge_graphs function to perform the merge
             merge_graphs(files_to_merge, output_filename)
 
@@ -1128,7 +1123,7 @@ def merge_graphs(input_files: list[Path], output_file: Path, quiet: bool = False
 
     # Initialize the merged graph with the first graph's data
     merged_data = graphs_to_merge[0].clone()
-    
+
     # Iterate over the rest of the graphs and merge them in
     for i in range(1, len(graphs_to_merge)):
         graph_to_add = graphs_to_merge[i]
@@ -1141,7 +1136,7 @@ def merge_graphs(input_files: list[Path], output_file: Path, quiet: bool = False
         merged_data.is_carbon = torch.cat([merged_data.is_carbon, graph_to_add.is_carbon], dim=0)
         merged_data.su_type_indices = torch.cat([merged_data.su_type_indices, graph_to_add.su_type_indices], dim=0)
         merged_data.su_max_degrees = torch.cat([merged_data.su_max_degrees, graph_to_add.su_max_degrees], dim=0)
-        
+
         # --- Concatenate edge-level features (with offset) ---
         if graph_to_add.edge_index.numel() > 0:
             edge_index_offset = graph_to_add.edge_index + num_nodes_before
@@ -1152,21 +1147,20 @@ def merge_graphs(input_files: list[Path], output_file: Path, quiet: bool = False
         merged_data.y_spectrum += graph_to_add.y_spectrum
         merged_data.total_atom_counts += graph_to_add.total_atom_counts
         merged_data.su_hist += graph_to_add.su_hist
-        
+
         # --- Combine SMILES ---
         # 修正：确保SMILES是字符串
         if hasattr(merged_data, 'smiles') and isinstance(merged_data.smiles, list):
             merged_data.smiles = "".join(merged_data.smiles)
         if hasattr(graph_to_add, 'smiles') and isinstance(graph_to_add.smiles, list):
             graph_to_add.smiles = "".join(graph_to_add.smiles)
-            
+
         merged_data.smiles += "." + graph_to_add.smiles
 
     # Ensure output directory exists
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    # V-Fix: Save as dict to maintain compatibility
     torch.save(merged_data.to_dict(), output_file)
-    
+
     if not quiet:
         print(f"  - Total nodes in merged graph: {merged_data.num_nodes}")
         print(f"  - Total edges in merged graph: {merged_data.num_edges}")
@@ -1560,4 +1554,4 @@ def main():
         )
 
 if __name__ == '__main__':
-    main() 
+    main()

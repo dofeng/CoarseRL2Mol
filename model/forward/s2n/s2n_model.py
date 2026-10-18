@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Sequence
 
 import torch
+
+from model.forward.common import collect_pt_files
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
@@ -124,21 +126,6 @@ class S2NConfig:
             data["target_mode"] = "absolute"
         valid = {field.name for field in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in data.items() if k in valid})
-
-
-def collect_pt_files(paths: Sequence[str | Path]) -> list[str]:
-    files: list[str] = []
-    for item in paths:
-        path = Path(item)
-        if path.is_dir():
-            files.extend(str(p) for p in sorted(path.glob("*.pt")))
-        elif path.is_file() and path.suffix == ".pt":
-            files.append(str(path))
-        else:
-            raise FileNotFoundError(f"No .pt files found at '{path}'")
-    if not files:
-        raise FileNotFoundError(f"No .pt files found in: {paths}")
-    return files
 
 
 def normalize_element_vector(elements: torch.Tensor,
@@ -466,22 +453,9 @@ class S2NDataset(Dataset):
 def s2n_loss(n_su_logits: torch.Tensor,
              n_su_true: torch.Tensor,
              elements_true: torch.Tensor,
-             config: S2NConfig | None = None,
-             **legacy_weights):
-    """Composite S2N loss.
-
-    Backward compatibility: legacy keyword weights w_cnt, w_elem_abs and
-    w_nodesum are accepted and mapped to the new config weights.
-    """
+             config: S2NConfig | None = None):
+    """Composite S2N loss with weights supplied through S2NConfig."""
     cfg = config or S2NConfig()
-    if legacy_weights:
-        cfg = S2NConfig.from_dict(cfg.to_dict())
-        if "w_cnt" in legacy_weights:
-            cfg.w_count = float(legacy_weights["w_cnt"])
-        if "w_elem_abs" in legacy_weights:
-            cfg.w_element = float(legacy_weights["w_elem_abs"])
-        if "w_nodesum" in legacy_weights:
-            cfg.w_total = float(legacy_weights["w_nodesum"])
 
     pred = logits_to_su_counts(n_su_logits, elements_true, cfg)
     true = n_su_true.float()

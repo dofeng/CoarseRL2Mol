@@ -1,3 +1,4 @@
+from model.shared.port_rules import TERMINAL_PORT_BASE_SU, terminal_neighbor_count
 import math
 import io
 import numpy as np
@@ -7,7 +8,6 @@ from contextlib import redirect_stdout
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
-from ...shared.inverse_common import TERMINAL_PORT_BASE_SU, terminal_neighbor_count
 from ..special_anchor_evidence import (
     SU19_DOUBLE_EVIDENCE_WINDOWS,
     SU19_DOUBLE_SUPPORT_WEIGHT,
@@ -41,6 +41,30 @@ MANUAL_SPECIAL_ANCHOR_MODE_WINDOWS: Dict[int, Dict[str, Tuple[float, float, floa
         'single_d3': (55.0, 64.0, 59.5),
     },
 }
+
+
+def _pick_aromatic_donors(histogram: torch.Tensor, count: int) -> Optional[List[int]]:
+    donors: List[int] = []
+    for _ in range(max(0, int(count))):
+        if int(histogram[13].item()) > 0:
+            histogram[13] -= 1
+            donors.append(13)
+        elif int(histogram[11].item()) > 0:
+            histogram[11] -= 1
+            donors.append(11)
+        else:
+            for donor_su in donors:
+                histogram[donor_su] += 1
+            return None
+    return donors
+
+
+def _sign(value: float) -> int:
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0
 
 
 def _window_score(adjuster: Any,
@@ -640,74 +664,6 @@ def _special_anchor_mode_scores(adjuster: Any,
     return out
 
 
-def _special_degree_core_scores(adjuster: Any,
-                                ppm_arr: np.ndarray,
-                                diff_arr: np.ndarray,
-                                su_type: int,
-                                degrees: List[int],
-                                core_half_width: float = 3.5,
-                                support_weight: float = 0.25) -> Dict[int, Dict[str, float]]:
-    out: Dict[int, Dict[str, float]] = {}
-    for degree_i in [int(x) for x in list(degrees or [])]:
-        lo_w, hi_w, mu = adjuster._get_su_special_degree_window(
-            int(su_type),
-            int(degree_i),
-            fallback_mu=0.0,
-            pad=0.0,
-            min_half_width=float(core_half_width),
-        )
-        core_hw = float(core_half_width)
-        if int(su_type) == 19 and int(degree_i) == 2:
-            core_hi = min(float(mu + 2.5), float(hi_w))
-            core_lo = max(float(mu - core_hw), float(lo_w))
-            # d2 的高ppm上尾容易侵入 d3 区域，单独做弱化统计。
-            tail_lo = max(float(core_hi), float(lo_w))
-            tail_hi = float(hi_w)
-        else:
-            core_lo = max(float(mu - core_hw), float(lo_w))
-            core_hi = min(float(mu + core_hw), float(hi_w))
-            tail_lo = float(core_hi)
-            tail_hi = float(core_hi)
-        if float(core_hi) <= float(core_lo):
-            core_lo = float(lo_w)
-            core_hi = float(hi_w)
-        stats_core = adjuster._window_stats(ppm_arr, diff_arr, float(core_lo), float(core_hi))
-        stats_support = adjuster._window_stats(ppm_arr, diff_arr, float(lo_w), float(hi_w))
-        if float(tail_hi) > float(tail_lo) + 1e-6:
-            stats_tail = adjuster._window_stats(ppm_arr, diff_arr, float(tail_lo), float(tail_hi))
-        else:
-            stats_tail = {'pos': 0.0, 'neg': 0.0, 'abs': 0.0}
-        core_score = float(stats_core.get('pos', 0.0) - stats_core.get('neg', 0.0))
-        support_score = float(stats_support.get('pos', 0.0) - stats_support.get('neg', 0.0))
-        tail_score = float(stats_tail.get('pos', 0.0) - stats_tail.get('neg', 0.0))
-        # d2 的高ppm尾部只做弱支持，避免把 d3 信号误吞到 d2。
-        if int(su_type) == 19 and int(degree_i) == 2 and float(tail_hi) > float(tail_lo) + 1e-6:
-            final_score = float(core_score + float(support_weight) * support_score - 0.35 * max(0.0, float(tail_score)))
-        else:
-            final_score = float(core_score + float(support_weight) * support_score)
-        out[int(degree_i)] = {
-            'mu': float(mu),
-            'lo': float(lo_w),
-            'hi': float(hi_w),
-            'core_lo': float(core_lo),
-            'core_hi': float(core_hi),
-            'tail_lo': float(tail_lo),
-            'tail_hi': float(tail_hi),
-            'core_pos': float(stats_core.get('pos', 0.0)),
-            'core_neg': float(stats_core.get('neg', 0.0)),
-            'support_pos': float(stats_support.get('pos', 0.0)),
-            'support_neg': float(stats_support.get('neg', 0.0)),
-            'tail_pos': float(stats_tail.get('pos', 0.0)),
-            'tail_neg': float(stats_tail.get('neg', 0.0)),
-            'core_score': float(core_score),
-            'support_score': float(support_score),
-            'tail_score': float(tail_score),
-            'score': float(final_score),
-            'abs': float(stats_core.get('abs', 0.0)),
-        }
-    return out
-
-
 def _mode_tail_su(su_type: int, degree_i: int) -> Optional[int]:
     su_i = int(su_type)
     deg_i = int(degree_i)
@@ -781,48 +737,6 @@ def _special_mode_scores(adjuster: Any,
             "abs": float(stats["abs"]),
         }
     return stats_by_degree
-
-
-def _pick_mode_increase_degree(scores: Dict[int, Dict[str, float]],
-                               allowed_degrees: List[int],
-                               donor_check_fn) -> Optional[int]:
-    candidates = [int(d) for d in allowed_degrees if donor_check_fn(int(d))]
-    if not candidates:
-        return None
-    ranked = sorted(
-        candidates,
-        key=lambda d: (
-            float(scores.get(int(d), {}).get("score", 0.0)),
-            -int(d),
-        ),
-        reverse=True,
-    )
-    return int(ranked[0]) if ranked else None
-
-
-def _pick_mode_decrease_degree(scores: Dict[int, Dict[str, float]],
-                               counts: Dict[int, int],
-                               allowed_degrees: List[int]) -> Optional[int]:
-    candidates = [int(d) for d in allowed_degrees if int(counts.get(int(d), 0)) > 0]
-    if not candidates:
-        return None
-    ranked = sorted(
-        candidates,
-        key=lambda d: (
-            float(-scores.get(int(d), {}).get("score", 0.0)),
-            int(counts.get(int(d), 0)),
-            int(d),
-        ),
-        reverse=True,
-    )
-    return int(ranked[0]) if ranked else None
-
-
-def _mode_stats_meta(scores: Dict[int, Dict[str, float]]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    for degree_i, stats in scores.items():
-        out[f"d{int(degree_i)}"] = dict(stats)
-    return out
 
 
 def _anchor_mode_stats_meta(scores: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
@@ -1128,8 +1042,7 @@ def adjust_special_degree_mode_impl(
     degrees: List[int],
     anchor_partition: Optional[str] = None,
     max_moves: int = 4,
-    peak_rel_threshold: float = 0.01,
-    window: float = 3.0,
+    peak_rel_threshold: float = 0.01
 ) -> Tuple[torch.Tensor, List[Dict[str, Any]], Dict[str, Any]]:
     label = f"SU{int(su_type)}内部连接度"
     print(f"\n[{label}调整] 基于差谱分析")
@@ -1785,7 +1698,6 @@ def adjust_block_b_hetero_anchor_impl(
         ("thioether", adjust_thioether_719_by_difference_impl, {
             "max_moves": int(total_stage_moves),
             "peak_rel_threshold": float(peak_rel_threshold),
-            "min_keep": 0,
         }),
         ("thio_count19", adjust_special_anchor_count_impl, {
             "su_type": 19,
@@ -2294,7 +2206,6 @@ def adjust_ether_519_by_difference_impl(
     H: torch.Tensor,
     ppm: Optional[np.ndarray],
     diff: Optional[np.ndarray],
-    window_19: float = 3.0,
     peak_rel_threshold: float = 0.01,
     max_moves: int = 5,
     min_keep: int = 1,
@@ -2317,9 +2228,6 @@ def adjust_ether_519_by_difference_impl(
         mode_scores,
         ['single_d1', 'single_d2', 'single_d3', 'double_d2', 'double_d3'],
     )
-    s23_tail = adjuster._window_stats(ppm_arr, diff_arr, 18.0, 35.0)
-    s24_tail = adjuster._window_stats(ppm_arr, diff_arr, 32.0, 50.0)
-    s25_tail = adjuster._window_stats(ppm_arr, diff_arr, 45.0, 65.0)
 
     band_abs = float(s5["abs"]) + float(s19_total["abs"])
     thr = float(peak_rel_threshold) * max(1e-8, band_abs)
@@ -2379,20 +2287,6 @@ def adjust_ether_519_by_difference_impl(
     anchor_mode_meta = _clone_special_anchor_mode_meta(adjuster._get_special_anchor_mode_meta(H_new))
     single_bucket, double_bucket, _, _ = _anchor_mode_bucket_names(19)
 
-    def _pick_5_donors(hh: torch.Tensor, num: int) -> Optional[List[int]]:
-        donors: List[int] = []
-        for _ in range(max(0, int(num))):
-            if int(hh[13].item()) > 0:
-                hh[13] -= 1
-                donors.append(13)
-            elif int(hh[11].item()) > 0:
-                hh[11] -= 1
-                donors.append(11)
-            else:
-                for su_idx in donors:
-                    hh[int(su_idx)] += 1
-                return None
-        return donors
 
     def _restore_5_donors(hh: torch.Tensor, donors: List[int]) -> None:
         for su_idx in list(donors or []):
@@ -2422,7 +2316,7 @@ def adjust_ether_519_by_difference_impl(
         if picked is None:
             return []
         bucket, mode_name, dec_degree, donor_num = picked
-        donors = _pick_5_donors(hh, donor_num)
+        donors = _pick_aromatic_donors(hh, donor_num)
         if donors is None:
             return []
         tail_su = _mode_tail_su(19, int(dec_degree))
@@ -2581,8 +2475,6 @@ def adjust_amine_620_by_difference_impl(
     H: torch.Tensor,
     ppm: Optional[np.ndarray],
     diff: Optional[np.ndarray],
-    window_6: float = 3.0,
-    window_20: float = 3.0,
     peak_rel_threshold: float = 0.01,
     max_moves: int = 5,
     min_keep: int = 0,
@@ -2632,15 +2524,9 @@ def adjust_amine_620_by_difference_impl(
             "threshold": thr,
         }
 
-    def _sgn(x: float) -> int:
-        if x > 0:
-            return 1
-        if x < 0:
-            return -1
-        return 0
 
-    dir_6 = _sgn(float(score_6))
-    dir_20 = _sgn(float(score_20))
+    dir_6 = _sign(float(score_6))
+    dir_20 = _sign(float(score_20))
 
     if dir_6 != 0 and dir_20 != 0 and dir_6 != dir_20:
         inc = 6 if dir_6 > 0 else 20
@@ -2715,20 +2601,6 @@ def adjust_amine_620_by_difference_impl(
             "reason": "amine_total_mismatch",
         }
 
-    def _pick_aromatic_donors(hh: torch.Tensor, num: int) -> Optional[List[int]]:
-        donors: List[int] = []
-        for _ in range(max(0, int(num))):
-            if int(hh[13].item()) > 0:
-                hh[13] -= 1
-                donors.append(13)
-            elif int(hh[11].item()) > 0:
-                hh[11] -= 1
-                donors.append(11)
-            else:
-                for su_idx in donors:
-                    hh[int(su_idx)] += 1
-                return None
-        return donors
 
     def _restore_aromatic_donors(hh: torch.Tensor, donors: List[int]) -> None:
         for su_idx in list(donors or []):
@@ -2892,11 +2764,8 @@ def adjust_thioether_719_by_difference_impl(
     H: torch.Tensor,
     ppm: Optional[np.ndarray],
     diff: Optional[np.ndarray],
-    window_7: float = 3.0,
-    window_19: float = 3.0,
     peak_rel_threshold: float = 0.01,
-    max_moves: int = 5,
-    min_keep: int = 0,
+    max_moves: int = 5
 ) -> Tuple[torch.Tensor, List[Dict[str, Any]], Dict[str, Any]]:
     print("\n[S连接(7/19)调整] 基于差谱分析")
 
@@ -2943,15 +2812,9 @@ def adjust_thioether_719_by_difference_impl(
             "threshold": thr,
         }
 
-    def _sgn(x: float) -> int:
-        if x > 0:
-            return 1
-        if x < 0:
-            return -1
-        return 0
 
-    dir_7 = _sgn(float(score_7))
-    dir_19 = _sgn(float(score_19))
+    dir_7 = _sign(float(score_7))
+    dir_19 = _sign(float(score_19))
 
     if dir_7 != 0 and dir_19 != 0 and dir_7 != dir_19:
         inc = 7 if dir_7 > 0 else 19
@@ -2998,20 +2861,6 @@ def adjust_thioether_719_by_difference_impl(
             "reason": "thio_total_mismatch",
         }
 
-    def _pick_aromatic_donors(hh: torch.Tensor, num: int) -> Optional[List[int]]:
-        donors: List[int] = []
-        for _ in range(max(0, int(num))):
-            if int(hh[13].item()) > 0:
-                hh[13] -= 1
-                donors.append(13)
-            elif int(hh[11].item()) > 0:
-                hh[11] -= 1
-                donors.append(11)
-            else:
-                for su_idx in donors:
-                    hh[int(su_idx)] += 1
-                return None
-        return donors
 
     def _restore_aromatic_donors(hh: torch.Tensor, donors: List[int]) -> None:
         for su_idx in list(donors or []):
@@ -3158,8 +3007,6 @@ def adjust_halogen_821_by_difference_impl(
     H: torch.Tensor,
     ppm: Optional[np.ndarray],
     diff: Optional[np.ndarray],
-    window_8: float = 3.0,
-    window_21: float = 3.0,
     peak_rel_threshold: float = 0.01,
     max_moves: int = 5,
     min_keep: int = 0,
@@ -3209,15 +3056,9 @@ def adjust_halogen_821_by_difference_impl(
             "threshold": thr,
         }
 
-    def _sgn(x: float) -> int:
-        if x > 0:
-            return 1
-        if x < 0:
-            return -1
-        return 0
 
-    dir_8 = _sgn(float(score_8))
-    dir_21 = _sgn(float(score_21))
+    dir_8 = _sign(float(score_8))
+    dir_21 = _sign(float(score_21))
 
     if dir_8 != 0 and dir_21 != 0 and dir_8 != dir_21:
         inc = 8 if dir_8 > 0 else 21
@@ -3251,20 +3092,6 @@ def adjust_halogen_821_by_difference_impl(
             "total_x": int(total_x),
         }
 
-    def _pick_aromatic_donors(hh: torch.Tensor, num: int) -> Optional[List[int]]:
-        donors: List[int] = []
-        for _ in range(max(0, int(num))):
-            if int(hh[13].item()) > 0:
-                hh[13] -= 1
-                donors.append(13)
-            elif int(hh[11].item()) > 0:
-                hh[11] -= 1
-                donors.append(11)
-            else:
-                for su_idx in donors:
-                    hh[int(su_idx)] += 1
-                return None
-        return donors
 
     def _restore_aromatic_donors(hh: torch.Tensor, donors: List[int]) -> None:
         for su_idx in list(donors or []):

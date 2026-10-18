@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from ..core.validation import _node_label
+
 import re
 from typing import Any, Dict, List, Optional, Set
 
 from .....shared.inverse_common import _NodeV3
 from ...classification.classification_models import TopologyFragment
-from ...classification.classification_tokens import normalize_subtype
 from ...fixed_edges import nodes_have_fixed_edge as _nodes_have_fixed_edge
 from ...resources.types import PHYSICAL_TOPOLOGY_RESOURCE_TYPES
 from ..core.fragment import AssemblyFragmentView
@@ -196,15 +197,6 @@ def canonical_view_render_node_ids(view: AssemblyFragmentView) -> Set[int]:
                 for value in list(getattr(stub, "source_node_ids", []) or [])
             )
     return rendered
-
-
-def _node_label(node: _NodeV3) -> str:
-    subtype = str(normalize_subtype(node))
-    try:
-        su_type = int(getattr(node, "su_type", -1))
-    except (TypeError, ValueError):
-        su_type = -1
-    return subtype if subtype not in {str(su_type), ""} else str(su_type)
 
 
 def route_unrendered_claimed_fixed_components(

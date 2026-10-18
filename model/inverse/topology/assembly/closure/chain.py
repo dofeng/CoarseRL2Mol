@@ -8,19 +8,18 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from ...fixed_edges import nodes_have_fixed_edge as _nodes_have_fixed_edge
+from ...classification.classification_tokens import AROMATIC_SU_TYPES
 from ...fixed_routes import fragment_structure_signature, fragment_structure_snapshot
 from ...resources.profiles import (
     alternative_closure_required_counts,
     closure_sequences,
     minimum_closure_required_counts,
 )
-from ...resources.types import PHYSICAL_TOPOLOGY_RESOURCE_TYPES
 from ...stage3_models import (
     RingTopologyContract,
     TopologyAssemblyProduct,
     TopologyClosureSlot,
     TopologyPathRender,
-    merge_stage3_contracts_by_owner,
 )
 from . import branch as branch_closure_module
 from ..state import ownership as ownership_module
@@ -30,7 +29,6 @@ from ..ring import policy as ring_policy_module
 from ..core.fragment import (
     AssemblyFragmentView,
     render_linear_path as _render_linear_path,
-    strip_open_markers as _strip_open_markers,
 )
 from ..core.models import (
     AssemblyCompositionCandidate,
@@ -617,30 +615,12 @@ def make_product(
             str(product_kind),
         )
     )
-    topology_notation = str(render.topology_notation)
     if is_ring and ring_contract is not None:
         source_fragment_ids = [int(value) for value in list(ring_contract.source_fragment_ids or [])]
         fixed_source_node_ids = sorted({
             int(value) for value in list(ring_contract.fixed_source_node_ids or [])
         })
         rendered_node_ids = set(ring_contract.declared_node_ids())
-        topology_notation = str(ring_contract.topology_notation)
-    elif str(product_kind).startswith("fatty_ring_"):
-        topology_notation = str(
-            diagnostics_payload.get("topology_notation")
-            or diagnostics_payload.get("canonical_topology_notation")
-            or render.topology_notation
-        )
-    elif "canonical_labels" in diagnostics_payload:
-        canonical_labels = list(diagnostics_payload.get("canonical_labels", list(labels or [])) or [])
-        canonical_render = render_product(assembler, 
-            canonical_labels,
-            [None for _ in canonical_labels],
-            {},
-            {},
-            suppressed_support_node_ids=suppressed_support_node_ids,
-        )
-        topology_notation = str(canonical_render.topology_notation)
     actual_topology_su = str(
         ring_contract.topology_notation
         if ring_contract is not None
@@ -1258,18 +1238,6 @@ def branch_pending_reason(
     default: str,
 ) -> str:
     return str(validate_external_branch_closure_state(assembler, diagnostics) or str(default))
-
-
-def is_external_branch_closure_reason(
-    assembler,
-    reason: str,
-) -> bool:
-    return str(reason) in {
-        "external_branch_closure_pending",
-        "fixed_branch_H1_missing",
-        "fixed_branch_partner_missing",
-        "fixed_branch_role_conflict",
-    }
 
 
 def has_pending_contracts_for_subphase(
@@ -2698,6 +2666,40 @@ def assemble_remaining_external_d_double_flex(
     return progress_made
 
 
+def single_b_flex_closure_modes(
+    assembler: Any, view: AssemblyFragmentView,
+) -> Optional[List[Tuple[str, str]]]:
+    if any(
+        _d2_endpoint_requires_full_f1(assembler, view, side=side, closure_mode="F1")
+        for side in ("left", "right")
+    ):
+        return [("left", "F1"), ("right", "F1")]
+    open_sides = [side for side in ("left", "right") if view.endpoint(side).is_open]
+    aromatic_labels = {str(value) for value in AROMATIC_SU_TYPES} | {"11"}
+    if len(open_sides) != 1 or any(
+        not view.endpoint(side).is_open and str(view.endpoint(side).label) not in aromatic_labels
+        for side in ("left", "right")
+    ):
+        return None
+    return [(open_sides[0], "F1")]
+
+
+def close_single_b_as_flex(
+    assembler: Any, view: AssemblyFragmentView, branch_donors: List[AssemblyFragmentView],
+) -> bool:
+    modes = single_b_flex_closure_modes(assembler, view)
+    if modes is None:
+        return False
+    if len(modes) == 2:
+        return finalize_with_two_end_closures(
+            assembler, view, product_kind="flex_chain", left_mode="F1", right_mode="F1",
+            branch_donors=branch_donors,
+        )
+    return finalize_with_closure(
+        assembler, view, product_kind="flex_chain", closure_mode="F1", branch_donors=branch_donors,
+    )
+
+
 def assemble_remaining_external_single_b_closures_for_flex(
     assembler,
     branch_donors: List[AssemblyFragmentView],
@@ -2712,30 +2714,7 @@ def assemble_remaining_external_single_b_closures_for_flex(
             require_materializable=True,
             require_generic_join=False,
         ):
-            if (
-                _d2_endpoint_requires_full_f1(
-                    assembler, view, side="right", closure_mode="F1"
-                )
-                or _d2_endpoint_requires_full_f1(
-                    assembler, view, side="left", closure_mode="F1"
-                )
-            ):
-                assembled = finalize_with_two_end_closures(
-                    assembler,
-                    view,
-                    product_kind="flex_chain",
-                    left_mode="F1",
-                    right_mode="F1",
-                    branch_donors=branch_donors,
-                )
-            else:
-                assembled = finalize_with_closure(
-                    assembler,
-                    view,
-                    product_kind="flex_chain",
-                    closure_mode="F1",
-                    branch_donors=branch_donors,
-                )
+            assembled = close_single_b_as_flex(assembler, view, branch_donors)
             if assembled:
                 cycle_progress = True
                 break
@@ -2912,11 +2891,14 @@ def flex_limit(assembler: Any, name: str) -> int:
 
 
 def current_flex_product_count(assembler: Any) -> int:
-    return int(sum(
-        1
+    return len({
+        tuple(item.rendered_node_ids())
         for item in list(assembler.products or [])
         if str(getattr(item, "product_kind", "")) in {"flex_chain", "residual_flex_chain"}
-    ))
+        and bool(getattr(item, "closed", False))
+        and not bool(getattr(item, "provisional", False))
+        and item.rendered_node_ids()
+    })
 
 
 def can_create_more_flex(assembler: Any) -> bool:
@@ -3139,12 +3121,7 @@ def assemble_selected_supplemental_flex(
                 branch_donors=branch_donors,
             )
         elif strategy == "b_single_closure" and len(views) == 1:
-            assembled = finalize_with_closure(assembler, 
-                views[0],
-                product_kind="flex_chain",
-                closure_mode="F1",
-                branch_donors=branch_donors,
-            )
+            assembled = close_single_b_as_flex(assembler, views[0], branch_donors)
         progress_made = bool(assembled or progress_made)
 
     if int(current_flex_product_count(assembler, )) >= int(target_count):

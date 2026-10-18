@@ -1,17 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List
 
-
-LIKE24_SUBTYPES: Set[str] = {
-    "single19d3",
-    "double19d3",
-    "single20d3",
-    "double20d3",
-    "21d3",
-    "24",
-    "14",
-}
 
 LIKE24_BASE_RULES: List[Dict[str, Any]] = [
     {

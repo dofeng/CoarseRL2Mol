@@ -1,4 +1,10 @@
 from __future__ import annotations
+from model.shared.port_rules import (
+    can_match_ports_exact,
+    can_match_ports_partial,
+    format_port_patterns_debug,
+    has_forbidden_fixed_connector_special_combo,
+)
 
 from collections import Counter
 from typing import Any, List, Optional, Set, Tuple
@@ -6,12 +12,7 @@ from typing import Any, List, Optional, Set, Tuple
 import torch
 
 from ...shared.coarse_graph import NUM_SU_TYPES
-from ...shared.inverse_common import (
-    _NodeV3,
-    format_port_patterns_debug,
-    has_forbidden_fixed_connector_special_combo,
-)
-from .hop1_adjuster import can_match_ports_exact, can_match_ports_partial
+from ...shared.inverse_common import _NodeV3
 from .terminal_paths import terminal_path_reason
 
 

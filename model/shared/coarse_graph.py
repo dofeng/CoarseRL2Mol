@@ -2,17 +2,13 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data
 from rdkit import Chem
-from rdkit.Chem import Descriptors, AllChem
+from rdkit.Chem import AllChem
 from typing import List, Dict, Tuple, Optional, Set
 import os
 import sys
 import networkx as nx
-import numpy as np
-import re
 import math
 from collections import deque
-import itertools as _it
-from scipy.signal import find_peaks
 
 # 自定义异常类，用于更好地处理不同的跳过情况
 class MoleculeProcessingError(Exception):
@@ -57,11 +53,11 @@ SU_DEFS: List[Tuple[str, str]] = [
     ('Amide_Group', '[#6](=[O])[#7]'),
     ('Carboxylic_Acid', '[CX3](=[O])[OX2H1]'),
     ('Ester_Group', '[#6](=[O])[#8;X2;!H1]'),
-    
+
     # B类: 其他单原子官能团 (橙色)
     ('Aldehyde_Ketone_C', '[#6;H1,H0](=[O])'),
     ('Nitrile_C', '[#6]#[N]'),
-    
+
     # C类: 芳香碳 (蓝色)（5-13）
     ('O_Substituted_Aro_C', '[c;$(c-O)]'),
     ('N_Substituted_Aro_C', '[c;$(c-N)]'),
@@ -72,14 +68,14 @@ SU_DEFS: List[Tuple[str, str]] = [
     ('Alkyl_Substituted_Aro_C','[c;$(c-C)]'),
     ('Aromatic_Bridgehead_C', '[c;a;H0;R2,R3,R4]'),  
     ('Carbocyclic_Aro_CH', '[cH1;a]'),
-    
+
     # D类: 链状不饱和碳 (青色)（14-18）
     ('Vinyllic_Cq', '[CX3H0;$(C=C)]'),
     ('Vinyllic_CH', '[CX3H1;$(C=C)]'),
     ('Vinyllic_CH2', '[CX3H2;$(C=C)]'),
     ('Alkynyl_Cq', '[CX2H0;$(C#C)]'),
     ('Alkynyl_CH', '[CX2H1;$(C#C)]'),
-    
+
     # E类: 饱和脂肪碳 (绿色)（19-25）
     ('Alcohol_Ether_C', '[CX4;$(C-[O,o,S,s])]'),
     ('Amine_C', '[CX4;$(C-[N,n])]'),
@@ -88,7 +84,7 @@ SU_DEFS: List[Tuple[str, str]] = [
     ('Alkyl_CH2', '[CX4H2]'),
     ('Alkyl_CH', '[CX4H1]'),
     ('Alkyl_Cq', '[CX4H0]'),
-    
+
     # F类: 杂原子节点 (紫色)（26-32）
     ('Heterocyclic_N', '[n;r;+0;!$(nC=O)]'),
     ('Amine_Nitrogen', '[N;X3;v3;+0;!$(NC=O)]'),
@@ -103,7 +99,7 @@ SU_DEFS: List[Tuple[str, str]] = [
 SU_NAME_TO_ID: Dict[str, int] = {name: i for i, (name, _) in enumerate(SU_DEFS)}
 SU_PATTERNS: List[Tuple[str, Chem.Mol]] = [(name, Chem.MolFromSmarts(smarts)) for name, smarts in SU_DEFS]
 
-# V-Final-Fix: Degree/Valency constraints for each SU
+# Degree/Valency constraints for each SU
 SU_MAX_DEGREE = {
     # A类: 核心官能团
     'Amide_Group': 2,
@@ -157,12 +153,12 @@ def calculate_actual_atom_counts_for_su(mol: Chem.Mol, atom_indices: List[int]) 
     for atom_idx in atom_indices:
         atom = mol.GetAtomWithIdx(atom_idx)
         symbol = atom.GetSymbol()
-        
+
         # 统计与该重原子相连的显式氢原子数量（AddHs 之后为显式氢）
         for nbr in atom.GetNeighbors():
             if nbr.GetSymbol() == 'H':
                 total_h_in_su += 1
-        
+
         # 累加重原子本身的计数
         if symbol in counts:
             counts[symbol] += 1
@@ -227,19 +223,6 @@ def get_su_ppm_range(su_type: int) -> tuple[float, float]:
         raise KeyError(f"missing coarse ppm range for SU{su_i} ({su_name})")
     low, high = SU_PPM_RANGES[su_name]
     return float(low), float(high)
-
-_ppm_list = []
-for name, _ in SU_DEFS:
-    low, high = SU_PPM_RANGES.get(name, (0, 300))
-    # 对 Halogen_X 维持极窄范围 (0~1 ppm)，不再额外扩展
-    if name == 'Halogen_X':
-        _ppm_list.append((low, high))
-        continue
-    low = max(0, low - 1)
-    high = min(300, high + 1)
-    _ppm_list.append((low, high))
-
-SU_PPM_MIN_MAX = torch.tensor(_ppm_list, dtype=torch.float)
 
 
 # ==========================================================
@@ -906,7 +889,7 @@ def visualize_coarse_grained_graph(data, su_matches, mol, output_path,
     fig_height = max(4, min(fig_height, 20))
 
     fig = Figure(figsize=(fig_width, fig_height), dpi=100)
-    canvas = FigureCanvas(fig)
+    FigureCanvas(fig)
     ax = fig.add_subplot(1, 1, 1)
 
     for u, v in edge_list:
@@ -965,7 +948,7 @@ def _assign_atoms_to_su(mol: Chem.Mol) -> Tuple[List[Dict], List[int]]:
     """将分子中的原子分配给结构单元(SU)。返回匹配列表和原子->SU索引的映射。"""
     atom_to_su_idx = [-1] * mol.GetNumAtoms()
     su_matches = []
-    
+
     for su_name, pattern in SU_PATTERNS:
         matches = mol.GetSubstructMatches(pattern)
         for match in matches:
@@ -975,13 +958,12 @@ def _assign_atoms_to_su(mol: Chem.Mol) -> Tuple[List[Dict], List[int]]:
                 su_matches.append({'name': su_name, 'atoms': match})
                 for atom_idx in match:
                     atom_to_su_idx[atom_idx] = su_id
-    
+
     return su_matches, atom_to_su_idx
 
 def smiles_to_coarse_grained_graph(
     smiles_string: str,
     output_path_prefix: Optional[str] = None,
-    y_spectrum: Optional[torch.Tensor] = None,
     real_atom_shifts: Optional[Dict[int, Tuple[float, float]]] = None,
     min_su_nodes: int = 6,
     save_visualization: bool = True,
@@ -993,7 +975,7 @@ def smiles_to_coarse_grained_graph(
     font_size: int = FONT_SIZE,
 ) -> Optional[Tuple[Data, List[Dict]]]:
     """
-    V27: 将一个SMILES字符串转换为一个包含【最终版增强特征】和【修正后边提取逻辑】的粗粒度图信息的PyG Data对象。
+    将 SMILES 转换为 39 维节点特征的粗粒度图，并从节点位移生成谱图。
     """
     try:
         mol = Chem.MolFromSmiles(smiles_string)
@@ -1004,10 +986,10 @@ def smiles_to_coarse_grained_graph(
         print(f"  -> 警告: 处理SMILES '{smiles_string}' 时发生意外的RDKit错误: {e}。跳过该分子。")
         return None
 
-    # V49: 确保先执行AddHs，让后续所有函数都操作在带H的完整分子上
+    # 确保先执行AddHs，让后续所有函数都操作在带H的完整分子上
     mol = Chem.AddHs(mol)
     AllChem.Compute2DCoords(mol)
-    
+
     try:
         AllChem.ComputeGasteigerCharges(mol)
     except Exception:
@@ -1070,10 +1052,10 @@ def smiles_to_coarse_grained_graph(
     for su_info in su_matches:
         su_type_id = SU_NAME_TO_ID[su_info['name']]
         one_hot_su_type = F.one_hot(torch.tensor(su_type_id), num_classes=NUM_SU_TYPES).float()
-        
+
         atom_counts = calculate_actual_atom_counts_for_su(mol, su_info['atoms'])
-        
-        # V-Refactored: 节点特征现在是干净的 39 维: 33 (one-hot SU) + 6 (原子数)
+
+        # 节点特征现在是干净的 39 维: 33 (one-hot SU) + 6 (原子数)
         node_feat = torch.cat([
             one_hot_su_type,
             atom_counts,
@@ -1100,7 +1082,7 @@ def smiles_to_coarse_grained_graph(
     edge_index = torch.tensor(list(edge_map.keys()), dtype=torch.long).t().contiguous() if edge_map else torch.empty((2, 0), dtype=torch.long)
     edge_attr = torch.stack(list(edge_map.values())) if edge_map else torch.empty((0, 2), dtype=torch.float)
 
-    # --- 提取全局特征 (V49: 基于最终的、已添加H的mol对象) ---
+    # --- 提取全局特征 (基于已添加H的mol对象) ---
     total_counts = {'C': 0, 'H': 0, 'O': 0, 'N': 0, 'S': 0, 'X': 0}
     # 直接遍历处理过的分子（包含所有H原子）以获得精确的全局计数
     for atom in mol.GetAtoms():
@@ -1127,31 +1109,23 @@ def smiles_to_coarse_grained_graph(
         total_counts['X']
     ], dtype=torch.float)
 
-    # V-Final-Fix: Add max degree information
+    # Add max degree information
     su_max_degrees = torch.tensor([SU_MAX_DEGREE.get(su['name'], 4) for su in su_matches], dtype=torch.long)
 
     # 创建PyG Data对象
     data = Data(x=node_feat_matrix, edge_index=edge_index, edge_attr=edge_attr)
     data.smiles = smiles_string
-    
-    # data.y 仅做兼容保留，不再用于训练。
-    # 该谱图将被下面基于节点信息新生成的谱图所覆盖。
-    if y_spectrum is not None:
-        # 临时保留输入谱图，主要为了可视化或调试，但不会是最终数据
-        data.y_spectrum = y_spectrum
-    else:
-        data.y_spectrum = torch.zeros(NMR_DATA_POINTS, dtype=torch.float)
 
     data.total_atom_counts = total_atom_counts
     data.su_max_degrees = su_max_degrees
-    
-    # V-Fix (Robustness #6): 为损失函数预先计算好节点类型标签
+
+    # 为损失函数预先计算好节点类型标签
     data.su_type_indices = torch.tensor([SU_NAME_TO_ID[su['name']] for su in su_matches], dtype=torch.long)
-    
-    # V-Refactored: 从39维特征中提取 one-hot 部分
+
+    # 从39维特征中提取 one-hot 部分
     su_onehot = data.x[:, 0:NUM_SU_TYPES]
     data.su_hist = su_onehot.sum(0) 
-    
+
     # ❷ is_carbon 标记 
     data.is_carbon = (data.x[:, :26].sum(-1) > 0)
 
@@ -1192,7 +1166,7 @@ def smiles_to_coarse_grained_graph(
                 f"uncovered_su_indices={uncovered_su_indices}, smiles={smiles_string}"
             )
 
-    # -------- [V3] 将相对强度转换为基于碳计数的“准绝对强度” --------
+    # -------- 将相对强度转换为基于碳计数的“准绝对强度” --------
     # 1. 计算分子中碳原子的总数
     num_carbons = total_atom_counts[0].item() # C is at index 0
 
@@ -1203,7 +1177,7 @@ def smiles_to_coarse_grained_graph(
     if current_total_intensity > 1e-6 and num_carbons > 0:
         scaling_factor = num_carbons / current_total_intensity
         real_intensity_tensor = real_intensity_tensor * scaling_factor
-        
+
     data.real_ppm       = real_ppm_tensor        
     data.real_intensity = real_intensity_tensor 
 
@@ -1247,7 +1221,7 @@ def smiles_to_coarse_grained_graph(
 
 if __name__ == '__main__':
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description='将SMILES分子转换为粗粒度图并可视化',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1283,24 +1257,24 @@ if __name__ == '__main__':
                         help='节点中心 SU ID 字号')
     parser.add_argument('--hide_su_id', action='store_true',
                         help='隐藏节点中心 SU ID，只展示粗粒度节点颜色和拓扑')
-    
+
     args = parser.parse_args()
-    
+
     if not VISUALIZATION_ENABLED:
         print("警告: 可视化库(networkx, matplotlib)未安装，图片将不会被生成。")
-    
+
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"输出目录: {args.output_dir}\n")
-    
+
     def process_smiles(smiles: str, name: str, save_pt: bool = True):
         """处理单个SMILES"""
         print(f"{'='*60}")
         print(f"分子: {name}")
         print(f"SMILES: {smiles}")
         print(f"{'='*60}")
-        
+
         output_prefix = os.path.join(args.output_dir, name)
-        
+
         try:
             result = smiles_to_coarse_grained_graph(
                 smiles,
@@ -1322,7 +1296,7 @@ if __name__ == '__main__':
                     su_id = SU_NAME_TO_ID[su_info['name']]
                     print(f"   节点 {i:2d}: SU {su_id:2d} ({su_info['name']:<25})")
                 print(f"\n🖼️  图片: {output_prefix}.png")
-                
+
                 if not save_pt:
                     # 删除pt文件
                     pt_path = f"{output_prefix}.pt"
@@ -1338,7 +1312,7 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ 错误: {e}")
             return False
-    
+
     if args.smiles:
         # 处理用户指定的SMILES
         process_smiles(args.smiles, args.name, save_pt=not args.no_pt)
@@ -1351,7 +1325,7 @@ if __name__ == '__main__':
             "Naphthalene": "c1ccc2ccccc2c1",
             "Biphenyl": "c1ccccc1-c1ccccc1",
         }
-        
+
         print("运行内置测试分子演示...\n")
         for name, smiles in test_smiles.items():
             process_smiles(smiles, name, save_pt=not args.no_pt)

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import random
 
-import numpy as np
 import pandas as pd
 import torch
+
+from model.forward.common import set_seed
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -34,14 +34,6 @@ except ImportError:
         save_s2n_checkpoint,
         save_s2n_plot_data,
     )
-
-
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def build_loader(files: list[str],

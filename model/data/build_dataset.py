@@ -1,12 +1,11 @@
 import os
 import argparse
 import pandas as pd
-import torch
 from rdkit import Chem
 from tqdm import tqdm
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Tuple, Dict, Optional, List
+from typing import Tuple, Dict, Optional
 import numpy as np
 import sys
 from pathlib import Path
@@ -54,7 +53,7 @@ class ThreadSafeStats:
     def increment(self, key: str, value: int = 1):
         with self._lock:
             self.stats[key] = self.stats.get(key, 0) + value
-    
+
     def get_stats(self) -> Dict[str, int]:
         with self._lock:
             return self.stats.copy()
@@ -73,13 +72,13 @@ def calculate_carbon_count_from_smiles(smiles: str) -> int:
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             return 0
-        
+
         # 计算所有碳原子数量
         carbon_count = 0
         for atom in mol.GetAtoms():
             if atom.GetSymbol() == 'C':
                 carbon_count += 1
-        
+
         return carbon_count
     except Exception:
         return 0
@@ -101,11 +100,11 @@ def is_valid_molecule(smiles: str) -> Tuple[bool, str]:
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return False, "Invalid SMILES string, cannot be parsed by RDKit"
-        
+
     # Check for multiple disconnected components
     if len(Chem.GetMolFrags(mol)) > 1:
         return False, "Molecule has disconnected components (contains '.')"
-        
+
     for atom in mol.GetAtoms():
         # Check for unsupported elements
         if atom.GetSymbol() not in ALLOWED_ELEMENTS:
@@ -113,7 +112,7 @@ def is_valid_molecule(smiles: str) -> Tuple[bool, str]:
         # Check for charges
         if atom.GetFormalCharge() != 0:
             return False, f"Atom {atom.GetIdx()} has a formal charge of {atom.GetFormalCharge()}"
-            
+
     return True, "Valid"
 
 # ------------------------------------------------------------
@@ -130,29 +129,24 @@ def process_single_molecule(basename: str, data_dir: str, output_dir: str, stats
     处理单个分子文件，生成并保存其 .pt 图数据文件。
     """
     txt_path = os.path.join(data_dir, f"{basename}.txt")
-    
-    # 不再需要 .csv 文件，因为谱图是动态生成的
-    # if not os.path.exists(csv_path):
-    #     stats_counter.increment("skipped_no_csv")
-    #     return
 
     try:
         # 读取SMILES
         with open(txt_path, 'r', encoding='utf-8') as f:
             smiles = f.read().strip()
-        
+
         # 验证分子有效性
-        is_valid, reason = is_valid_molecule(smiles)
+        is_valid, _ = is_valid_molecule(smiles)
         if not is_valid:
             stats_counter.increment("skipped_invalid_smiles")
             return
-        
+
         # 🔧 新增：计算总碳数
         total_carbon_count = calculate_carbon_count_from_smiles(smiles)
         if total_carbon_count <= 0:
             stats_counter.increment("skipped_zero_carbon")
             return
-            
+
         # curated 数据必须优先按文件 ID 精确匹配，避免重复 SMILES 互相覆盖。
         # 非严格模式下保留旧数据的 smiles -> atom shift 映射回退。
         real_shift_map = {}
@@ -175,33 +169,31 @@ def process_single_molecule(basename: str, data_dir: str, output_dir: str, stats
                 return
 
         # 生成粗粒度图，并保存 .pt 与可视化 .png 文件
-        # y_spectrum 传入 None, 将在 coarse_graph.py 中动态生成
         output_prefix = os.path.join(output_dir, basename)
         result = smiles_to_coarse_grained_graph(
             smiles_string=smiles,
             output_path_prefix=output_prefix,
-            y_spectrum=None, # 谱图将从节点数据动态生成
             real_atom_shifts=real_shift_map,
             min_su_nodes=int(min_su_nodes),
             save_visualization=bool(save_visualization),
             require_complete_real_shifts=bool(require_complete_shifts),
         )
-        
+
         if result:
             stats_counter.increment("processed")
         else:
             # 理论上不应该到这里，因为函数现在会抛出异常而不是返回 None
             stats_counter.increment("skipped_cg_fail")
-            
-    except TooFewNodesError as e:
+
+    except TooFewNodesError:
         stats_counter.increment("skipped_too_few_nodes")
-    except NoStructureUnitsError as e:
+    except NoStructureUnitsError:
         stats_counter.increment("skipped_cg_fail")
-    except UnassignedAtomsError as e:
+    except UnassignedAtomsError:
         stats_counter.increment("skipped_cg_fail")
-    except IncompleteShiftMappingError as e:
+    except IncompleteShiftMappingError:
         stats_counter.increment("skipped_incomplete_shifts")
-    except Exception as e:
+    except Exception:
         import traceback
         basename = os.path.basename(txt_path).replace('.txt', '')
         print(f"--- Exception occurred for molecule: {basename} ---")
@@ -217,15 +209,15 @@ def process_single_molecule(basename: str, data_dir: str, output_dir: str, stats
 def main(args):
     """Main function to orchestrate the dataset building process with multithreading."""
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
     source_files = os.listdir(args.data_dir)
     basenames = sorted([os.path.splitext(f)[0] for f in source_files if f.endswith('.txt')])
-    
+
     print(f"Found {len(basenames)} unique molecules to process in '{args.data_dir}'")
     print(f"Using {args.num_workers} worker threads for parallel processing.")
-    
+
     stats_counter = ThreadSafeStats()
-    
+
     with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
         futures = {
             executor.submit(
@@ -257,7 +249,7 @@ def main(args):
 
     # Final statistics
     final_stats = stats_counter.get_stats()
-    
+
     print("\n--- Processing Complete ---")
     print(f"Successfully processed and generated .pt files for: {final_stats['processed']} molecules")
     print("Skipped molecules breakdown:")
@@ -374,7 +366,7 @@ if __name__ == '__main__':
         type=str,
         default=None,
         help="Curated dataset root containing structure_data/ and shift_data/.\n"
-             "Example: --curated_dir /home/dmin/CoarseRL2Mol/data/curated_shift_dataset"
+             "Example: --curated_dir data/curated_shift_dataset"
     )
     parser.add_argument(
         '--data_dir', 
@@ -427,7 +419,7 @@ if __name__ == '__main__':
         action='store_true',
         help="Require atom_index values in the shift data to exactly match all RDKit carbon atom indices."
     )
-    
+
     args = parser.parse_args()
 
     if args.curated_dir:
@@ -446,4 +438,4 @@ if __name__ == '__main__':
 
     args.shift_mapping = shift_mapping
     args.shift_mapping_by_id = shift_mapping_by_id
-    main(args) 
+    main(args)

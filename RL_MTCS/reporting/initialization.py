@@ -7,7 +7,9 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 from RL_MTCS.io.input import initialize, load_node_rows, load_topology_rows
-from RL_MTCS.mdp.types import TopologyUnit, ExternalContract, InverseInputError
+from RL_MTCS.mdp.types import (
+    ALIPHATIC_RING_KINDS, TopologyUnit, ExternalContract, InverseInputError,
+)
 from RL_MTCS.io.output import contract_rows
 from RL_MTCS.geometry import HEX_DIRECTIONS
 
@@ -339,10 +341,12 @@ def inspect_csv_initialization(
             "initial_component_count": state.component_count(),
             "anchor_unit_id": str(initialized["anchor_unit_id"]),
             "su25_count": len(su25_rows),
+            "aromatic_residual_count": len(problem.aromatic_residual_node_ids),
         },
         "distributions": {
             "su_types": _su_distribution(state.current_node_map(), names),
             "planned_su_types": _su_distribution(problem.node_map(), names),
+            "assembly_target_su_types": _su_distribution(problem.assembly_target_node_map(), names),
             "initially_placed_aromatic_su_types": _su_distribution(
                 placed_initial_su, names
             ),
@@ -356,7 +360,7 @@ def inspect_csv_initialization(
                 (_metadata(unit).get("ring_geometry_mode", "tree")
                  for unit in topology_units
                  if _metadata(unit).get("source_product_type", "").lower()
-                 in {"aliphatic_ring", "fatty_ring", "fatty_ring_fused", "fatty_ring_side", "fatty_ring_upper_lower"}),
+                 in ALIPHATIC_RING_KINDS),
                 "ring_geometry_mode",
             ),
             "source_product_types": _count_rows(
@@ -377,6 +381,7 @@ def inspect_csv_initialization(
         "topology_units": topology_rows,
         "contracts": contract_records,
         "source_rigid_pairs": contract_rows(problem.source_rigid_contracts),
+        "aromatic_residual_nodes": problem.aromatic_residual_rows(),
         "su25_sites": su25_rows,
         "initial_state_audit": initial_audit,
         "validation": {

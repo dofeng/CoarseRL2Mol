@@ -6,7 +6,7 @@ from collections import Counter, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 import re
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from ...resources.types import (
     EXTERNAL_ADJUSTMENT_RESOURCE_TYPES,
@@ -325,35 +325,6 @@ def build_candidate_identity(
         },
         "rendered_node_ids": sorted(rendered_node_ids),
     }
-
-
-def preflight_branch_donor(assembler: Any, view: AssemblyFragmentView) -> bool:
-    """Reject a donor whose real route is no longer physically available."""
-    fragment_id = int(view.fragment_id)
-    route_ids = _canonical_view_render_node_ids(view)
-    owner_map = dict(getattr(assembler, "fixed_node_owner_by_id", {}) or {})
-    source_fragment_ids = {
-        int(fragment_id),
-        *(
-            int(owner_map[int(node_id)])
-            for node_id in route_ids
-            if int(node_id) in owner_map
-        ),
-    }
-    conflict = candidate_identity_conflict(assembler, 
-        rendered_node_ids=route_ids,
-        source_fragment_ids=source_fragment_ids,
-    )
-    if conflict is not None:
-        record_composition_failure_entry(assembler, {
-            "attempted_product_kind": "branch_donor",
-            "source_fragment_ids": sorted(source_fragment_ids),
-            "validation_reason": "branch_donor_route_unavailable",
-            "submitted_node_ids": list(conflict.get("submitted_node_ids", []) or []),
-            "foreign_fixed_node_ids": list(conflict.get("foreign_fixed_node_ids", []) or []),
-        })
-        return False
-    return True
 
 
 def branch_result_route_ids(assembler: Any, result: BranchClosureResult) -> Set[int]:

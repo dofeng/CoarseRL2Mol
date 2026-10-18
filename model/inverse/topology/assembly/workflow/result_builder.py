@@ -27,12 +27,48 @@ from ..state.round_context import (
 from ..core.rules import external_phase_for_role as _external_phase_for_role
 
 
+def _current_resource_initial_ids(
+    nodes_by_id: Any,
+    allocator_initial: Any,
+    classified_donors: Any,
+    remaining_ids: Any,
+) -> dict[str, list[int]]:
+    current_su = {
+        int(node_id): int(node.su_type)
+        for node_id, node in dict(nodes_by_id or {}).items()
+    }
+    initial = {
+        int(node_id): current_su[int(node_id)]
+        for values in dict(allocator_initial or {}).values()
+        for node_id in list(values or [])
+        if int(node_id) in current_su
+    }
+    for values in dict(classified_donors or {}).values():
+        for raw_id in list(values or []):
+            node_id = int(raw_id)
+            if node_id in current_su:
+                initial[node_id] = current_su[node_id]
+    for values in dict(remaining_ids or {}).values():
+        for raw_id in list(values or []):
+            node_id = int(raw_id)
+            if node_id in current_su:
+                initial[node_id] = current_su[node_id]
+    keys = sorted(
+        {str(key) for source in (allocator_initial, classified_donors, remaining_ids)
+         for key in dict(source or {})}
+        | {str(value) for value in initial.values()}, key=int,
+    )
+    return {
+        key: sorted(node_id for node_id, su_type in initial.items() if su_type == int(key))
+        for key in keys
+    }
+
+
 def build_external_assembly_result(
     self: Any,
     phase_state: ExternalAssemblyPhaseState,
 ) -> TopologyAssemblyResult:
     external_subphases = list(phase_state.external_subphases)
-    deferred_flex_shortfall = bool(phase_state.deferred_flex_shortfall)
     flex_violation_reason = phase_state.flex_violation_reason
     ring_resource_blockers = dict(phase_state.ring_resource_blockers)
     ring_materialization_blockers = dict(
@@ -92,9 +128,13 @@ def build_external_assembly_result(
         "external_symbolic_addition": max(0, int(final_flex_count) - int(explicit_flex_count)),
         "external_capacity_exhausted": bool(
             dict(self.flex_audit or {}).get("external_capacity_exhausted", False)
-            or deferred_flex_shortfall
         ),
-        "external_shortfall_deferred_to_residual": bool(deferred_flex_shortfall),
+        "physical_ok": bool(self.flex_audit.get("flex_physical_ok", False)),
+        "count_ok": bool(self.flex_audit.get("flex_count_ok", False)),
+        "window_ok": bool(self.flex_audit.get("flex_window_width_ok", False)),
+        "external_pool_addition": sum(
+            product.reason == "external_flex_pool_supplement" for product in self.products
+        ),
         "remaining_minimum_gap": max(0, int(chain_materializer_module.flex_limit(self, "min")) - int(final_flex_count)),
         "remaining_preferred_gap": max(0, int(dict(self.flex_bounds or {}).get("target", 0) or 0) - int(final_flex_count)),
     }
@@ -133,7 +173,7 @@ def build_external_assembly_result(
         for item in list(self.pending_contracts or [])
         if dict(item or {})
     ]
-    has_external_pending = bool(self.pending_units)
+    has_external_pending = bool(self.pending_units or pending_contracts)
     has_shortage_contract = any(
         int(value) > 0
         for contract in list(pending_contracts or [])
@@ -162,11 +202,16 @@ def build_external_assembly_result(
     active_external_phase = _external_phase_for_role(
         str(dict(active_pending_contract or {}).get("target_role", "") or "")
     )
+    flex_ready = bool(
+        flex_target_plan["physical_ok"]
+        and flex_target_plan["count_ok"]
+        and flex_target_plan["window_ok"]
+    )
     if str(flex_violation_reason) == "flex_range_below_minimum":
         result_reason = "external_flex_range_below_minimum"
     elif flex_violation_reason is not None or flex_above_max:
         result_reason = "external_flex_range_exceeded"
-    elif self.current_phase == "flex_range_reconciliation":
+    elif self.current_phase == "flex_range_reconciliation" or not flex_ready:
         result_reason = "flex_range_reconciliation_required"
     elif not has_external_pending:
         result_reason = "remaining_pool_spectrum_rebalance_ready"
@@ -176,7 +221,7 @@ def build_external_assembly_result(
         result_reason = "external_ring_candidates_pending"
     else:
         result_reason = f"{active_external_phase}_pending"
-    if (flex_violation_reason is not None or flex_above_max
+    if (flex_violation_reason is not None or flex_above_max or not flex_ready
             or self.current_phase == "flex_range_reconciliation"):
         stage3_phase = "flex_range_reconciliation"
     elif has_external_pending:
@@ -434,21 +479,10 @@ def build_external_assembly_result(
             classification_pool.get("su11_donor_ids_by_su", {}) or {}
         ).items()
     }
-    ledger.initial_ids_by_su = {
-        str(key): sorted({
-            int(value)
-            for value in (
-                list(closure_initial_ids.get(str(key), []) or [])
-                + list(donor_initial_ids.get(str(key), []) or [])
-            )
-        })
-        for key in sorted(
-            set(closure_initial_ids)
-            | set(donor_initial_ids)
-            | set(ownership_remaining_ids),
-            key=int,
-        )
-    }
+    ledger.initial_ids_by_su = _current_resource_initial_ids(
+        self.nodes_by_id, closure_initial_ids, donor_initial_ids,
+        ownership_remaining_ids,
+    )
     ledger.consumed_ids_by_su = {
         str(key): sorted(
             set(ledger.initial_ids_by_su.get(str(key), []) or [])

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict, deque
-from copy import deepcopy
+from collections import Counter
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -18,12 +17,10 @@ from ...classification.classification_tokens import (
     is_abstract_open_nonfixed_semantic,
     normalize_subtype,
 )
-from ...stage3.flex_audit import _compute_flex_audit
 from ...fixed_edges import nodes_have_fixed_edge as _nodes_have_fixed_edge
 from ...resources.types import PHYSICAL_TOPOLOGY_RESOURCE_TYPES
 from ...stage3_models import (
     TopologyAssemblyResult,
-    TopologyPathRender,
     TopologyPendingUnit,
     TopologyPoolLedger,
 )
@@ -31,19 +28,13 @@ from ..core.models import (
     BranchStub,
 )
 from .validation import (
-    canonical_view_render_node_ids as _canonical_view_render_node_ids,
     fragment_atomic_groups as _fragment_atomic_groups,
     route_unrendered_claimed_fixed_components as _route_unrendered_claimed_fixed_components,
     validate_fragment_view_projection as _validate_fragment_view_projection,
-    view_render_route_node_ids as _view_render_route_node_ids,
 )
 from ..core.fragment import (
     AssemblyFragmentView,
-    clean_ring_segment_text as _clean_ring_segment_text,
     is_aromatic_label as _is_aromatic_label,
-    render_linear_path as _render_linear_path,
-    render_token_sequence as _render_token_sequence,
-    strip_open_markers as _strip_open_markers,
 )
 from ..core.rules import (
     CANONICAL_LABEL_BY_CLASS,
@@ -52,10 +43,6 @@ from ..core.rules import (
 )
 from ..core.validation import mainline_contract_reason, validate_chain_product_shape
 from ..state.iteration_ledger import normalize_slot, required_counts_from_slots
-from ...resources.profiles import (
-    build_raw_su24_resource_profiles,
-    raw_su24_segment_support,
-)
 
 
 def _slot_required_counts(slot_dicts: Sequence[Dict[str, Any]]) -> Dict[str, int]:
@@ -1451,7 +1438,6 @@ def _build_like24_branch_maps_for_center(
         if neighbor is None:
             continue
         semantics = _neighbor_semantic_dict(center, neighbor)
-        label = _node_label(neighbor)
         if int(getattr(neighbor, "su_type", -1)) == 11:
             suppressed_support_node_ids.append(int(node_id))
             continue
@@ -1785,6 +1771,10 @@ def project_like24_fragment(fragment: TopologyFragment, nodes_by_id: Dict[int, _
     h_branch_contract_counts_by_center: Counter = Counter()
     for raw_contract in list(fixed_connection_contracts or []):
         contract = dict(raw_contract or {})
+        if _safe_int(contract.get("connector_node_id"), -1) in node_ids:
+            # A connector already used on this mainline cannot also close an
+            # off-mainline branch, regardless of its original fragment role.
+            continue
         role_candidates = {
             str(value)
             for value in list(contract.get("role_candidates", []) or [])

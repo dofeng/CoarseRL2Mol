@@ -317,12 +317,6 @@ class RingTopologyContract(Stage3Serializable):
             }
         )
 
-    def recyclable_node_ids(self) -> List[int]:
-        return sorted({
-            int(value)
-            for values in dict(self.recyclable_resource_ids_by_su or {}).values()
-            for value in list(values or [])
-        })
 
     def to_audit_dict(self) -> Dict[str, Any]:
         """Return the read-only ring graph needed by final diagnostics."""

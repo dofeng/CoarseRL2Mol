@@ -6,10 +6,11 @@ chemical shift only; intensity is intentionally not learned because it is less
 stable and is better handled by node counts / deterministic spectrum
 normalization in downstream inverse reconstruction.
 
-For compatibility with the existing inverse code, the public class name
-``NMR_VAE`` and the decoder interface are retained. The decoder returns two
-columns ``[mu, pi_logit]`` when called directly, with ``pi_logit=0`` as a
-neutral placeholder.
+The public ``NMR_VAE`` name and two-column decoder interface are retained
+for stored models and forward consumers. With the default shift-only head,
+direct decoding returns ``[mu, 0]`` and forward returns unit intensity.
+Historical ``predict_intensity=True`` checkpoints use a learned second column;
+new shift-only training does not optimize that intensity output.
 """
 
 from __future__ import annotations
@@ -17,20 +18,20 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
-import os
 
 import torch
+
+from model.forward.common import collect_pt_files
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset
 from torch_geometric.data import Data, InMemoryDataset
 from torch_geometric.nn import GATv2Conv, GINEConv
 from torch_geometric.utils import k_hop_subgraph, to_undirected
 
 try:
-    from ...shared.coarse_graph import NUM_SU_TYPES, SU_DEFS
+    from ...shared.coarse_graph import NUM_SU_TYPES
 except ImportError:
-    from model.shared.coarse_graph import NUM_SU_TYPES, SU_DEFS
+    from model.shared.coarse_graph import NUM_SU_TYPES
 
 
 PPM_CENTER = 120.0
@@ -67,7 +68,6 @@ class G2SConfig:
     beta: float = 1.0e-4
     loss: str = "smooth_l1"
     predict_intensity: bool = False
-    use_latent: bool = True
     use_global_element: bool = True
 
     def to_dict(self) -> dict:
@@ -79,21 +79,6 @@ class G2SConfig:
             return cls()
         valid = {field.name for field in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in dict(data).items() if k in valid})
-
-
-def collect_pt_files(paths: Sequence[str | Path]) -> list[str]:
-    files: list[str] = []
-    for item in paths:
-        path = Path(item)
-        if path.is_dir():
-            files.extend(str(p) for p in sorted(path.glob("*.pt")))
-        elif path.is_file() and path.suffix == ".pt":
-            files.append(str(path))
-        else:
-            raise FileNotFoundError(f"No .pt files found at '{path}'")
-    if not files:
-        raise FileNotFoundError(f"No .pt files found in: {paths}")
-    return files
 
 
 def load_raw_data(path: str | Path | Sequence[str | Path]) -> list:
@@ -149,10 +134,6 @@ def _set_mol_attr(mol, key: str, value):
             setattr(mol, key, value)
         except Exception:
             pass
-
-
-def _mol_id_from_path(path: str | Path) -> str:
-    return Path(path).stem
 
 
 class MyData(Data):
@@ -268,26 +249,6 @@ class LocalNMRDataset(InMemoryDataset):
         return self.collate(all_data)
 
 
-class G2SFileDataset(Dataset):
-    """Lazy dataset wrapper that builds local subgraphs from individual files."""
-
-    def __init__(self, files: Sequence[str | Path], k: int = 3):
-        self.files = [str(p) for p in files]
-        self.k = int(k)
-
-    def __len__(self) -> int:
-        return len(self.files)
-
-    def __getitem__(self, idx: int):
-        mol = torch.load(self.files[idx], weights_only=False)
-        dataset = LocalNMRDataset([mol], k=self.k)
-        data_list = dataset.to_data_list()
-        for data in data_list:
-            data.source_path = self.files[idx]
-            data.source_mol = _mol_id_from_path(self.files[idx])
-        return data_list
-
-
 class EnvironmentEncoder(nn.Module):
     """GINE layers followed by GATv2 attention, returning center embeddings."""
 
@@ -376,7 +337,7 @@ class ShiftDecoder(nn.Module):
 
 
 class NMRDecoder(ShiftDecoder):
-    """Backward-compatible decoder name used by inverse reconstruction code."""
+    """Decoder class name retained for serialized forward models."""
 
 
 class NMR_VAE(nn.Module):
@@ -386,8 +347,9 @@ class NMR_VAE(nn.Module):
 
         (mu_pred, pi_placeholder), (mu_latent, logvar_latent)
 
-    ``pi_placeholder`` is a vector of ones. It is not trained and should not be
-    treated as a learned intensity prediction.
+    The default shift-only head returns unit ``pi_placeholder`` values.
+    Historical dual-output heads return ``softplus(pi_logit)`` instead; current
+    inverse reconstruction uses deterministic node-count intensities.
     """
 
     def __init__(self,
@@ -510,128 +472,3 @@ def g2s_loss_function(pred_params,
     total = loss_mu + float(beta) * kl
     mae_ppm = F.l1_loss(mu_pred[mask], real_ppm[mask])
     return total, {"loss": total, "mu": loss_mu, "kl": kl, "mae_ppm": mae_ppm}
-
-
-def vae_loss_function(pred_params,
-                      latent_params,
-                      true_data,
-                      beta: float = 1.0e-4,
-                      lambda_mu: float = 1.0,
-                      lambda_pi: float = 0.0):
-    """Backward-compatible wrapper returning the historical 5-tuple.
-
-    ``lambda_pi`` is accepted but ignored in shift-only training.
-    """
-    loss, parts = g2s_loss_function(pred_params, latent_params, true_data, beta=beta)
-    zero = (parts["loss"] * 0.0)
-    return loss * float(lambda_mu), parts["mu"] * float(lambda_mu), parts["kl"], parts["mae_ppm"], zero
-
-
-@torch.no_grad()
-def collect_val_regression_data(model, loader, device):
-    """Compatibility helper returning mu arrays and dummy pi arrays."""
-    model.eval()
-    all_mu_true, all_mu_pred = [], []
-    for data in loader:
-        data = data.to(device)
-        (mu_pred, _), _ = model(data)
-        real_ppm = data.real_ppm.view(-1).to(mu_pred.device)
-        is_carbon = data.is_carbon.view(-1).bool().to(mu_pred.device)
-        mask = is_carbon & torch.isfinite(real_ppm) & (real_ppm > 0.0)
-        if mask.any():
-            all_mu_true.append(real_ppm[mask].detach().cpu())
-            all_mu_pred.append(mu_pred.view(-1)[mask].detach().cpu())
-    if not all_mu_true:
-        return None, None, None, None
-    mu_true = torch.cat(all_mu_true).numpy()
-    mu_pred = torch.cat(all_mu_pred).numpy()
-    pi_dummy = torch.ones_like(torch.tensor(mu_true)).numpy()
-    return mu_true, mu_pred, pi_dummy, pi_dummy
-
-
-def train(model, loader, opt, device, epoch=0, beta=1.0e-4):
-    model.train()
-    totals = {"loss": 0.0, "mu": 0.0, "kl": 0.0, "mae_ppm": 0.0}
-    count = 0
-    for data in loader:
-        data = data.to(device)
-        opt.zero_grad(set_to_none=True)
-        pred, latent = model(data)
-        loss, parts = g2s_loss_function(pred, latent, data, beta=beta)
-        if torch.isnan(loss):
-            continue
-        loss.backward()
-        opt.step()
-        batch_size = int(data.real_ppm.numel())
-        count += batch_size
-        for key in totals:
-            totals[key] += float(parts[key].detach().item()) * batch_size
-    return tuple(totals[key] / max(count, 1) for key in ["loss", "mu", "kl"])
-
-
-@torch.no_grad()
-def validate(model, loader, device, beta=1.0e-4):
-    model.eval()
-    totals = {"loss": 0.0, "mu": 0.0, "kl": 0.0, "mae_ppm": 0.0}
-    count = 0
-    for data in loader:
-        data = data.to(device)
-        pred, latent = model(data)
-        loss, parts = g2s_loss_function(pred, latent, data, beta=beta)
-        if torch.isnan(loss):
-            continue
-        batch_size = int(data.real_ppm.numel())
-        count += batch_size
-        for key in totals:
-            totals[key] += float(parts[key].detach().item()) * batch_size
-    return (
-        totals["loss"] / max(count, 1),
-        totals["mu"] / max(count, 1),
-        totals["kl"] / max(count, 1),
-        totals["mae_ppm"] / max(count, 1),
-        0.0,
-    )
-
-
-if __name__ == "__main__":
-    import argparse
-    from torch_geometric.loader import DataLoader
-
-    parser = argparse.ArgumentParser("Train shift-only G2S model (legacy entry point)")
-    parser.add_argument("data_path", type=str)
-    parser.add_argument("--hid", type=int, default=384)
-    parser.add_argument("--latent_dim", type=int, default=16)
-    parser.add_argument("--k_hop", type=int, default=3)
-    parser.add_argument("--beta", type=float, default=1.0e-4)
-    parser.add_argument("--epochs", type=int, default=120)
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=1.0e-4)
-    args = parser.parse_args()
-
-    raw_list = load_raw_data(args.data_path)
-    dataset = LocalNMRDataset(raw_list, k=args.k_hop)
-    mol_ids = torch.unique(dataset._data.mol_id).tolist()
-    rng = torch.Generator().manual_seed(42)
-    perm = torch.randperm(len(mol_ids), generator=rng).tolist()
-    mol_ids = [mol_ids[i] for i in perm]
-    split = int(0.9 * len(mol_ids))
-    train_mols = set(mol_ids[:split])
-    val_mols = set(mol_ids[split:])
-    train_idx = [i for i, d in enumerate(dataset) if int(d.mol_id.item()) in train_mols]
-    val_idx = [i for i, d in enumerate(dataset) if int(d.mol_id.item()) in val_mols]
-    train_loader = DataLoader(torch.utils.data.Subset(dataset, train_idx), batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(torch.utils.data.Subset(dataset, val_idx), batch_size=args.batch_size, shuffle=False)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    config = G2SConfig(k_hop=args.k_hop, hid=args.hid, latent_dim=args.latent_dim, beta=args.beta)
-    model = NMR_VAE.from_config(config).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1.0e-5)
-    best = float("inf")
-    os.makedirs("checkpoints_g2s", exist_ok=True)
-    for epoch in range(1, args.epochs + 1):
-        train_loss, train_mu, train_kl = train(model, train_loader, opt, device, epoch, beta=args.beta)
-        val_loss, _, _, val_mae, _ = validate(model, val_loader, device, beta=args.beta)
-        print(f"Epoch {epoch:03d} | train {train_loss:.5f} | val {val_loss:.5f} | val MAE {val_mae:.3f} ppm")
-        if val_loss < best:
-            best = val_loss
-            torch.save({"model_state_dict": model.state_dict(), "config": config.to_dict(), "epoch": epoch}, "checkpoints_g2s/g2s_best_model.pt")
-            print("  [best] saved checkpoints_g2s/g2s_best_model.pt")

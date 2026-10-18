@@ -1,7 +1,8 @@
-import copy
+from model.shared.port_rules import get_port_pattern_degrees, terminal_neighbor_count
 import numpy as np
 import pandas as pd
 import torch
+from model.shared.inverse_common import hop1_neighbor_nodes
 from collections import Counter, defaultdict
 from typing import Any, Iterable, List, Mapping, Sequence, Tuple, Dict, Optional, Set, Callable
 from pathlib import Path
@@ -13,13 +14,11 @@ try:
     from ...shared.coarse_graph import PPM_AXIS, SU_DEFS
     from ...shared.inverse_common import (
         evaluate_mu_pi_assignments,
-        get_port_pattern_degrees,
         multiset_from_counter as _common_multiset_from_counter,
         multiset_l1_distance as _common_multiset_l1_distance,
         save_node_peak_rows,
         save_spectrum_comparison,
         save_spectrum_figure,
-        terminal_neighbor_count,
         reconstruction_peak_scale,
     )
 except ImportError:
@@ -28,13 +27,11 @@ except ImportError:
     from model.shared.coarse_graph import PPM_AXIS, SU_DEFS
     from model.shared.inverse_common import (
         evaluate_mu_pi_assignments,
-        get_port_pattern_degrees,
         multiset_from_counter as _common_multiset_from_counter,
         multiset_l1_distance as _common_multiset_l1_distance,
         save_node_peak_rows,
         save_spectrum_comparison,
         save_spectrum_figure,
-        terminal_neighbor_count,
         reconstruction_peak_scale,
     )
 
@@ -42,7 +39,7 @@ def _normalize_hop1_tuple(values: Sequence[int]) -> Tuple[int, ...]:
     return tuple(sorted(int(x) for x in values))
 
 
-from model.shared.port_rules import can_match_ports_exact, can_match_ports_partial
+from model.shared.port_rules import can_match_ports_exact
 
 
 def hop1_counter_to_multiset(hop1_su: Mapping[int, int]) -> Tuple[int, ...]:
@@ -139,7 +136,7 @@ class Hop1Adjuster:
         if not self.exact_hop1_required_centers and self.carbon_su_set:
             self.exact_hop1_required_centers = set(self.carbon_su_set)
         self.strict_swap_branch_limit = max(1, int(strict_swap_branch_limit))
-        
+
         # 统计
         self.stats = {
             'adjustments_attempted': 0,
@@ -460,7 +457,7 @@ class Hop1Adjuster:
             f"aliphatic={metrics['r2_aliphatic']:.4f})"
         )
         return metrics
-    
+
     def _required_degree(self, center_su: int) -> Optional[Tuple[int, ...]]:
         if not isinstance(self.port_combinations, dict):
             return None
@@ -474,11 +471,7 @@ class Hop1Adjuster:
         return [int(nodes[int(nid)].su_type) for nid in list(node.hop1_ids)]
 
     def _get_neighbor_nodes(self, nodes: List, node) -> List[Any]:
-        return [
-            nodes[int(nid)]
-            for nid in list(getattr(node, 'hop1_ids', []) or [])
-            if 0 <= int(nid) < len(nodes)
-        ]
+        return hop1_neighbor_nodes(nodes, node)
 
     @staticmethod
     def _node_target_degree(node) -> Optional[int]:
@@ -488,14 +481,6 @@ class Hop1Adjuster:
         except Exception:
             return None
 
-    def _terminal_neighbor_cap_ok(self,
-                                  nodes: List,
-                                  node,
-                                  proposed_neighbor: Optional[Any] = None) -> bool:
-        neighbor_nodes = self._get_neighbor_nodes(nodes, node)
-        if proposed_neighbor is not None:
-            neighbor_nodes.append(proposed_neighbor)
-        return int(terminal_neighbor_count(neighbor_nodes)) <= 1
 
     def _is_hop1_valid_types(self,
                              center_su: int,
@@ -557,7 +542,7 @@ class Hop1Adjuster:
         """
         negative_peaks = []
         positive_peaks = []
-        
+
         # 找负峰区域（差谱<neg_threshold）
         neg_regions = self._find_continuous_regions(diff, ppm, lambda x: x < neg_threshold)
         for region in neg_regions:
@@ -569,7 +554,7 @@ class Hop1Adjuster:
                     center_ppm=region['center_ppm'],
                     area=region['abs_area'],
                 ))
-        
+
         # 找正峰区域（差谱>pos_threshold）
         pos_regions = self._find_continuous_regions(diff, ppm, lambda x: x > pos_threshold)
         for region in pos_regions:
@@ -581,13 +566,13 @@ class Hop1Adjuster:
                     center_ppm=region['center_ppm'],
                     area=region['abs_area'],
                 ))
-        
+
         # 按强度排序（负峰按绝对值降序，正峰按值降序）
         negative_peaks.sort(key=lambda p: (-float(p.area), float(p.intensity)))
         positive_peaks.sort(key=lambda p: (-float(p.area), -float(p.intensity)))
-        
+
         return negative_peaks, positive_peaks
-    
+
     def _find_continuous_regions(self, 
                                   arr: np.ndarray, 
                                   ppm: np.ndarray,
@@ -596,7 +581,7 @@ class Hop1Adjuster:
         regions = []
         in_region = False
         start_idx = 0
-        
+
         for i, val in enumerate(arr):
             if condition_fn(val):
                 if not in_region:
@@ -606,23 +591,23 @@ class Hop1Adjuster:
                 if in_region:
                     in_region = False
                     regions.append(self._extract_region_info(arr, ppm, start_idx, i-1))
-        
+
         # 处理末尾
         if in_region:
             regions.append(self._extract_region_info(arr, ppm, start_idx, len(arr)-1))
-        
+
         return regions
-    
+
     def _extract_region_info(self, arr: np.ndarray, ppm: np.ndarray, 
                               start_idx: int, end_idx: int) -> Dict:
         """提取区域信息"""
         region_arr = arr[start_idx:end_idx+1]
         region_ppm = ppm[start_idx:end_idx+1]
-        
+
         # 找极值位置
         min_idx = np.argmin(region_arr)
         max_idx = np.argmax(region_arr)
-        
+
         return {
             'ppm_min': float(region_ppm.min()),
             'ppm_max': float(region_ppm.max()),
@@ -631,89 +616,16 @@ class Hop1Adjuster:
             'center_ppm': float(region_ppm[min_idx if abs(region_arr.min()) > abs(region_arr.max()) else max_idx]),
             'abs_area': float(np.trapz(np.abs(region_arr), region_ppm)) if len(region_arr) > 1 else float(abs(region_arr[0])),
         }
-    
+
     # ========================================================================
     # 节点-峰区域匹配
     # ========================================================================
-    
-    def find_nodes_in_peak_region(self,
-                                   nodes: List,  # List[_NodeV3]
-                                   node_peaks: Any,
-                                   peak_region: PeakRegion) -> List[Dict]:
-        """
-        找出mu落在指定峰区域内的节点
-        
-        Args:
-            nodes: 节点列表
-            node_peaks: layer1_library_node_peaks.csv数据
-            peak_region: 峰区域
-        
-        Returns:
-            匹配的节点信息列表
-        """
-        matched = []
-        node_by_id = {int(getattr(n, 'global_id', -1)): n for n in nodes}
 
-        def _row_get(row: Any, key: str, default: Any = None) -> Any:
-            if isinstance(row, dict):
-                return row.get(key, default)
-            return getattr(row, key, default)
-
-        if isinstance(node_peaks, pd.DataFrame):
-            if node_peaks.empty or 'mu' not in node_peaks.columns:
-                return matched
-            mu_values = pd.to_numeric(node_peaks['mu'], errors='coerce')
-            mask = (
-                mu_values.notna()
-                & (mu_values >= float(peak_region.ppm_min))
-                & (mu_values <= float(peak_region.ppm_max))
-            )
-            rows_iter = node_peaks.loc[mask].to_dict('records')
-        else:
-            rows_iter = list(node_peaks or [])
-
-        for row in rows_iter:
-            mu = _row_get(row, 'mu', np.nan)
-            if pd.isna(mu):
-                continue
-            mu_f = float(mu)
-            if not (float(peak_region.ppm_min) <= mu_f <= float(peak_region.ppm_max)):
-                continue
-            try:
-                global_id = int(_row_get(row, 'global_id'))
-            except Exception:
-                continue
-            node = node_by_id.get(int(global_id))
-            if node is None:
-                continue
-            hop1_ms = _row_get(row, 'hop1_tuple', None)
-            if hop1_ms is None:
-                hop1_ms = self._parse_hop1_string(_row_get(row, 'hop1_ms', ''))
-            else:
-                hop1_ms = tuple(sorted(int(x) for x in tuple(hop1_ms)))
-            matched.append({
-                'node': node,
-                'global_id': int(global_id),
-                'center_su': int(_row_get(row, 'center_su_idx')),
-                'hop1_ms': hop1_ms,
-                'mu': float(mu_f),
-            })
-
-        return matched
-    
-    def _parse_hop1_string(self, s: str) -> Tuple[int, ...]:
-        """解析hop1字符串如'[10 11]'为元组"""
-        if pd.isna(s):
-            return ()
-        s = str(s).strip('[]')
-        if not s:
-            return ()
-        return tuple(sorted(int(x) for x in s.split()))
 
     # ========================================================================
     # 候选1-hop查找
     # ========================================================================
-    
+
     def find_shift_guided_hop1_targets(self,
                                        center_su: int,
                                        current_hop1: Tuple[int, ...],
@@ -761,11 +673,11 @@ class Hop1Adjuster:
             tuple(x['hop1_tuple']),
         ))
         return candidates
-    
+
     # ========================================================================
     # 1-hop替换执行
     # ========================================================================
-    
+
     def execute_hop1_replacement(self,
                                   nodes: List,
                                   target_node_id: int,
@@ -797,7 +709,7 @@ class Hop1Adjuster:
             'affected_nodes': [],
             'error': None,
         }
-        
+
         # 找目标节点；常规节点池 global_id 与列表下标一致，保留回退以兼容外部构造。
         target_node = None
         if 0 <= int(target_node_id) < len(nodes):
@@ -809,11 +721,11 @@ class Hop1Adjuster:
                 if int(getattr(n, 'global_id', -1)) == int(target_node_id):
                     target_node = n
                     break
-        
+
         if target_node is None:
             result['error'] = f"未找到节点ID={target_node_id}"
             return result
-        
+
         old_hop1 = tuple(sorted(target_node.hop1_su.elements()))
         result['old_hop1'] = old_hop1
 
@@ -830,7 +742,7 @@ class Hop1Adjuster:
             if port_sets and not can_match_ports_exact(list(new_hop1_tuple), port_sets, center_node=target_node):
                 result['error'] = f"新的1-hop组合不满足状态感知端口规则: {tuple(new_hop1_tuple)}"
                 return result
-        
+
         if nodes_by_su is None:
             nodes_by_su_local: Mapping[int, Sequence[int]] = defaultdict(list)
             for n in nodes:
@@ -841,13 +753,13 @@ class Hop1Adjuster:
         # 检查新的1-hop是否可行
         # 1. 检查SU类型是否存在于当前节点池
         needed_sus = Counter(new_hop1_tuple)
-        
+
         for su_type, count in needed_sus.items():
             available_count = int(len(nodes_by_su_local.get(int(su_type), [])))
             if available_count < int(count):
                 result['error'] = f"SU类型{su_type}数量不足（需要{count}，可用{available_count}）"
                 return result
-        
+
         # 2. 通过“2-edge swap”执行严格换位：
         #    remove (t-u) + (v-w), add (t-v) + (u-w)
         try:
@@ -870,7 +782,7 @@ class Hop1Adjuster:
                 self.stats['adjustments_successful'] += 1
         except Exception as e:
             result['error'] = str(e)
-        
+
         self.stats['adjustments_attempted'] += 1
         return result
 
@@ -912,7 +824,7 @@ class Hop1Adjuster:
             if int(available_edges) < int(required):
                 shortages[int(su_type)] = int(required) - int(available_edges)
         return shortages
-    
+
     @staticmethod
     def _capture_topology_state(nodes: Sequence[Any]) -> List[Tuple[Counter, List[int], Set[int]]]:
         return [
@@ -1059,97 +971,28 @@ class Hop1Adjuster:
             if bool(dry_run) or not bool(committed):
                 self._restore_topology_state(nodes, topology_state)
 
-    def _try_two_edge_swap(self,
-                            nodes: List,
-                            t: int,
-                            u: int,
-                            v: int,
-                            E_target: Optional[torch.Tensor]) -> Tuple[bool, int, List[int]]:
-        t_node = nodes[int(t)]
-        u_node = nodes[int(u)]
-        v_node = nodes[int(v)]
-        if int(u) not in t_node.hop1_ids:
-            return False, -1, []
-        if int(v) in t_node.hop1_ids:
-            return False, -1, []
-        if self._edge_is_fixed(nodes, int(t), int(u)):
-            return False, -1, []
 
-        for w in list(v_node.hop1_ids):
-            w = int(w)
-            if w == t or w == u or w == v:
-                continue
-            if self._edge_is_fixed(nodes, int(v), int(w)):
-                continue
-            w_node = nodes[int(w)]
-            if int(w) in u_node.hop1_ids:
-                continue
-            if int(w) in t_node.hop1_ids and int(w) != u:
-                continue
-
-            t_new_ids = [int(x) for x in list(t_node.hop1_ids) if int(x) != int(u)] + [int(v)]
-            u_new_ids = [int(x) for x in list(u_node.hop1_ids) if int(x) != int(t)] + [int(w)]
-            v_new_ids = [int(x) for x in list(v_node.hop1_ids) if int(x) != int(w)] + [int(t)]
-            w_new_ids = [int(x) for x in list(w_node.hop1_ids) if int(x) != int(v)] + [int(u)]
-
-            if len(set(t_new_ids)) != len(t_new_ids):
-                continue
-            if len(set(u_new_ids)) != len(u_new_ids):
-                continue
-            if len(set(v_new_ids)) != len(v_new_ids):
-                continue
-            if len(set(w_new_ids)) != len(w_new_ids):
-                continue
-
-            t_types = [int(nodes[i].su_type) for i in t_new_ids]
-            u_types = [int(nodes[i].su_type) for i in u_new_ids]
-            v_types = [int(nodes[i].su_type) for i in v_new_ids]
-            w_types = [int(nodes[i].su_type) for i in w_new_ids]
-
-            t_neighbors = [nodes[int(i)] for i in t_new_ids]
-            u_neighbors = [nodes[int(i)] for i in u_new_ids]
-            v_neighbors = [nodes[int(i)] for i in v_new_ids]
-            w_neighbors = [nodes[int(i)] for i in w_new_ids]
-
-            if terminal_path_reason(nodes, neighbor_overrides={
-                t: t_new_ids, u: u_new_ids, v: v_new_ids, w: w_new_ids,
-            }, start_ids=[t, u, v, w]):
-                continue
-
-            if not self._is_hop1_valid_types(int(t_node.su_type), t_types, E_target, center_node=t_node, neighbor_nodes=t_neighbors):
-                continue
-            if not self._is_hop1_valid_types(int(u_node.su_type), u_types, E_target, center_node=u_node, neighbor_nodes=u_neighbors):
-                continue
-            if not self._is_hop1_valid_types(int(v_node.su_type), v_types, E_target, center_node=v_node, neighbor_nodes=v_neighbors):
-                continue
-            if not self._is_hop1_valid_types(int(w_node.su_type), w_types, E_target, center_node=w_node, neighbor_nodes=w_neighbors):
-                continue
-
-            return True, int(w), [int(t), int(u), int(v), int(w)]
-
-        return False, -1, []
-    
     def _remove_hop1_edge(self, nodes: List, id1: int, id2: int):
         """移除一条双向1-hop边"""
         node1 = nodes[id1] if id1 < len(nodes) else None
         node2 = nodes[id2] if id2 < len(nodes) else None
-        
+
         if node1 is None or node2 is None:
             return
         if self._edge_is_fixed(nodes, int(id1), int(id2)):
             return
-        
+
         # 更新hop1_su计数
         if node2.su_type in node1.hop1_su and node1.hop1_su[node2.su_type] > 0:
             node1.hop1_su[node2.su_type] -= 1
             if node1.hop1_su[node2.su_type] == 0:
                 del node1.hop1_su[node2.su_type]
-        
+
         if node1.su_type in node2.hop1_su and node2.hop1_su[node1.su_type] > 0:
             node2.hop1_su[node1.su_type] -= 1
             if node2.hop1_su[node1.su_type] == 0:
                 del node2.hop1_su[node1.su_type]
-        
+
         # 更新hop1_ids
         if id2 in node1.hop1_ids:
             node1.hop1_ids.remove(id2)
@@ -1175,74 +1018,7 @@ class Hop1Adjuster:
         node1.hop1_su[int(node2.su_type)] += 1
         node2.hop1_su[int(node1.su_type)] += 1
         return True
-    
-    def _add_hop1_edge(self, nodes: List, id1: int, id2: int) -> bool:
-        """添加一条双向1-hop边"""
-        if terminal_path_reason(nodes, proposed_edge=(int(id1), int(id2))):
-            return False
-        node1 = nodes[id1] if id1 < len(nodes) else None
-        node2 = nodes[id2] if id2 < len(nodes) else None
-        
-        if node1 is None or node2 is None:
-            return False
-        
-        if id1 == id2:
-            return False
-        
-        # 检查是否已存在
-        if id2 in node1.hop1_ids:
-            return False
-        if id1 in node2.hop1_ids:
-            return False
-        if not self._terminal_neighbor_cap_ok(nodes, node1, node2):
-            return False
-        if not self._terminal_neighbor_cap_ok(nodes, node2, node1):
-            return False
-        if not self._is_hop1_valid_types(
-            int(node1.su_type),
-            [int(nodes[int(nid)].su_type) for nid in list(node1.hop1_ids)] + [int(node2.su_type)],
-            None,
-            center_node=node1,
-            neighbor_nodes=self._get_neighbor_nodes(nodes, node1) + [node2],
-        ):
-            return False
-        if not self._is_hop1_valid_types(
-            int(node2.su_type),
-            [int(nodes[int(nid)].su_type) for nid in list(node2.hop1_ids)] + [int(node1.su_type)],
-            None,
-            center_node=node2,
-            neighbor_nodes=self._get_neighbor_nodes(nodes, node2) + [node1],
-        ):
-            return False
-        
-        # 添加连接
-        node1.hop1_su[node2.su_type] += 1
-        node2.hop1_su[node1.su_type] += 1
-        node1.hop1_ids.append(id2)
-        node2.hop1_ids.append(id1)
-        old_enforce_external = bool(self.enforce_external_requirements)
-        self.enforce_external_requirements = False
-        try:
-            ok1 = self._is_hop1_valid_types(
-                int(node1.su_type),
-                [int(nodes[int(nid)].su_type) for nid in list(node1.hop1_ids)],
-                None,
-                center_node=node1,
-                neighbor_nodes=self._get_neighbor_nodes(nodes, node1),
-            )
-            ok2 = self._is_hop1_valid_types(
-                int(node2.su_type),
-                [int(nodes[int(nid)].su_type) for nid in list(node2.hop1_ids)],
-                None,
-                center_node=node2,
-                neighbor_nodes=self._get_neighbor_nodes(nodes, node2),
-            )
-        finally:
-            self.enforce_external_requirements = old_enforce_external
-        if not (bool(ok1) and bool(ok2)):
-            self._remove_hop1_edge(nodes, id1, id2)
-            return False
-        return True
+
 
     @staticmethod
     def _unit_peak(
@@ -1392,7 +1168,6 @@ class Hop1Adjuster:
             )
         ppm = np.asarray(initial_snapshot['ppm'], dtype=np.float64)
         target = initial_snapshot['S_target'].detach().cpu().numpy().astype(np.float64)
-        current_snapshot = initial_snapshot
         details: List[Dict[str, object]] = []
         region_summaries: List[Dict[str, object]] = []
 
@@ -1601,9 +1376,7 @@ class Hop1Adjuster:
             )
             if not committed:
                 self._restore_topology_state(nodes, region_state)
-                current_snapshot = self.build_eval_snapshot(nodes, S_target)
             else:
-                current_snapshot = batch_after
                 details.extend(batch_details)
             region_summaries.append({
                 'region': region_name,
@@ -1628,4 +1401,3 @@ class Hop1Adjuster:
             'initial_r2': float(initial_snapshot.get('r2', 0.0)),
             'final_r2': float(final_snapshot.get('r2', 0.0)),
         }
-    

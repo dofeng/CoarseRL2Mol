@@ -12,7 +12,7 @@ import argparse
 import csv
 import json
 import math
-from collections import Counter, defaultdict, deque
+from collections import Counter, deque
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -469,7 +469,7 @@ def extract_coarse_subgraphs(
 
     template_rows = []
     template_json = []
-    for idx, (key, bucket) in enumerate(sorted(template_buckets.items(), key=lambda kv: kv[0])):
+    for idx, (_, bucket) in enumerate(sorted(template_buckets.items(), key=lambda kv: kv[0])):
         hop3_counts = dict(sorted(bucket["hop3_multiset_counts"].items()))
         row = {
             "template_id": idx,

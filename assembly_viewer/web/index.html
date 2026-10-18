@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GraphNMR · 拓扑组装</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header><div><span class="eyebrow">GRAPHNMR / ASSEMBLY</span><h1>拓扑结构实时组装</h1></div><div><span id="sample-note" hidden>合成演示</span><span id="run-status">等待读取拓扑</span></div></header>
+<details id="configuration" open class="panel"><summary>输入文件与运行参数</summary>
+<form id="run-form">
+<div class="form-grid"><label>样品<select id="sample"></select></label><label>Python 可执行文件<input id="python" required></label>
+<label class="wide">节点 CSV<input id="nodes-path" required></label><label class="wide">拓扑 CSV<input id="topology-path" required></label>
+<label class="wide">输出根目录<input id="output-path" required></label></div>
+<div class="form-grid parameters">
+<label>合法候选上限<input id="connection_candidate_limit" type="number" min="1"></label>
+<label>柔性检查点间隔<input id="forward_checkpoint_interval" type="number" min="1"></label>
+<label>前瞻完成率阈值<input id="forward_min_completion" type="number" min="0" max="1" step=".01"></label>
+<label>最多回退次数<input id="forward_max_rollbacks" type="number" min="0"></label>
+<label>SU13 余量半径<input id="clearance_radius" type="number" min="1"></label>
+<label>c_puct<input id="c_puct" type="number" min="0" step=".001"></label>
+<label>随机种子<input id="seed" type="number"></label><label>五项奖励权重<input id="reward_weights"></label>
+<label>实验谱 CSV（可空）<input id="spectrum_csv"></label><label>元素组成 CSV（可空）<input id="element_composition_csv"></label>
+<label>G2S 模型（可空）<input id="g2s_checkpoint"></label><label class="check"><input id="save_stage_images" type="checkbox">保存引擎阶段图片</label>
+<label class="check"><input id="verbose" type="checkbox">记录详细运行日志</label></div>
+<p class="muted">同目录的芳香团簇计划和拓扑资源表会按引擎规则自动读取。读取预览不执行 MCTS 或 NMR。</p>
+<div class="buttons"><button id="read" type="submit">1 · 读取拓扑</button><button id="start" type="button" disabled>2 · 开始组装</button><span id="input-status"></span></div>
+<details><summary>实际运行命令与输出路径</summary><pre id="command">读取后显示</pre><p id="output-note"></p></details>
+</form></details>
+<div class="history panel"><label>历史运行<select id="history"><option value="">选择已保存的记录</option></select></label><button id="refresh-history">刷新</button><input id="open-path" placeholder="已有输出目录或 process_trace 路径"><button id="open-trace">打开记录</button></div>
+<nav id="phases" aria-label="从指定阶段回放"></nav>
+<main>
+<section class="canvas panel">
+<div class="canvas-heading"><div><span class="eyebrow" id="frame-type">INPUT RESOURCES</span><h2 id="canvas-title">等待拓扑资源</h2></div><button id="fit">适应画布</button></div>
+<div class="tools"><label><input id="main-only" type="checkbox">仅主组件</label><label><input id="auto-fit" type="checkbox" checked>自动适应</label><label><input id="focus-action" type="checkbox" checked>聚焦当前连接</label><label><input id="show-gid" type="checkbox">显示 GID</label><label><input id="show-hull" type="checkbox">柔性骨架凸包</label></div>
+<svg id="molecule-svg" role="img" aria-label="拓扑资源、实时组装与过程回放共用画布"></svg>
+<p id="caption">读取拓扑后，全部输入资源会显示在这里。</p><p class="muted">滚轮缩放 · 拖动画布 · 点击节点查看身份 · 预览分区位移只用于展示</p>
+</section>
+<aside class="panel"><h2>任务与过程</h2><div id="inventory"></div><p id="counts-info" class="muted"></p><div id="decision"></div>
+<h3>节点身份</h3><pre id="node-detail">点击节点查看 GID、原始 / 计划 / 当前 SU 及真实坐标。</pre>
+<details><summary>未连接资源</summary><pre id="unconnected"></pre></details>
+<details><summary>事件详情</summary><pre id="event-detail"></pre></details>
+<details><summary>运行配置与来源</summary><pre id="manifest"></pre></details>
+<details><summary>工作进程日志</summary><button id="load-log">读取日志</button><pre id="log"></pre></details></aside>
+</main>
+<footer class="panel">
+<div class="buttons"><button id="previous">← 上一步</button><button id="play">播放</button><button id="next">下一步 →</button>
+<select id="mode" aria-label="过程范围"><option value="live">搜索、确认与回退</option><option value="formal">已确认连接</option><option value="forward">快速前瞻试算</option></select>
+<select id="speed" aria-label="播放速度"><option value="800">慢速</option><option value="250" selected>正常</option><option value="40">快速</option></select>
+<label><input id="stage-only" type="checkbox">只回放所选阶段</label><button id="from-start">从头回放</button><button id="follow">连续播放到实时</button><span id="position">0 / 0</span></div>
+<input id="scrubber" type="range" min="0" max="0" value="0" aria-label="全过程位置">
+<p id="playback-note" class="muted">每次连接按顺序显示；播放速度不代表计算速度。暂停只影响画面。</p>
+<div class="buttons"><button id="export-svg">当前 SVG</button><button id="export">离线回放与阶段图</button><button id="export-video">当前范围 MP4</button><a id="final-download" hidden>最终结构 JSON</a><span id="exports"></span></div>
+<p id="message" role="status"></p>
+</footer>
+</body></html>

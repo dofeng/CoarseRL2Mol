@@ -1,9 +1,17 @@
+from model.shared.port_rules import (
+    HOP1_PORT_COMBINATIONS,
+    SPECIAL_DEGREE_PRIORS,
+    can_match_ports_partial,
+    has_forbidden_fixed_connector_special_combo,
+    is_terminal_port_node,
+    violates_special_d3_terminal_limit,
+)
 import copy
 import hashlib
 import time
-import numpy as np
 import pandas as pd
 import torch
+from model.shared.inverse_common import hop1_neighbor_nodes
 import random
 from pathlib import Path
 from typing import Any, List, Optional, Dict, Tuple, Set
@@ -11,26 +19,16 @@ from collections import Counter, defaultdict
 
 from ...shared.coarse_graph import E_SU, NUM_SU_TYPES
 from ...shared.inverse_common import (
-    _NodeV3, HOP1_PORT_COMBINATIONS,
+    _NodeV3,
     SU_CONNECTION_DEGREE,
-    SPECIAL_DEGREE_PRIORS,
     allocate_special_degree_counts,
     rebuild_su19_partition_meta,
     SU_EXTERNAL_CONNECTIONS,
-    format_port_patterns_debug,
-    has_forbidden_fixed_connector_special_combo,
     is_mode_specific_neighbor_forbidden,
-    is_terminal_port_node,
     select_port_patterns_for_degree,
     validate_connection,
-    violates_special_d3_terminal_limit,
 )
-from .hop1_adjuster import (
-    Hop1Adjuster,
-    can_match_ports_exact,
-    can_match_ports_partial,
-    hop1_counter_to_multiset,
-)
+from .hop1_adjuster import Hop1Adjuster
 from .layer1_validator import Layer1GraphValidator
 from .terminal_paths import terminal_path_reason
 from .port_role_balance import (
@@ -1071,7 +1069,6 @@ class Layer1Assigner:
         self._exact_hop1_shift_constraints_enabled = False
         self._exact_hop1_constraint_lib_path: Optional[str] = None
         self._exact_hop1_signature_set: Set[Tuple[int, Tuple[int, ...]]] = set()
-        self._exact_hop1_mu_by_signature: Dict[Tuple[int, Tuple[int, ...]], float] = {}
         self._exact_hop1_signatures_by_center_degree: Dict[
             Tuple[int, int], Tuple[Tuple[int, ...], ...]
         ] = {}
@@ -1094,7 +1091,6 @@ class Layer1Assigner:
         self._exact_hop1_shift_constraints_enabled = False
         self._exact_hop1_constraint_lib_path = None
         self._exact_hop1_signature_set = set()
-        self._exact_hop1_mu_by_signature = {}
         self._exact_hop1_signatures_by_center_degree = {}
         self._exact_hop1_partial_cache = {}
         self._reset_layer1_search_caches()
@@ -1128,13 +1124,6 @@ class Layer1Assigner:
         for center_su, hop1_ms in sorted(signatures):
             grouped[(int(center_su), int(len(hop1_ms)))].append(tuple(hop1_ms))
         self._exact_hop1_signature_set = set(signatures)
-        self._exact_hop1_mu_by_signature = {
-            (
-                int(center_su),
-                tuple(sorted(int(x) for x in tuple(hop1_ms))),
-            ): float(mu)
-            for (center_su, hop1_ms), mu in median_index.items()
-        }
         self._exact_hop1_signatures_by_center_degree = {
             key: tuple(values)
             for key, values in grouped.items()
@@ -1244,7 +1233,7 @@ class Layer1Assigner:
             return ordered
         random.shuffle(ordered)
         return ordered
-    
+
     def _histogram_from_nodes(self, nodes: List[_NodeV3]) -> torch.Tensor:
         """从节点列表构建SU直方图"""
         H = torch.zeros(NUM_SU_TYPES, dtype=torch.float, device=self.device)
@@ -1689,81 +1678,9 @@ class Layer1Assigner:
             return 0
         return int(sum(1 for x in self._current_neighbor_types(nodes, node) if int(x) in required))
 
-    def _fixed_target_rank(self,
-                           center: _NodeV3,
-                           candidate: _NodeV3,
-                           priority_list: List[int]) -> Tuple[int, int, int, int]:
-        center_su = int(getattr(center, 'su_type', -1))
-        cand_su = int(getattr(candidate, 'su_type', -1))
-        cand_deg = self._node_target_degree(candidate)
-        try:
-            pri_idx = int(priority_list.index(int(cand_su)))
-        except ValueError:
-            pri_idx = int(len(priority_list))
-
-        fixed_pref = 50
-        if center_su in {2, 29}:
-            if cand_su == 19:
-                if self._node_anchor_partition(candidate) != 'ether':
-                    fixed_pref = 98
-                else:
-                    fixed_pref = {1: 0, 2: 2, 3: 3}.get(int(cand_deg or 0), 9)
-            elif cand_su == 5:
-                fixed_pref = 1
-        elif center_su == 28:
-            if cand_su == 5:
-                fixed_pref = 0
-            elif cand_su == 19:
-                if self._node_anchor_partition(candidate) != 'ether':
-                    fixed_pref = 98
-                else:
-                    fixed_pref = {2: 1, 3: 2}.get(int(cand_deg or 0), 9)
-        elif center_su == 31 and cand_su == 19:
-            if self._node_anchor_partition(candidate) != 'thio':
-                fixed_pref = 98
-            else:
-                fixed_pref = {1: 0, 2: 1, 3: 2}.get(int(cand_deg or 0), 9)
-        elif center_su in {0, 27} and cand_su == 20:
-            fixed_pref = {1: 0, 2: 1, 3: 2}.get(int(cand_deg or 0), 9)
-        elif center_su == 32 and cand_su == 21:
-            fixed_pref = {2: 0, 3: 1}.get(int(cand_deg or 0), 9)
-
-        return (
-            int(fixed_pref),
-            int(pri_idx),
-            int(candidate.remaining_hop1_slots()),
-            int(getattr(candidate, 'global_id', 0)),
-        )
-
-    def _choose_fixed_candidate(self,
-                                center: _NodeV3,
-                                candidates: List[_NodeV3],
-                                priority_list: List[int],
-                                nodes: Optional[List[_NodeV3]] = None) -> Optional[_NodeV3]:
-        filtered = [
-            n for n in candidates
-            if n.global_id != center.global_id
-            and n.remaining_hop1_slots() > 0
-            and n.global_id not in center.hop1_ids
-        ]
-        if not filtered:
-            return None
-        if nodes is not None:
-            filtered = [n for n in filtered if self._can_add_hop1_connection(nodes, center, n)]
-            if not filtered:
-                return None
-        ranked = sorted(
-            filtered,
-            key=lambda n: self._fixed_target_rank(center, n, priority_list),
-        )
-        return ranked[0] if ranked else None
 
     def _current_neighbor_nodes(self, nodes: List[_NodeV3], node: _NodeV3) -> List[_NodeV3]:
-        return [
-            nodes[int(nid)]
-            for nid in list(getattr(node, 'hop1_ids', []) or [])
-            if 0 <= int(nid) < len(nodes)
-        ]
+        return hop1_neighbor_nodes(nodes, node)
 
     def _is_su19_partition_compatible(self, node: _NodeV3, neighbor_su: int) -> bool:
         if int(getattr(node, 'su_type', -1)) != 19:
@@ -1874,8 +1791,6 @@ class Layer1Assigner:
     def _is_terminal_like_neighbor(node: _NodeV3) -> bool:
         return bool(is_terminal_port_node(node))
 
-    def _node_has_terminal_neighbor_limit(self, node: _NodeV3) -> bool:
-        return True
 
     def _terminal_neighbor_count(self,
                                  nodes: List[_NodeV3],
@@ -1892,8 +1807,6 @@ class Layer1Assigner:
                                           node: _NodeV3,
                                           node1: Optional[_NodeV3] = None,
                                           node2: Optional[_NodeV3] = None) -> bool:
-        if not self._node_has_terminal_neighbor_limit(node):
-            return False
         return int(self._terminal_neighbor_count(nodes, node, node1, node2)) >= 2
 
     def _fixed_connector_special_target_su(self, connector: _NodeV3) -> Optional[int]:
@@ -2663,15 +2576,6 @@ class Layer1Assigner:
             valid.append(n)
         return valid
 
-    def _pick_fixed_target(self,
-                           nodes: List[_NodeV3],
-                           center: _NodeV3,
-                           target_pool: List[_NodeV3],
-                           priority_list: List[int]) -> Optional[_NodeV3]:
-        candidates = self._filter_valid_fixed_targets(nodes, center, target_pool)
-        if not candidates:
-            return None
-        return self._choose_fixed_candidate(center, candidates, priority_list, nodes=nodes)
 
     @staticmethod
     def _print_consistency_errors(errors: List[str], prefix: str, limit: int = 8) -> None:
@@ -2697,7 +2601,7 @@ class Layer1Assigner:
         )
     # Layer1: 1-hop分配辅助方法
     # ========================================================================
-    
+
     def _initialize_node_pool(
         self,
         H_init: torch.Tensor,
@@ -2710,7 +2614,7 @@ class Layer1Assigner:
         special_degree_meta = self._get_special_degree_meta(H_init)
         special_partition_meta = self._get_special_partition_meta(H_init)
         special_anchor_mode_meta = self._get_special_anchor_mode_meta(H_init)
-        
+
         for su_type in range(NUM_SU_TYPES):
             count = int(H_init[su_type].item())
             degree_sequence = self._build_special_degree_sequence(int(su_type), int(count), special_degree_meta)
@@ -2753,7 +2657,7 @@ class Layer1Assigner:
                 )
                 nodes.append(node)
                 global_id += 1
-        
+
         if identity_seed_nodes is None:
             return nodes
 
@@ -2810,10 +2714,10 @@ class Layer1Assigner:
         """
         node1 = nodes[id1]
         node2 = nodes[id2]
-        
+
         if id1 == id2:
             return False
-        
+
         if id2 in node1.hop1_ids or id1 in node2.hop1_ids:
             return False
         if not self._can_add_hop1_connection(nodes, node1, node2):
@@ -2835,7 +2739,7 @@ class Layer1Assigner:
         # 添加互为1-hop（SU类型计数）
         node1.hop1_su[node2.su_type] += 1
         node2.hop1_su[node1.su_type] += 1
-        
+
         # 记录全局ID（用于追踪具体连接）
         node1.hop1_ids.append(id2)
         node2.hop1_ids.append(id1)
@@ -2850,9 +2754,6 @@ class Layer1Assigner:
         # many thousands of times on large graphs.
         return True
 
-    def _remove_bidirectional_hop1(self, nodes: List[_NodeV3], id1: int, id2: int) -> bool:
-        """移除一条双向1-hop连接（仅移除一条，多重边会移除一次）"""
-        return self._remove_bidirectional_hop1_with_force(nodes, id1, id2, force=False)
 
     def _remove_bidirectional_hop1_with_force(self,
                                               nodes: List[_NodeV3],
@@ -3047,13 +2948,12 @@ class Layer1Assigner:
             ids = list(self._node_ids_by_su.get(int(su_type), []))
             return [nodes[int(i)] for i in ids]
         return [n for n in nodes if n.su_type == su_type]
-    
+
     def _choose_weighted_candidate(self,
                                    center: _NodeV3,
                                    candidates: List[_NodeV3],
                                    priority_list: List[int],
-                                   nodes: Optional[List[_NodeV3]] = None,
-                                   motif_usage: Optional[Counter] = None) -> Optional[_NodeV3]:
+                                   nodes: Optional[List[_NodeV3]] = None) -> Optional[_NodeV3]:
         filtered = [
             n for n in candidates
             if n.global_id != center.global_id
@@ -3118,11 +3018,11 @@ class Layer1Assigner:
             choose_pos = int(center.global_id) % len(window)
             return filtered[int(window[int(choose_pos)])]
         return random.choices(filtered, weights=weights, k=1)[0]
-    
+
     # ========================================================================
     # Layer1: 固定连接分配方法（a-f）
     # ========================================================================
-    
+
     def _assign_fixed_halogen_X(self, nodes: List[_NodeV3]):
         """a) 32号X -> 8号/21号"""
         owner_ids, target_ids_all, edge_pairs = self._build_exact_halogen_fixed_edges(nodes)
@@ -3393,7 +3293,7 @@ class Layer1Assigner:
             check_amine=False,
             check_halogen=False,
         )
-    
+
     def _assign_fixed_amine_N(self, nodes: List[_NodeV3]):
         """c) 0号氨基端、27号 -> 6号/20号"""
         work_nodes = copy.deepcopy(nodes)
@@ -3485,7 +3385,7 @@ class Layer1Assigner:
             check_amine=True,
             check_halogen=False,
         )
-    
+
     def _assign_fixed_ether_O(self, nodes: List[_NodeV3]):
         """d) 2号醚端、28号、29号 -> 5号/19号
         """
@@ -3501,7 +3401,7 @@ class Layer1Assigner:
             check_amine=False,
             check_halogen=False,
         )
-    
+
     def _assign_fixed_carbonyl(self, nodes: List[_NodeV3]):
         """e) Assign only the mandatory carbonyl neighbor of every SU9.
         
@@ -3514,7 +3414,7 @@ class Layer1Assigner:
         su2_nodes = self._get_nodes_by_su_type(nodes, 2)
         su3_nodes = self._get_nodes_by_su_type(nodes, 3)
         su9_nodes = [n for n in self._get_nodes_by_su_type(nodes, 9) if n.remaining_hop1_slots() > 0]
-        
+
         # ---- 阶段1：先给每个0/1/2/3尽量分一个9号 ----
         first_round = self._canonical_node_order(
             list(su0_nodes) + list(su1_nodes) + list(su2_nodes) + list(su3_nodes),
@@ -3723,10 +3623,10 @@ class Layer1Assigner:
         su14_nodes = self._get_nodes_by_su_type(nodes, 14)
         su15_nodes = self._get_nodes_by_su_type(nodes, 15)
         su16_nodes = self._get_nodes_by_su_type(nodes, 16)
-        
-        # SU16 是只能和 SU15 配对的端基，不能参与 SU16-SU16。
-        # 先完成这类强约束配对，再处理其余双键节点，避免普通贪心
-        # 先消耗掉 SU15 后遗留孤立 SU16。
+
+        # SU16 可与 SU14/SU15 配对，禁止 SU16-SU16。
+        # 先满足端基，再处理其余双键节点；14-16 也是差谱成对转换
+        # 22+24 -> 16+14 所需的合法固定边。
         paired = set()
 
         def pair_from_pools(left_pool, right_pool) -> None:
@@ -3750,7 +3650,7 @@ class Layer1Assigner:
                     )
 
         pair_from_pools(su16_nodes, su15_nodes)
-        pair_from_pools(su15_nodes, su16_nodes)
+        pair_from_pools(su16_nodes, su14_nodes)
 
         remaining_double_bond_pool = [
             node for node in list(su14_nodes) + list(su15_nodes)
@@ -3779,11 +3679,11 @@ class Layer1Assigner:
             self._add_bidirectional_hop1(
                 nodes, node1.global_id, partner.global_id, lock=True
             )
-        
+
         # 三键配对 (17, 18) - 17的不饱和端连接度=1，18的连接度=1
         su17_nodes = self._get_nodes_by_su_type(nodes, 17)
         su18_nodes = list(self._get_nodes_by_su_type(nodes, 18))
-        
+
         # 先17-18配对
         for n17 in su17_nodes:
             if su18_nodes and n17.remaining_hop1_slots() > 0:
@@ -3797,7 +3697,7 @@ class Layer1Assigner:
                     self._add_bidirectional_hop1(
                         nodes, n17.global_id, n18.global_id, lock=True
                     )
-        
+
         # 如果还有剩余的17且port2未填充（即没有17/18邻居），才做17-17配对
         # SU17端口规则: [{芳香}, {17, 18}]，port2只能放17或18
         # 已有SU18邻居的SU17的port2已满，剩余槽位是port1(芳香)，不能再放17
@@ -3838,7 +3738,7 @@ class Layer1Assigner:
                 "[Unsaturated Fixed Assign] fixed-role matching incomplete: "
                 + str(invalid_unsaturated[:8])
             )
-    
+
     def _assign_fixed_su10_external_roles(self, nodes: List[_NodeV3]) -> None:
         """Assign the strict one-to-one SU10 self-pair role."""
         self_nodes = self._canonical_node_order(
@@ -4322,7 +4222,7 @@ class Layer1Assigner:
                 print("\n" + "=" * 60)
                 print(f"Layer1: 单图精炼 ({len(nodes)}个节点)")
                 print("=" * 60)
-    
+
         check_t0 = time.perf_counter()
         is_valid, errors = self.validate_graph_consistency(
             nodes=nodes, 
@@ -4491,20 +4391,3 @@ class Layer1Assigner:
                 f"aromatic_ring={diagnostics['projected_aromatic_ring_ports']}"
             )
         return True, 'ok'
-
-    def evaluate_layer1_nmr_with_library(
-        self,
-        nodes: List[_NodeV3],
-        S_target: torch.Tensor,
-        lib_path: Optional[str] = None,
-        output_dir: Optional[str] = None,
-    ) -> Dict[str, float]:
-        if lib_path and str(lib_path) != self._exact_hop1_constraint_lib_path:
-            self._configure_exact_hop1_shift_constraints(str(lib_path))
-        if self._hop1_adjuster is None:
-            raise ValueError('Layer1 evaluation requires an active template library')
-        return self._hop1_adjuster.evaluate_with_library(
-            nodes=nodes,
-            S_target=S_target,
-            output_dir=output_dir,
-        )

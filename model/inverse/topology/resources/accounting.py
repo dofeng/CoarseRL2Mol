@@ -3,10 +3,8 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
-from .types import (
-    PHYSICAL_TOPOLOGY_RESOURCE_TYPES,
-    STAGE3_ACCOUNTING_SU_TYPES,
-)
+from .types import PHYSICAL_TOPOLOGY_RESOURCE_TYPES
+from .conversion_paths import audit_conversion_paths
 
 
 def normalize_counts(values: Mapping[Any, Any]) -> Dict[int, int]:
@@ -171,6 +169,8 @@ def build_resource_accounting_snapshot(
     aggregate_types, errors = _node_types_from_ids(aggregate_ids_before_by_su)
     authorized_types, authorized_errors = _node_types_from_ids(authorized_ids_before_by_su)
     errors.extend(authorized_errors)
+    path_proof = audit_conversion_paths(groups, initial_ids_by_su=authorized_ids_before_by_su)
+    errors.extend(path_proof["errors"])
     duplicate_aggregate_ids = _duplicate_ids(aggregate_ids_before_by_su)
     duplicate_authorized_ids = _duplicate_ids(authorized_ids_before_by_su)
     duplicate_claimed_ids = _duplicate_ids(committed_claimed_ids_by_su)
@@ -325,6 +325,7 @@ def build_resource_accounting_snapshot(
         "authorized_inventory_after": authorized_after_counts,
         "aggregate_required_counts": aggregate_required_counts,
         "combined_delta": combined_group_delta(groups, extra_ops=extra_ops),
+        "conversion_path_audit": path_proof,
     }
 
 

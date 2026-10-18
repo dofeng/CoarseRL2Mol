@@ -39,9 +39,29 @@ def completion_report(state):
             row['unconnected'].append(uid)
     total = sum(r['total'] for r in stages.values())
     completed = sum(r['completed'] for r in stages.values())
+    tasks_complete = completed == total and state.phase_done('rigid') and not state.mandatory_contracts()
+    reasons = []
+    if completed != total:
+        reasons.append('unconnected_topology_tasks')
+    if not state.phase_done('rigid'):
+        reasons.append('incomplete_rigid_connections')
+    if state.mandatory_contracts():
+        reasons.append('pending_connection_contracts')
+    if state.problem.input_issues:
+        reasons.append('invalid_input')
+    resource_errors = state.audit_resource_partition_errors()
+    if resource_errors:
+        reasons.append('invalid_resource_partition')
+    allowed_resources = state.problem.aromatic_residual_rows() + [
+        dict(node_id=gid, source_su_type=su, final_su_type=None, state='idle_aromatic',
+             completion_tolerated=True, reason='bounded_template_residual')
+        for gid, su in state.problem.idle_aromatic_nodes
+    ] + [dict(node_id=r.node_id, source_su_type=r.su_type, final_su_type=None,
+              state=r.state, completion_tolerated=True, reason=r.reason)
+         for r in state.problem.unassembled_closure_resources]
     return dict(total=total,completed=completed,completion=completed/total if total else 1.0,
-                all_complete=completed==total and state.phase_done("rigid") and not state.mandatory_contracts()
-                             and not state.problem.input_issues and not state.problem.unassembled_closure_resources
-                             and not state.problem.idle_aromatic_nodes,
+                tasks_complete=tasks_complete, all_complete=tasks_complete and not reasons,
+                completion_reasons=reasons, allowed_remaining_resources=allowed_resources,
+                allowed_remaining_resource_count=len(allowed_resources),
                 stages=stages,main_component=sorted(connected),
                 main_anchor=anchor_for(state),excluded_units=sorted(state.excluded_unit_ids))

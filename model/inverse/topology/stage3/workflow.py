@@ -233,6 +233,7 @@ def plan_stage3_resource_adjustments(
     spectrum_hop1_template_options: Optional[Dict[int, Any]] = None,
     rejected_spectrum_histogram_signatures: Optional[Any] = None,
     rejected_spectrum_bundle_signatures: Optional[Any] = None,
+    rejected_spectrum_su24_signatures: Optional[Any] = None,
     forbidden_spectrum_inverse_signatures: Optional[Any] = None,
     forbidden_resource_conversion_signatures: Optional[Any] = None,
 ) -> Stage3AdjustmentPlan:
@@ -274,6 +275,7 @@ def plan_stage3_resource_adjustments(
         spectrum_hop1_template_options=spectrum_hop1_template_options,
         rejected_spectrum_histogram_signatures=rejected_spectrum_histogram_signatures,
         rejected_spectrum_bundle_signatures=rejected_spectrum_bundle_signatures,
+        rejected_spectrum_su24_signatures=rejected_spectrum_su24_signatures,
         forbidden_spectrum_inverse_signatures=forbidden_spectrum_inverse_signatures,
         forbidden_resource_conversion_signatures=forbidden_resource_conversion_signatures,
         flex_max_primary_adjustments=flex_max_primary_adjustments,
@@ -423,19 +425,28 @@ def audit_stage3_topology(
         for item in pending_contracts
     ]
 
+    assembly_resource_ledger = dict(assembly_snapshot.get("resource_ledger", {}) or {})
     resource_pool = dict(classification.get("resource_pool", {}) or {})
+    current_su_by_id = {
+        int(node.global_id): int(node.su_type) for node in list(nodes or [])
+    }
+    initial_source = dict(assembly_resource_ledger.get("initial_ids_by_su", {}) or {})
+    if not initial_source:
+        for field in ("initial_ids_by_su", "su11_donor_ids_by_su"):
+            for key, values in dict(resource_pool.get(field, {}) or {}).items():
+                initial_source.setdefault(str(key), [])
+                initial_source[str(key)].extend(int(value) for value in list(values or []))
     aggregate_id_sets: Dict[int, set[int]] = {}
-    for field in ("initial_ids_by_su", "su11_donor_ids_by_su"):
-        for key, values in dict(resource_pool.get(field, {}) or {}).items():
-            if not str(key).lstrip("-").isdigit():
-                continue
-            aggregate_id_sets.setdefault(int(key), set()).update(
-                int(value) for value in list(values or [])
-            )
+    for key, values in initial_source.items():
+        if not str(key).lstrip("-").isdigit():
+            continue
+        for value in list(values or []):
+            node_id = int(value)
+            current_su = current_su_by_id.get(node_id, int(key))
+            aggregate_id_sets.setdefault(int(current_su), set()).add(node_id)
     aggregate_ids = {
         int(key): sorted(values) for key, values in aggregate_id_sets.items()
     }
-    assembly_resource_ledger = dict(assembly_snapshot.get("resource_ledger", {}) or {})
     remaining_ids = {
         int(key): [int(value) for value in list(values or [])]
         for key, values in dict(ledger.get("available_ids_by_su", {}) or {}).items()

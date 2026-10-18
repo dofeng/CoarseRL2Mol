@@ -133,51 +133,6 @@ class PoolAllocator:
             },
         }
 
-    def claimability_for_request(
-        self,
-        su_type: int,
-        *,
-        count: int = 1,
-        specific_node_ids: Optional[Iterable[int]] = None,
-    ) -> Dict[str, Any]:
-        """Describe exactly what generic and specific claim calls can take."""
-        su_key = _su_key(su_type)
-        want = max(0, int(count))
-        raw_ids = [
-            int(value)
-            for value in list(self.remaining_ids_by_su.get(su_key, []) or [])
-        ]
-        generic_ids = [
-            int(value)
-            for value in self.claimable_ids_by_su().get(su_key, [])
-        ]
-        protected = max(
-            0, int(self.protected_counts_by_su.get(su_key, 0) or 0)
-        )
-        specific = sorted({
-            int(value) for value in list(specific_node_ids or [])
-        })
-        specific_result = {
-            str(node_id): bool(
-                int(node_id) in set(raw_ids)
-                and len(raw_ids) - int(protected) >= 1
-            )
-            for node_id in specific
-        }
-        return {
-            "su_type": int(su_type),
-            "requested_count": int(want),
-            "raw_available_ids": raw_ids,
-            "generic_claimable_ids": generic_ids,
-            "protected_count": int(protected),
-            "excluded_node_ids": sorted(
-                int(value)
-                for value in self._generic_claim_excluded_node_ids
-                if int(value) in set(raw_ids)
-            ),
-            "generic_claim_satisfied": len(generic_ids) >= int(want),
-            "specific_claim_satisfied_by_node_id": specific_result,
-        }
 
     def _record_claim(
         self,

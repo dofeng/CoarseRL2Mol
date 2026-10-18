@@ -21,7 +21,10 @@ def validate_snapshot_state(
     nodes: Sequence[Any], snapshot: Dict[str, Any], H: Any = None,
     *, require_complete: bool = False,
 ) -> Dict[str, Any]:
+    from ..ring.topology import ring_target_degree_errors
+
     actual = {int(node.global_id): int(node.su_type) for node in nodes}
+    nodes_by_id = {int(node.global_id): node for node in nodes}
     errors = []
     if len(actual) != len(nodes) or any(node_id < 0 for node_id in actual):
         errors.append({"reason": "duplicate_or_invalid_node_id"})
@@ -281,6 +284,12 @@ def validate_snapshot_state(
                 "actual_state": actual_state,
             })
     for product in snapshot.get("products", []):
+        ring_audit = dict(product.get("ring_audit", {}) or {})
+        if ring_audit:
+            errors.extend(
+                {**error, "product_id": product.get("product_id", "")}
+                for error in ring_target_degree_errors(ring_audit, nodes_by_id)
+            )
         for node_id, su in product.get("expected_su_type_by_node_id", {}).items():
             check(node_id, su, "product_su_type_mismatch")
             if int(node_id) in resource_ids:

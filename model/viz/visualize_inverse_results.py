@@ -11,10 +11,7 @@ import pandas as pd
 try:
     from ..shared.coarse_graph import SU_DEFS, _node_color
 except ImportError:
-    try:
-        from model.shared.coarse_graph import SU_DEFS, _node_color
-    except ImportError:
-        from model.shared.coarse_graph import SU_DEFS, _node_color
+    from model.shared.coarse_graph import SU_DEFS, _node_color
 
 
 def _set_plot_defaults():
@@ -25,20 +22,25 @@ def _set_plot_defaults():
 
 
 def _find_latest_matching_file(base_dir: Path, file_names: list[str]) -> Path | None:
-    """优先查找当前目录下的文件；若不存在，再递归查找最近更新的匹配文件。"""
-    for name in file_names:
-        direct_path = base_dir / name
-        if direct_path.exists():
-            return direct_path
+    """Prefer selected final outputs and exclude archived runs from discovery."""
+    for directory in (base_dir / "final_outputs", base_dir):
+        for name in file_names:
+            direct_path = directory / name
+            if direct_path.is_file():
+                return direct_path
 
-    matches: list[Path] = []
-    for name in file_names:
-        matches.extend(p for p in base_dir.rglob(name) if p.is_file())
-
+    matches = [
+        candidate
+        for name in file_names
+        for candidate in base_dir.rglob(name)
+        if candidate.is_file()
+        and not any(part.lower() in {"archive", "archives", "_archive"}
+                    or part.startswith(".") for part in candidate.relative_to(base_dir).parts[:-1])
+    ]
     if not matches:
         return None
-
-    return max(matches, key=lambda p: p.stat().st_mtime)
+    final_matches = [candidate for candidate in matches if "final_outputs" in candidate.parts]
+    return max(final_matches or matches, key=lambda candidate: candidate.stat().st_mtime)
 
 
 def _parse_template_key(template_key: str) -> tuple[int | None, list[int], list[int]]:
@@ -71,7 +73,7 @@ def _format_multiset(values: list[int]) -> str:
 
 def _standardize_nodes_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    将旧版/新版 layer2/layer3 节点 CSV 统一为:
+    将 final_nodes_by_global_id 或 Layer2/3 节点 CSV 统一为:
     node_id, center_su_idx, center_su, hop1_ms, hop2_ms, mu_pred, pi_pred
     """
     if df.empty:
@@ -180,9 +182,8 @@ def _build_su_distribution_from_nodes(nodes_df: pd.DataFrame) -> pd.DataFrame:
 def plot_layer3_su_distribution(csv_path: Path | str, output_dir: Path | str | None = None) -> Path:
     """绘制当前逆向结果的 SU 直方图。
 
-    兼容两种输入:
-    1. 旧版 `layer3_su_distribution.csv`。
-    2. 新版 `layer2/3_nodes_detail.csv` 或 `layer2/3_node_peaks.csv`，会自动聚合统计。
+    接受 final_su_distribution.csv、SU_ID/SU_Name/Count 分布表，
+    或 final_nodes_by_global_id/Layer2/3 节点表；节点表会自动聚合计数。
     """
     csv_path = Path(csv_path)
     if output_dir is None:
@@ -196,6 +197,12 @@ def plot_layer3_su_distribution(csv_path: Path | str, output_dir: Path | str | N
             "SU_Index": df["SU_ID"].astype(int),
             "SU_Name": df["SU_Name"],
             "Total_Count": df["Count"].astype(int),
+        })
+    elif {"su_type", "su_name", "count"}.issubset(df.columns):
+        df_plot = pd.DataFrame({
+            "SU_Index": df["su_type"].astype(int),
+            "SU_Name": df["su_name"],
+            "Total_Count": df["count"].astype(int),
         })
     else:
         df_plot = _build_su_distribution_from_nodes(_standardize_nodes_df(df))
@@ -251,12 +258,12 @@ def plot_layer3_local_subgraphs(
     output_dir: Path | str | None = None,
     num_examples: int = 16,
 ) -> Path:
-    """从当前可用的节点结果 CSV 中选取若干节点, 绘制局部 3-hop 拓扑示意图。
+    """从当前节点结果 CSV 中选取若干节点，绘制模板局部邻域示意图。
 
     - 每个节点一张小子图 (中心 + hop1 + hop2)。
     - 仅展示 SU 类型与层级结构, 不依赖真实分子骨架。
-    - 兼容旧版 `layer3_nodes.csv`，也兼容新版 `layer2/3_nodes_detail.csv`
-      与 `layer2/3_node_peaks.csv`。
+    - 接受 `final_nodes_by_global_id.csv`、`layer3_nodes.csv`、
+      `layer2/3_nodes_detail.csv` 与 `layer2/3_node_peaks.csv`。
     """
     nodes_csv = Path(nodes_csv)
     if output_dir is None:
@@ -427,7 +434,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Visualize inverse pipeline results with automatic support for the latest Layer2/Layer3 output files."
+        description="Visualize inverse pipeline results with selected final outputs and Layer2/Layer3 inspection files."
     )
     parser.add_argument("--result_dir", type=str, default="inverse_result",
                         help="Result directory. Can be a root result folder, a specific layer2_eval/layer3_eval folder, or any directory containing the output CSVs.")
@@ -438,6 +445,7 @@ def main():
     result_dir = Path(args.result_dir)
 
     node_csv_candidates = [
+        "final_nodes_by_global_id.csv",
         "layer3_nodes_detail.csv",
         "layer3_node_peaks.csv",
         "layer2_nodes_detail.csv",
@@ -445,6 +453,7 @@ def main():
         "layer3_nodes.csv",
     ]
     su_csv_candidates = [
+        "final_su_distribution.csv",
         "layer3_su_distribution.csv",
         *node_csv_candidates,
     ]

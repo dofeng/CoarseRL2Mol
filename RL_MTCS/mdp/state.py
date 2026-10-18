@@ -284,6 +284,7 @@ class HexAssemblyState(StateTransitions, GeometryValidation):
         return (
             str(self.stage), self.main_anchor, self.backbone_hull,
             self.problem.node_su_types, self.problem.ownership, self.problem.contracts,
+            self.problem.aromatic_residual_node_ids,
             self.problem.units,
             self.last_rigid_axis, self.last_flex_axis,
             tuple(sorted(self.excluded_unit_ids)),
@@ -319,6 +320,8 @@ class HexAssemblyState(StateTransitions, GeometryValidation):
         ownership = self.problem.ownership_map()
         units = {unit.unit_id: unit for unit in self.problem.units}
         planned = self.problem.node_map()
+        targets = self.problem.assembly_target_node_map()
+        residual_ids = set(self.problem.aromatic_residual_node_ids)
         original = self.source_problem.node_map()
         source_owner = self.source_problem.ownership_map()
         nodes = {n.node_id: n for u in self.problem.units for n in u.nodes}
@@ -344,6 +347,7 @@ class HexAssemblyState(StateTransitions, GeometryValidation):
             "last_flex_axis": self.last_flex_axis,
             "excluded_unit_ids": sorted(self.excluded_unit_ids),
             "task_inventory": list(self.task_inventory),
+            "aromatic_residual_nodes": self.problem.aromatic_residual_rows(),
             "action_history": copy.deepcopy(self.action_history),
             "substitution_geometry_exceptions": [sorted(pair) for pair in self.substitution_relaxed_edges],
             "su25_center_branches": [
@@ -394,6 +398,7 @@ class HexAssemblyState(StateTransitions, GeometryValidation):
                     "su25_center_parent_id": self._su25_center_parents.get(node_id),
                     "satisfied_contract_ids": sorted(active_contracts[node_id]),
                     "label_state": ('substituted' if self.current_su_types.get(node_id) in {26, 30}
+                                    else 'residual_converted' if node_id in residual_ids
                                     else 'connected' if active_contracts[node_id]
                                     else 'aromatic_pending' if units[ownership[node_id]].phase == 'aromatic'
                                     and self.current_su_types.get(node_id) == 13 else 'internal'),
@@ -401,6 +406,7 @@ class HexAssemblyState(StateTransitions, GeometryValidation):
                     "planned_su_type": int(
                         planned.get(int(node_id), -1)
                     ),
+                    "assembly_target_su_type": targets.get(node_id, -1),
                     "axial": [int(axial[0]), int(axial[1])],
                     "final_position": list(self.final_node_positions.get(
                         int(node_id), (float(axial[0]), float(axial[1]))

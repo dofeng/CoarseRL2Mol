@@ -23,6 +23,11 @@ from .conversion_scoring import (
     rank_conversions,
     score_conversion_bundle,
 )
+from .conversion_paths import (
+    ConversionPathError,
+    audit_conversion_paths,
+    bind_conversion_paths,
+)
 from .profiles import (
     DEFAULT_STAGE3_H_SOFT_TOLERANCE,
     MAX_FLEX_LOWER_INCREASE_PER_ADJUSTMENT_PLAN,
@@ -96,7 +101,7 @@ def _iter_plan_ops(plan: Stage3AdjustmentPlan) -> List[Dict[str, Any]]:
     return ops
 
 
-def _phase_inventory(plan: Stage3AdjustmentPlan, H: torch.Tensor) -> Dict[int, int]:
+def _phase_inventory(plan: Stage3AdjustmentPlan) -> Dict[int, int]:
     runtime = dict(plan.runtime or {})
     assembly = dict(runtime.get("assembly_before_adjustment", {}) or {})
     ledger = dict(assembly.get("resource_ledger", {}) or {})
@@ -155,6 +160,24 @@ def _preferred_phase_demand(plan: Stage3AdjustmentPlan) -> Dict[int, int]:
     }
 
 
+def _required_residual_flex(plan: Stage3AdjustmentPlan) -> bool:
+    return bool(
+        str(plan.phase) == "residual_resource_self_closure"
+        and any(
+            contract.get("target_role") == "flex_chain"
+            and dict(contract.get("diagnostics", {}) or {}).get("required_flex", False)
+            for contract in plan.requirement_contracts
+        )
+    )
+
+
+def _residual_closure_only(plan: Stage3AdjustmentPlan) -> bool:
+    return bool(
+        str(plan.phase) == "residual_resource_self_closure"
+        and not _required_residual_flex(plan)
+    )
+
+
 def _runtime_flex_audit(plan: Stage3AdjustmentPlan) -> Dict[str, Any]:
     runtime = dict(getattr(plan, "runtime", {}) or {})
     phase_eval = runtime.get("phase_evaluation")
@@ -181,8 +204,9 @@ def _runtime_flex_audit(plan: Stage3AdjustmentPlan) -> Dict[str, Any]:
         if dict(contract or {})
     }
     audit["expected_flex_product_gain"] = int(
-        str(getattr(plan, "phase", "") or "") == "external_flex_closure"
-        and "flex_chain" in active_roles
+        (str(getattr(plan, "phase", "") or "") == "external_flex_closure"
+         and "flex_chain" in active_roles)
+        or _required_residual_flex(plan)
     )
     return audit
 
@@ -666,6 +690,7 @@ def _enumerate_scored_bundles(
     max_h_compensation_ops: int,
     h_tolerance: float,
     special_degree_meta: Optional[Dict[str, Any]],
+    residual_closure_only: bool,
     forbidden_su_types: Optional[Iterable[int]] = None,
 ) -> List[ConversionBundleScore]:
     forbidden = {int(value) for value in list(forbidden_su_types or [])}
@@ -737,9 +762,7 @@ def _enumerate_scored_bundles(
                         inventory_after,
                         context.demand,
                         protected_counts=context.protected_resource_counts,
-                        residual_closure_only=(
-                            str(context.phase) == "residual_resource_self_closure"
-                        ),
+                        residual_closure_only=residual_closure_only,
                     )
                     if not _conversion_uses_forbidden_su(
                         candidate,
@@ -828,10 +851,7 @@ def _choose_bundle_from_gap(
     if not targets:
         return [], int(aromatic_cursor), None
     target = sorted(targets, key=lambda su: (-int(gap[su]), TARGET_PRIORITY[int(su)]))[0]
-    residual_closure_only = bool(
-        str(getattr(plan, "phase", "") or "")
-        == "residual_resource_self_closure"
-    )
+    residual_closure_only = _residual_closure_only(plan)
     direct_candidates = _direct_gap_candidates(
         int(target),
         inventory,
@@ -883,6 +903,7 @@ def _choose_bundle_from_gap(
             max_h_compensation_ops=max_h_compensation_ops,
             h_tolerance=h_tolerance,
             special_degree_meta=special_degree_meta,
+            residual_closure_only=residual_closure_only,
             forbidden_su_types=forbidden_su_types,
         )
         return [
@@ -900,9 +921,9 @@ def _choose_bundle_from_gap(
             and _flex_lower_increase_allowed(plan, score)
         ]
 
-    # Aromatic donors are a fallback for an external resource deficit, not a
-    # co-equal scoring option.  This preserves SU13 for the aromatic plan and
-    # prevents avoidable SU13->SU11->SU22/23 conversions.
+    # Aromatic donors supplement required topology only after ordinary
+    # closure conversions fail. This includes a mandatory residual flex
+    # chain needed to reach the lower bound.
     feasible = _select_from(direct_candidates)
     if not feasible and aromatic_candidates:
         feasible = _select_from(direct_candidates + aromatic_candidates)
@@ -989,6 +1010,8 @@ def build_histogram_adjustment_plan(
     h_tolerance: float = DEFAULT_STAGE3_H_SOFT_TOLERANCE,
     special_degree_meta: Optional[Dict[str, Any]] = None,
     su11_rotation_index: int = 0,
+    node_pool: Optional[Dict[int, List[int]]] = None,
+    protected_node_ids: Optional[List[int]] = None,
 ) -> HistogramAdjustmentPlan:
     if H is None:
         runtime = dict(plan.runtime or {})
@@ -1002,12 +1025,14 @@ def build_histogram_adjustment_plan(
     else:
         H_before = torch.clamp(H.detach().clone(), min=0).long()
     H_work = H_before.detach().clone()
-    inventory = _phase_inventory(plan, H_before)
+    inventory = _phase_inventory(plan)
     demand = _phase_demand(plan, inventory)
     preferred_demand = _preferred_phase_demand(plan)
     inventory_before = dict(inventory)
     demand_before = dict(demand)
     groups: List[AtomicAdjustmentGroup] = []
+    concrete_pool = copy.deepcopy(node_pool)
+    primary_node_ids: set[int] = set()
     aromatic_cursor = max(0, int(su11_rotation_index))
     aromatic_cursor_before = int(aromatic_cursor)
     soft_direction_blocked = False
@@ -1024,13 +1049,15 @@ def build_histogram_adjustment_plan(
             target_h = None
 
     def _primary_units() -> int:
+        if concrete_pool is not None:
+            return len(primary_node_ids)
         return sum(
             len(list(getattr(group.primary_op, "node_ids", []) or []))
             or max(0, int(getattr(group.primary_op, "count", 0) or 0))
             for group in groups
         )
 
-    while _primary_units() < max(0, int(max_primary_adjustments)):
+    while int(max_primary_adjustments) > 0:
         primary: Optional[HistogramConversion] = None
         selected_bundle: List[HistogramConversion] = []
         selected_bundle_score: Optional[ConversionBundleScore] = None
@@ -1131,6 +1158,7 @@ def build_histogram_adjustment_plan(
                     max_h_compensation_ops=max_h_compensation_ops,
                     h_tolerance=h_tolerance,
                     special_degree_meta=special_degree_meta,
+                    residual_closure_only=_residual_closure_only(plan),
                     forbidden_su_types=_forbidden_conversion_su_types(plan),
                 )
                 selected_score = min(
@@ -1231,13 +1259,7 @@ def build_histogram_adjustment_plan(
         candidate_primary_units = len(
             list(getattr(primary, "node_ids", []) or [])
         ) or max(0, int(getattr(primary, "count", 0) or 0))
-        if _primary_units() + int(candidate_primary_units) > max(
-            0, int(max_primary_adjustments)
-        ):
-            # Never exceed a concrete-node budget by accepting a multi-node
-            # group that would straddle the remaining allowance.
-            break
-        groups.append(AtomicAdjustmentGroup(
+        candidate_group = AtomicAdjustmentGroup(
             primary_op=primary,
             h_compensation_ops=compensation,
             combined_delta=combined_delta,
@@ -1251,7 +1273,24 @@ def build_histogram_adjustment_plan(
                 if selected_bundle_score is not None
                 else {}
             ),
-        ))
+        )
+        if concrete_pool is not None:
+            try:
+                candidate_pool, path_proof = bind_conversion_paths(
+                    [candidate_group], concrete_pool,
+                    protected_node_ids=protected_node_ids,
+                )
+            except ConversionPathError:
+                rejected_primary_states.add(primary_state)
+                continue
+            candidate_ids = primary_node_ids | set(path_proof["primary_node_ids"])
+            if len(candidate_ids) > max(0, int(max_primary_adjustments)):
+                break
+            concrete_pool = candidate_pool
+            primary_node_ids = candidate_ids
+        elif _primary_units() + int(candidate_primary_units) > max(0, int(max_primary_adjustments)):
+            break
+        groups.append(candidate_group)
         aromatic_cursor = int(candidate_aromatic_cursor)
         H_work = H_final
         inventory = inventory_after
@@ -1270,8 +1309,8 @@ def build_histogram_adjustment_plan(
         # count.
         primary_adjustment_count=_primary_units(),
         physical_conversion_count=sum(
-            (2 if group.primary_op.via_su is not None else 1)
-            + sum(2 if op.via_su is not None else 1 for op in group.h_compensation_ops)
+            int(group.primary_op.count) * (2 if group.primary_op.via_su is not None else 1)
+            + sum(int(op.count) * (2 if op.via_su is not None else 1) for op in group.h_compensation_ops)
             for group in groups
         ),
         H_before=H_before,
@@ -1328,6 +1367,28 @@ def apply_histogram_adjustment_plan(
     applied_ops: List[Dict[str, Any]] = []
     rejected_ops: List[Dict[str, Any]] = []
     initial_total = int(H_before.sum().item())
+    path_groups = list(histogram_plan.groups or [])
+    path_proof: Dict[str, Any] = {"node_paths": {}}
+    if nodes_by_id or any(
+        list(getattr(operation, "node_ids", []) or [])
+        for group in path_groups
+        for operation in [group.primary_op] + list(group.h_compensation_ops or [])
+    ):
+        initial_ids_by_su: Dict[int, List[int]] = {}
+        for node_id, node in nodes_by_id.items():
+            initial_ids_by_su.setdefault(int(node.su_type), []).append(node_id)
+        path_proof = audit_conversion_paths(
+            path_groups, initial_ids_by_su=initial_ids_by_su if nodes_by_id else None,
+        )
+        if not path_proof["ok"]:
+            return Stage3AdjustmentApplyResult(
+                nodes=copy.deepcopy(list(nodes or [])), H=H_before,
+                applied_ops=[], rejected_ops=[{
+                    "reason": "invalid_conversion_path", "proof": path_proof,
+                }], changed=False,
+                conservation_before={"su_count": initial_total},
+                conservation_after={"su_count": initial_total},
+            )
     convertible_inventory = {
         int(key): int(value)
         for key, value in dict(histogram_plan.inventory_before or {}).items()
@@ -1373,7 +1434,7 @@ def apply_histogram_adjustment_plan(
             conservation_before={"su_count": initial_total},
             conservation_after={"su_count": initial_total},
         )
-    used_conversion_node_ids: set[int] = set()
+    used_conversion_node_ids = {int(node_id) for node_id in path_proof["node_paths"]}
     # Port-balance operations are part of the same atomic Stage3 transaction.
     # Do not reject a primary group merely because its intermediate histogram
     # is over the SU12 cap; the final cap check below evaluates the complete
@@ -1386,46 +1447,6 @@ def apply_histogram_adjustment_plan(
         getattr(histogram_plan, field, None) is not None
         for field in ("parity_balance_op", "port_role_balance_op")
     )
-    projected_node_types = {
-        int(node_id): int(getattr(node, "su_type", -1))
-        for node_id, node in nodes_by_id.items()
-    }
-    for group in list(histogram_plan.groups or []):
-        for op in [group.primary_op] + list(group.h_compensation_ops or []):
-            op_node_ids = [int(value) for value in list(op.node_ids or [])]
-            if len(op_node_ids) != len(set(op_node_ids)):
-                return Stage3AdjustmentApplyResult(
-                    nodes=copy.deepcopy(list(nodes or [])),
-                    H=H_before,
-                    applied_ops=[],
-                    rejected_ops=[{
-                        "reason": "duplicate_real_conversion_node_id_in_operation",
-                        "node_ids": op_node_ids,
-                    }],
-                    changed=False,
-                    conservation_before={"su_count": initial_total},
-                    conservation_after={"su_count": initial_total},
-                )
-            for node_id in op_node_ids:
-                if int(projected_node_types.get(node_id, -1)) != int(op.from_su):
-                    return Stage3AdjustmentApplyResult(
-                        nodes=copy.deepcopy(list(nodes or [])),
-                        H=H_before,
-                        applied_ops=[],
-                        rejected_ops=[{
-                            "reason": "non_contiguous_real_conversion_path",
-                            "node_id": int(node_id),
-                            "expected_from_su": int(
-                                projected_node_types.get(node_id, -1)
-                            ),
-                            "actual_from_su": int(op.from_su),
-                        }],
-                        changed=False,
-                        conservation_before={"su_count": initial_total},
-                        conservation_after={"su_count": initial_total},
-                    )
-                projected_node_types[node_id] = int(op.to_su)
-                used_conversion_node_ids.add(int(node_id))
     used_balance_node_ids: set[int] = set()
     for balance_field in ("parity_balance_op", "port_role_balance_op"):
         balance_op = getattr(histogram_plan, balance_field, None)

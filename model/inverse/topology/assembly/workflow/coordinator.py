@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from .....shared.aromatic_plan import MAX_FLEX_WINDOW_WIDTH
 
 from ..closure import chain as chain_materializer_module
+from ..closure.flex import run_external_flex_phase
 from ..state import ownership as ownership_module
 from ..ring import planner as ring_planner_module
 from ..state.pending import consolidate_pending_owners
@@ -15,7 +16,6 @@ from ..state.pending import consolidate_pending_owners
 @dataclass(frozen=True)
 class ExternalAssemblyPhaseState:
     external_subphases: List[str] = field(default_factory=list)
-    deferred_flex_shortfall: bool = False
     flex_violation_reason: Optional[str] = None
     ring_resource_blockers: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     ring_materialization_blockers: Dict[int, Dict[str, Any]] = field(default_factory=dict)
@@ -29,127 +29,27 @@ def run_external_assembly_phases(assembler: Any) -> ExternalAssemblyPhaseState:
     of rebuilding products from the classifier snapshot.
     """
 
-    branch_donors = chain_materializer_module.available_branch_donors(assembler)
-    completed = set(getattr(assembler, "completed_phases", set()) or set())
-    external_subphases: List[str] = []
-
-    explicit_pending = chain_materializer_module.has_pending_contracts_for_subphase(
-        assembler, "explicit_branch_closure"
-    )
-    if "explicit_branch_closure" not in completed or explicit_pending:
-        external_subphases.append("explicit_branch_closure")
-        chain_materializer_module.retry_ready_pending_contracts(
-            assembler,
-            branch_donors,
-            subphase="explicit_branch_closure",
-        )
-        chain_materializer_module.close_explicit_flex_branches_if_needed(
-            assembler, branch_donors
-        )
-    explicit_branch_stage_ok = not chain_materializer_module.has_pending_contracts_for_subphase(
-        assembler, "explicit_branch_closure"
-    )
-    if explicit_branch_stage_ok:
-        completed.add("explicit_branch_closure")
-
-    flex_scenario = str(dict(assembler.flex_audit or {}).get("scenario", "") or "")
     flex_enforced = bool(dict(assembler.flex_audit or {}).get("enforced", False))
-    flex_phase_name = (
-        "supplemental_flex_closure"
-        if flex_scenario == "below_range"
-        else "unbounded_external_flex_closure"
-    )
-    flex_pending = any(
-        str(dict(contract or {}).get("target_role", "") or "") == "flex_chain"
-        for contract in list(assembler.pending_contracts or [])
-    )
-    flex_needed = (
-        flex_pending
-        or "external_flex_closure" not in completed
-        or flex_phase_name not in completed
-    )
-    if explicit_branch_stage_ok and flex_pending:
-        # A resource conversion can satisfy a flex contract after the static
-        # flex audit has moved to ``in_range``.  The live pending contract is
-        # still authoritative and must be retried regardless of that scenario.
-        chain_materializer_module.retry_ready_pending_contracts(
-            assembler,
-            branch_donors,
-            target_role="flex_chain",
-        )
-        flex_pending = any(
-            str(dict(contract or {}).get("target_role", "") or "")
-            == "flex_chain"
-            for contract in list(assembler.pending_contracts or [])
-        )
-    if flex_scenario == "below_range" and explicit_branch_stage_ok and flex_needed:
-        external_subphases.append("supplemental_flex_closure")
-        chain_materializer_module.retry_ready_pending_contracts(
-            assembler,
-            branch_donors,
-            target_role="flex_chain",
-        )
-        chain_materializer_module.assemble_selected_supplemental_flex(
-            assembler, branch_donors
-        )
-        chain_materializer_module.release_satisfied_flex_selection(assembler)
-    elif explicit_branch_stage_ok and flex_needed and (
-        flex_scenario == "not_applicable" or not flex_enforced
-    ):
-        external_subphases.append("unbounded_external_flex_closure")
-        chain_materializer_module.retry_ready_pending_contracts(
-            assembler,
-            branch_donors,
-            target_role="flex_chain",
-        )
-        chain_materializer_module.assemble_remaining_flex(
-            assembler, branch_donors
-        )
-
-    pending_flex_contracts = bool(
+    wide_window = bool(
         flex_enforced
-        and flex_scenario == "below_range"
-        and any(
-            str(dict(contract or {}).get("target_role", "") or "") == "flex_chain"
-            and (
-                str(dict(contract or {}).get("failure_domain", "") or "")
-                == "topology_materialization"
-                or any(
-                    int(value) > 0
-                    for value in dict(
-                        dict(contract or {}).get("required_counts", {}) or {}
-                    ).values()
-                )
-            )
-            for contract in list(assembler.pending_contracts or [])
-        )
+        and int(assembler.flex_audit.get("flex_window_width", 0)) > MAX_FLEX_WINDOW_WIDTH
     )
-    flex_stage_ok = bool(explicit_branch_stage_ok and not pending_flex_contracts)
-    if flex_stage_ok:
-        completed.add("external_flex_closure")
-        completed.add(flex_phase_name)
-    raw_flex_violation_reason = chain_materializer_module.flex_range_violation_reason(
-        assembler
+    flex_state = run_external_flex_phase(
+        assembler,
+        complete_quantity=not wide_window or bool(assembler.flex_audit.get("stop_after_flex", False)),
     )
-    if assembler.flex_audit.get("stop_after_flex", False) or (
-        flex_enforced and int(assembler.flex_audit.get("flex_window_width", 0)) > MAX_FLEX_WINDOW_WIDTH
-    ):
-        # Materialize chains before asking Stage3 to narrow the window. Do
-        # not spend the remaining pool on rings/sides before this boundary.
-        assembler.completed_phases = completed
-        assembler.current_phase = "flex_range_reconciliation"
+    external_subphases = list(flex_state.subphases)
+    completed = set(assembler.completed_phases)
+    flex_stage_ok = flex_state.ready
+    flex_violation_reason = chain_materializer_module.flex_range_violation_reason(assembler)
+    if assembler.flex_audit.get("stop_after_flex", False) or wide_window or not flex_stage_ok:
+        assembler.current_phase = "flex_range_reconciliation" if wide_window or assembler.flex_audit.get("stop_after_flex", False) else "external_flex_closure"
         consolidate_pending_owners(assembler)
         return ExternalAssemblyPhaseState(
             external_subphases=external_subphases,
-            flex_violation_reason=raw_flex_violation_reason,
+            flex_violation_reason=flex_violation_reason,
         )
-    deferred_flex_shortfall = bool(
-        raw_flex_violation_reason == "flex_range_below_minimum"
-        and flex_stage_ok
-    )
-    flex_violation_reason = (
-        None if deferred_flex_shortfall else raw_flex_violation_reason
-    )
+    branch_donors = chain_materializer_module.available_branch_donors(assembler)
 
     ring_stage_attempted = False
     recovery_applied = False
@@ -274,7 +174,6 @@ def run_external_assembly_phases(assembler: Any) -> ExternalAssemblyPhaseState:
         assembler.current_phase = "complete"
     return ExternalAssemblyPhaseState(
         external_subphases=external_subphases,
-        deferred_flex_shortfall=deferred_flex_shortfall,
         flex_violation_reason=flex_violation_reason,
         ring_resource_blockers=ring_resource_blockers,
         ring_materialization_blockers=ring_materialization_blockers,

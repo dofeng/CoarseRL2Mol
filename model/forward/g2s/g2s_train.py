@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import random
 
-import numpy as np
 import pandas as pd
 import torch
+
+from model.forward.common import set_seed
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
@@ -40,14 +40,6 @@ except ImportError:
         save_json,
         save_prediction_points,
     )
-
-
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def build_dataset(paths: list[Path], k_hop: int) -> LocalNMRDataset:

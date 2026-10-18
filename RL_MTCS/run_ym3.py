@@ -46,6 +46,8 @@ def run(*, preflight_only=False):
     print("运行状态:", result["status"])
     print("结构合法:", result["legal"])
     print("是否全部完成:", result["all_complete"])
+    print("所有原始节点均已使用:", result["strict_all_nodes_assembled"])
+    print("允许剩余资源:", result["allowed_remaining_resources"])
 
     report = result["completion_report"]
     print("完成任务:", f"{report['completed']}/{report['total']}",

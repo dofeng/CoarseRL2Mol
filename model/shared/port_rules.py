@@ -1,38 +1,10 @@
 """Shared state-aware SU port rules, without model or plotting dependencies."""
 
 from dataclasses import dataclass
-import re
 from typing import Any, FrozenSet, Iterable, List, Tuple, Dict, Optional, Set, Union, Sequence
 from model.shared.topology_contract import (AROMATIC_RING_SU_TYPES,
     AROMATIC_RING_NEIGHBOR_SU_TYPES, CARBONYL_BODY_SU_TYPES)
 
-
-@dataclass(frozen=True)
-class PortRuleNode:
-    su_type: int
-    target_hop1_degree: int
-    special_anchor_mode: Optional[str] = None
-    special_anchor_partition: Optional[str] = None
-
-
-def port_rule_nodes(labels, adjacency, metadata=None):
-    """Use actual degrees and explicit modes, inferring unspecified anchors."""
-    nodes = {}
-    for gid, su in labels.items():
-        row = (metadata or {}).get(gid, {})
-        label = row.get('su_label', '')
-        match = re.match(r'(single|double)', label)
-        mode = row.get('special_anchor_mode') or (match.group(1) if match else None)
-        partition = row.get('special_anchor_partition') or None
-        kinds = [labels.get(n) for n in adjacency.get(gid, ())]
-        if su in {19, 20}:
-            anchors = {0, 27} if su == 20 else {2, 28, 29, 31}
-            if mode is None:
-                mode = 'double' if sum(k in anchors for k in kinds) >= 2 else 'single'
-            if su == 19 and partition is None:
-                partition = 'thio' if 31 in kinds else 'ether'
-        nodes[gid] = PortRuleNode(su, len(adjacency.get(gid, ())), mode, partition)
-    return nodes
 
 SPECIAL_DEGREE_PRIORS: Dict[int, Dict[int, float]] = {
     19: {1: 0.35, 2: 0.60, 3: 0.05},
@@ -252,31 +224,6 @@ def violates_special_d3_terminal_limit(su_type: int,
     except Exception:
         return False
     return bool(terminal_neighbor_count(neighbors) > 1)
-
-
-def is_single_special_d3_port_node(node_or_su: Any, su_type: Optional[int] = None) -> bool:
-    su_i = _node_su_type(node_or_su)
-    if su_i is None or int(su_i) not in {19, 20}:
-        return False
-    if su_type is not None and int(su_i) != int(su_type):
-        return False
-    degree = _node_target_degree(node_or_su)
-    if degree is None or int(degree) != 3:
-        return False
-    mode = _node_anchor_mode(node_or_su)
-    return str(mode) != 'double'
-
-
-def is_double_special_d23_port_node(node_or_su: Any, su_type: Optional[int] = None) -> bool:
-    su_i = _node_su_type(node_or_su)
-    if su_i is None or int(su_i) not in {19, 20}:
-        return False
-    if su_type is not None and int(su_i) != int(su_type):
-        return False
-    degree = _node_target_degree(node_or_su)
-    if degree is None or int(degree) not in {2, 3}:
-        return False
-    return str(_node_anchor_mode(node_or_su)) == 'double'
 
 
 def is_double_special_d3_port_node(node_or_su: Any, su_type: Optional[int] = None) -> bool:

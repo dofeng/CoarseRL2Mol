@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from ...shared.inverse_common import _NodeV3
 from .classification.classification_tokens import (
@@ -314,29 +314,6 @@ def resolve_fixed_contract_route(
             "contract_base_path_labels": list(labels),
             "contract_base_path_node_ids": list(node_ids),
         },
-    )
-
-
-def preflight_fixed_contracts(
-    nodes: Sequence[_NodeV3],
-    contracts: Iterable[Mapping[str, Any]],
-    *,
-    mainline_node_ids: Sequence[int] = (),
-    node_owner_by_id: Optional[Mapping[int, int]] = None,
-) -> Tuple[FixedRouteResolution, ...]:
-    nodes_by_id = {
-        _safe_int(getattr(node, "global_id", -1), -1): node
-        for node in list(nodes or [])
-        if _safe_int(getattr(node, "global_id", -1), -1) >= 0
-    }
-    return tuple(
-        resolve_fixed_contract_route(
-            contract,
-            nodes_by_id=nodes_by_id,
-            mainline_node_ids=mainline_node_ids,
-            node_owner_by_id=node_owner_by_id,
-        )
-        for contract in list(contracts or [])
     )
 
 

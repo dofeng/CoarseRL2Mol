@@ -306,6 +306,8 @@ def composition_report(state, source_problem, pre_substitution=None, output_dir=
     final = {gid: su for gid, su in state.current_node_map().items() if gid in state.node_axial}
     idle = dict(source_problem.idle_aromatic_nodes)
     residual = source_problem.unassembled_resource_map()
+    retained_ids = set(source_problem.aromatic_residual_node_ids)
+    allowed_conversions = {gid for gid in retained_ids if source.get(gid) == 11 and final.get(gid) == 13}
     merged = {a['removed_node_id']: a['representative_node_id'] for a in state.action_history
               if a.get('kind') == 'substitution' and 'removed_node_id' in a}
     before_state = pre_substitution or state
@@ -317,47 +319,59 @@ def composition_report(state, source_problem, pre_substitution=None, output_dir=
     unconnected = sorted(absent-missing_required)
     rows = []
     for gid in sorted(set(source) | set(final) | synthetic):
-        disposition = ('assembled' if gid in final else 'idle_aromatic' if gid in idle
+        disposition = ('retained_as_su13' if gid in allowed_conversions
+                       else 'assembled' if gid in final else 'idle_aromatic' if gid in idle
                        else 'unassembled_resource' if gid in residual
                        else 'substitution_merged' if gid in merged else 'missing_required' if gid in missing_required else 'unconnected')
         rows.append(dict(node_id=gid, source_su=source.get(gid), final_su=final.get(gid),
                          disposition=disposition, synthetic=gid in synthetic,
+                         conversion_reason='unused_su11_retained_as_su13' if gid in allowed_conversions else '',
                          representative_node_id=merged.get(gid, gid if gid in final else None)))
     counts, placed, pre = Counter(source.values()), Counter(final.values()), Counter(before.values())
     idle_counts, residual_counts = Counter(idle.values()), Counter(residual.values())
-    pending_ids = {r.target_node_id for r in source_problem.hetero_requests}
+    pending_ids = {r.target_node_id for r in source_problem.hetero_requests
+                   if final.get(r.target_node_id) != r.target_su}
     pending_ids.update(n for c in state.mandatory_contracts() for n in (c.source_node_id,c.target_node_id))
-    aromatic_ids = {n.node_id for u in state.problem.units if u.phase == 'aromatic' for n in u.nodes}
-    pending_ids.update(n for n, su in state.problem.node_su_types
-                       if n in aromatic_ids and (5 <= su <= 11 or su in {26, 30}))
     mismatches = sorted(gid for gid in set(final)&set(source) if final[gid]!=source[gid])
-    pending_labels = {gid for gid in mismatches if final[gid]==13 and gid in pending_ids}
+    pending_labels = {gid for gid in mismatches if final[gid]==13 and gid in pending_ids
+                      and gid not in retained_ids}
     pending_delta = Counter(final[gid] for gid in pending_labels)
     pending_delta.subtract(source[gid] for gid in pending_labels)
     pending_delta.update(final[gid] for gid in set(final)&synthetic)
+    retained_delta = Counter({13: len(retained_ids), 11: -len(retained_ids)})
     unconnected_counts = Counter(source[gid] for gid in unconnected)
+    unconnected_target_counts = Counter(13 if gid in retained_ids else source[gid] for gid in unconnected)
     comparison = []
     for su in sorted(set(counts) | set(placed) | set(pre)):
-        target = counts[su] - idle_counts[su] - residual_counts[su]
+        target = counts[su] - idle_counts[su] - residual_counts[su] + retained_delta[su]
         comparison.append(dict(su_type=su, inverse_count=counts[su], assembly_target_count=target,
             pre_substitution_count=pre[su], final_count=placed[su],
             idle_aromatic_count=idle_counts[su], other_unassembled_count=residual_counts[su],
             substitution_delta=placed[su]-pre[su], unconnected_count=unconnected_counts[su],
+            unconnected_target_count=unconnected_target_counts[su],
+            retained_residual_delta=retained_delta[su],
             pending_label_delta=pending_delta[su],
-            unexplained_delta=placed[su]-target+unconnected_counts[su]-pending_delta[su]))
+            unexplained_delta=placed[su]-target+unconnected_target_counts[su]-pending_delta[su]))
     unexpected = sorted(set(final) - set(source) - synthetic)
-    mismatches = sorted(gid for gid in set(final) & set(source) if final[gid] != source[gid])
-    # Partial assembly is an accounted disposition, not lost input identity.
-    reconciled = not (missing_required or unexpected or (set(mismatches)-pending_labels))
+    unexplained_mismatches = sorted(set(mismatches) - pending_labels - allowed_conversions)
+    # Actual pending contracts and explicit residual conversions have different
+    # dispositions. A missing task must never masquerade as a pending label.
+    reconciled = not (missing_required or unexpected or unexplained_mismatches)
+    expected_final = {gid: su for gid, su in source.items() if gid not in idle and gid not in residual}
+    expected_final.update({gid: 13 for gid in retained_ids})
     summary = dict(assembly_complete=bool(state.is_complete()),
         identity_valid=not state.audit_identity_errors(), label_valid=not state.audit_label_errors(),
         input_valid=not state.problem.input_issues,
         input_errors=[json.loads(issue) for issue in state.problem.input_issues],
         all_input_nodes_used=set(source) <= set(final), composition_reconciled=reconciled,
+        target_labels_complete=final == expected_final,
+        target_su_counts_match=Counter(final.values()) == Counter(expected_final.values()),
         source_node_count=len(source), assembled_node_count=len(final),
         idle_aromatic_count=len(idle), other_unassembled_count=len(residual),
         missing_required_ids=sorted(missing_required), unconnected_node_ids=unconnected,
         pending_label_ids=sorted(pending_labels), unexpected_ids=unexpected, su_mismatch_ids=mismatches,
+        allowed_su_conversion_ids=sorted(allowed_conversions), unexplained_su_mismatch_ids=unexplained_mismatches,
+        aromatic_residual_nodes=source_problem.aromatic_residual_rows(),
         synthetic_merged_ids=sorted(set(merged) & synthetic), su_comparison=comparison)
     if output_dir is not None:
         directory = Path(output_dir)
@@ -392,7 +406,7 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
             "q", "r", "final_q", "final_r", "x", "y",
             "logical_gid", "physical_slot_id", "source_unit_id", "original_su_type",
             "actual_degree", "label_state", "satisfied_contract_ids",
-            "su25_center_parent_id",
+            "su25_center_parent_id", "assembly_target_su_type",
         ])
         node_details = {row['node_id']: row for row in molecule['nodes']}
         for node_id, axial in sorted(state.node_axial.items()):
@@ -413,6 +427,7 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
                 node_details[node_id]['actual_degree'], node_details[node_id]['label_state'],
                 json.dumps(node_details[node_id]['satisfied_contract_ids']),
                 node_details[node_id]['su25_center_parent_id'],
+                node_details[node_id]['assembly_target_su_type'],
             ])
     with (directory / "final_edges.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -460,6 +475,9 @@ def export_final_state(state, output_dir: str | Path) -> Dict[str, str]:
             ])
 
         already_reported = {r.node_id for r in state.problem.unassembled_closure_resources}
+        for node_id, su in state.problem.idle_aromatic_nodes:
+            writer.writerow([node_id, su, 'idle_aromatic', '[]', 'bounded_template_residual'])
+            already_reported.add(node_id)
         merged = {a['removed_node_id'] for a in state.action_history
                   if a.get('kind') == 'substitution' and 'removed_node_id' in a}
         for node_id,su in state.problem.input_node_map().items():

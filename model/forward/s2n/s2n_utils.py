@@ -10,9 +10,15 @@ import numpy as np
 import pandas as pd
 import torch
 
+from model.forward.checkpoints import load_s2n_checkpoint
+from model.forward.common import (
+    metrics_to_dataframe,
+    r2_score_np,
+    save_checkpoint as save_s2n_checkpoint,
+)
+
 try:
     from .s2n_model import (
-        S2NConfig,
         S2NModel,
         SU_GROUPS,
         apply_element_feasibility_mask,
@@ -21,7 +27,6 @@ try:
     from ...shared.coarse_graph import _node_color
 except ImportError:
     from model.forward.s2n.s2n_model import (
-        S2NConfig,
         S2NModel,
         SU_GROUPS,
         apply_element_feasibility_mask,
@@ -30,62 +35,11 @@ except ImportError:
     from model.shared.coarse_graph import _node_color
 
 
-def load_s2n_checkpoint(model_path: str | Path,
-                        device: torch.device | str = "cpu") -> tuple[S2NModel, S2NConfig, dict]:
-    ckpt = torch.load(model_path, map_location=device, weights_only=False)
-    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        config = S2NConfig.from_dict(ckpt.get("config"))
-        state_dict = ckpt["model_state_dict"]
-        metadata = dict(ckpt)
-    else:
-        # Compatibility with older checkpoints that stored state_dict only.
-        config = S2NConfig(target_mode="absolute")
-        state_dict = ckpt
-        metadata = {"legacy_state_dict_only": True}
-    model = S2NModel.from_config(config).to(device)
-    model.load_state_dict(state_dict)
-    model.eval()
-    return model, config, metadata
-
-
-def save_s2n_checkpoint(path: str | Path,
-                        model: S2NModel,
-                        config: S2NConfig,
-                        epoch: int,
-                        metrics: dict,
-                        optimizer_state: dict | None = None,
-                        scheduler_state: dict | None = None,
-                        extra: dict | None = None):
-    payload = {
-        "model_state_dict": model.state_dict(),
-        "config": config.to_dict(),
-        "epoch": int(epoch),
-        "metrics": metrics,
-        "optimizer_state_dict": optimizer_state,
-        "scheduler_state_dict": scheduler_state,
-    }
-    if extra:
-        payload.update(extra)
-    torch.save(payload, path)
-
-
 def save_json(path: str | Path, obj: dict):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
-
-
-def r2_score_np(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    y_true = np.asarray(y_true, dtype=float).reshape(-1)
-    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
-    if y_true.size == 0:
-        return float("nan")
-    ss_res = float(np.sum((y_true - y_pred) ** 2))
-    ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
-    if ss_tot <= 1e-12:
-        return float("nan")
-    return 1.0 - ss_res / ss_tot
 
 
 def predict_loader(model: S2NModel,
@@ -521,12 +475,3 @@ def plot_regression(pred: torch.Tensor,
     fig.tight_layout()
     fig.savefig(output_png, dpi=300, bbox_inches="tight")
     plt.close(fig)
-
-
-def metrics_to_dataframe(metrics_by_split: dict[str, dict]) -> pd.DataFrame:
-    rows = []
-    for split, metrics in metrics_by_split.items():
-        row = {"split": split}
-        row.update(metrics)
-        rows.append(row)
-    return pd.DataFrame(rows)

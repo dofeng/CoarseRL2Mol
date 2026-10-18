@@ -22,7 +22,7 @@ from ....shared.aromatic_plan import (
 
 
 AROMATIC_TYPES = (12, 13)
-CONVERSION_SCORING_VERSION = "soft_h_flex_balance_v9"
+CONVERSION_SCORING_VERSION = "soft_h_flex_balance_v10"
 INFEASIBLE_SCORE = 1.0e12
 AROMATIC_STAGING_INVALID_PENALTY = 250.0
 
@@ -392,9 +392,19 @@ def _flex_transition_penalty(
         penalty += 14.0 * drift + 4.0 * drift * drift
     elif after_deviation < before_deviation:
         penalty -= float(before_deviation - after_deviation) * 120.0
-    if str(after.get("scenario", "")) == "invalid":
+    # Ordinary conversions may leave odd SU12 until the generation-boundary
+    # port balance. A successful projection already supplies the window used
+    # above. Score that window, without charging this authorized intermediate
+    # state the penalties for an unrepairable aromatic plan. Otherwise every
+    # SU12 donor loses to SU13 by 295 points regardless of donor rotation.
+    projected = bool(after.get("aromatic_staging_projected", False))
+    scenario = str(
+        after.get("aromatic_staging_projected_scenario", after.get("scenario", ""))
+        if projected else after.get("scenario", "")
+    )
+    if scenario == "invalid":
         penalty += 45.0
-    if not bool(after.get("aromatic_staging_valid", True)):
+    if not bool(after.get("aromatic_staging_valid", True)) and not projected:
         penalty += float(AROMATIC_STAGING_INVALID_PENALTY)
     if int(after.get("maximum_flex_capacity", 0) or 0) < int(before.get("maximum_flex_capacity", 0) or 0):
         penalty += float(int(before["maximum_flex_capacity"]) - int(after["maximum_flex_capacity"])) * 3.0
@@ -451,8 +461,7 @@ def _aromatic_rotation_offset(cursor: int, su_type: int) -> int:
 
 def _aromatic_penalty(
     context: ConversionContext,
-    ops: Sequence[HistogramConversion],
-    flex_impact: FlexImpact,
+    ops: Sequence[HistogramConversion]
 ) -> float:
     penalty = 0.0
     cursor = int(context.su11_rotation_index)
@@ -624,7 +633,7 @@ def score_conversion_bundle(
         tolerance=float(context.h_tolerance),
     )
     flex_impact = evaluate_flex_impact(context.current_H, H_after, context.flex_audit)
-    aromatic_penalty = _aromatic_penalty(context, ops, flex_impact)
+    aromatic_penalty = _aromatic_penalty(context, ops)
     donor_penalty = _donor_criticality_penalty(context, ops, inventory_after)
     operation_penalty = float(len(ops)) * 0.25 + sum(0.4 for op in ops if op.via_su is not None)
     topology_gain = float(gap_gain) * 100.0

@@ -1,9 +1,8 @@
 """Immutable input tasks and topology contracts.
 
-The legacy RL_MTCS implementation rebuilt aromatic clusters from SU counts and
-then allocated new chains.  This module defines the replacement boundary: the
-inverse pipeline owns topology and node identity, while MCTS only places the
-already-complete units on the hexagonal lattice.
+The inverse pipeline owns topology, original node identity and allowed closure
+resources. MCTS places these units on the hexagonal lattice. Unused SU11
+resources retain their original identities and have an assembly target of SU13.
 """
 
 from __future__ import annotations
@@ -18,6 +17,10 @@ AROMATIC_KINDS = {
     "chrysene", "triphenylene", "pyrene", "benzo_pyrene", "perylene",
     "coronene", "aromatic", "aromatic_cluster", "aromatic_unit",
 }
+ALIPHATIC_RING_KINDS = frozenset({
+    "aliphatic_ring", "fatty_ring", "fatty_ring_fused",
+    "fatty_ring_side", "fatty_ring_upper_lower",
+})
 
 
 class InverseInputError(ValueError):
@@ -101,6 +104,9 @@ class TopologyUnit:
     metadata: Tuple[Tuple[str, str], ...] = ()
     # Stable logical (SU25 parent, fixed terminal SU22) identities.
     su25_center_branches: Tuple[Tuple[int, int], ...] = ()
+    # Set from parsed connectivity. A ring label alone does not imply that
+    # the unit shares an edge with an aromatic ring.
+    attaches_to_aromatic_edge: bool = False
 
     @property
     def phase(self) -> str:
@@ -116,13 +122,6 @@ class TopologyUnit:
 
     def node_map(self) -> Dict[int, UnitNode]:
         return {int(node.node_id): node for node in self.nodes}
-
-    @property
-    def attaches_to_aromatic_edge(self) -> bool:
-        return self.product_type.lower() in {
-            "aliphatic_ring", "fatty_ring", "fatty_ring_fused",
-            "fatty_ring_side", "fatty_ring_upper_lower",
-        }
 
 
 @dataclass(frozen=True)
@@ -152,12 +151,25 @@ class InverseAssemblyInput:
     source_rigid_contracts: Tuple[ExternalContract, ...] = ()
     idle_aromatic_nodes: Tuple[Tuple[int, int], ...] = ()
     input_issues: Tuple[str, ...] = ()
+    # Unused SU11 closure identities retained on aromatic perimeter slots as
+    # actual SU13. These nodes have no external connection task.
+    aromatic_residual_node_ids: Tuple[int, ...] = ()
 
     def node_map(self) -> Dict[int, int]:
         return {int(node_id): int(su) for node_id, su in self.node_su_types}
 
     def ownership_map(self) -> Dict[int, str]:
         return {int(node_id): str(unit_id) for node_id, unit_id in self.ownership}
+
+    def assembly_target_node_map(self) -> Dict[int, int]:
+        """Expected labels after assembly, preserving original SU provenance."""
+        return {**self.node_map(), **{gid: 13 for gid in self.aromatic_residual_node_ids}}
+
+    def aromatic_residual_rows(self):
+        return [dict(node_id=gid, source_su_type=11, final_su_type=13,
+                     state='aromatic_residual', completion_tolerated=True,
+                     reason='unused_su11_retained_as_su13')
+                for gid in self.aromatic_residual_node_ids]
 
     def unassembled_resource_map(self) -> Dict[int, int]:
         return {

@@ -1,3 +1,4 @@
+from model.shared.port_rules import SPECIAL_DEGREE_PRIORS
 import torch
 import pandas as pd
 import copy
@@ -8,23 +9,26 @@ import re
 import os
 import shutil
 import time
+import warnings
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional, Any, Sequence
 
 # 导入项目内部模块
 from ..shared.coarse_graph import (
-    E_SU, SU_PPM_RANGES, NUM_SU_TYPES, PPM_AXIS
+    E_SU, NUM_SU_TYPES, PPM_AXIS
 )
-from ..forward.s2n.s2n_model import S2NConfig, S2NModel
-from ..forward.g2s.g2s_model import G2SConfig, NMR_VAE
+from ..forward.s2n.s2n_model import S2NModel
+from ..forward.checkpoints import load_s2n_checkpoint
 # 导入拆分模块
 from ..shared.inverse_common import (
-    _NodeV3, lorentzian_spectrum,
+    _NodeV3,
+    lorentzian_spectrum,
     multiset_from_counter,
     SU_DEFS,
-    visualize_su_distribution, evaluate_spectrum_reconstruction, resample_spectrum_to_ppm_axis,
+    visualize_su_distribution,
+    evaluate_spectrum_reconstruction,
+    resample_spectrum_to_ppm_axis,
     normalize_spectrum_to_carbon_count,
-    SPECIAL_DEGREE_PRIORS,
     get_effective_hist_element_vector,
     get_effective_nodes_element_vector,
     get_node_degree_hint,
@@ -56,53 +60,57 @@ from .topology.stage3.rebuild import Layer12CandidatesExhausted
 # ============================================================================
 
 class InversePipelineV3:
+    """Coordinate inventory repair, template matching and Stage3 assembly.
+
+    Layer1/2 build and score library-backed candidates. Stage3 consumes physical
+    resources under topology contracts; completed candidates may then refine
+    paired z/mu samples within fixed templates using Layer3. Inference does not
+    decode G2S or synthesize missing library templates.
     """
-    改进的逆向推理主类
-    
-    核心改进：
-    1. 软约束系统：约束按优先级分级，允许临时违反低优先级约束
-    2. 合成模板生成：库缺失时动态生成化学合理的模板
-    3. 增量优化：保留历史信息，避免全盘推翻
-    4. 多目标评估：不仅看R²，还考虑分段匹配、尖峰抑制、元素平衡
-    """
-    
+
     def __init__(self, 
                  s2n_model: S2NModel,
-                 vae_model: NMR_VAE,
-                 templates: Optional[Any],
+                 vae_model: Optional[torch.nn.Module] = None,
+                 templates: Optional[Any] = None,
                  device: str = 'cuda'):
         """
         初始化推理管道
         
         Args:
             s2n_model: Spectrum-to-Node模型
-            vae_model: NMR VAE模型（用于解码mu/pi）
+            vae_model: 已弃用的旧位置参数；当前反推只读取模板库中的配对 z/mu
             templates: 模板库路径或包含'_lib_path'的配置对象
             device: 计算设备
         """
         self.s2n = s2n_model.to(device).eval()
-        self.vae = vae_model.to(device).eval()
+        if vae_model is not None:
+            warnings.warn(
+                "vae_model is deprecated: inverse refinement uses template samples, not G2S decoding",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self.device = device
         # Chosen once from the target spectrum and applied only to all
         # structure-derived reconstructed spectra.  The target spectrum and
         # topology/resource rules remain untouched.
         self.aromatic_area_fraction: float = 0.0
         self.aromatic_response_scale: float = 1.0
-        self.default_template_lib_path: Optional[str] = None
-        if isinstance(templates, (str, Path)):
-            self.default_template_lib_path = str(Path(templates))
-        elif isinstance(templates, dict):
-            try:
-                lib_path = templates.get('_lib_path')
-                if isinstance(lib_path, (str, Path)):
-                    self.default_template_lib_path = str(Path(lib_path))
-            except Exception:
-                pass
-        
+        if isinstance(templates, dict):
+            warnings.warn(
+                "Dictionary-style templates are deprecated; pass the library path directly",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            templates = templates.get('_lib_path')
+        if templates is not None and not isinstance(templates, (str, Path)):
+            raise TypeError("templates must be a library path")
+        self.default_template_lib_path: Optional[str] = (
+            str(Path(templates)) if templates is not None else None
+        )
+
         # 加载常量到设备
         self.E_SU = E_SU.to(device)
-        self.SU_PPM_RANGES = SU_PPM_RANGES  # 字典，不需要.to(device)
-        
+
         # 初始化分层组件（委托模式）
         self.layer0_estimator = Layer0Estimator(
             s2n_model=self.s2n,
@@ -120,7 +128,6 @@ class InversePipelineV3:
 
         self.layer3_estimator = Layer3Estimator(
             device=torch.device(device),
-            vae_model=self.vae,
             lib_path=self.default_template_lib_path,
         )
         if self.default_template_lib_path:
@@ -150,13 +157,6 @@ class InversePipelineV3:
         self.layer2_estimator.aromatic_response_scale = float(scale)
         self.layer3_estimator.aromatic_response_scale = float(scale)
 
-    @staticmethod
-    def _merge_stage_config(defaults: Dict[str, Any],
-                            override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        cfg = dict(defaults)
-        if isinstance(override, dict):
-            cfg.update(override)
-        return cfg
 
     def _set_fixed_partition_meta(self, meta: Optional[Dict[str, Any]]) -> None:
         """Keep Layer4 and Layer0 on the same fixed-anchor metadata snapshot."""
@@ -991,86 +991,6 @@ class InversePipelineV3:
         except Exception as e:
             print(f"[{label}] Effective resource summary unavailable: {e}")
 
-    def _hist_element_counts_from_H(self, H: torch.Tensor) -> Dict[str, float]:
-        labels = ('C', 'H', 'O', 'N', 'S', 'X')
-        out = {str(label): 0.0 for label in labels}
-        try:
-            H_cpu = H.detach().cpu().flatten().long()
-            vec = get_effective_hist_element_vector(
-                H_cpu,
-                E_SU_tensor=self.E_SU.detach().cpu(),
-                device=torch.device('cpu'),
-            ).detach().cpu().flatten().float()
-            out = {
-                str(label): float(vec[idx].item())
-                for idx, label in enumerate(labels)
-                if idx < int(vec.numel())
-            }
-        except Exception:
-            pass
-        return out
-
-    def _element_error_summary(self,
-                               H: Optional[torch.Tensor],
-                               E_target: Optional[torch.Tensor],
-                               nodes: Optional[List[_NodeV3]] = None) -> Dict[str, Any]:
-        labels = ('C', 'H', 'O', 'N', 'S', 'X')
-        pred = {str(label): 0.0 for label in labels}
-        try:
-            if nodes:
-                vec = get_effective_nodes_element_vector(
-                    list(nodes or []),
-                    self.E_SU.detach().cpu(),
-                    device=torch.device('cpu'),
-                )
-                pred = {
-                    str(label): float(vec.detach().cpu().flatten()[idx].item())
-                    for idx, label in enumerate(labels)
-                    if idx < int(vec.numel())
-                }
-            elif H is not None:
-                H_cpu = H.detach().cpu().long()
-                try:
-                    special_degree_meta = self.layer4_adjuster._get_special_degree_meta(H_cpu)
-                except Exception:
-                    special_degree_meta = None
-                vec = get_effective_hist_element_vector(
-                    H_cpu,
-                    special_degree_meta=special_degree_meta,
-                    E_SU_tensor=self.E_SU.detach().cpu(),
-                    device=torch.device('cpu'),
-                )
-                pred = {
-                    str(label): float(vec.detach().cpu().flatten()[idx].item())
-                    for idx, label in enumerate(labels)
-                    if idx < int(vec.numel())
-                }
-        except Exception:
-            pred = self._hist_element_counts_from_H(H) if H is not None else pred
-        target: Dict[str, float] = {}
-        if E_target is not None:
-            try:
-                t = E_target.detach().cpu().flatten().float()
-                target = {
-                    str(label): float(t[idx].item())
-                    for idx, label in enumerate(labels)
-                    if idx < int(t.numel())
-                }
-            except Exception:
-                target = {}
-        errors = {
-            str(label): float(pred.get(str(label), 0.0) - target.get(str(label), 0.0))
-            for label in labels
-            if str(label) in pred and str(label) in target
-        }
-        abs_total = float(sum(abs(float(v)) for v in errors.values()))
-        return {
-            'pred': pred,
-            'target': target,
-            'error': errors,
-            'abs_total_error': abs_total,
-            'h_error': float(errors.get('H', 0.0)),
-        }
 
     def _run_layer12_cycle(
         self,
@@ -1093,7 +1013,7 @@ class InversePipelineV3:
         # reject an otherwise valid Layer1/2 graph before Layer2 is complete.
         def validate_candidate(*, nodes, H, tag):
             return self._validate_layer12_candidate(
-                nodes, H, S_target, E_target, tag
+                nodes, H, E_target, tag
             )
         fixed_meta = copy.deepcopy(
             getattr(self.layer4_adjuster, 'fixed_partition_meta', {}) or {}
@@ -1563,35 +1483,6 @@ class InversePipelineV3:
         )
         return hashlib.sha1(repr(signature).encode('utf-8')).hexdigest()
 
-    @staticmethod
-    def _outer_selected_state_signature(
-        nodes: Sequence[_NodeV3],
-        H: torch.Tensor,
-    ) -> str:
-        """Hash the observable state that seeds the next deterministic outer cycle."""
-        histogram = tuple(
-            int(value)
-            for value in torch.clamp(H.detach().cpu(), min=0).long().tolist()
-        )
-        node_rows = tuple(
-            (
-                int(getattr(node, 'global_id', -1)),
-                int(getattr(node, 'su_type', -1)),
-                round(float(getattr(node, 'mu', 0.0) or 0.0), 8),
-                round(float(getattr(node, 'pi', 0.0) or 0.0), 8),
-                tuple(sorted(
-                    int(value)
-                    for value in list(getattr(node, 'hop1_ids', []) or [])
-                )),
-            )
-            for node in sorted(
-                list(nodes or []),
-                key=lambda item: int(getattr(item, 'global_id', -1)),
-            )
-        )
-        return hashlib.sha1(
-            repr((histogram, node_rows)).encode('utf-8')
-        ).hexdigest()
 
     @staticmethod
     def _owned_product_node_ids(product: Dict[str, Any]) -> List[int]:
@@ -1933,9 +1824,7 @@ class InversePipelineV3:
 
     def _final_topology_rows(
         self,
-        nodes: List[_NodeV3],
-        S_target: Optional[torch.Tensor] = None,
-        E_target: Optional[torch.Tensor] = None,
+        nodes: List[_NodeV3]
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         current_node_ids = sorted({
             int(getattr(node, 'global_id', -1)) for node in list(nodes or [])
@@ -2278,7 +2167,6 @@ class InversePipelineV3:
                     dict(row or {}).get('claimed_source_node_ids', []) or []
                 )
             }
-            resource_ledger = dict(summary['diagnostics'].get('resource_ledger', {}) or {})
             ownership_states = dict(
                 dict(summary['diagnostics'].get('ownership_ledger', {}) or {}).get('states', {}) or {}
             )
@@ -2316,7 +2204,6 @@ class InversePipelineV3:
                 dict(row or {}).get('claimed_source_node_ids', []) or []
             )
         }
-        resource_ledger = dict(summary['diagnostics'].get('resource_ledger', {}) or {})
         ownership_states = dict(
             dict(summary['diagnostics'].get('ownership_ledger', {}) or {}).get('states', {}) or {}
         )
@@ -2581,12 +2468,14 @@ class InversePipelineV3:
     ) -> Dict[str, Any]:
         assembled_states = {
             'completed_topology', 'claimed_closure_resource',
-            'claimed_su24_ring_resource', 'aromatic_cluster_assigned',
+            'claimed_su24_ring_resource', 'aromatic_cluster_assigned', 'aromatic_residual',
         }
         assembled = sum(row.get('state') in assembled_states for row in ownership_rows)
         idle = sum(row.get('state') == 'idle_aromatic' for row in ownership_rows)
         tolerated = sum(bool(row.get('completion_tolerated', False))
-                        and row.get('state') != 'idle_aromatic' for row in ownership_rows)
+                        and row.get('state') not in assembled_states | {'idle_aromatic'}
+                        for row in ownership_rows)
+        retained = sum(row.get('state') == 'aromatic_residual' for row in ownership_rows)
         valid = bool(complete and not pending_count and not conflict_count and coverage_valid)
         strict = bool(valid and assembled == len(ownership_rows))
         return {
@@ -2594,9 +2483,12 @@ class InversePipelineV3:
             'assembled_node_count': assembled,
             'tolerated_unassembled_closure_resource_count': tolerated,
             'idle_aromatic_count': idle,
+            'aromatic_residual_count': retained,
+            'allowed_remaining_resource_count': idle + retained + tolerated,
             'strict_all_nodes_assembled': strict,
             'completion_mode': (
-                'strict_all_nodes_assembled' if strict
+                'retained_su11_as_su13' if strict and retained
+                else 'strict_all_nodes_assembled' if strict
                 else 'bounded_idle_aromatic'
                 if valid and idle > 0 and assembled + tolerated + idle == len(ownership_rows)
                 else 'tolerated_unassembled_closure_resources'
@@ -2707,15 +2599,11 @@ class InversePipelineV3:
     def _print_final_topology_specs(
         self,
         nodes: List[_NodeV3],
-        limit: int = 20,
-        S_target: Optional[torch.Tensor] = None,
-        E_target: Optional[torch.Tensor] = None,
+        limit: int = 20
     ) -> None:
         try:
             rows, summary = self._final_topology_rows(
-                nodes,
-                S_target=S_target,
-                E_target=E_target,
+                nodes
             )
             solver_reason = str(
                 dict(summary.get('diagnostics', {}) or {}).get('solver_reason', '')
@@ -2829,7 +2717,6 @@ class InversePipelineV3:
     def _validate_layer12_candidate(self,
                                     nodes: List[_NodeV3],
                                     H: torch.Tensor,
-                                    S_target: torch.Tensor,
                                     E_target: torch.Tensor,
                                     tag: str) -> Dict[str, Any]:
         """Validate only contracts owned by Layer1/Layer2.
@@ -2857,8 +2744,7 @@ class InversePipelineV3:
             validation_stage = 'histogram'
             hist_diag = self.layer4_adjuster._evaluate_required_hist_constraints(
                 H,
-                E_target,
-                S_target=S_target,
+                E_target
             )
             if not hist_diag.get('ok', False):
                 return {'ok': False, 'reason': str(hist_diag.get('reason', 'hist_invalid')),
@@ -2876,7 +2762,6 @@ class InversePipelineV3:
     def _validate_stage3_candidate(self,
                                    nodes: List[_NodeV3],
                                    H: torch.Tensor,
-                                   S_target: torch.Tensor,
                                    E_target: torch.Tensor,
                                    tag: str) -> Dict[str, Any]:
         """Validate a committed Layer2 result against Stage3 contracts."""
@@ -2886,7 +2771,7 @@ class InversePipelineV3:
                     'failure_domain': 'histogram', 'details': su12_cap, 'candidate_id': tag}
 
         layer12_validation = self._validate_layer12_candidate(
-            nodes, H, S_target, E_target, tag,
+            nodes, H, E_target, tag,
         )
         if not bool(layer12_validation.get('ok', False)):
             return layer12_validation
@@ -3022,7 +2907,6 @@ class InversePipelineV3:
             return self._validate_stage3_candidate(
                 nodes,
                 H,
-                S_target=S_target,
                 E_target=E_target,
                 tag=tag,
             )
@@ -3574,7 +3458,7 @@ class InversePipelineV3:
                 indent=2,
                 default=str,
             )
-    
+
     def infer(self, S_target: torch.Tensor, E_target: torch.Tensor,
               save_intermediates: bool = True,
               output_dir: str = 'inverse_result',
@@ -3596,10 +3480,11 @@ class InversePipelineV3:
              作为候选 H 调整，只在重跑 Layer1/2 后通过结构校验且
              Layer2 R2 超过当前接受参考时才采纳
            - block_c_resource:
-             每轮执行“分类 -> 组装 -> 精确需求 -> 合法转化 -> 完全重建 Layer1/2”
-             的 Stage3 组装循环；资源差谱候选仅以 Layer2-to-Layer2 R2 验收
+             执行分类、组装、精确需求与合法资源事务；同 generation 内续跑
+             live assembler，只在必要边界重建 Layer1/2；资源差谱候选
+             以 Layer2-to-Layer2 R2 验收
            - Stage3（包括SU24阶段）完成后执行固定模板 Layer3 z 细化
-        4. 返回当前外循环结束时的状态
+        4. 从满足 Stage3 完成条件的外循环快照中选择最优状态并只读导出
         
         Args:
             stage_configs: Layer4 正式阶段配置，推荐格式如:
@@ -3624,8 +3509,9 @@ class InversePipelineV3:
             layer3_config 可调参数:
                 - max_iters, pos_search_window, neg_assign_window
                 - top_k_samples, neg_top_k_peaks, neg_peak_min_sep_ppm
-                Layer3 keeps every Layer2 template fixed and always decodes
-                candidate z values with G2S. layer3_verbose controls logging.
+                Layer3 keeps every Layer2 template fixed and selects paired
+                samples.z/samples.mu from that template. No G2S decoding occurs.
+                layer3_verbose controls logging.
             outer_max_cycles:
                 - Layer4 -> Layer1/2 -> Layer3 宏循环次数上限
             outer_improve_eps:
@@ -3865,7 +3751,7 @@ class InversePipelineV3:
                                               H_local: torch.Tensor,
                                               tag: str) -> Tuple[bool, str]:
                 validation = self._validate_layer12_candidate(
-                    nodes_local, H_local, S_target, E_target, tag,
+                    nodes_local, H_local, E_target, tag,
                 )
                 if not validation['ok']:
                     return False, str(validation['reason'])
@@ -3881,8 +3767,7 @@ class InversePipelineV3:
                 try:
                     hist_diag = self.layer4_adjuster._evaluate_required_hist_constraints(
                         H_local,
-                        E_target,
-                        S_target=S_target,
+                        E_target
                     )
                 except Exception as e:
                     if emit:
@@ -3908,7 +3793,7 @@ class InversePipelineV3:
                     H_block_a_base, nodes_block_a_base, diff_block_a_base,
                     E_target, S_target, block_a_cfg, f'Block A #{block_a_iter + 1}',
                 )
-                for H_block_a, moves_a, _meta_a in candidates_a:
+                for H_block_a, _, _meta_a in candidates_a:
                     hist_ok, _hist_reason = _candidate_hist_feasible(H_block_a, tag=f'BlockA #{block_a_iter + 1}')
                     if not hist_ok:
                         continue
@@ -3976,8 +3861,8 @@ class InversePipelineV3:
             for block_b_iter in range(block_b_cycles):
                 block_b_progress = False
                 block_b_attempted = False
-                for family_idx, (family_name, family_substages) in enumerate(block_b_families):
-                    for substage_idx, substage in enumerate(family_substages):
+                for family_name, family_substages in block_b_families:
+                    for substage in family_substages:
                         nodes_stage_base = copy.deepcopy(current_nodes)
                         H_stage_base = current_H.detach().clone()
                         diff_stage_base = copy.deepcopy(current_diff)
@@ -4335,7 +4220,6 @@ class InversePipelineV3:
                         nodes=copy.deepcopy(stage3_nodes),
                         H=stage3_H.detach().clone(),
                         E_target=E_target,
-                        S_target=S_target,
                         output_root=output_root,
                         run_id=run_id,
                         stage3_complete=False,
@@ -4402,6 +4286,7 @@ class InversePipelineV3:
                     > float(best_outer_snapshot.get('selected_r2', float('-inf')))
                 )
             )
+            previous_best_outer_snapshot = best_outer_snapshot
             if round_became_best:
                 best_outer_snapshot = {
                     'outer_idx': int(outer_idx),
@@ -4501,7 +4386,6 @@ class InversePipelineV3:
                     nodes=copy.deepcopy(current_nodes),
                     H=current_H.detach().clone(),
                     E_target=E_target,
-                    S_target=S_target,
                     output_root=output_root,
                     run_id=run_id,
                     stage3_complete=bool(stage3_complete_for_layer3),
@@ -4518,7 +4402,14 @@ class InversePipelineV3:
                         or 'template_center_mu'
                     ),
                 )
-                if round_became_best and not bool(
+                if round_became_best and snapshot_result.get('topology_valid') is False:
+                    best_outer_snapshot = previous_best_outer_snapshot
+                    print(
+                        f"[Outer Cycle {outer_idx + 1}] excluded from best result: "
+                        "export topology validation failed; retaining previous valid best",
+                        flush=True,
+                    )
+                elif round_became_best and not bool(
                     snapshot_result.get('snapshot_ok', False)
                 ):
                     # Ownership completeness is checked before selection.
@@ -4708,9 +4599,7 @@ class InversePipelineV3:
         )
         self._print_histogram_and_elements(H_final, E_target, label='Final Summary', nodes=nodes)
         self._print_final_topology_specs(
-            nodes,
-            S_target=S_target,
-            E_target=E_target,
+            nodes
         )
         print("\n" + "=" * 80)
         print("逆向推理完成！")
@@ -4754,67 +4643,11 @@ class InversePipelineV3:
             if 0 <= su < NUM_SU_TYPES:
                 H[su] += 1
         return H
-    
+
     def estimate_su_histogram(self, S_target: torch.Tensor, E_target: torch.Tensor) -> torch.Tensor:
         """委托给Layer0Estimator执行SU直方图估计"""
         return self.layer0_estimator.estimate_su_histogram(S_target, E_target)
 
-    def run_layer12(
-        self,
-        S_target: torch.Tensor,
-        E_target: torch.Tensor,
-        *,
-        H_seed: Optional[torch.Tensor] = None,
-        save_intermediates: bool = True,
-        output_dir: Optional[str] = None,
-        eval_lib_path: Optional[str] = None,
-        layer1_config: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], float]:
-        """Run Layer0/1/2 once with the fixed inverse spectral contract."""
-        started = time.perf_counter()
-        target = S_target.to(self.device).flatten()
-        self._set_aromatic_reconstruction_scale(target)
-        elements = E_target.to(self.device).flatten()
-        layer1_runtime_config, _layer3_config = self._build_layer_runtime_configs(
-            layer1_config=layer1_config,
-        )
-        resolved_lib = str(eval_lib_path or self.default_template_lib_path or '')
-        if not resolved_lib:
-            raise ValueError('run_layer12 requires an active template library')
-
-        layer0_started = time.perf_counter()
-        if H_seed is None:
-            histogram = self.estimate_su_histogram(target, elements)
-            self._set_fixed_partition_meta(
-                getattr(self.layer0_estimator, 'fixed_partition_meta', {}) or {}
-            )
-        else:
-            histogram = H_seed.to(self.device).detach().clone()
-        layer0_elapsed = time.perf_counter() - layer0_started
-
-        stage_output = None
-        if save_intermediates and output_dir:
-            stage_output = str(Path(output_dir))
-            Path(stage_output).mkdir(parents=True, exist_ok=True)
-        cycle_started = time.perf_counter()
-        nodes, final_histogram, difference, layer2_r2 = self._run_layer12_cycle(
-            H_seed=histogram.detach().clone(),
-            S_target=target,
-            E_target=elements,
-            eval_lib_path=resolved_lib,
-            layer1_runtime_cfg=layer1_runtime_config,
-            eval_nmr=True,
-            eval_output_dir=stage_output,
-            layer2_output_dir=stage_output,
-        )
-        difference['layer0_elapsed_s'] = float(layer0_elapsed)
-        difference['layer12_compute_elapsed_s'] = float(
-            time.perf_counter() - cycle_started
-        )
-        difference['run_layer12_total_elapsed_s'] = float(
-            time.perf_counter() - started
-        )
-        return nodes, final_histogram, difference, float(layer2_r2)
     def layer1_assign(
         self,
         H_init: torch.Tensor,
@@ -4846,20 +4679,6 @@ class InversePipelineV3:
             eval_output_dir=eval_output_dir,
             eval_lib_path=eval_lib_path or self.default_template_lib_path,
             **runtime_config,
-        )
-
-    def evaluate_layer1_nmr_with_library(
-        self,
-        nodes: List[_NodeV3],
-        S_target: torch.Tensor,
-        lib_path: Optional[str] = None,
-        output_dir: Optional[str] = 'inverse_result',
-    ) -> Dict[str, float]:
-        return self.layer1_assigner.evaluate_layer1_nmr_with_library(
-            nodes=nodes,
-            S_target=S_target,
-            lib_path=lib_path or self.default_template_lib_path,
-            output_dir=output_dir,
         )
 
     def layer2_assign(self, nodes: List[_NodeV3],
@@ -4906,11 +4725,11 @@ class InversePipelineV3:
         self.layer3_estimator.lib_path = resolved_path
         self.layer3_estimator._template_cache = layer2_cache
         return True
-    
+
     # ========================================================================
     # Layer3: z调优（改进版）
     # ========================================================================
-    
+
     def layer3_adjust_templates(self,
                                 nodes: List[_NodeV3],
                                 S_target: torch.Tensor,
@@ -4926,12 +4745,10 @@ class InversePipelineV3:
                                 layer3_verbose: bool = True) \
                                 -> Tuple[List[_NodeV3], float]:
         """
-        Layer3: 通过调整z向量优化谱图匹配
-        
-        改进点：
-        1. 分段优先优化：集中火力攻克尖峰区域
-        2. 候选池扩展：增加多样性采样
-        3. 早停机制：R²达标提前终止
+        在固定 Layer2 模板内选择配对 z/mu 样本，以全谱 R² 验收移动。
+
+        根据差谱负峰和正峰邻域生成离散候选；无负峰、无改善移动或达到
+        迭代上限时结束，不设置 R² 达标阈值。E_target 保留统一分层接口。
         """
         self._set_aromatic_reconstruction_scale(S_target)
         return self.layer3_adjust_templates_impl(
@@ -5048,7 +4865,6 @@ class InversePipelineV3:
             self._save_final_result_summary(
                 nodes=nodes,
                 E_target=E_target,
-                S_target=S_target,
                 output_dir=str(final_dir),
                 include_diagnostics=bool(include_diagnostics),
             )
@@ -5084,20 +4900,6 @@ class InversePipelineV3:
             hop1_ms = tuple(multiset_from_counter(getattr(n, 'hop1_su', {}) or {}))
             hop2_ms = tuple(multiset_from_counter(getattr(n, 'hop2_su', {}) or {}))
             hop1_ids = [int(x) for x in list(getattr(n, 'hop1_ids', []) or [])]
-            fixed_ids = sorted(int(x) for x in set(getattr(n, 'fixed_hop1_ids', set()) or set()))
-            score_components = dict(getattr(n, 'score_components', {}) or {})
-            z_vec = getattr(n, 'z_vec', None)
-            z_norm = None
-            z_head4 = None
-            if isinstance(z_vec, torch.Tensor) and int(z_vec.numel()) > 0:
-                try:
-                    z_norm = float(z_vec.detach().float().norm().item())
-                    z_head4 = ",".join(
-                        f"{float(v):.6f}" for v in z_vec.detach().flatten()[:4].cpu().tolist()
-                    )
-                except Exception:
-                    z_norm = None
-                    z_head4 = None
             rows.append({
                 'global_id': int(getattr(n, 'global_id', -1)),
                 'su_type': int(su_idx),
@@ -5247,6 +5049,7 @@ class InversePipelineV3:
             if str(node_row.get('node_id', '')).lstrip('-').isdigit()
         }
         idle_aromatic_ids = {node_id for node_id, _su in problem.idle_aromatic_nodes}
+        aromatic_residual_ids = set(problem.aromatic_residual_node_ids)
         for name in ('final_topology_node_ownership.csv', 'final_topology_resource_pool.csv'):
             manifest_path = final_dir / name
             if not manifest_path.is_file() or not aromatic_owner_by_node:
@@ -5275,15 +5078,17 @@ class InversePipelineV3:
                     if owner is None:
                         continue
                     if 'state' in frame.columns:
-                        frame.at[row_index, 'state'] = 'aromatic_cluster_assigned'
+                        frame.at[row_index, 'state'] = ('aromatic_residual'
+                            if node_id in aromatic_residual_ids else 'aromatic_cluster_assigned')
                     if 'role' in frame.columns:
                         frame.at[row_index, 'role'] = 'aromatic_site'
                     if 'resource_pool' in frame.columns:
                         frame.at[row_index, 'resource_pool'] = False
                     if 'completion_tolerated' in frame.columns:
-                        frame.at[row_index, 'completion_tolerated'] = False
+                        frame.at[row_index, 'completion_tolerated'] = node_id in aromatic_residual_ids
                     if 'tolerance_reason' in frame.columns:
-                        frame.at[row_index, 'tolerance_reason'] = ''
+                        frame.at[row_index, 'tolerance_reason'] = ('unused_su11_retained_as_su13'
+                            if node_id in aromatic_residual_ids else '')
                     if 'product_id' in frame.columns:
                         frame.at[row_index, 'product_id'] = owner
                 if name == 'final_topology_resource_pool.csv':
@@ -5365,7 +5170,6 @@ class InversePipelineV3:
         nodes: List[_NodeV3],
         H: torch.Tensor,
         E_target: torch.Tensor,
-        S_target: Optional[torch.Tensor],
         output_root: Path,
         run_id: str,
         stage3_complete: bool,
@@ -5434,7 +5238,6 @@ class InversePipelineV3:
                 self._save_final_result_summary(
                     nodes=nodes,
                     E_target=E_target,
-                    S_target=S_target,
                     output_dir=str(temp_dir),
                     raise_topology_errors=True,
                 )
@@ -5503,6 +5306,7 @@ class InversePipelineV3:
                 )
 
             aromatic_plan_payload: Dict[str, Any] = {}
+            topology_valid = bool(state_consistency['ok'])
             if stage3_complete:
                 try:
                     aromatic_plan_payload = self._save_final_aromatic_plan(
@@ -5513,16 +5317,29 @@ class InversePipelineV3:
                             or 0
                         ),
                     )
+                    topology_valid = bool(
+                        topology_valid and aromatic_plan_payload.get('complete', False)
+                    )
                 except Exception as exc:
+                    from RL_MTCS.mdp.types import InverseInputError
+
+                    # Structural rejection invalidates the candidate itself;
+                    # a filesystem publication error does not establish that.
+                    if isinstance(exc, InverseInputError):
+                        topology_valid = False
                     errors.append({
                         'artifact': 'final_aromatic_clusters.json',
                         'error': f'{type(exc).__name__}: {exc}',
                     })
+            result['topology_valid'] = bool(topology_valid)
 
             aromatic_owner_by_node: Dict[int, str] = {}
             idle_aromatic_ids = {
                 int(row['node_id'])
                 for row in aromatic_plan_payload.get('idle_aromatic_nodes', [])
+            }
+            aromatic_residual_ids = {
+                int(row['node_id']) for row in aromatic_plan_payload.get('aromatic_residual_nodes', [])
             }
             for cluster in list(aromatic_plan_payload.get('clusters', []) or []):
                 cluster_id = int(dict(cluster or {}).get('cluster_id', -1))
@@ -5592,7 +5409,8 @@ class InversePipelineV3:
                 # resource manifest.
                 aromatic_owner = aromatic_owner_by_node.get(node_id)
                 if aromatic_owner is not None:
-                    state = 'aromatic_cluster_assigned'
+                    state = ('aromatic_residual' if node_id in aromatic_residual_ids
+                             else 'aromatic_cluster_assigned')
                     owner_product = aromatic_owner
                 elif node_id in idle_aromatic_ids:
                     state = 'idle_aromatic'
@@ -5603,9 +5421,10 @@ class InversePipelineV3:
                     'state': state,
                     'resource_pool': bool(state in resource_states),
                     'product_id': owner_product,
-                    'completion_tolerated': state == 'idle_aromatic',
+                    'completion_tolerated': state in {'idle_aromatic', 'aromatic_residual'},
                     'tolerance_reason': ('bounded_template_residual'
-                                         if state == 'idle_aromatic' else ''),
+                                         if state == 'idle_aromatic' else 'unused_su11_retained_as_su13'
+                                         if state == 'aromatic_residual' else ''),
                 })
             closure_rows = [
                 row for row in ownership_rows
@@ -5804,11 +5623,9 @@ class InversePipelineV3:
                         'error': 'required_snapshot_artifact_missing',
                     })
             status['snapshot_ok'] = not bool(errors)
-            # Best-round eligibility is based on the validated in-memory
-            # Stage3/Layer3 result.  Snapshot errors remain visible through
-            # ``snapshot_ok`` but do not invalidate that result.
-            status['eligible_for_best'] = bool(eligible_for_best)
-            status['best_so_far_at_cycle_end'] = bool(best_so_far_at_cycle_end)
+            status['topology_valid'] = bool(topology_valid)
+            status['eligible_for_best'] = bool(eligible_for_best and topology_valid)
+            status['best_so_far_at_cycle_end'] = bool(best_so_far_at_cycle_end and topology_valid)
             status_path = temp_dir / 'outer_cycle_status.json'
             status_path.write_text(
                 json.dumps(
@@ -5823,13 +5640,15 @@ class InversePipelineV3:
             result.update({
                 'published': True,
                 'snapshot_ok': not bool(errors),
-                'eligible_for_best': bool(eligible_for_best),
+                'topology_valid': bool(topology_valid),
+                'eligible_for_best': bool(eligible_for_best and topology_valid),
                 'status_path': str(final_dir / 'outer_cycle_status.json'),
                 'output_dir': str(final_dir),
             })
             print(
                 f"[Outer Cycle {int(outer_idx) + 1} Snapshot] "
                 f"published={bool(result['published'])} "
+                f"snapshot_ok={not bool(errors)} "
                 f"complete={bool(stage3_complete)} dir={final_dir}",
                 flush=True,
             )
@@ -5855,6 +5674,12 @@ class InversePipelineV3:
                     f"export_errors={len(errors)}",
                     flush=True,
                 )
+                for error in errors:
+                    print(
+                        f"  export failure: artifact={error.get('artifact', 'unknown')} "
+                        f"reason={error.get('error') or error.get('details')}",
+                        flush=True,
+                    )
             return result
         except Exception as exc:
             failure = {
@@ -6006,7 +5831,6 @@ class InversePipelineV3:
     def _save_final_result_summary(self,
                                    nodes: List[_NodeV3],
                                    E_target: torch.Tensor,
-                                   S_target: Optional[torch.Tensor],
                                    output_dir: str,
                                    *,
                                    raise_topology_errors: bool = False,
@@ -6046,9 +5870,7 @@ class InversePipelineV3:
 
         try:
             topology_rows, topology_summary = self._final_topology_rows(
-                nodes,
-                S_target=S_target,
-                E_target=E_target,
+                nodes
             )
             topology_columns = [
                 'actual_su', 'gid', 'product_type', 'required_slots_satisfied',
@@ -6344,11 +6166,11 @@ class InversePipelineV3:
             print(f"[Final Topology Export] 保存失败: {e}")
             if raise_topology_errors:
                 raise
-    
+
     # ========================================================================
     # 辅助方法
     # ========================================================================
-    
+
     def reconstruct_spectrum(self, nodes: List[_NodeV3]) -> torch.Tensor:
         """Reconstruct the inverse spectrum with unit peaks and HWHM 1.0."""
         device = self.device
@@ -6400,57 +6222,28 @@ class InversePipelineV3:
 # 工具函数（用于外部调用）
 # ============================================================================
 
-def _extract_checkpoint_state_dict(ckpt: Any) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
-    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        return dict(ckpt["model_state_dict"]), dict(ckpt)
-    if isinstance(ckpt, dict) and "state_dict" in ckpt:
-        return dict(ckpt["state_dict"]), dict(ckpt)
-    return dict(ckpt), {"legacy_state_dict_only": True}
 
-
-def _normalize_g2s_state_dict(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    normalized: Dict[str, torch.Tensor] = {}
-    for key, value in dict(state_dict or {}).items():
-        key_s = str(key)
-        if key_s.startswith("decoder.decoder."):
-            key_s = "decoder." + key_s[len("decoder.decoder."):]
-        normalized[key_s] = value
-    return normalized
-
-
-def _g2s_predict_intensity_from_state_dict(state_dict: Dict[str, torch.Tensor],
-                                           fallback: bool = False) -> bool:
-    weight = state_dict.get("decoder.net.5.weight")
-    if weight is None:
-        return bool(fallback)
-    try:
-        return bool(int(weight.shape[0]) > 1)
-    except Exception:
-        return bool(fallback)
-
-
-def load_pipeline(s2n_ckpt: str, vae_ckpt: str, templates_pkl: str,
+def load_pipeline(s2n_ckpt: str, vae_ckpt: Optional[str] = None,
+                  templates_pkl: Optional[str] = None,
                   device: str = 'cuda') -> InversePipelineV3:
-    """加载完整推理管道，兼容新旧 S2N/G2S checkpoint 格式。"""
-    s2n_ckpt_obj = torch.load(s2n_ckpt, map_location=device, weights_only=False)
-    s2n_state, s2n_meta = _extract_checkpoint_state_dict(s2n_ckpt_obj)
-    s2n_model = S2NModel.from_config(S2NConfig.from_dict(s2n_meta.get("config")))
-    s2n_model.load_state_dict(s2n_state)
+    """Load S2N and a template library without allocating an unused G2S model.
 
-    vae_ckpt_obj = torch.load(vae_ckpt, map_location=device, weights_only=False)
-    vae_state_raw, vae_meta = _extract_checkpoint_state_dict(vae_ckpt_obj)
-    vae_state = _normalize_g2s_state_dict(vae_state_raw)
-    g2s_cfg = G2SConfig.from_dict(vae_meta.get("config"))
-    g2s_cfg.predict_intensity = _g2s_predict_intensity_from_state_dict(
-        vae_state,
-        fallback=bool(getattr(g2s_cfg, "predict_intensity", False)),
-    )
-    vae_model = NMR_VAE.from_config(g2s_cfg)
-    vae_model.load_state_dict(vae_state)
-
-    template_path = str(Path(templates_pkl))
-    pipeline = InversePipelineV3(s2n_model, vae_model, template_path, device)
-    return pipeline
+    Prefer ``load_pipeline(s2n_ckpt, templates_pkl=path, device=device)``.
+    The previous four-argument form remains accepted with a deprecation warning;
+    its G2S checkpoint argument is no longer read.
+    """
+    if templates_pkl is None:
+        templates_pkl, vae_ckpt = vae_ckpt, None
+    if templates_pkl is None:
+        raise ValueError("A template library path is required")
+    if vae_ckpt is not None:
+        warnings.warn(
+            "vae_ckpt is deprecated and is not loaded by the inverse pipeline",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    s2n_model, _, _ = load_s2n_checkpoint(s2n_ckpt, device=device)
+    return InversePipelineV3(s2n_model, templates=str(Path(templates_pkl)), device=device)
 
 
 def read_spectrum_csv(path: str) -> torch.Tensor:
@@ -6477,32 +6270,32 @@ def parse_elements(expr: str) -> torch.Tensor:
 
 if __name__ == '__main__':
     import argparse
-    
+
     parser = argparse.ArgumentParser(description='InversePipelineV3: 改进的逆向推理')
     parser.add_argument('--s2n_ckpt', type=str, required=True, help='S2N模型检查点路径')
-    parser.add_argument('--vae_ckpt', type=str, required=True, help='VAE模型检查点路径')
+    parser.add_argument('--vae_ckpt', type=str, default=None, help='已弃用；反推不再加载 G2S 检查点')
     parser.add_argument('--templates', type=str, required=True, help='模板库pkl路径')
     parser.add_argument('--spectrum', type=str, required=True, help='目标谱图CSV路径')
     parser.add_argument('--elements', type=str, required=True, help='元素组成，如 C=100 H=150 O=10')
     parser.add_argument('--device', type=str, default='cuda', help='计算设备')
     parser.add_argument('--output', type=str, default='inverse_result', help='输出目录')
-    
+
     args = parser.parse_args()
-    
+
     # 加载管道
-    print(f"加载模型: S2N={args.s2n_ckpt}, VAE={args.vae_ckpt}")
+    print(f"加载模型: S2N={args.s2n_ckpt}, 模板库={args.templates}")
     pipeline = load_pipeline(args.s2n_ckpt, args.vae_ckpt, args.templates, args.device)
-    
+
     # 读取输入
     print(f"读取谱图: {args.spectrum}")
     S_target_raw = read_spectrum_csv(args.spectrum)
-    
+
     print(f"解析元素: {args.elements}")
     E_target = parse_elements(args.elements)
     S_target = normalize_spectrum_to_carbon_count(S_target_raw, float(E_target[0].item()))
-    
+
     print(f"目标谱图维度: {S_target.shape}, 元素组成: {E_target.tolist()}")
-    
+
     # 执行推理
     nodes, H_final = pipeline.infer(
         S_target,
@@ -6511,7 +6304,7 @@ if __name__ == '__main__':
         output_dir=args.output,
         eval_lib_path=args.templates,
     )
-    
+
     print(f"\n推理完成！结果已保存至 {args.output}/")
     print(f"最终SU数量: {len(nodes)}")
     print(f"SU直方图: {H_final.long().tolist()}")

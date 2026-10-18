@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from collections import Counter
 import hashlib
 import json
 import math
@@ -13,7 +14,6 @@ import torch
 from ....shared.coarse_graph import get_su_ppm_range
 from ....shared.inverse_common import reconstruction_peak_scale
 from ....shared.aromatic_plan import su12_transition_diagnostics
-from .conversion_scoring import evaluate_flex_impact
 from .histogram import _h_total
 from .profiles import MIN_STAGE3_AROMATIC_RESOURCE_COUNT
 from ..stage3_models import Stage3SpectrumCandidate
@@ -25,11 +25,6 @@ SPECTRUM_RESOURCE_TYPES = (11, 12, 13, 22, 23, 24)
 # conversion rules below; adding them to SPECTRUM_RESOURCE_TYPES would reopen
 # arbitrary single-node conversions in the legacy candidate generator.
 UNSATURATED_SPECTRUM_TYPES = (14, 15, 16)
-UNSATURATED_PAIR_SOURCE_BY_TARGET = {
-    14: 24,
-    15: 23,
-    16: 22,
-}
 UNSATURATED_DIFF_WINDOWS: Dict[int, Tuple[float, float]] = {
     14: (125.0, 150.0),
     15: (120.0, 140.0),
@@ -46,110 +41,6 @@ SPECTRUM_PAIR_RULES: Tuple[Tuple[Tuple[int, int], Tuple[int, int], str], ...] = 
 SPECTRUM_UNSATURATED_CAP_RATIO = 0.10
 SPECTRUM_ALIPHATIC_NEGATIVE_CARBON_THRESHOLD = 12.0
 SPECTRUM_UNIT_PEAK_HWHM = 1.0
-DEFAULT_SPECTRUM_WINDOWS: Dict[int, Tuple[float, float, float, float]] = {
-    int(su_type): (*get_su_ppm_range(int(su_type)), *get_su_ppm_range(int(su_type)))
-    for su_type in SPECTRUM_RESOURCE_TYPES
-}
-
-SPECTRUM_H_SOFT_LOWER_RATIO = -0.03
-SPECTRUM_H_SOFT_UPPER_RATIO = 0.03
-SPECTRUM_H_OUTSIDE_WORSENING_WEIGHT = 3.0
-SPECTRUM_FLEX_DEVIATION_WORSENING_PENALTY = 0.02
-SPECTRUM_FLEX_INVALID_WINDOW_PENALTY = 0.05
-SPECTRUM_PEAK_URGENCY_WEIGHT = 0.60
-SPECTRUM_AREA_URGENCY_WEIGHT = 0.40
-SPECTRUM_BATCH_CARBON_RATIO = 0.02
-
-
-def spectrum_h_soft_bounds(target_h: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
-    if target_h is None or float(target_h) <= 0.0:
-        return None, None
-    return (
-        float(target_h) * (1.0 + float(SPECTRUM_H_SOFT_LOWER_RATIO)),
-        float(target_h) * (1.0 + float(SPECTRUM_H_SOFT_UPPER_RATIO)),
-    )
-
-
-def spectrum_candidate_balance_penalty(
-    *,
-    H_before: torch.Tensor,
-    H_after: torch.Tensor,
-    E_target: Optional[torch.Tensor],
-    special_degree_meta: Optional[Dict[str, Any]] = None,
-    flex_audit: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Return an R2-scale soft penalty for H and flex degradation."""
-    target_h: Optional[float]
-    try:
-        target_h = float(E_target.detach().cpu().float()[1].item())
-    except Exception:
-        target_h = None
-    if target_h is not None and float(target_h) <= 0.0:
-        target_h = None
-
-    h_before = float(_h_total(H_before, special_degree_meta))
-    h_after = float(_h_total(H_after, special_degree_meta))
-    lower, upper = spectrum_h_soft_bounds(target_h)
-    if target_h is None:
-        error_before = error_after = outside_before = outside_after = 0.0
-    else:
-        error_before = abs(float(h_before) - float(target_h)) / float(target_h)
-        error_after = abs(float(h_after) - float(target_h)) / float(target_h)
-        ratio_before = (float(h_before) - float(target_h)) / float(target_h)
-        ratio_after = (float(h_after) - float(target_h)) / float(target_h)
-
-        def _outside(ratio: float) -> float:
-            if float(ratio) < float(SPECTRUM_H_SOFT_LOWER_RATIO):
-                return float(SPECTRUM_H_SOFT_LOWER_RATIO) - float(ratio)
-            if float(ratio) > float(SPECTRUM_H_SOFT_UPPER_RATIO):
-                return float(ratio) - float(SPECTRUM_H_SOFT_UPPER_RATIO)
-            return 0.0
-
-        outside_before = _outside(ratio_before)
-        outside_after = _outside(ratio_after)
-
-    outside_worsening = max(0.0, float(outside_after) - float(outside_before))
-    h_penalty = float(outside_worsening) * float(SPECTRUM_H_OUTSIDE_WORSENING_WEIGHT)
-
-    flex_impact = evaluate_flex_impact(H_before, H_after, flex_audit)
-    flex_before = dict(flex_impact.before or {})
-    flex_after = dict(flex_impact.after or {})
-    flex_deviation_worsening = max(
-        0,
-        int(flex_after.get("deviation", 0) or 0)
-        - int(flex_before.get("deviation", 0) or 0),
-    )
-    flex_penalty = (
-        float(flex_deviation_worsening)
-        * float(SPECTRUM_FLEX_DEVIATION_WORSENING_PENALTY)
-    )
-    if (
-        str(flex_after.get("scenario", "")) == "invalid"
-        and str(flex_before.get("scenario", "")) != "invalid"
-    ):
-        flex_penalty += float(SPECTRUM_FLEX_INVALID_WINDOW_PENALTY)
-
-    return {
-        "penalty": float(h_penalty + flex_penalty),
-        "h_penalty": float(h_penalty),
-        "flex_penalty": float(flex_penalty),
-        "h_before": float(h_before),
-        "h_after": float(h_after),
-        "target_h": None if target_h is None else float(target_h),
-        "soft_lower": None if lower is None else float(lower),
-        "soft_upper": None if upper is None else float(upper),
-        "h_error_before": float(error_before),
-        "h_error_after": float(error_after),
-        "h_outside_before": float(outside_before),
-        "h_outside_after": float(outside_after),
-        "h_compensation_required": bool(float(outside_after) > 1e-12),
-        "h_compensation_suppressed_within_window": bool(float(outside_after) <= 1e-12),
-        "spectrum_h_soft_lower_ratio": float(SPECTRUM_H_SOFT_LOWER_RATIO),
-        "spectrum_h_soft_upper_ratio": float(SPECTRUM_H_SOFT_UPPER_RATIO),
-        "flex_before": flex_before,
-        "flex_after": flex_after,
-        "soft_constraint": True,
-    }
 
 
 def _array(value: Any) -> np.ndarray:
@@ -158,13 +49,6 @@ def _array(value: Any) -> np.ndarray:
     if hasattr(value, "detach"):
         value = value.detach().cpu().numpy()
     return np.asarray(value, dtype=np.float64).reshape(-1)
-
-
-def _window_abs(ppm: np.ndarray, diff: np.ndarray, lo: float, hi: float) -> float:
-    if ppm.size == 0 or diff.size == 0 or ppm.size != diff.size:
-        return 0.0
-    mask = (ppm >= float(lo)) & (ppm <= float(hi))
-    return float(np.sum(np.abs(diff[mask]))) if np.any(mask) else 0.0
 
 
 def _window_signed(ppm: np.ndarray, diff: np.ndarray, lo: float, hi: float) -> Dict[str, float]:
@@ -204,57 +88,6 @@ def _window_signed(ppm: np.ndarray, diff: np.ndarray, lo: float, hi: float) -> D
     }
 
 
-def spectrum_window_audit(
-    difference_spectrum: Optional[Dict[str, Any]],
-    *,
-    windows: Optional[Dict[int, Tuple[float, float, float, float]]] = None,
-) -> Dict[str, Any]:
-    data = dict(difference_spectrum or {})
-    ppm = _array(data.get("ppm"))
-    diff = _array(data.get("diff"))
-    resolved = dict(windows or DEFAULT_SPECTRUM_WINDOWS)
-    rows: Dict[str, Any] = {}
-    for su_type in SPECTRUM_RESOURCE_TYPES:
-        narrow_lo, narrow_hi, wide_lo, wide_hi = resolved[int(su_type)]
-        narrow = _window_signed(ppm, diff, narrow_lo, narrow_hi)
-        wide = _window_signed(ppm, diff, wide_lo, wide_hi)
-        rows[str(su_type)] = {
-            "narrow": narrow,
-            "wide": wide,
-            "need": float(narrow["signed"]),
-            "window": [float(narrow_lo), float(narrow_hi)],
-            "wide_window": [float(wide_lo), float(wide_hi)],
-        }
-    return {
-        "valid": bool(ppm.size > 0 and ppm.size == diff.size),
-        "ppm_size": int(ppm.size),
-        "r2": data.get("r2"),
-        "by_su": rows,
-    }
-
-
-def spectrum_window_loss(
-    difference_spectrum: Optional[Dict[str, Any]],
-    su_types: Optional[Iterable[int]] = None,
-    *,
-    windows: Optional[Dict[int, Tuple[float, float, float, float]]] = None,
-) -> float:
-    data = dict(difference_spectrum or {})
-    ppm = _array(data.get("ppm"))
-    diff = _array(data.get("diff"))
-    resolved = dict(windows or DEFAULT_SPECTRUM_WINDOWS)
-    selected = sorted({int(value) for value in list(su_types or SPECTRUM_RESOURCE_TYPES)})
-    total = 0.0
-    for su_type in selected:
-        if int(su_type) not in resolved:
-            continue
-        narrow_lo, narrow_hi, wide_lo, wide_hi = resolved[int(su_type)]
-        total += _window_abs(ppm, diff, narrow_lo, narrow_hi)
-        if (float(wide_lo), float(wide_hi)) != (float(narrow_lo), float(narrow_hi)):
-            total += 0.35 * _window_abs(ppm, diff, wide_lo, wide_hi)
-    return float(total)
-
-
 def _signature(operations: Sequence[Dict[str, Any]]) -> str:
     payload = [
         {
@@ -266,6 +99,17 @@ def _signature(operations: Sequence[Dict[str, Any]]) -> str:
     ]
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def spectrum_su24_signature(operations: Sequence[Dict[str, Any]]) -> str:
+    """Key SU24 edits independently of unrelated operations and donor-ID permutations."""
+    counts = Counter(
+        (int(op["from_su"]), int(op["to_su"]))
+        for op in operations
+        if int(op.get("from_su", -1)) != int(op.get("to_su", -1))
+        and 24 in (int(op.get("from_su", -1)), int(op.get("to_su", -1)))
+    )
+    return "|".join(f"{source}>{target}x{count}" for (source, target), count in sorted(counts.items()))
 
 
 def inverse_bundle_signature(operations: Sequence[Dict[str, Any]]) -> str:
@@ -300,103 +144,6 @@ def histogram_signature_after_operations(H: torch.Tensor, operations: Sequence[D
     candidate = _histogram_after_operations(H, operations)
     encoded = json.dumps(candidate.tolist(), separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _spectrum_candidate_h_rank(balance: Dict[str, Any]) -> int:
-    """Rank optional spectrum trials without turning the H window into a hard gate."""
-    target_h = balance.get("target_h")
-    if target_h is None:
-        return 0
-    outside_before = max(0.0, float(balance.get("h_outside_before", 0.0) or 0.0))
-    outside_after = max(0.0, float(balance.get("h_outside_after", 0.0) or 0.0))
-    error_before = max(0.0, float(balance.get("h_error_before", 0.0) or 0.0))
-    error_after = max(0.0, float(balance.get("h_error_after", 0.0) or 0.0))
-    epsilon = 1e-12
-    if outside_after <= epsilon:
-        return 0 if error_after <= error_before + epsilon else 1
-    if outside_after + epsilon < outside_before:
-        return 2
-    if abs(outside_after - outside_before) <= epsilon:
-        return 3
-    return 4
-
-
-def _spectrum_urgency_profiles(audit: Dict[str, Any]) -> Tuple[Dict[int, Dict[str, Any]], Dict[str, float]]:
-    rows = dict(audit.get("by_su", {}) or {})
-    area_scale = max(
-        [
-            float(dict(dict(rows.get(str(su_type), {}) or {}).get("narrow", {}) or {}).get(key, 0.0) or 0.0)
-            for su_type in SPECTRUM_RESOURCE_TYPES
-            for key in ("positive", "negative")
-        ]
-        or [0.0]
-    )
-    peak_scale = max(
-        [
-            float(dict(dict(rows.get(str(su_type), {}) or {}).get("narrow", {}) or {}).get(key, 0.0) or 0.0)
-            for su_type in SPECTRUM_RESOURCE_TYPES
-            for key in ("positive_peak", "negative_peak")
-        ]
-        or [0.0]
-    )
-    area_scale = max(float(area_scale), 1e-12)
-    peak_scale = max(float(peak_scale), 1e-12)
-    profiles: Dict[int, Dict[str, Any]] = {}
-    for su_type in SPECTRUM_RESOURCE_TYPES:
-        row = dict(rows.get(str(su_type), {}) or {})
-        narrow = dict(row.get("narrow", {}) or {})
-        positive_area = max(0.0, float(narrow.get("positive", 0.0) or 0.0))
-        negative_area = max(0.0, float(narrow.get("negative", 0.0) or 0.0))
-        positive_peak = max(0.0, float(narrow.get("positive_peak", 0.0) or 0.0))
-        negative_peak = max(0.0, float(narrow.get("negative_peak", 0.0) or 0.0))
-        positive_area_norm = float(positive_area) / float(area_scale)
-        negative_area_norm = float(negative_area) / float(area_scale)
-        positive_peak_norm = float(positive_peak) / float(peak_scale)
-        negative_peak_norm = float(negative_peak) / float(peak_scale)
-        deficit_score = (
-            float(SPECTRUM_PEAK_URGENCY_WEIGHT) * float(positive_peak_norm)
-            + float(SPECTRUM_AREA_URGENCY_WEIGHT) * float(positive_area_norm)
-        )
-        surplus_score = (
-            float(SPECTRUM_PEAK_URGENCY_WEIGHT) * float(negative_peak_norm)
-            + float(SPECTRUM_AREA_URGENCY_WEIGHT) * float(negative_area_norm)
-        )
-        epsilon = 1e-12
-        if deficit_score > surplus_score + epsilon:
-            direction = "deficit"
-        elif surplus_score > deficit_score + epsilon:
-            direction = "surplus"
-        else:
-            signed_need = float(row.get("need", 0.0) or 0.0)
-            direction = "deficit" if signed_need > 0.0 else "surplus" if signed_need < 0.0 else "none"
-        profiles[int(su_type)] = {
-            "direction": str(direction),
-            "need": float(row.get("need", 0.0) or 0.0),
-            "deficit_score": float(deficit_score),
-            "surplus_score": float(surplus_score),
-            "positive_area": float(positive_area),
-            "negative_area": float(negative_area),
-            "positive_peak": float(positive_peak),
-            "negative_peak": float(negative_peak),
-            "positive_peak_ppm": narrow.get("positive_peak_ppm"),
-            "negative_peak_ppm": narrow.get("negative_peak_ppm"),
-            "positive_area_norm": float(positive_area_norm),
-            "negative_area_norm": float(negative_area_norm),
-            "positive_peak_norm": float(positive_peak_norm),
-            "negative_peak_norm": float(negative_peak_norm),
-        }
-    dominant_max = max(
-        [
-            max(float(profile["deficit_score"]), float(profile["surplus_score"]))
-            for profile in profiles.values()
-        ]
-        or [0.0]
-    )
-    return profiles, {
-        "area_scale": float(area_scale),
-        "peak_scale": float(peak_scale),
-        "score_floor": max(1e-12, 0.01 * float(dominant_max)),
-    }
 
 
 def _difference_ppm_step(ppm: np.ndarray) -> float:
@@ -608,174 +355,6 @@ def fixed_flex_capacity_spectrum_audit(
     }
 
 
-def _deoverlapped_lobe_areas(
-    ppm: np.ndarray,
-    diff: np.ndarray,
-) -> Dict[int, Dict[str, float]]:
-    areas = {
-        int(su_type): {"positive": 0.0, "negative": 0.0}
-        for su_type in SPECTRUM_RESOURCE_TYPES
-    }
-    if ppm.size == 0 or ppm.size != diff.size:
-        return areas
-    support = np.zeros((len(SPECTRUM_RESOURCE_TYPES), int(ppm.size)), dtype=np.float64)
-    for row_index, su_type in enumerate(SPECTRUM_RESOURCE_TYPES):
-        lo, hi, _, _ = DEFAULT_SPECTRUM_WINDOWS[int(su_type)]
-        width = max(float(hi) - float(lo), 1e-12)
-        support[row_index, (ppm >= float(lo)) & (ppm <= float(hi))] = 1.0 / float(width)
-    denominator = np.sum(support, axis=0)
-    covered = denominator > 0.0
-    if not np.any(covered):
-        return areas
-    shares = np.zeros_like(support)
-    shares[:, covered] = support[:, covered] / denominator[covered]
-    step = _difference_ppm_step(ppm)
-    positive = np.maximum(diff, 0.0)
-    negative = np.maximum(-diff, 0.0)
-    for row_index, su_type in enumerate(SPECTRUM_RESOURCE_TYPES):
-        areas[int(su_type)] = {
-            "positive": float(np.sum(positive * shares[row_index]) * float(step)),
-            "negative": float(np.sum(negative * shares[row_index]) * float(step)),
-        }
-    return areas
-
-
-def _apportion_integer_counts(
-    total: int,
-    weights: Dict[int, float],
-    capacities: Optional[Dict[int, int]] = None,
-) -> Dict[int, int]:
-    allocation = {int(key): 0 for key in weights}
-    capacity_by_key = {
-        int(key): max(0, int(dict(capacities or {}).get(int(key), int(total))))
-        for key in weights
-    }
-    for _ in range(max(0, int(total))):
-        eligible = [
-            int(key)
-            for key, weight in weights.items()
-            if float(weight) > 0.0
-            and int(allocation[int(key)]) < int(capacity_by_key[int(key)])
-        ]
-        if not eligible:
-            break
-        selected = max(
-            eligible,
-            key=lambda key: (
-                float(weights[int(key)]) / float(allocation[int(key)] + 1),
-                float(weights[int(key)]),
-                -int(key),
-            ),
-        )
-        allocation[int(selected)] += 1
-    return {
-        int(key): int(value)
-        for key, value in allocation.items()
-        if int(value) > 0
-    }
-
-
-def _direction_weights(
-    su_types: Sequence[int],
-    urgency_profiles: Dict[int, Dict[str, Any]],
-    lobe_areas: Dict[int, Dict[str, float]],
-    *,
-    direction: str,
-) -> Dict[int, float]:
-    area_key = "negative" if str(direction) == "surplus" else "positive"
-    peak_key = "negative_peak" if str(direction) == "surplus" else "positive_peak"
-    area_total = sum(
-        max(0.0, float(lobe_areas[int(su_type)][area_key]))
-        for su_type in su_types
-    )
-    peak_total = sum(
-        max(0.0, float(urgency_profiles[int(su_type)][peak_key]))
-        for su_type in su_types
-    )
-    weights: Dict[int, float] = {}
-    for su_type in su_types:
-        area_share = (
-            max(0.0, float(lobe_areas[int(su_type)][area_key])) / float(area_total)
-            if float(area_total) > 1e-12
-            else 0.0
-        )
-        peak_share = (
-            max(0.0, float(urgency_profiles[int(su_type)][peak_key])) / float(peak_total)
-            if float(peak_total) > 1e-12
-            else 0.0
-        )
-        weights[int(su_type)] = (
-            float(SPECTRUM_PEAK_URGENCY_WEIGHT) * float(peak_share)
-            + float(SPECTRUM_AREA_URGENCY_WEIGHT) * float(area_share)
-        )
-    return weights
-
-
-def _transport_operations(
-    *,
-    batch_size: int,
-    source_weights: Dict[int, float],
-    target_weights: Dict[int, float],
-    available_ids_by_su: Dict[int, Sequence[int]],
-) -> Tuple[List[Dict[str, Any]], Dict[str, int], Dict[int, int], Dict[int, int]]:
-    source_counts = _apportion_integer_counts(
-        int(batch_size),
-        source_weights,
-        capacities={
-            int(su_type): len(list(available_ids_by_su.get(int(su_type), []) or []))
-            for su_type in source_weights
-        },
-    )
-    actual_batch = sum(int(value) for value in source_counts.values())
-    target_counts = _apportion_integer_counts(int(actual_batch), target_weights)
-    source_remaining = dict(source_counts)
-    target_remaining = dict(target_counts)
-    source_offsets = {int(key): 0 for key in source_counts}
-    operations: List[Dict[str, Any]] = []
-    conversion_counts: Dict[str, int] = {}
-    while source_remaining and target_remaining:
-        source = max(
-            source_remaining,
-            key=lambda key: (
-                float(source_weights.get(int(key), 0.0)),
-                int(source_remaining[int(key)]),
-                -int(key),
-            ),
-        )
-        target = max(
-            target_remaining,
-            key=lambda key: (
-                float(target_weights.get(int(key), 0.0)),
-                int(target_remaining[int(key)]),
-                -int(key),
-            ),
-        )
-        amount = min(
-            int(source_remaining[int(source)]),
-            int(target_remaining[int(target)]),
-        )
-        source_ids = list(available_ids_by_su.get(int(source), []) or [])
-        start = int(source_offsets[int(source)])
-        for node_id in source_ids[start:start + int(amount)]:
-            operations.append({
-                "op": "convert",
-                "node_id": int(node_id),
-                "from_su": int(source),
-                "to_su": int(target),
-                "reason": "remaining_pool_difference_spectrum_proportional_bundle",
-            })
-        source_offsets[int(source)] += int(amount)
-        conversion_key = f"{int(source)}->{int(target)}"
-        conversion_counts[conversion_key] = int(conversion_counts.get(conversion_key, 0)) + int(amount)
-        source_remaining[int(source)] -= int(amount)
-        target_remaining[int(target)] -= int(amount)
-        if int(source_remaining[int(source)]) <= 0:
-            source_remaining.pop(int(source), None)
-        if int(target_remaining[int(target)]) <= 0:
-            target_remaining.pop(int(target), None)
-    return operations, conversion_counts, source_counts, target_counts
-
-
 def _bundle_delta(operations: Sequence[Dict[str, Any]]) -> Dict[int, int]:
     delta: Dict[int, int] = {}
     for raw in operations:
@@ -825,110 +404,6 @@ def _su12_cap_for_operations(
         "generation_allowed": True,
         "reason": "ok",
     }
-
-
-def _append_low_h_compensation(
-    *,
-    H: torch.Tensor,
-    primary_operations: Sequence[Dict[str, Any]],
-    available_ids_by_su: Dict[int, Sequence[int]],
-    E_target: Optional[torch.Tensor],
-    special_degree_meta: Optional[Dict[str, Any]],
-    max_h_compensation_ops: int,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Add the minimum SU11->SU23 compensation needed to re-enter the H window."""
-    primary = [dict(op or {}) for op in list(primary_operations or [])]
-    primary_H = _histogram_after_operations(H, primary)
-    h_before = float(_h_total(H, special_degree_meta))
-    h_after_primary = float(_h_total(primary_H, special_degree_meta))
-    try:
-        target_h = float(E_target.detach().cpu().float()[1].item())
-    except Exception:
-        target_h = None
-    if target_h is not None and float(target_h) <= 0.0:
-        target_h = None
-    lower, upper = spectrum_h_soft_bounds(target_h)
-    diagnostics: Dict[str, Any] = {
-        "policy": "minimum_su11_to_su23_until_spectrum_h_window",
-        "h_before": float(h_before),
-        "h_after_primary": float(h_after_primary),
-        "h_after_compensation": float(h_after_primary),
-        "target_h": None if target_h is None else float(target_h),
-        "soft_lower": None if lower is None else float(lower),
-        "soft_upper": None if upper is None else float(upper),
-        "required_count": 0,
-        "applied_count": 0,
-        "available_su11_count": 0,
-        "max_count": max(0, int(max_h_compensation_ops)),
-        "complete": True,
-        "reason": "not_required",
-    }
-    if lower is None or float(h_after_primary) >= float(lower) - 1e-12:
-        return primary, diagnostics
-
-    used_node_ids = {
-        int(op.get("node_id", -1))
-        for op in primary
-        if int(op.get("node_id", -1)) >= 0
-    }
-    available_su11_ids = [
-        int(node_id)
-        for node_id in list(available_ids_by_su.get(11, []) or [])
-        if int(node_id) not in used_node_ids
-    ]
-    diagnostics["available_su11_count"] = len(available_su11_ids)
-
-    if int(primary_H.numel()) <= 23 or int(primary_H[11].item()) <= 0:
-        diagnostics.update({"complete": False, "reason": "su11_histogram_unavailable"})
-        return primary, diagnostics
-    probe_H = primary_H.clone()
-    probe_H[11] -= 1
-    probe_H[23] += 1
-    h_per_op = float(_h_total(probe_H, special_degree_meta)) - float(h_after_primary)
-    diagnostics["h_gain_per_operation"] = float(h_per_op)
-    if float(h_per_op) <= 0.0:
-        diagnostics.update({"complete": False, "reason": "nonpositive_su11_to_su23_h_gain"})
-        return primary, diagnostics
-
-    required_count = max(
-        0,
-        int(math.ceil((float(lower) - float(h_after_primary) - 1e-12) / float(h_per_op))),
-    )
-    applied_count = min(
-        int(required_count),
-        max(0, int(max_h_compensation_ops)),
-        len(available_su11_ids),
-        int(primary_H[11].item()),
-    )
-    compensation = [
-        {
-            "op": "convert",
-            "node_id": int(node_id),
-            "from_su": 11,
-            "to_su": 23,
-            "reason": "remaining_pool_spectrum_h_compensation",
-            "operation_kind": "h_compensation",
-        }
-        for node_id in available_su11_ids[:applied_count]
-    ]
-    combined = primary + compensation
-    compensated_H = _histogram_after_operations(H, combined)
-    h_after_compensation = float(_h_total(compensated_H, special_degree_meta))
-    complete = bool(float(h_after_compensation) >= float(lower) - 1e-12)
-    diagnostics.update({
-        "required_count": int(required_count),
-        "applied_count": int(applied_count),
-        "h_after_compensation": float(h_after_compensation),
-        "complete": bool(complete),
-        "reason": (
-            "restored_to_window"
-            if complete
-            else "compensation_limit_reached"
-            if int(applied_count) >= max(0, int(max_h_compensation_ops))
-            else "insufficient_available_su11"
-        ),
-    })
-    return combined, diagnostics
 
 
 _SPECTRUM_PROFILE_FIELDS = (
@@ -1176,9 +651,7 @@ def spectrum_profile_loss(
 def _atomic_score_state(
     *,
     residual: np.ndarray,
-    donor_rows: Sequence[Dict[str, Any]],
     donor_peaks: np.ndarray,
-    target_rows: Sequence[Dict[str, Any]],
     target_peaks: np.ndarray,
 ) -> Dict[str, np.ndarray]:
     """Score physical peak coverage directly on the current residual.
@@ -1668,6 +1141,9 @@ def _pair_target_combinations(
     rows_by_su: Dict[int, Sequence[Dict[str, Any]]],
     target_types: Sequence[int],
     *,
+    ppm: np.ndarray,
+    diff: np.ndarray,
+    aromatic_response_scale: float = 1.0,
     limit_per_type: int = 8,
 ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
     first_type, second_type = (int(target_types[0]), int(target_types[1]))
@@ -1681,14 +1157,30 @@ def _pair_target_combinations(
             return False
         return float(bounds[0]) <= mu <= float(bounds[1])
 
-    first_rows = [
-        dict(row) for row in list(rows_by_su.get(first_type, []) or [])
-        if _in_explicit_window(first_type, dict(row))
-    ][: int(limit_per_type)]
-    second_rows = [
-        dict(row) for row in list(rows_by_su.get(second_type, []) or [])
-        if _in_explicit_window(second_type, dict(row))
-    ][: int(limit_per_type)]
+    def ranked_rows(su_type: int, partner_type: int) -> List[Dict[str, Any]]:
+        rows = []
+        for raw in rows_by_su.get(su_type, []) or []:
+            row = dict(raw)
+            if not _in_explicit_window(su_type, row):
+                continue
+            if su_type in UNSATURATED_SPECTRUM_TYPES:
+                partners = [int(su) for su in row["hop1_tuple"]
+                            if int(su) in UNSATURATED_SPECTRUM_TYPES]
+                if partners != [partner_type]:
+                    continue
+            peak = _lorentzian_peak(
+                ppm, float(row["mu_median"]), su_type=su_type,
+                aromatic_response_scale=aromatic_response_scale,
+            )
+            gain = float(2.0 * np.dot(diff, peak) - np.dot(peak, peak))
+            rows.append(((-gain, float(row["mu_median"]), tuple(row["hop1_tuple"])), row))
+        # The input is sorted by ppm, not by fit. Apply the bounded search
+        # only after ranking all compatible templates against this spectrum.
+        rows.sort(key=lambda item: item[0])
+        return [row for _, row in rows[:int(limit_per_type)]]
+
+    first_rows = ranked_rows(first_type, second_type)
+    second_rows = ranked_rows(second_type, first_type)
     if first_type == second_type:
         # Two physical nodes may legitimately use the same exact-hop1 median
         # template, so combinations with replacement are intentional here.
@@ -1812,15 +1304,28 @@ def _generate_spectrum_pair_candidates(
         )
         for row in atomic_target_rows
     ]) if atomic_target_rows else np.empty((0, int(ppm.size)), dtype=np.float64)
+    atomic_donor_peak_norms = np.sum(atomic_donor_peaks * atomic_donor_peaks, axis=1)
+    atomic_target_peak_norms = np.sum(atomic_target_peaks * atomic_target_peaks, axis=1)
+    atomic_donor_target_dot = (
+        atomic_donor_peaks @ atomic_target_peaks.T
+        if atomic_donor_peaks.size and atomic_target_peaks.size
+        else np.empty((len(atomic_donor_rows), len(atomic_target_rows)))
+    )
     rejected_hist = {str(value) for value in list(rejected_histogram_signatures or [])}
     rejected_bundles = {str(value) for value in list(rejected_bundle_signatures or [])}
     candidates: List[Stage3SpectrumCandidate] = []
     attempts: List[Dict[str, Any]] = []
+    rule_audits: List[Dict[str, Any]] = []
     if int(max_primary_adjustments) < 2 or int(H.numel()) <= max(
         UNSATURATED_SPECTRUM_TYPES + (22, 23, 24)
     ):
         return [], {"pair_candidate_count": 0, "pair_attempts": []}
 
+    # Bound expensive greedy extensions per rule/direction so an early rule
+    # cannot prevent later rules from being searched at all.
+    per_direction_limit = max(1, math.ceil(
+        4 * max(1, int(max_primary_adjustments)) / (2 * len(SPECTRUM_PAIR_RULES))
+    ))
     for forward_sources, forward_targets, rule_name in SPECTRUM_PAIR_RULES:
         for reverse in (False, True):
             source_types = forward_targets if reverse else forward_sources
@@ -1833,7 +1338,17 @@ def _generate_spectrum_pair_candidates(
             target_pairs = _pair_target_combinations(
                 target_rows_by_su,
                 target_types,
+                ppm=ppm,
+                diff=diff_array,
+                aromatic_response_scale=aromatic_response_scale,
             )
+            rule_audit = {
+                "rule": str(rule_name), "direction": str(direction),
+                "source_pair_count": len(source_pairs),
+                "target_pair_count": len(target_pairs),
+                "positive_seed_count": 0, "candidate_count": 0,
+            }
+            rule_audits.append(rule_audit)
             if not source_pairs or not target_pairs:
                 attempts.append({
                     "rule": str(rule_name),
@@ -1843,328 +1358,343 @@ def _generate_spectrum_pair_candidates(
                     "target_count": len(target_pairs),
                 })
                 continue
+            ranked_seeds = []
+            indexed_targets = []
+            for target_pair in target_pairs:
+                indices = tuple(next(
+                    index for index, row in target_rows_indexed[int(target_types[i])]
+                    if row == target_pair[i]
+                ) for i in range(2))
+                peak = sum(target_peaks[(int(target_types[i]), indices[i])] for i in range(2))
+                indexed_targets.append((target_pair, indices, peak))
             for source_pair in source_pairs:
-                source_peak = (
-                    donor_peaks_by_node_id[int(source_pair[0]["node_id"])]
-                    + donor_peaks_by_node_id[int(source_pair[1]["node_id"])]
+                source_peak = sum(donor_peaks_by_node_id[int(row["node_id"])] for row in source_pair)
+                for target_pair, indices, target_peak in indexed_targets:
+                    change = target_peak - source_peak
+                    gain = float(2.0 * np.dot(diff_array, change) - np.dot(change, change))
+                    if gain > 1e-10:
+                        key = (-gain, tuple(int(row["node_id"]) for row in source_pair), indices)
+                        ranked_seeds.append((key, source_pair, target_pair, indices))
+            ranked_seeds.sort(key=lambda item: item[0])
+            rule_audit["positive_seed_count"] = len(ranked_seeds)
+            rule_audit["best_pair_predicted_sse_gain"] = (
+                -ranked_seeds[0][0][0] if ranked_seeds else 0.0
+            )
+            if not ranked_seeds:
+                attempts.append({"rule": str(rule_name), "direction": str(direction),
+                                 "reason": "pair_predicted_sse_gain_not_positive"})
+            # Inspect a bounded set of best joint replacements, then apply
+            # the same ordinary greedy extension and final ranking as before.
+            for _, source_pair, target_pair, indices in ranked_seeds[:4 * per_direction_limit]:
+                target_index_0, target_index_1 = indices
+                source_peak = sum(donor_peaks_by_node_id[int(row["node_id"])] for row in source_pair)
+                # Direction is a property of this concrete node/template
+                # pair, not of the entire SU window.  In particular,
+                # aromatic overlap can make one member's broad window
+                # have the opposite net sign while the actual Lorentzian
+                # replacement remains beneficial.
+                evidence = _pair_direction_evidence(
+                    difference_spectrum,
+                    source_types,
+                    target_types,
+                    ppm=ppm,
+                    source_pair=source_pair,
+                    target_pair=target_pair,
+                    source_local_surplus=[
+                        source_local_cache[int(source_pair[0]["node_id"])],
+                        source_local_cache[int(source_pair[1]["node_id"])],
+                    ],
+                    target_local_deficit=[
+                        target_local_cache[(int(target_types[0]), int(target_index_0))],
+                        target_local_cache[(int(target_types[1]), int(target_index_1))],
+                    ],
+                    aromatic_response_scale=aromatic_response_scale,
                 )
-                for target_pair in target_pairs:
-                    target_index_0 = next(
-                        index
-                        for index, row in target_rows_indexed[int(target_types[0])]
-                        if row == target_pair[0]
-                    )
-                    target_index_1 = next(
-                        index
-                        for index, row in target_rows_indexed[int(target_types[1])]
-                        if row == target_pair[1]
-                    )
-                    # Direction is a property of this concrete node/template
-                    # pair, not of the entire SU window.  In particular,
-                    # aromatic overlap can make one member's broad window
-                    # have the opposite net sign while the actual Lorentzian
-                    # replacement remains beneficial.
-                    evidence = _pair_direction_evidence(
-                        difference_spectrum,
-                        source_types,
-                        target_types,
-                        ppm=ppm,
-                        source_pair=source_pair,
-                        target_pair=target_pair,
-                        source_local_surplus=[
-                            source_local_cache[int(source_pair[0]["node_id"])],
-                            source_local_cache[int(source_pair[1]["node_id"])],
-                        ],
-                        target_local_deficit=[
-                            target_local_cache[(int(target_types[0]), int(target_index_0))],
-                            target_local_cache[(int(target_types[1]), int(target_index_1))],
-                        ],
-                        aromatic_response_scale=aromatic_response_scale,
-                    )
-                    if not bool(evidence.get("valid", False)):
-                        attempts.append({
-                            "rule": str(rule_name),
-                            "direction": str(direction),
-                            "reason": "pair_local_direction_not_supported",
-                            "source_node_ids": [
-                                int(source_pair[0]["node_id"]),
-                                int(source_pair[1]["node_id"]),
-                            ],
-                            "target_mu": [
-                                float(target_pair[0]["mu_median"]),
-                                float(target_pair[1]["mu_median"]),
-                            ],
-                            "evidence": evidence,
-                        })
-                        continue
-                    target_peak = (
-                        target_peaks[
-                            (int(target_types[0]), int(target_index_0))
-                        ]
-                        + target_peaks[
-                            (int(target_types[1]), int(target_index_1))
-                        ]
-                    )
-                    operations: List[Dict[str, Any]] = []
-                    pair_id_seed = {
+                if not bool(evidence.get("valid", False)):
+                    attempts.append({
                         "rule": str(rule_name),
                         "direction": str(direction),
-                        "node_ids": sorted({
-                            int(source_pair[0]["node_id"]),
-                            int(source_pair[1]["node_id"]),
-                        }),
-                        "source": [int(value) for value in source_types],
-                        "target": [int(value) for value in target_types],
-                    }
-                    pair_id = "pair:" + hashlib.sha1(
-                        json.dumps(pair_id_seed, sort_keys=True).encode("utf-8")
-                    ).hexdigest()[:12]
-                    for source_row, target_row, source_su, target_su in zip(
-                        source_pair,
-                        target_pair,
-                        source_types,
-                        target_types,
-                    ):
-                        operations.append({
-                            "op": "convert",
-                            "node_id": int(source_row["node_id"]),
-                            "from_su": int(source_su),
-                            "to_su": int(target_su),
-                            "source_original_su_type": int(source_su),
-                            "reason": "remaining_pool_difference_spectrum_pair",
-                            "operation_kind": "spectrum_pair_primary",
-                            "pair_id": str(pair_id),
-                            "pair_rule": str(rule_name),
-                            "pair_direction": str(direction),
-                            "source_mu": float(source_row["mu"]),
-                            "target_mu_goal": float(target_row["mu_median"]),
-                            "simulated_target_hop1": [
-                                int(value)
-                                for value in tuple(target_row["hop1_tuple"])
-                            ],
-                            **{
-                                key: value
-                                for key, value in source_row.items()
-                                if str(key).startswith("source_")
-                            },
-                        })
-                    residual = np.asarray(
-                        np.asarray(difference_spectrum.get("diff", []), dtype=np.float64)
-                        + source_peak
-                        - target_peak,
-                        dtype=np.float64,
-                    )
-                    pair_predicted_gain = float(
-                        np.dot(
-                            np.asarray(difference_spectrum.get("diff", []), dtype=np.float64),
-                            np.asarray(difference_spectrum.get("diff", []), dtype=np.float64),
-                        )
-                        - np.dot(residual, residual)
-                    )
-                    # The two-node pair must improve the spectrum as a unit;
-                    # an appended ordinary conversion may not rescue a pair
-                    # whose own joint replacement is harmful.
-                    if pair_predicted_gain <= 1e-10:
-                        attempts.append({
-                            "rule": str(rule_name),
-                            "direction": str(direction),
-                            "reason": "pair_predicted_sse_gain_not_positive",
-                            "pair_predicted_sse_gain": float(pair_predicted_gain),
-                            "evidence": evidence,
-                        })
-                        continue
-                    # A pair is the indivisible seed.  Ordinary six-type
-                    # conversions may be appended while budget remains, but
-                    # neither member of the pair can be selected alone.
-                    used_node_ids = {
-                        int(operation["node_id"]) for operation in operations
-                    }
-                    H_state = _histogram_after_operations(H, operations)
-                    atomic_donor_peak_norms = np.sum(
-                        atomic_donor_peaks * atomic_donor_peaks, axis=1
-                    )
-                    atomic_target_peak_norms = np.sum(
-                        atomic_target_peaks * atomic_target_peaks, axis=1
-                    )
-                    atomic_donor_target_dot = (
-                        atomic_donor_peaks @ atomic_target_peaks.T
-                        if atomic_donor_peaks.size and atomic_target_peaks.size
-                        else np.empty((len(atomic_donor_rows), len(atomic_target_rows)))
-                    )
-                    while len(operations) < int(max_primary_adjustments):
-                        if not atomic_donor_rows or not atomic_target_rows:
-                            break
-                        score_state = _atomic_score_state(
-                            residual=residual,
-                            donor_rows=atomic_donor_rows,
-                            donor_peaks=atomic_donor_peaks,
-                            target_rows=atomic_target_rows,
-                            target_peaks=atomic_target_peaks,
-                        )
-                        next_operations: List[Dict[str, Any]] = []
-                        for next_source in SPECTRUM_RESOURCE_TYPES:
-                            for next_target in SPECTRUM_RESOURCE_TYPES:
-                                atomic = _best_atomic_for_direction(
-                                    residual=residual,
-                                    source_su=int(next_source),
-                                    target_su=int(next_target),
-                                    donor_rows=atomic_donor_rows,
-                                    donor_peaks=atomic_donor_peaks,
-                                    donor_peak_norms=atomic_donor_peak_norms,
-                                    target_rows=atomic_target_rows,
-                                    target_peaks=atomic_target_peaks,
-                                    target_peak_norms=atomic_target_peak_norms,
-                                    donor_target_dot=atomic_donor_target_dot,
-                                    score_state=score_state,
-                                    used_node_ids=used_node_ids,
-                                    H_state=H_state,
-                                )
-                                if atomic is not None:
-                                    next_operations.append(atomic)
-                        if not next_operations:
-                            break
-                        next_operation = min(next_operations, key=_operation_sort_key)
-                        operations.append(next_operation)
-                        used_node_ids.add(int(next_operation["node_id"]))
-                        residual = np.asarray(
-                            next_operation["_next_residual"], dtype=np.float64
-                        )
-                        H_state = _histogram_after_operations(H, operations)
-                    candidate_H = _histogram_after_operations(H, operations)
-                    su12_cap = _su12_cap_for_operations(H, operations)
-                    if not bool(su12_cap.get("generation_allowed", True)):
-                        attempts.append({
-                            "rule": str(rule_name),
-                            "direction": str(direction),
-                            "reason": "su12_generation_cap_reached",
-                            "su12_cap": dict(su12_cap),
-                        })
-                        continue
-                    if (
-                        unsaturated_cap is not None
-                        and int(candidate_H[14].item())
-                        + int(candidate_H[15].item())
-                        + int(candidate_H[16].item())
-                        > int(unsaturated_cap)
-                    ):
-                        attempts.append({
-                            "rule": str(rule_name),
-                            "direction": str(direction),
-                            "reason": "unsaturated_cap_exceeded",
-                        })
-                        continue
-                    predicted_gain = float(
-                        np.dot(
-                            np.asarray(difference_spectrum.get("diff", []), dtype=np.float64),
-                            np.asarray(difference_spectrum.get("diff", []), dtype=np.float64),
-                        )
-                        - np.dot(residual, residual)
-                    )
-                    if predicted_gain <= 1e-10:
-                        continue
-                    pair_group = {
-                        "pair_id": str(pair_id),
-                        "pair_rule": str(rule_name),
-                        "pair_rules_used": [str(rule_name)],
-                        "pair_direction": str(direction),
-                        "source_su_types": [int(value) for value in source_types],
-                        "target_su_types": [int(value) for value in target_types],
+                        "reason": "pair_local_direction_not_supported",
                         "source_node_ids": [
                             int(source_pair[0]["node_id"]),
                             int(source_pair[1]["node_id"]),
                         ],
-                        "source_provenance": [
-                            {
-                                str(key): value
-                                for key, value in source_row.items()
-                                if str(key).startswith("source_")
-                            }
-                            for source_row in source_pair
+                        "target_mu": [
+                            float(target_pair[0]["mu_median"]),
+                            float(target_pair[1]["mu_median"]),
                         ],
-                        "target_template_options": [
-                            {
-                                "su_type": int(target_types[index]),
-                                "hop1_tuple": list(target_pair[index]["hop1_tuple"]),
-                                "mu_median": float(target_pair[index]["mu_median"]),
-                            }
-                            for index in range(2)
-                        ],
-                    }
-                    candidate = _candidate_from_path(
-                        H=H,
-                        baseline_diff=np.asarray(
-                            difference_spectrum.get("diff", []),
-                            dtype=np.float64,
-                        ),
-                        normalized_weights=normalized_weights,
-                        seed_direction=(
-                            int(source_types[0]),
-                            int(target_types[0]),
-                        ),
-                        operations=operations,
-                        residual=residual,
-                        pair_groups=[pair_group],
-                        su12_bias_score=_su12_bias_score(
-                            operations,
-                            aliphatic_audit,
-                        ),
-                        spectrum_audit={
-                            "aliphatic_excess": dict(aliphatic_audit or {}),
-                        },
-                    )
-                    candidate.diagnostics.update({
+                        "evidence": evidence,
+                    })
+                    continue
+                target_peak = (
+                    target_peaks[
+                        (int(target_types[0]), int(target_index_0))
+                    ]
+                    + target_peaks[
+                        (int(target_types[1]), int(target_index_1))
+                    ]
+                )
+                operations: List[Dict[str, Any]] = []
+                pair_id_seed = {
+                    "rule": str(rule_name),
+                    "direction": str(direction),
+                    "node_ids": sorted({
+                        int(source_pair[0]["node_id"]),
+                        int(source_pair[1]["node_id"]),
+                    }),
+                    "source": [int(value) for value in source_types],
+                    "target": [int(value) for value in target_types],
+                }
+                pair_id = "pair:" + hashlib.sha1(
+                    json.dumps(pair_id_seed, sort_keys=True).encode("utf-8")
+                ).hexdigest()[:12]
+                for source_row, target_row, source_su, target_su in zip(
+                    source_pair,
+                    target_pair,
+                    source_types,
+                    target_types,
+                ):
+                    operations.append({
+                        "op": "convert",
+                        "node_id": int(source_row["node_id"]),
+                        "from_su": int(source_su),
+                        "to_su": int(target_su),
+                        "source_original_su_type": int(source_su),
+                        "reason": "remaining_pool_difference_spectrum_pair",
+                        "operation_kind": "spectrum_pair_primary",
+                        "pair_id": str(pair_id),
                         "pair_rule": str(rule_name),
                         "pair_direction": str(direction),
-                        "source_su_types": [int(value) for value in source_types],
-                        "target_su_types": [int(value) for value in target_types],
-                        "pair_count": 1,
-                        "pair_operations": [dict(op) for op in operations[:2]],
-                        "pair_operation_count": 2,
-                        "h_before": float(_h_total(H, None)),
-                        "h_after_predicted": float(_h_total(candidate_H, None)),
-                        "unsaturated_count_before": int(
-                            sum(int(H[index].item()) for index in (14, 15, 16))
-                        ),
-                        "unsaturated_count_after": int(
-                            sum(int(candidate_H[index].item()) for index in (14, 15, 16))
-                        ),
-                        "unsaturated_cap": (
-                            None if unsaturated_cap is None else int(unsaturated_cap)
-                        ),
-                        "h_delta": int(
-                            -2 if str(direction) == "aliphatic_to_unsaturated" else 2
-                        ),
-                        "pair_direction_evidence": dict(evidence),
-                        "pair_source_evidence": float(
-                            evidence.get("pair_source_evidence", 0.0) or 0.0
-                        ),
-                        "pair_target_evidence": float(
-                            evidence.get("pair_target_evidence", 0.0) or 0.0
-                        ),
-                        "pair_predicted_sse_gain": float(pair_predicted_gain),
-                        "rejected_pair_reasons": [],
+                        "source_mu": float(source_row["mu"]),
+                        "target_mu_goal": float(target_row["mu_median"]),
+                        "simulated_target_hop1": [
+                            int(value)
+                            for value in tuple(target_row["hop1_tuple"])
+                        ],
+                        **{
+                            key: value
+                            for key, value in source_row.items()
+                            if str(key).startswith("source_")
+                        },
                     })
-                    histogram_signature = str(candidate.histogram_signature or "")
-                    bundle_signature = str(
-                        candidate.diagnostics.get("bundle_signature", "") or ""
+                residual = np.asarray(
+                    np.asarray(difference_spectrum.get("diff", []), dtype=np.float64)
+                    + source_peak
+                    - target_peak,
+                    dtype=np.float64,
+                )
+                pair_predicted_gain = float(
+                    np.dot(
+                        np.asarray(difference_spectrum.get("diff", []), dtype=np.float64),
+                        np.asarray(difference_spectrum.get("diff", []), dtype=np.float64),
                     )
-                    if (
-                        histogram_signature in rejected_hist
-                        or bundle_signature in rejected_bundles
-                    ):
-                        continue
-                    candidates.append(candidate)
-                    # Keep pair trial generation bounded. The normal candidate
-                    # limit remains the final cross-family limit.
-                    if len(candidates) >= 4 * max(1, int(max_primary_adjustments)):
-                        return candidates, {
-                            "pair_candidate_count": len(candidates),
-                            "pair_attempts": attempts[-64:],
+                    - np.dot(residual, residual)
+                )
+                # The two-node pair must improve the spectrum as a unit;
+                # an appended ordinary conversion may not rescue a pair
+                # whose own joint replacement is harmful.
+                if pair_predicted_gain <= 1e-10:
+                    attempts.append({
+                        "rule": str(rule_name),
+                        "direction": str(direction),
+                        "reason": "pair_predicted_sse_gain_not_positive",
+                        "pair_predicted_sse_gain": float(pair_predicted_gain),
+                        "evidence": evidence,
+                    })
+                    continue
+                # A pair is the indivisible seed.  Ordinary six-type
+                # conversions may be appended while budget remains, but
+                # neither member of the pair can be selected alone.
+                used_node_ids = {
+                    int(operation["node_id"]) for operation in operations
+                }
+                H_state = _histogram_after_operations(H, operations)
+                while len(operations) < int(max_primary_adjustments):
+                    if not atomic_donor_rows or not atomic_target_rows:
+                        break
+                    score_state = _atomic_score_state(
+                        residual=residual,
+                        donor_peaks=atomic_donor_peaks,
+                        target_peaks=atomic_target_peaks,
+                    )
+                    next_operations: List[Dict[str, Any]] = []
+                    for next_source in SPECTRUM_RESOURCE_TYPES:
+                        for next_target in SPECTRUM_RESOURCE_TYPES:
+                            atomic = _best_atomic_for_direction(
+                                residual=residual,
+                                source_su=int(next_source),
+                                target_su=int(next_target),
+                                donor_rows=atomic_donor_rows,
+                                donor_peaks=atomic_donor_peaks,
+                                donor_peak_norms=atomic_donor_peak_norms,
+                                target_rows=atomic_target_rows,
+                                target_peaks=atomic_target_peaks,
+                                target_peak_norms=atomic_target_peak_norms,
+                                donor_target_dot=atomic_donor_target_dot,
+                                score_state=score_state,
+                                used_node_ids=used_node_ids,
+                                H_state=H_state,
+                            )
+                            if atomic is not None:
+                                next_operations.append(atomic)
+                    if not next_operations:
+                        break
+                    next_operation = min(next_operations, key=_operation_sort_key)
+                    operations.append(next_operation)
+                    used_node_ids.add(int(next_operation["node_id"]))
+                    residual = np.asarray(
+                        next_operation["_next_residual"], dtype=np.float64
+                    )
+                    H_state = _histogram_after_operations(H, operations)
+                candidate_H = _histogram_after_operations(H, operations)
+                su12_cap = _su12_cap_for_operations(H, operations)
+                if not bool(su12_cap.get("generation_allowed", True)):
+                    attempts.append({
+                        "rule": str(rule_name),
+                        "direction": str(direction),
+                        "reason": "su12_generation_cap_reached",
+                        "su12_cap": dict(su12_cap),
+                    })
+                    continue
+                if (
+                    unsaturated_cap is not None
+                    and int(candidate_H[14].item())
+                    + int(candidate_H[15].item())
+                    + int(candidate_H[16].item())
+                    > int(unsaturated_cap)
+                ):
+                    attempts.append({
+                        "rule": str(rule_name),
+                        "direction": str(direction),
+                        "reason": "unsaturated_cap_exceeded",
+                    })
+                    continue
+                predicted_gain = float(
+                    np.dot(
+                        np.asarray(difference_spectrum.get("diff", []), dtype=np.float64),
+                        np.asarray(difference_spectrum.get("diff", []), dtype=np.float64),
+                    )
+                    - np.dot(residual, residual)
+                )
+                if predicted_gain <= 1e-10:
+                    continue
+                pair_group = {
+                    "pair_id": str(pair_id),
+                    "pair_rule": str(rule_name),
+                    "pair_rules_used": [str(rule_name)],
+                    "pair_direction": str(direction),
+                    "source_su_types": [int(value) for value in source_types],
+                    "target_su_types": [int(value) for value in target_types],
+                    "source_node_ids": [
+                        int(source_pair[0]["node_id"]),
+                        int(source_pair[1]["node_id"]),
+                    ],
+                    "source_provenance": [
+                        {
+                            str(key): value
+                            for key, value in source_row.items()
+                            if str(key).startswith("source_")
                         }
+                        for source_row in source_pair
+                    ],
+                    "target_template_options": [
+                        {
+                            "su_type": int(target_types[index]),
+                            "hop1_tuple": list(target_pair[index]["hop1_tuple"]),
+                            "mu_median": float(target_pair[index]["mu_median"]),
+                        }
+                        for index in range(2)
+                    ],
+                }
+                candidate = _candidate_from_path(
+                    H=H,
+                    baseline_diff=np.asarray(
+                        difference_spectrum.get("diff", []),
+                        dtype=np.float64,
+                    ),
+                    normalized_weights=normalized_weights,
+                    seed_direction=(
+                        int(source_types[0]),
+                        int(target_types[0]),
+                    ),
+                    operations=operations,
+                    residual=residual,
+                    pair_groups=[pair_group],
+                    su12_bias_score=_su12_bias_score(
+                        operations,
+                        aliphatic_audit,
+                    ),
+                    spectrum_audit={
+                        "aliphatic_excess": dict(aliphatic_audit or {}),
+                    },
+                )
+                candidate.diagnostics.update({
+                    "pair_rule": str(rule_name),
+                    "pair_direction": str(direction),
+                    "source_su_types": [int(value) for value in source_types],
+                    "target_su_types": [int(value) for value in target_types],
+                    "pair_count": 1,
+                    "pair_operations": [dict(op) for op in operations[:2]],
+                    "pair_operation_count": 2,
+                    "h_before": float(_h_total(H, None)),
+                    "h_after_predicted": float(_h_total(candidate_H, None)),
+                    "unsaturated_count_before": int(
+                        sum(int(H[index].item()) for index in (14, 15, 16))
+                    ),
+                    "unsaturated_count_after": int(
+                        sum(int(candidate_H[index].item()) for index in (14, 15, 16))
+                    ),
+                    "unsaturated_cap": (
+                        None if unsaturated_cap is None else int(unsaturated_cap)
+                    ),
+                    "h_delta": int(
+                        -2 if str(direction) == "aliphatic_to_unsaturated" else 2
+                    ),
+                    "pair_direction_evidence": dict(evidence),
+                    "pair_source_evidence": float(
+                        evidence.get("pair_source_evidence", 0.0) or 0.0
+                    ),
+                    "pair_target_evidence": float(
+                        evidence.get("pair_target_evidence", 0.0) or 0.0
+                    ),
+                    "pair_predicted_sse_gain": float(pair_predicted_gain),
+                    "rejected_pair_reasons": [],
+                })
+                histogram_signature = str(candidate.histogram_signature or "")
+                bundle_signature = str(
+                    candidate.diagnostics.get("bundle_signature", "") or ""
+                )
+                if (
+                    histogram_signature in rejected_hist
+                    or bundle_signature in rejected_bundles
+                ):
+                    continue
+                candidates.append(candidate)
+                rule_audit["candidate_count"] += 1
+                if rule_audit["candidate_count"] >= per_direction_limit:
+                    break
+    for rule_audit in rule_audits:
+        rule_audit["rejected_reasons"] = dict(Counter(
+            attempt["reason"] for attempt in attempts
+            if attempt.get("rule") == rule_audit["rule"]
+            and attempt.get("direction") == rule_audit["direction"]
+        ))
     return candidates, {
         "pair_candidate_count": len(candidates),
         "pair_attempts": attempts[-64:],
+        "rules": rule_audits,
+        "candidate_limit_per_direction": per_direction_limit,
     }
+
+
+def _spectrum_candidate_sort_key(candidate: Stage3SpectrumCandidate) -> Tuple[Any, ...]:
+    diagnostics = dict(candidate.diagnostics or {})
+    return (
+        -round(float(diagnostics.get("predicted_global_sse_gain", 0.0) or 0.0), 6),
+        -float(diagnostics.get("su12_bias_score", 0.0) or 0.0),
+        -float(candidate.predicted_window_gain or 0.0),
+        str(candidate.candidate_id),
+    )
 
 
 def generate_spectrum_candidates(
@@ -2178,17 +1708,14 @@ def generate_spectrum_candidates(
     hop1_template_options: Optional[Dict[int, Any]] = None,
     candidate_limit: int = 8,
     max_primary_adjustments: int = 10,
-    max_h_compensation_ops: int = 8,
     rejected_histogram_signatures: Optional[Iterable[str]] = None,
     rejected_bundle_signatures: Optional[Iterable[str]] = None,
+    rejected_su24_signatures: Optional[Iterable[str]] = None,
     forbidden_inverse_signatures: Optional[Iterable[str]] = None,
     E_target: Optional[torch.Tensor] = None,
-    special_degree_meta: Optional[Dict[str, Any]] = None,
-    flex_audit: Optional[Dict[str, Any]] = None,
     temporary_unsaturated_ids_by_su: Optional[Dict[int, Sequence[int]]] = None,
     aromatic_response_scale: float = 1.0,
 ) -> Tuple[List[Stage3SpectrumCandidate], Dict[str, Any]]:
-    del special_degree_meta, flex_audit, max_h_compensation_ops
     data = dict(difference_spectrum or {})
     ppm = _array(data.get("ppm"))
     diff = _array(data.get("diff"))
@@ -2420,9 +1947,7 @@ def generate_spectrum_candidates(
 
     baseline_score_state = _atomic_score_state(
         residual=diff,
-        donor_rows=donor_rows,
         donor_peaks=donor_peaks,
-        target_rows=target_rows,
         target_peaks=target_peaks,
     )
     seed_atomics: List[Dict[str, Any]] = []
@@ -2478,9 +2003,7 @@ def generate_spectrum_candidates(
         while len(operations) < int(primary_cap):
             score_state = _atomic_score_state(
                 residual=residual,
-                donor_rows=donor_rows,
                 donor_peaks=donor_peaks,
-                target_rows=target_rows,
                 target_peaks=target_peaks,
             )
             next_operations: List[Dict[str, Any]] = []
@@ -2551,7 +2074,12 @@ def generate_spectrum_candidates(
     merged_candidates: List[Stage3SpectrumCandidate] = []
     merged_histograms: set[str] = set()
     merged_bundles: set[str] = set()
-    for candidate in list(selected) + list(pair_candidates):
+    # Different template assignments can produce the same histogram. Keep
+    # the best predicted fit for it, rather than whichever template was
+    # encountered first in a rule's enumeration.
+    for candidate in sorted(
+        list(selected) + list(pair_candidates), key=_spectrum_candidate_sort_key,
+    ):
         histogram_signature = str(getattr(candidate, "histogram_signature", "") or "")
         diagnostics = dict(getattr(candidate, "diagnostics", {}) or {})
         bundle_signature = str(diagnostics.get("bundle_signature", "") or "")
@@ -2576,16 +2104,9 @@ def generate_spectrum_candidates(
         if bundle_signature:
             merged_bundles.add(bundle_signature)
 
-    merged_candidates.sort(key=lambda candidate: (
-        -round(float(dict(getattr(candidate, "diagnostics", {}) or {}).get(
-            "predicted_global_sse_gain", 0.0
-        ) or 0.0), 6),
-        -float(dict(getattr(candidate, "diagnostics", {}) or {}).get(
-            "su12_bias_score", 0.0
-        ) or 0.0),
-        -float(getattr(candidate, "predicted_window_gain", 0.0) or 0.0),
-        str(getattr(candidate, "candidate_id", "")),
-    ))
+    rejected_su24 = set(rejected_su24_signatures or [])
+    merged_candidates = [candidate for candidate in merged_candidates
+                         if spectrum_su24_signature(candidate.operations) not in rejected_su24]
     selected = merged_candidates[: int(limit)]
     for rank, candidate in enumerate(selected, start=1):
         candidate.diagnostics["spectral_priority_rank"] = int(rank)
@@ -2606,6 +2127,14 @@ def generate_spectrum_candidates(
             for operation in seed_atomics
         }),
         "pair_candidate_count": int(len(pair_candidates)),
+        "pair_selected_count": sum(bool(candidate.pair_groups) for candidate in selected),
+        "pair_best_predicted_sse_gain": max(
+            (float(candidate.diagnostics["predicted_global_sse_gain"]) for candidate in pair_candidates),
+            default=None,
+        ),
+        "selected_cutoff_predicted_sse_gain": (
+            float(selected[-1].diagnostics["predicted_global_sse_gain"]) if selected else None
+        ),
         "pair_audit": dict(pair_audit or {}),
         "rejected_pair_reasons": [
             dict(item or {}) for item in list(

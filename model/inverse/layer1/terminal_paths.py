@@ -1,8 +1,9 @@
 """Whole-path guard for joining two terminal-bearing linear half-chains."""
+from model.shared.port_rules import is_terminal_port_node
 
 from typing import Mapping, Optional, Sequence, Tuple
 
-from ...shared.inverse_common import is_terminal_port_node, SU_CONNECTION_DEGREE
+from ...shared.inverse_common import SU_CONNECTION_DEGREE
 
 
 def terminal_path_reason(

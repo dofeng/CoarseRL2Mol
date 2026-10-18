@@ -1422,13 +1422,11 @@ def _flex_reconcile_evidence(
 def _flex_range_mainline_evidence(
     *,
     family: str,
-    class_type: str,
     topology_template: str,
     open_slots: Sequence[str],
     branch_slots: Sequence[str],
     evidence: Dict[str, Any],
 ) -> Dict[str, Any]:
-    del class_type
     preferred_product_type = str(evidence.get("flex_reconcile_preferred_product_type", "") or "")
     main_kind = str(evidence.get("flex_reconcile_main_kind", "") or "")
     fixed_connection_contracts = [
@@ -1504,7 +1502,6 @@ def _flex_range_evidence(
     can_demote = False
     mainline_evidence = _flex_range_mainline_evidence(
         family=str(family),
-        class_type=str(class_type),
         topology_template=str(topology_template),
         open_slots=list(open_slots or []),
         branch_slots=list(branch_slots or []),
@@ -1547,10 +1544,8 @@ def _flex_range_evidence(
 
 def _external_pending_profile(
     *,
-    family: str,
     class_type: str,
 ) -> Dict[str, Any]:
-    del family
     class_name = str(class_type)
     pending_kind = "other"
     pending_reason = "remaining_external_halfclosed_open"
@@ -1642,10 +1637,8 @@ def _ring_roles_from_fragment_evidence(evidence: Dict[str, Any]) -> List[str]:
 def _ring_like24_units_for_fragment(
     *,
     family: str,
-    class_type: str,
-    evidence: Dict[str, Any],
+    class_type: str
 ) -> int:
-    del evidence
     if str(family) not in {"like24", "like24_secondary", "like24_bridge"}:
         return 0
     if str(class_type) in PAIRED_LIKE24_CLASS_TYPES:
@@ -1688,7 +1681,6 @@ def _augment_fragment_evidence(
     payload.setdefault(
         "external_pending_profile",
         _external_pending_profile(
-            family=str(family),
             class_type=str(class_type),
         ),
     )
@@ -1697,8 +1689,7 @@ def _augment_fragment_evidence(
         "ring_like24_units",
         int(_ring_like24_units_for_fragment(
             family=str(family),
-            class_type=str(class_type),
-            evidence=payload,
+            class_type=str(class_type)
         )),
     )
     return payload
@@ -2323,8 +2314,7 @@ def _like24_secondary_claimed_node_ids(
     connector_profiles: Sequence[Dict[str, Any]],
     tokens_by_id: Dict[int, ClassificationToken],
     *,
-    fixed_connection_contracts: Sequence[Dict[str, Any]],
-    primary_connector_id: int = -1,
+    fixed_connection_contracts: Sequence[Dict[str, Any]]
 ) -> List[int]:
     # A generic open neighbor behind a secondary fixed connector belongs to
     # the closure pool.  It is claimed later by that branch transaction.  The
@@ -2581,12 +2571,9 @@ def _build_fixed_connection_contracts(
 
 def _preferred_fixed_connection_role(
     *,
-    class_type: str,
     primary_connector: Optional[Dict[str, Any]],
-    fixed_connection_contracts: Sequence[Dict[str, Any]],
-    realization_modes: Optional[Sequence[str]] = None,
+    fixed_connection_contracts: Sequence[Dict[str, Any]]
 ) -> str:
-    del realization_modes
     if not list(fixed_connection_contracts or []):
         return "none"
     primary = dict(primary_connector or {})
@@ -2779,8 +2766,7 @@ def _like24_required_branch_kinds(
     token: ClassificationToken,
     *,
     class_type: str,
-    connector_profiles: Sequence[Dict[str, Any]],
-    realization_modes: Sequence[str],
+    connector_profiles: Sequence[Dict[str, Any]]
 ) -> Dict[str, List[str]]:
     class_name = str(class_type)
     subtype = str(getattr(token, "subtype", ""))
@@ -2819,16 +2805,13 @@ def _like24_required_branch_kinds(
     unresolved_count = max(0, int(generic_count - expected_mainline_generic))
     if unresolved_count <= 0:
         return {}
-    del realization_modes
     return {"center": ["H" for _ in range(int(unresolved_count))]}
 
 
 def _like24_branch_closures_in_ring(
     *,
-    class_type: str,
     required_branch_kinds_by_anchor: Dict[str, List[str]],
 ) -> Dict[str, Dict[str, List[str]]]:
-    del class_type
     center_branches = [str(value) for value in list(required_branch_kinds_by_anchor.get("center", []) or [])]
     if not center_branches:
         return {"side": {}, "upper_lower": {}, "fused": {}}
@@ -2841,11 +2824,9 @@ def _like24_branch_closures_in_ring(
 
 def _bridge_fragment_fixed_connection_contracts(
     *,
-    class_type: str,
     left_fragment: TopologyFragment,
     right_fragment: TopologyFragment,
 ) -> List[Dict[str, Any]]:
-    del class_type
 
     def _clone_contracts(fragment: TopologyFragment, center_node_id: int) -> List[Dict[str, Any]]:
         evidence = dict(getattr(fragment, "evidence", {}) or {})
@@ -2911,6 +2892,11 @@ def _bridge_fragment_fixed_connection_contracts(
             contract["tail_open_reason"] = ""
             contract["externally_closed"] = True
             contract["paired_like24_resolved"] = True
+            # The connector now joins the two centers on the merged mainline.
+            # A pre-merge branch_only role must not satisfy either center's
+            # separate H branch when this pair is projected into a ring.
+            contract["role_candidates"] = ["mainline_only"]
+            contract["fixed_connection_role"] = "mainline"
             partner_spec = dict(contract.get("partner_spec", {}) or {})
             partner_spec["resolved"] = True
             partner_spec["resolved_partner_node_ids"] = sorted(base_ids & pair_center_ids)
@@ -3409,7 +3395,6 @@ def _like24_ring_evidence(
     token: ClassificationToken,
     *,
     class_type: str,
-    topology_template: str,
     connector_profiles: Sequence[Dict[str, Any]],
     primary_connector: Optional[Dict[str, Any]] = None,
     realization_modes: Optional[Sequence[str]] = None,
@@ -3427,10 +3412,8 @@ def _like24_ring_evidence(
         primary_connector=primary_connector,
     )
     preferred_fixed_role = _preferred_fixed_connection_role(
-        class_type=str(class_type),
         primary_connector=primary_connector,
-        fixed_connection_contracts=fixed_connection_contracts,
-        realization_modes=realization_modes,
+        fixed_connection_contracts=fixed_connection_contracts
     )
     primary_connector_id = _safe_int(dict(primary_connector or {}).get("connector_node_id"), -1)
     primary_contract = next(
@@ -3577,8 +3560,7 @@ def _like24_ring_evidence(
     required_branch_kinds_by_anchor = _like24_required_branch_kinds(
         token,
         class_type=str(class_type),
-        connector_profiles=connector_profiles,
-        realization_modes=list(realization_modes or []),
+        connector_profiles=connector_profiles
     )
     try:
         primary_connector_su = int(dict(primary_connector or {}).get("connector_su_type", -1))
@@ -3606,7 +3588,6 @@ def _like24_ring_evidence(
         _forbid("side", "upper_lower", "fused")
 
     branch_closures_in_ring = _like24_branch_closures_in_ring(
-        class_type=str(class_type),
         required_branch_kinds_by_anchor=required_branch_kinds_by_anchor,
     )
     branch_kinds_by_slot = _like24_required_branch_kinds_by_slot(
@@ -4244,8 +4225,7 @@ def _make_like24_base_fragment(
     branch_requirements = _like24_required_branch_kinds(
         token,
         class_type=str(base_rule.get("class_type")),
-        connector_profiles=[],
-        realization_modes=[],
+        connector_profiles=[]
     )
     evidence = {
         "rule_id": str(base_rule.get("rule_id")),
@@ -4279,7 +4259,6 @@ def _make_like24_base_fragment(
     evidence.update(_like24_ring_evidence(
         token,
         class_type=str(base_rule.get("class_type")),
-        topology_template=topology_template,
         connector_profiles=[],
         primary_connector=None,
         realization_modes=[],
@@ -4357,10 +4336,6 @@ def _match_like24_fragment(
     rejects: List[Dict[str, Any]],
 ) -> Optional[TopologyFragment]:
     if int(token.su_type) == 24:
-        raw_role, raw_details = classify_raw_su24_semantics(
-            su_type=int(token.su_type),
-            neighbors=[neighbor.to_dict() for neighbor in list(token.neighbor_tokens or [])],
-        )
         # Ring-capable raw SU24 nodes remain resources until a concrete ring
         # contract selects them.
         return None
@@ -4519,8 +4494,7 @@ def _match_like24_fragment(
     branch_requirements = _like24_required_branch_kinds(
         token,
         class_type=str(secondary_rule.get("class_type")),
-        connector_profiles=connector_profiles,
-        realization_modes=list(secondary_rule.get("realization_modes", []) or []),
+        connector_profiles=connector_profiles
     )
     context_node_ids = _union_source_ids(
         _collect_direct_source_ids(token),
@@ -4549,7 +4523,6 @@ def _match_like24_fragment(
     evidence.update(_like24_ring_evidence(
         token,
         class_type=str(secondary_rule.get("class_type")),
-        topology_template=topology_template,
         connector_profiles=connector_profiles,
         primary_connector=primary_connector,
         realization_modes=list(secondary_rule.get("realization_modes", []) or []),
@@ -4567,8 +4540,7 @@ def _match_like24_fragment(
         token,
         connector_profiles,
         tokens_by_id,
-        fixed_connection_contracts=list(evidence.get("fixed_connection_contracts", []) or []),
-        primary_connector_id=_safe_int(primary_connector.get("connector_node_id"), -1),
+        fixed_connection_contracts=list(evidence.get("fixed_connection_contracts", []) or [])
     )
     return _make_fragment(
         token,
@@ -4585,7 +4557,7 @@ def _match_like24_fragment(
 
 
 def _resolve_bridge_rule(left_class: str, right_class: str) -> Optional[Dict[str, Any]]:
-    for class_type, rule in LIKE24_BRIDGE_BY_CLASS.items():
+    for rule in LIKE24_BRIDGE_BY_CLASS.values():
         if left_class in set(rule.get("left_classes", set()) or set()) and right_class in set(rule.get("right_classes", set()) or set()):
             return dict(rule)
     return None
@@ -4647,7 +4619,6 @@ def _match_like24_pair_bridge_fragments(
             [int(connector.node_id)],
         )
         bridge_fixed_contracts = _bridge_fragment_fixed_connection_contracts(
-            class_type=str(rule.get("class_type")),
             left_fragment=left_fragment,
             right_fragment=right_fragment,
         )

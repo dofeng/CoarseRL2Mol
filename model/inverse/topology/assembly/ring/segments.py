@@ -774,7 +774,6 @@ def build_pool_ring_template_segments(
     include_unavailable: bool = False,
 ) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
-    counts = assembler.allocator.available_counts()
     for su_type in list(allowed_su or []):
         # Pool-backed ring segments must be backed by a real Stage3
         # resource.  Structural SU labels (for example SU3) may appear in

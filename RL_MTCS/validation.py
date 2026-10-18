@@ -12,6 +12,7 @@ from RL_MTCS.geometry import segments_intersect
 from RL_MTCS.reporting.diagnostics import record_feasibility
 from model.shared.topology_contract import (MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
     TOLERATED_UNASSEMBLED_CLOSURE_SU_TYPES)
+from model.shared.aromatic_plan import MAX_IDLE_AROMATIC_NODES
 from RL_MTCS.mdp.sites import aromatic_template_errors
 import re
 from dataclasses import replace
@@ -34,6 +35,8 @@ class GeometryValidation:
 
     def audit_identity_errors(self):
         errors = list(self.audit_resource_partition_errors())
+        if self.problem.aromatic_residual_node_ids != self.source_problem.aromatic_residual_node_ids:
+            errors.append(dict(reason='aromatic_residual_identity_changed'))
         owner, planned = self.problem.ownership_map(), self.problem.node_map()
         source = self.source_problem.node_map()
         seen, slots, port_keys = set(), set(), set()
@@ -395,6 +398,8 @@ class GeometryValidation:
         resource_ids = [int(resource.node_id) for resource in resources]
         idle_ids = [node_id for node_id, _su in self.problem.idle_aromatic_nodes]
         if (len(idle_ids) != len(set(idle_ids))
+                or len(idle_ids) > MAX_IDLE_AROMATIC_NODES
+                or any(su != 13 or gid < 0 for gid, su in self.problem.idle_aromatic_nodes)
                 or set(idle_ids) & (set(assembled) | set(resource_ids))):
             errors.append({"reason": "idle_aromatic_partition_mismatch", "node_ids": idle_ids})
         if len(resource_ids) != len(set(resource_ids)):
@@ -408,10 +413,22 @@ class GeometryValidation:
                 "reason": "unassembled_resource_owned_by_graph",
                 "node_ids": overlap,
             })
-        if len(resources) > MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES:
+        retained_ids = list(self.problem.aromatic_residual_node_ids)
+        if len(retained_ids) != len(set(retained_ids)):
+            errors.append(dict(reason='duplicate_aromatic_residual_id', node_ids=retained_ids))
+        contract_ids = {n for c in self.problem.contracts for n in (c.source_node_id, c.target_node_id)}
+        for gid in retained_ids:
+            unit = self._units.get(ownership.get(gid))
+            node = unit.node_map().get(gid) if unit is not None else None
+            if (assembled.get(gid) != 11 or unit is None or unit.phase != 'aromatic'
+                    or node is None or node.su_type != 13 or gid in contract_ids
+                    or any(p.node_id == gid for p in unit.ports)
+                    or self.current_su_types.get(gid) != 13):
+                errors.append(dict(reason='aromatic_residual_invalid', node_id=gid))
+        if len(resources) + len(retained_ids) > MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES:
             errors.append({
-                "reason": "unassembled_resource_limit_exceeded",
-                "count": len(resources),
+                "reason": "closure_resource_limit_exceeded",
+                "count": len(resources) + len(retained_ids),
                 "limit": MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES,
             })
         for resource in resources:
@@ -743,8 +760,13 @@ class GeometryValidation:
         return errors
 
     def audit(self, *, diagnostics: bool = True) -> Dict[str, Any]:
+        from RL_MTCS.reporting.completion import completion_report
+        completion = completion_report(self)
         expected_ids = {int(node_id) for node_id, _unit_id in self.problem.ownership}
         placed_ids = set(int(node_id) for node_id in self.node_axial)
+        targets = self.problem.assembly_target_node_map()
+        target_label_unfulfilled = sorted(gid for gid in expected_ids
+            if gid not in placed_ids or self.current_su_types.get(gid) != targets.get(gid))
         nodes_by_coordinate = {}
         for node_id, axial in self.node_axial.items():
             nodes_by_coordinate.setdefault(axial, []).append(node_id)
@@ -806,7 +828,12 @@ class GeometryValidation:
         if side_attachment_count >= 4 and side_coverage_ratio < 0.65:
             side_distribution_warnings.append("side_attachments_clustered")
         return {
-            "complete": bool(self.is_complete()),
+            "complete": completion['all_complete'],
+            "tasks_complete": completion['tasks_complete'],
+            "completion_reasons": completion['completion_reasons'],
+            "allowed_remaining_resources": completion['allowed_remaining_resources'],
+            "target_labels_complete": not target_label_unfulfilled,
+            "target_label_unfulfilled_ids": target_label_unfulfilled,
             "input_valid": not self.problem.input_issues,
             "input_errors": [json.loads(issue) for issue in self.problem.input_issues],
             "rigid_stage_complete": bool(self.phase_done("rigid")),
@@ -835,6 +862,8 @@ class GeometryValidation:
                 for node_id, su_type in self.problem.idle_aromatic_nodes
             ],
             "idle_aromatic_count": len(self.problem.idle_aromatic_nodes),
+            "aromatic_residual_nodes": self.problem.aromatic_residual_rows(),
+            "aromatic_residual_count": len(self.problem.aromatic_residual_node_ids),
             "strict_all_nodes_assembled": not bool(
                 unassembled_resources or self.problem.idle_aromatic_nodes or (expected_ids-placed_ids)),
             "completion_mode": "best_legal_partial_allowed",

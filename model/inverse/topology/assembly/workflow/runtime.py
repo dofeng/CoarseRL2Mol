@@ -183,9 +183,6 @@ class ExternalTopologyAssembler:
             if ownership_registry is not None
             else OwnershipRegistry.from_classification(classification)
         )
-        self.last_classification_owner_conflicts = list(
-            self.ownership_registry.classification_conflicts
-        )
         for view in self.views:
             foreign_context_owners = {
                 int(node_id): int(self.fragment_owner_by_node_id[int(node_id)])
@@ -410,7 +407,7 @@ class ExternalTopologyAssembler:
             "pending_contracts", "pending_units", "ring_infeasible_contracts",
             "ring_pending_attempts", "ring_pending_reasons",
             "materialization_failure_by_fragment_id", "ring_exhausted_fragment_ids",
-            "completed_phases",
+            "completed_phases", "flex_audit", "flex_bounds",
         )
         state = deepcopy({name: getattr(self, name) for name in fields})
         for name, value in state.items():
@@ -816,7 +813,48 @@ class ExternalTopologyAssembler:
                         pending.infeasibility_proof["diagnostics"] = (
                             proof_diagnostics
                         )
+        if applied_resource_change and H is not None and self.flex_audit.get("enforced", False):
+            from ...stage3.flex_coordination import histogram_flex_window
+
+            try:
+                window = histogram_flex_window(H)
+            except ValueError as exc:
+                self.flex_audit.update({
+                    "flex_window_ok": False,
+                    "flex_window_width_ok": False,
+                    "flex_window_error": str(exc),
+                    "blocked_reason": "flex_window_invalid",
+                })
+            else:
+                self.flex_audit.update(window)
+                if not window["flex_window_ok"]:
+                    self.flex_audit["blocked_reason"] = "flex_window_invalid"
+                elif self.flex_audit.get("blocked_reason") == "flex_window_invalid":
+                    self.flex_audit["blocked_reason"] = ""
+                self.flex_audit["scenario"] = (
+                    "below_range" if self.explicit_flex_count < window["flex_lower"]
+                    else "above_range" if self.explicit_flex_count > window["flex_upper"]
+                    else "in_range"
+                )
+                self.flex_audit["target_flex_count"] = int(window["flex_lower"])
+                self.flex_audit["flex_target"] = int(window["flex_lower"])
+                self.flex_bounds = _compute_flex_bounds(
+                    explicit_flex_count=self.explicit_flex_count, flex_audit=self.flex_audit,
+                )
+            self.completed_phases.discard("external_flex_closure")
         self.current_H = H.detach().clone() if hasattr(H, "detach") else H
+
+    def snapshot(self) -> TopologyAssemblyResult:
+        """Project current products and ownership without executing assembly phases."""
+        from .coordinator import ExternalAssemblyPhaseState
+        from .result_builder import build_external_assembly_result
+        from ..ring import planner as ring_planner_module
+
+        return build_external_assembly_result(self, ExternalAssemblyPhaseState(
+            flex_violation_reason=chain_materializer_module.flex_range_violation_reason(self),
+            ring_resource_blockers=ring_planner_module.ring_resource_blockers(self),
+            ring_materialization_blockers=ring_planner_module.ring_materialization_blockers(self),
+        ))
 
     def continue_assembly(self) -> TopologyAssemblyResult:
         """Continue the current generation from its phase/pending contracts."""

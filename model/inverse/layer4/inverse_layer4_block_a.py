@@ -498,7 +498,7 @@ def adjust_block_a_carbonyl_anchor_impl(
 
             adjuster.fixed_partition_meta = copy.deepcopy(fixed_meta_after)
             constraints = adjuster._evaluate_required_hist_constraints(
-                H_new, E_target, S_target=getattr(adjuster, '_current_S_target', None),
+                H_new, E_target
             )
             if not constraints['ok']:
                 _rollback()
@@ -557,8 +557,7 @@ def adjust_block_a_carbonyl_anchor_impl(
         nonlocal H_work
         final_audit = audit_layer1_port_roles(H_work, adjuster._get_special_degree_meta(H_work))
         final_constraints = adjuster._evaluate_required_hist_constraints(
-            H_work, getattr(adjuster, 'E_target', None),
-            S_target=getattr(adjuster, '_current_S_target', None),
+            H_work, getattr(adjuster, 'E_target', None)
         )
         su12_cap = su12_transition_diagnostics(H, H_work)
         if not final_audit['ok'] or not final_constraints['ok'] or not su12_cap['generation_allowed']:

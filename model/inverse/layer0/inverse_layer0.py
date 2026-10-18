@@ -1,16 +1,14 @@
 """
 Inverse Pipeline Layer0 Module - Layer0: SU直方图估计器
 """
+from model.shared.port_rules import SPECIAL_DEGREE_PRIORS, TERMINAL_PORT_BASE_SU
 import copy
 import math
 import torch
 from typing import Tuple, Dict, Any, Optional
 
 from ...shared.inverse_common import (
-    SPECIAL_DEGREE_PRIORS,
     SU_CONNECTION_DEGREE,
-    TERMINAL_PORT_BASE_SU,
-    allocate_special_degree_counts,
     get_effective_hist_element_vector,
     estimate_region_carbon_budgets,
 )
@@ -969,55 +967,6 @@ class Layer0Estimator:
             return H
         return H_new
 
-    @staticmethod
-    def _rebalance_pair_counts(count_a: int,
-                               count_b: int,
-                               total_target: int,
-                               ratio_a: float,
-                               ratio_b: float,
-                               tie_inc_prefer: str,
-                               tie_dec_prefer: str) -> Tuple[int, int]:
-        """将两个计数按目标总量与比例重分配。"""
-        a = max(0, int(count_a))
-        b = max(0, int(count_b))
-        total_target = max(0, int(total_target))
-        target_a = float(total_target) * float(ratio_a)
-        target_b = float(total_target) * float(ratio_b)
-
-        while int(a + b) < int(total_target):
-            delta_a = float(a) - float(target_a)
-            delta_b = float(b) - float(target_b)
-            if delta_a < delta_b:
-                a += 1
-            elif delta_b < delta_a:
-                b += 1
-            elif str(tie_inc_prefer) == 'a':
-                a += 1
-            else:
-                b += 1
-
-        while int(a + b) > int(total_target):
-            delta_a = float(a) - float(target_a)
-            delta_b = float(b) - float(target_b)
-            can_del_a = int(a) > 0
-            can_del_b = int(b) > 0
-            if can_del_a and (not can_del_b or delta_a > delta_b):
-                a -= 1
-            elif can_del_b and (not can_del_a or delta_b > delta_a):
-                b -= 1
-            elif can_del_a and can_del_b:
-                if str(tie_dec_prefer) == 'a':
-                    a -= 1
-                else:
-                    b -= 1
-            elif can_del_a:
-                a -= 1
-            elif can_del_b:
-                b -= 1
-            else:
-                break
-
-        return max(0, int(a)), max(0, int(b))
 
     def _audit_fixed_connection_histogram(self,
                                           H: torch.Tensor,
@@ -1046,13 +995,6 @@ class Layer0Estimator:
             'n19_total': int(h[19].item()),
         }
 
-    @staticmethod
-    def _compute_region_area_ratios(S_target: torch.Tensor) -> Tuple[float, float, float]:
-        budgets = estimate_region_carbon_budgets(
-            S_target,
-            torch.tensor([1.0, 1.0, 0.0, 0.0, 0.0, 0.0], dtype=torch.float),
-        )
-        return float(budgets.get('x', 0.33)), float(budgets.get('y', 0.33)), float(budgets.get('z', 0.34))
 
     def _estimate_region_carbon_budgets(self,
                                         S_target: torch.Tensor,
@@ -1088,9 +1030,9 @@ class Layer0Estimator:
         S_target = S_target.to(device)
         E_target = E_target.to(device)
         self._current_S_target = S_target.detach().cpu()
-        
+
         print("\n[Layer0] SU直方图估计开始")
-        
+
         # Step 1: S2N模型预测初始SU分布
         with torch.no_grad():
             if hasattr(self.s2n, 'infer_su_hist'):
@@ -1099,27 +1041,27 @@ class Layer0Estimator:
                 H_pred = torch.nn.functional.softplus(
                     self.s2n(S_target.unsqueeze(0), E_target.unsqueeze(0))
                 ).squeeze(0)
-        
+
         # 整数化（四舍五入）
         H_init = torch.round(H_pred).long()
         H_init = torch.clamp(H_init, min=0)
-        
+
         # Step 2: 杂原子元素修正（X → S → N 顺序）
         H_corrected = H_init.clone()
-        
+
         # 2.1 修正X元素（32号）
         H_corrected = self._correct_halogen_X(H_corrected, E_target)
-        
+
         # 2.2 修正S元素（30, 31号）
         H_corrected = self._correct_sulfur_S(H_corrected, E_target)
-        
+
         # 2.3 修正N元素（0, 4, 26, 27号）
         H_corrected = self._correct_nitrogen_N(H_corrected, E_target)
-        
+
         # Step 3: C=O羰基分布修正（基于光谱区域比例）
         self._o_cap_triggered = False
         H_corrected = self._correct_carbonyl_distribution(H_corrected, S_target, E_target)
-        
+
         # Step 4: O元素修正（只修正28, 29号）
         target_O = int(E_target[2].item())
         used_O_03 = (
@@ -1134,15 +1076,15 @@ class Layer0Estimator:
             H_corrected[29] = 0
         else:
             H_corrected = self._correct_oxygen_O(H_corrected, E_target, S_target=S_target)
-        
+
         # Step 5: 含碳结构单元连接匹配修正
-        
+
         # 3.1 修正C=O连接（9号）
         H_corrected = self._correct_carbonyl_connection(H_corrected)
-        
+
         # 3.2 修正-O-连接（5号、19号）
         H_corrected, ether_meta = self._correct_ether_connection(H_corrected, S_target=S_target)
-        
+
         # 3.3 修正-S-连接（7号），传入O基准
         o_base_19 = ether_meta.get('o_base_19', 0)
         H_corrected, thio_meta = self._correct_thioether_connection(
@@ -1151,19 +1093,19 @@ class Layer0Estimator:
             S_target=S_target,
         )
         self._record_fixed_partition_meta(H_corrected, ether_meta=ether_meta, thio_meta=thio_meta)
-        
+
         # 3.4 修正-NH-连接（6号、20号）
         H_corrected, amine_meta = self._correct_amine_connection(H_corrected, S_target=S_target)
-        
+
         # 3.5 修正-X连接（8号、21号）
         H_corrected, halogen_meta = self._correct_halogen_connection(H_corrected, S_target=S_target)
-        
+
         # Step 6: 脂肪碳结构修正（22, 23, 24, 25号）
         H_corrected = self._correct_aliphatic_carbons(H_corrected, S_target, E_target)
-        
+
         # Step 7: 非饱和结构修正（14, 15, 16, 17, 18号）
         H_corrected = self._correct_unsaturated_carbons(H_corrected, S_target, E_target)
-        
+
         # Step 8: 芳香结构修正（10, 11, 12, 13号）
         H_tmp = self._correct_aromatic_carbons(H_corrected, S_target, E_target)
         if H_tmp is not None:
@@ -1184,7 +1126,7 @@ class Layer0Estimator:
             x_fixed_edges_21=int((halogen_meta or {}).get('n21_fixed_edges', H_corrected[21].item() if int(H_corrected.numel()) > 21 else 0)),
             S_target=S_target,
         )
-            
+
         # Step 9: H元素调整（三区域调整）
         H_tmp = self._adjust_hydrogen(H_corrected, E_target)
         if H_tmp is not None:
@@ -1193,7 +1135,7 @@ class Layer0Estimator:
         # Layer1 之前再做一次 SU10 偶数化收口。
         # Step 8 的约束可能被后续 C/H 修正重新打坏，这里保证进入 Layer1 时仍满足。
         H_corrected = self._enforce_even_su10(H_corrected)
-            
+
         # 确保所有值为非负整数
         H_corrected = torch.clamp(H_corrected, min=0).long()
         special_degree_meta = self._allocate_special_degree_meta(
@@ -1272,11 +1214,11 @@ class Layer0Estimator:
             )
         except Exception:
             pass
-            
+
         print(f"[Layer0] 完成 - 总SU={int(H_corrected.sum().item())}")
-        
+
         return H_corrected
-    
+
     def _correct_halogen_X(self, H: torch.Tensor, E_target: torch.Tensor) -> torch.Tensor:
         """
         修正X元素（32号）
@@ -1291,7 +1233,7 @@ class Layer0Estimator:
         H_new = H.clone()
         H_new[32] = target_X
         return H_new
-    
+
     def _correct_sulfur_S(self, H: torch.Tensor, E_target: torch.Tensor) -> torch.Tensor:
         """
         修正S元素（30, 31号）
@@ -1306,22 +1248,22 @@ class Layer0Estimator:
 
         if current_S == target_S:
             return H
-        
+
         H_new = H.clone()
-        
+
         # 目标分布：30:31 = 0.4:0.6
         target_30 = target_S * 0.4
         target_31 = target_S * 0.6
-        
+
         if current_S < target_S:
             # 需要补充
             diff = target_S - current_S
-            
+
             for _ in range(diff):
                 # 计算当前偏差
                 delta_30 = m - target_30
                 delta_31 = n - target_31
-                
+
                 # 补充负值最大的；偏差相同时优先补充优先级高的（31 > 30）
                 if delta_30 < delta_31:
                     m += 1
@@ -1332,12 +1274,12 @@ class Layer0Estimator:
         else:
             # 需要删除
             diff = current_S - target_S
-            
+
             for _ in range(diff):
                 # 计算当前偏差
                 delta_30 = m - target_30
                 delta_31 = n - target_31
-                
+
                 # 删除正值最大的；偏差相同时优先删除优先级低的（30 < 31）
                 if delta_30 > delta_31 and m > 0:
                     m -= 1
@@ -1352,11 +1294,11 @@ class Layer0Estimator:
                     m -= 1
                 elif n > 0:
                     n -= 1
-        
+
         H_new[30] = m
         H_new[31] = n
         return H_new
-    
+
     def _correct_nitrogen_N(self, H: torch.Tensor, E_target: torch.Tensor) -> torch.Tensor:
         """
         修正N元素（0, 4, 26, 27号）
@@ -1370,19 +1312,19 @@ class Layer0Estimator:
 
         if current_N == target_N:
             return H
-        
+
         H_new = H.clone()
-        
+
         # 目标分布：0:4:26:27 = 0.1:0.05:0.45:0.4
         target_0 = target_N * 0.1
         target_4 = target_N * 0.05
         target_26 = target_N * 0.45
         target_27 = target_N * 0.4
-        
+
         if current_N < target_N:
             # 需要补充
             diff = target_N - current_N
-            
+
             for _ in range(diff):
                 # 计算当前偏差
                 delta_0 = x - target_0
@@ -1396,7 +1338,7 @@ class Layer0Estimator:
                           (delta_26, priority[26], 26, '26号'), 
                           (delta_27, priority[27], 27, '27号')]
                 _, _, su_idx, _ = min(deltas, key=lambda t: (t[0], t[1]))
-                
+
                 # 补充该结构单元
                 if su_idx == 0:
                     x += 1
@@ -1409,7 +1351,7 @@ class Layer0Estimator:
         else:
             # 需要删除
             diff = current_N - target_N
-            
+
             for _ in range(diff):
                 # 计算当前偏差
                 delta_0 = x - target_0
@@ -1427,12 +1369,12 @@ class Layer0Estimator:
                     candidates.append((delta_26, -priority[26], 26, '26号'))
                 if w > 0:
                     candidates.append((delta_27, -priority[27], 27, '27号'))
-                
+
                 if not candidates:
                     break
-                
+
                 _, _, su_idx, _ = max(candidates, key=lambda t: (t[0], t[1]))
-                
+
                 # 删除该结构单元
                 if su_idx == 0:
                     x -= 1
@@ -1442,14 +1384,14 @@ class Layer0Estimator:
                     z -= 1
                 else:  # 27
                     w -= 1
-                        
+
         H_new[0] = x
         H_new[4] = y
         H_new[26] = z
         H_new[27] = w
-              
+
         return H_new
-    
+
     def _correct_carbonyl_distribution(self, H: torch.Tensor, S_target: torch.Tensor,
                                        E_target: torch.Tensor) -> torch.Tensor:
         """
@@ -1458,28 +1400,28 @@ class Layer0Estimator:
         self._o_cap_triggered = False
         budgets = self._estimate_region_carbon_budgets(S_target, E_target)
         carbonyl_C = int(round(float(budgets['carbonyl_C'])))
-        
+
         # 0号由N修正固定，保持不变
         n_0 = int(H[0].item())
-        
+
         # 需要修正的羰基结构数量
         W = carbonyl_C - n_0
         W = max(0, W)  # 防止负数
 
         H_new = H.clone()
-        
+
         # 当前1、2、3号数量
         m = int(H[1].item())  # 1号 (COOH)
         n = int(H[2].item())  # 2号 (-COO-)
         p = int(H[3].item())  # 3号 (-C=O-)
-        
+
         current_total = m + n + p
-        
+
         # 目标分布：1:2:3 = 0.35:0.25:0.4
         target_1 = W * 0.35
         target_2 = W * 0.25
         target_3 = W * 0.4
-        
+
         if W == 0:
             m = 0
             n = 0
@@ -1487,12 +1429,12 @@ class Layer0Estimator:
         elif current_total < W:
             # 需要补充
             diff = W - current_total
-            
+
             for _ in range(diff):
                 delta_1 = m - target_1
                 delta_2 = n - target_2
                 delta_3 = p - target_3
-                
+
                 # 补充负值最大的；偏差相同时优先补充优先级高的（3 > 1 > 2）
                 priority = {3: -3, 1: -2, 2: -1}
                 candidates = [
@@ -1501,7 +1443,7 @@ class Layer0Estimator:
                     (delta_3, priority[3], 3, '3号')
                 ]
                 _, _, su_idx, _ = min(candidates, key=lambda t: (t[0], t[1]))
-                
+
                 if su_idx == 1:
                     m += 1
                 elif su_idx == 2:
@@ -1511,12 +1453,12 @@ class Layer0Estimator:
         elif current_total > W:
             # 需要删除
             diff = current_total - W
-            
+
             for _ in range(diff):
                 delta_1 = m - target_1
                 delta_2 = n - target_2
                 delta_3 = p - target_3
-                
+
                 # 删除正值最大的；偏差相同时优先删除优先级低的（2 < 1 < 3）
                 priority = {3: 3, 1: 2, 2: 1}
                 candidates = []
@@ -1526,19 +1468,19 @@ class Layer0Estimator:
                     candidates.append((delta_2, -priority[2], 2, '2号'))
                 if p > 0:
                     candidates.append((delta_3, -priority[3], 3, '3号'))
-                
+
                 if not candidates:
                     break
-                
+
                 _, _, su_idx, _ = max(candidates, key=lambda t: (t[0], t[1]))
-                
+
                 if su_idx == 1:
                     m -= 1
                 elif su_idx == 2:
                     n -= 1
                 else:  # 3
                     p -= 1
-        
+
         H_new[1] = m
         H_new[2] = n
         H_new[3] = p
@@ -1599,7 +1541,7 @@ class Layer0Estimator:
             used_O_03 = int(n_0 + 2 * m + 2 * n + p)
 
         return H_new
-    
+
     def _oxygen_2829_ratio_from_spectrum(self,
                                          S_target: Optional[torch.Tensor],
                                          oxygen_atoms: int,
@@ -1662,16 +1604,16 @@ class Layer0Estimator:
         修正O元素（28, 29号）
         """
         target_O = int(E_target[2].item())
-        
+
         # 0,1,2,3号已被N修正和羰基修正处理
         n_0 = int(H[0].item())   # 0号 (1个O)
         n_1 = int(H[1].item())   # 1号 (2个O)
         n_2 = int(H[2].item())   # 2号 (2个O)
         n_3 = int(H[3].item())   # 3号 (1个O)
-        
+
         # 0-3号已贡献的O
         used_O = n_0 * 1 + n_1 * 2 + n_2 * 2 + n_3 * 1
-        
+
         # 需要修正的O数量
         W = target_O - used_O
         H_new = H.clone()
@@ -1679,15 +1621,15 @@ class Layer0Estimator:
             H_new[28] = 0
             H_new[29] = 0
             return H_new
-        
+
         W = max(0, W)  # 防止负数
-        
+
         # 当前28、29号数量
         m = int(H[28].item())  # 28号 (OH)
         n = int(H[29].item())  # 29号 (-O-)
-        
+
         current_total = m + n
-        
+
         ratio_28, ratio_29, _ratio_meta = self._oxygen_2829_ratio_from_spectrum(
             S_target if S_target is not None else getattr(self, '_current_S_target', None),
             int(W),
@@ -1695,15 +1637,15 @@ class Layer0Estimator:
         )
         target_28 = W * float(ratio_28)
         target_29 = W * float(ratio_29)
-        
+
         if current_total < W:
             # 需要补充
             diff = W - current_total
-            
+
             for _ in range(diff):
                 delta_28 = m - target_28
                 delta_29 = n - target_29
-                
+
                 # 补充负值最大的；偏差相同时优先补充优先级高的（28 > 29）
                 if delta_28 < delta_29:
                     m += 1
@@ -1714,11 +1656,11 @@ class Layer0Estimator:
         elif current_total > W:
             # 需要删除
             diff = current_total - W
-            
+
             for _ in range(diff):
                 delta_28 = m - target_28
                 delta_29 = n - target_29
-                
+
                 # 删除正值最大的；偏差相同时优先删除优先级低的（29 < 28）
                 if delta_28 > delta_29 and m > 0:
                     m -= 1
@@ -1745,7 +1687,7 @@ class Layer0Estimator:
                 m += 1
         H_new[28] = m
         H_new[29] = n
-        
+
         return H_new
 
     def _rebalance_oxygen_linked_units_after_carbonyl_adjust(
@@ -1878,7 +1820,7 @@ class Layer0Estimator:
             'thio_meta': dict(thio_meta or {}),
             'fixed_partition_meta': dict(fixed_partition_meta or {}),
         }
-    
+
     def _correct_carbonyl_connection(self, H: torch.Tensor) -> torch.Tensor:
         """
         修正C=O连接（9号芳香羰基取代碳）
@@ -1887,7 +1829,7 @@ class Layer0Estimator:
         n_1 = int(H[1].item())
         n_2 = int(H[2].item())
         n_3 = int(H[3].item())
-        
+
         # 计算C=O总连接量
         W = n_0 * 1 + n_1 * 1 + n_2 * 1 + n_3 * 2
         target_9 = int(round(float(W) * 0.50))
@@ -1895,7 +1837,7 @@ class Layer0Estimator:
         H_new = H.clone()
         H_new[9] = target_9
         return H_new
-    
+
     @staticmethod
     def _window_area_from_spectrum(S_target: Optional[torch.Tensor],
                                    lo_ppm: float,
@@ -1927,12 +1869,12 @@ class Layer0Estimator:
         n_2 = int(H[2].item())
         n_28 = int(H[28].item())
         n_29 = int(H[29].item())
-        
+
         # 计算-O-总连接量
         W_ether = n_2 * 1 + n_28 * 1 + n_29 * 2
-        
+
         H_new = H.clone()
-        
+
         m_target, n_19_target, o_fixed_edges_19, ratio_meta = self._split_aromatic_special_fixed_edges(
             int(W_ether),
             aromatic_su=5,
@@ -1941,19 +1883,19 @@ class Layer0Estimator:
             S_target=S_target,
             fallback_special_ratio=0.35,
         )
-        
+
         H_new[5] = int(m_target)
         H_new[19] = int(n_19_target)  
-        
+
         # 返回元数据供后续S连接修正使用
         meta = {
             'o_base_19': int(n_19_target),
             'o_fixed_edges_19': int(o_fixed_edges_19),
             **dict(ratio_meta),
         }
-        
+
         return H_new, meta
-    
+
     def _correct_thioether_connection(self,
                                       H: torch.Tensor,
                                       o_base_19: int = 0,
@@ -1969,10 +1911,10 @@ class Layer0Estimator:
             Tuple[torch.Tensor, Dict[str, int]]: (修正后的直方图, 元数据字典)
         """
         n_31 = int(H[31].item())
-        
+
         # 计算-S-总连接量
         W_thioether = n_31 * 2
-        
+
         H_new = H.clone()
 
         m, n_19_thioether, s_fixed_edges_19, split_meta = self._split_aromatic_special_fixed_edges(
@@ -1984,10 +1926,10 @@ class Layer0Estimator:
             fallback_special_ratio=0.60,
             allowed_modes=('single_d2', 'single_d3'),
         )
-        
+
         H_new[7] = m
         H_new[19] = o_base_19 + n_19_thioether
-  
+
         # 返回元数据
         meta = {
             'o_base_19': o_base_19,
@@ -1995,9 +1937,9 @@ class Layer0Estimator:
             's_fixed_edges_19': int(s_fixed_edges_19),
             **dict(split_meta),
         }
-        
+
         return H_new, meta
-    
+
     def _correct_amine_connection(self,
                                   H: torch.Tensor,
                                   S_target: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
@@ -2006,10 +1948,10 @@ class Layer0Estimator:
         """
         n_0 = int(H[0].item())
         n_27 = int(H[27].item())
-        
+
         # 计算-NH-总连接量
         W = n_0 * 1 + n_27 * 2
-        
+
         H_new = H.clone()
         m, n, fixed_edges_20, split_meta = self._split_aromatic_special_fixed_edges(
             int(W),
@@ -2019,16 +1961,16 @@ class Layer0Estimator:
             S_target=S_target,
             fallback_special_ratio=0.40,
         )
-        
+
         H_new[6] = m
         H_new[20] = n
-        
+
         return H_new, {
             'n20_total': int(n),
             'n20_fixed_edges': int(fixed_edges_20),
             **dict(split_meta),
         }
-    
+
     def _correct_halogen_connection(self,
                                     H: torch.Tensor,
                                     S_target: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
@@ -2036,10 +1978,10 @@ class Layer0Estimator:
         修正-X连接（8号芳香卤取代碳、21号卤接脂肪碳）
         """
         n_32 = int(H[32].item())
-        
+
         # 计算-X总连接量
         W = n_32 * 1
-        
+
         H_new = H.clone()
         m, n, fixed_edges_21, split_meta = self._split_aromatic_special_fixed_edges(
             int(W),
@@ -2049,7 +1991,7 @@ class Layer0Estimator:
             S_target=S_target,
             fallback_special_ratio=0.40,
         )
-        
+
         H_new[8] = m
         H_new[21] = n
         return H_new, {
@@ -2057,7 +1999,7 @@ class Layer0Estimator:
             'n21_fixed_edges': int(fixed_edges_21),
             **dict(split_meta),
         }
-    
+
 
     def _correct_aliphatic_carbons(self, H: torch.Tensor, S_target: torch.Tensor,
                                    E_target: torch.Tensor) -> torch.Tensor:
@@ -2067,12 +2009,12 @@ class Layer0Estimator:
         budgets = self._estimate_region_carbon_budgets(S_target, E_target)
         M_float = float(budgets.get('ordinary_aliphatic_C', budgets.get('aliphatic_C', 0.0)))
         M = int(round(M_float))
-        
+
         if M == 0:
             return H
-        
+
         H_new = H.clone()
-        
+
         # M is now the ordinary 0-50 ppm aliphatic budget, so SU19/20/21
         # are handled by the oxygenated-aliphatic/hetero-anchor logic instead
         # of being subtracted from SU23.
@@ -2081,14 +2023,14 @@ class Layer0Estimator:
         target_25 = int(round(0.02 * M_float))
         target_23 = int(round(0.68 * M_float))
         target_23 = max(0, target_23)
-        
+
         H_new[22] = target_22
         H_new[23] = target_23
         H_new[24] = target_24
         H_new[25] = target_25 
-        
+
         return H_new
-    
+
     def _correct_unsaturated_carbons(self, H: torch.Tensor, S_target: torch.Tensor,
                                      E_target: torch.Tensor) -> torch.Tensor:
         """
@@ -2100,10 +2042,10 @@ class Layer0Estimator:
         # 新规则：
         # W = 0.05 * aromatic_C，W 取最近偶数
         W = max(0, self._nearest_even_int(0.05 * float(aromatic_C)))
-        
+
         if W == 0:
             return H
-        
+
         H_new = H.clone()
 
         # 双键:三键 = 0.8:0.2，并要求两端都为偶数。
@@ -2126,15 +2068,15 @@ class Layer0Estimator:
         # q:r = 0.5:0.5
         target_17 = int(triple_bond) // 2
         target_18 = int(triple_bond) // 2
-        
+
         H_new[14] = target_14
         H_new[15] = target_15
         H_new[16] = target_16
         H_new[17] = target_17
         H_new[18] = target_18
-        
+
         return H_new
-    
+
     def _correct_aromatic_carbons(self, H: torch.Tensor, S_target: torch.Tensor,
                                   E_target: torch.Tensor) -> torch.Tensor:
         """
@@ -2153,12 +2095,12 @@ class Layer0Estimator:
 
         W_float = float(0.95 * float(aromatic_C) - float(n_4))
         W = max(0, int(round(W_float)))
-        
+
         if W == 0:
             return H
-        
+
         H_new = H.clone()
-        
+
         n_5 = int(H[5].item())
         n_6 = int(H[6].item())
         n_7 = int(H[7].item())
@@ -2223,23 +2165,25 @@ class Layer0Estimator:
         if int(target_10) % 2 != 0 and int(target_10) > 0:
             target_10 -= 1
             target_11 += 1
-        
+
         H_new[10] = target_10
         H_new[11] = target_11
         H_new[12] = target_12
         H_new[13] = target_13
-        
+
         return H_new
 
     def _adjust_hydrogen(self, H: torch.Tensor, E_target: torch.Tensor) -> torch.Tensor:
         """
-        H元素调整（三区域调整）
+        初始化阶段的三区域 H 直方图修正，不分配真实 donor 节点。
+
+        Stage3 的 H 补偿则必须遵守物理节点身份与资源事务约束，因此不能
+        用本初始化启发式替代 topology.resources 中的事务实现。
         """
-        # TODO(common): 这组 H 平衡互转规则和 Layer4 的 H 校正存在重复语义，后续统一。
         # 将H转移到CPU上以避免频繁的GPU同步
         H_cpu = H.cpu()
         E_SU_cpu = self.E_SU.cpu()
-        
+
         E_current = get_effective_hist_element_vector(
             H_cpu,
             special_degree_meta=getattr(self, 'special_degree_meta', {}) or None,
@@ -2248,24 +2192,24 @@ class Layer0Estimator:
         )
         current_H = E_current[1].item()
         target_H = E_target[1].item()
-        
+
         delta_H = current_H - target_H
         rel_error = abs(delta_H) / max(1.0, float(target_H))
 
         if rel_error < 0.08:
             return H
-        
+
         W = abs(current_H - 1.04 * target_H) if delta_H > 0 else abs(current_H - 0.96 * target_H)
         W = int(W)
         if W <= 0:
             return H
-        
+
         X = int(W * 0.4)
         Y = int(W * 0.3)
         Z = int(W * 0.3)
 
         H_new = H_cpu.clone()
-        
+
         if delta_H > 0:
             H_new = self._reduce_hydrogen_aromatic(H_new, X)
             H_new = self._reduce_hydrogen_aliphatic(H_new, Y)
@@ -2274,7 +2218,7 @@ class Layer0Estimator:
             H_new = self._increase_hydrogen_aromatic(H_new, X)
             H_new = self._increase_hydrogen_aliphatic(H_new, Y)
             H_new = self._increase_hydrogen_unsaturated(H_new, Z)
-            
+
         # 限制25号的数量不超过3%的脂肪碳总量！22号的数量不少于23号的10%！
         aliphatic_total = sum(H_new[i].item() for i in [19, 20, 21, 22, 23, 24, 25])
         max_25 = int(0.03 * aliphatic_total)
@@ -2282,7 +2226,7 @@ class Layer0Estimator:
             diff = H_new[25] - max_25
             H_new[25] = max_25
             H_new[23] += diff
-            
+
         min_22 = int(0.10 * H_new[23].item())
         if H_new[22] < min_22:
             diff = min_22 - H_new[22]
@@ -2328,10 +2272,10 @@ class Layer0Estimator:
         if Y <= 0: return H
         H_new = H.clone()
         reduced = 0
-        
+
         step = 0
         stuck = 0
-        
+
         while reduced < Y:
             if step < 4:
                 # 第一轮: 减22, 增23/23/23/24
@@ -2355,20 +2299,20 @@ class Layer0Estimator:
                 else:
                     stuck += 1
                 step = 0
-                
+
             if stuck > 5:
                 break
         return H_new
-    
+
     def _reduce_hydrogen_unsaturated(self, H: torch.Tensor, Z: int) -> torch.Tensor:
         """第一轮减16增15/14，第二轮减15增14，必须保证15 > 14"""
         if Z <= 0: return H
         H_new = H.clone()
         reduced = 0
-        
+
         step = 0
         stuck = 0
-        
+
         while reduced < Z:
             if step == 0:
                 # 第一轮, 步1: -16, +15
@@ -2400,7 +2344,7 @@ class Layer0Estimator:
                 else:
                     stuck += 1
                 step = 0
-                
+
             if stuck > 3:
                 break
         return H_new
@@ -2413,7 +2357,7 @@ class Layer0Estimator:
         cycle = [11, 10, 12, 10]
         c_idx = 0
         stuck = 0
-        
+
         while increased < X:
             tgt = cycle[c_idx]
             if H_new[tgt] > 0:
@@ -2433,11 +2377,11 @@ class Layer0Estimator:
         if Y <= 0: return H
         H_new = H.clone()
         increased = 0
-        
+
         r1_targets = [23, 23, 23, 24, 25]
         c_idx = 0
         stuck = 0
-        
+
         while increased < Y:
             if c_idx < 5:
                 tgt = r1_targets[c_idx]
@@ -2458,7 +2402,7 @@ class Layer0Estimator:
                     stuck = 0
                 else:
                     stuck += 1
-                    
+
                 if stuck > 6:
                     break
                 c_idx = 0
@@ -2469,11 +2413,11 @@ class Layer0Estimator:
         if Z <= 0: return H
         H_new = H.clone()
         increased = 0
-        
+
         r1_targets = [15, 14]
         c_idx = 0
         stuck = 0
-        
+
         while increased < Z:
             if c_idx < 2:
                 tgt = r1_targets[c_idx]
@@ -2494,9 +2438,8 @@ class Layer0Estimator:
                     stuck = 0
                 else:
                     stuck += 1
-                    
+
                 if stuck > 4:
                     break
                 c_idx = 0
         return H_new
-    

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Any, Dict, Iterable, Optional, Sequence, Set, Tuple
 
 from ...classification.classification_tokens import (
@@ -44,6 +45,42 @@ def _real_node_lookup(nodes: Iterable[Any]) -> Dict[int, Any]:
         except (TypeError, ValueError, AttributeError):
             continue
     return lookup
+
+
+def ring_target_degree_errors(
+    ring_audit: Dict[str, Any], nodes_by_id: Dict[int, Any],
+) -> list[Dict[str, Any]]:
+    """Check the materialized ring edges, independently of cached hop1 IDs."""
+    edges: Set[Tuple[int, int]] = set()
+    for cycle in ring_audit.get("cycles", []) or []:
+        edges.update(cycle_edges(cycle))
+    for left, right in ring_audit.get("external_attachments", []) or []:
+        edges.add(_edge(left, right))
+    for branch in ring_audit.get("branch_paths", []) or []:
+        path = [int(branch["anchor_node_id"]), *map(int, branch.get("node_ids", []))]
+        edges.update(_edge(left, right) for left, right in zip(path, path[1:]))
+    neighbors: Dict[int, Set[int]] = defaultdict(set)
+    for left, right in edges:
+        neighbors[left].add(right)
+        neighbors[right].add(left)
+    errors = []
+    for node_id, neighbor_ids in sorted(neighbors.items()):
+        node = nodes_by_id.get(node_id)
+        if node is None or int(node.su_type) in AROMATIC_SU_TYPES:
+            # Aromatic boundaries receive their other edges from the aromatic
+            # cluster, outside this aliphatic-ring contract.
+            continue
+        target = int(getattr(node, "target_hop1_degree", 0) or 0)
+        if target > 0 and len(neighbor_ids) != target:
+            errors.append({
+                "reason": "ring_target_degree_mismatch",
+                "node_id": node_id,
+                "su_type": int(node.su_type),
+                "expected_degree": target,
+                "actual_degree": len(neighbor_ids),
+                "neighbor_ids": sorted(neighbor_ids),
+            })
+    return errors
 
 
 def _branch_reason(
@@ -257,6 +294,14 @@ def audit_ring_topology_contract(
     branch_reason = _branch_reason(contract, ring_node_ids)
     if branch_reason is not None:
         return branch_reason
+    degree_errors = ring_target_degree_errors(contract.to_audit_dict(), real_nodes)
+    if degree_errors:
+        error = degree_errors[0]
+        return (
+            f"ring_target_degree_mismatch:{error['node_id']}:"
+            f"expected={error['expected_degree']}:actual={error['actual_degree']}:"
+            f"neighbors={error['neighbor_ids']}"
+        )
     if owned_node_ids is not None:
         owned = {int(value) for value in list(owned_node_ids or [])}
         if declared != owned:

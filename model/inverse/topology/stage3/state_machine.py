@@ -26,6 +26,7 @@ from ..resources.histogram import (
     _conversion_signature,
     _h_total,
     _stateful_conversion_bundle_signature,
+    apply_histogram_adjustment_plan,
     build_histogram_adjustment_plan,
     next_su11_aromatic_target,
 )
@@ -36,14 +37,21 @@ from ..resources.conversion_scoring import (
 from ..resources.profiles import (
     DEFAULT_STAGE3_H_SOFT_TOLERANCE,
     MIN_STAGE3_AROMATIC_RESOURCE_COUNT,
+    flex_resource_sequences,
     h_soft_bounds,
 )
 from ..resources.accounting import build_resource_accounting_snapshot
+from ..resources.conversion_paths import (
+    ConversionPathError,
+    audit_conversion_paths,
+    bind_conversion_paths,
+    internal_primary_adjustment_counts,
+    require_conversion_paths,
+)
 from ..resources.types import (
     EXTERNAL_ADJUSTMENT_RESOURCE_TYPES,
     GENERIC_CLOSURE_RESOURCE_TYPES,
     INTERNAL_CONVERSION_SOURCE_TYPES,
-    STAGE3_ACCOUNTING_SU_TYPES,
     SU24_RING_RESOURCE_TYPE,
 )
 from ..assembly.state.iteration_ledger import (
@@ -59,6 +67,7 @@ from ..assembly.state.round_context import (
     build_stage3_round_context,
     normalize_stage3_product,
 )
+from ..assembly.state.snapshot import validate_snapshot_state
 from ..resources.spectrum_rebalance import (
     fixed_flex_capacity_spectrum_audit,
     generate_spectrum_candidates,
@@ -169,14 +178,20 @@ def _evaluate_external_phases(
     classification: Any = None,
     allow_ring_recovery: bool = False,
     external_assembler: Any = None,
+    snapshot_only: bool = False,
 ) -> Any:
     classification_obj = classification or classify_topology_units(list(nodes or []))
     generation_id = int(getattr(phase_eval, "generation_id", 0) or 0)
     live_assembler = external_assembler
-    if live_assembler is not None and int(
+    if snapshot_only:
+        assembly_obj = live_assembler.snapshot()
+    elif live_assembler is not None and int(
         getattr(live_assembler, "generation_id", generation_id)
     ) == generation_id:
         live_assembler.allow_ring_recovery = bool(allow_ring_recovery)
+        for name in ("residual_flex_preferred_23", "residual_flex_min_23"):
+            if name in phase_eval.flex_audit:
+                live_assembler.flex_audit[name] = phase_eval.flex_audit[name]
         if callable(getattr(live_assembler, "sync_after_resource_adjustments", None)):
             live_assembler.sync_after_resource_adjustments(
                 list(nodes or []),
@@ -354,7 +369,14 @@ def _evaluate_external_phases(
         int(key): [int(value) for value in list(values or [])]
         for key, values in dict(ownership.get("aromatic_donor_ids_by_su", {}) or {}).items()
     }
-    working.external_closure_ok = not bool(assembly.get("pending_units", []) or pending_contracts)
+    working.flex_audit = dict(live_assembler.flex_audit if live_assembler is not None else phase_eval.flex_audit)
+    working.external_closure_ok = bool(
+        not (assembly.get("pending_units", []) or pending_contracts)
+        and "external_flex_closure" in assembly.get("completed_phases", [])
+        and all(working.flex_audit.get(name, False) for name in (
+            "flex_physical_ok", "flex_count_ok", "flex_window_width_ok",
+        ))
+    )
     working.active_phase = str(
         assembly.get("active_phase", "")
         or diagnostics.get("stage3_phase", "")
@@ -493,7 +515,6 @@ def _remaining_closure_ids_by_su(
 def _tolerated_remaining_closure_ids(
     pool: Dict[int, List[int]],
     *,
-    remaining_flex_goal: int,
     recycled_resource_ids: Optional[Set[int]] = None,
 ) -> Dict[int, List[int]]:
     by_su = {
@@ -509,10 +530,7 @@ def _tolerated_remaining_closure_ids(
     }:
         return {}
     total = sum(len(values) for values in by_su.values())
-    if (
-        int(remaining_flex_goal) <= 0
-        and int(total) <= int(MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES)
-    ):
+    if int(total) <= int(MAX_TOLERATED_UNASSEMBLED_CLOSURE_RESOURCES):
         return by_su
     return {}
 
@@ -636,8 +654,7 @@ def _closure_contract(contract: Dict[str, Any], phase: str) -> TopologyClosureCo
     )
 
 
-def _external_contracts(phase_eval: Any, nodes: Sequence[Any]) -> List[Dict[str, Any]]:
-    del nodes
+def _external_contracts(phase_eval: Any) -> List[Dict[str, Any]]:
     contracts = [
         dict(item or {})
         for item in list(getattr(phase_eval, "canonical_contracts", []) or [])
@@ -1323,7 +1340,6 @@ def _plan_internal_surplus_su11_aromatic_conversion(
 
 def _residual_template_specs(
     *,
-    remaining_flex_chains: int,
     residual_flex_preferred_23: int,
     residual_flex_min_23: int,
     residual_side_preferred_23: int,
@@ -1331,18 +1347,10 @@ def _residual_template_specs(
     remaining_optional_flex_capacity: Optional[int] = None,
 ) -> List[Tuple[str, int, Dict[int, int]]]:
     requirements: List[Tuple[str, int, Dict[int, int]]] = []
-    allow_flex = bool(
-        int(remaining_flex_chains) > 0
-        or (
-            remaining_optional_flex_capacity is not None
-            and int(remaining_optional_flex_capacity) > 0
-        )
-    )
+    allow_flex = remaining_optional_flex_capacity is not None and int(remaining_optional_flex_capacity) > 0
     if allow_flex:
-        preferred_flex_23 = max(int(residual_flex_min_23), int(residual_flex_preferred_23))
-        # The configured minimum controls the normal preference, not topology
-        # legality. One SU23 is still a valid last-resort flex chain.
-        for chain_nodes in range(int(preferred_flex_23), 0, -1):
+        for sequence in flex_resource_sequences(residual_flex_preferred_23, residual_flex_min_23):
+            chain_nodes = sequence.count(23)
             requirements.append((
                 "residual_flex_chain",
                 int(chain_nodes),
@@ -1406,7 +1414,6 @@ def _plan_next_residual_product(
     h_tolerance: float,
     special_degree_meta: Optional[Dict[str, Any]],
     su11_rotation_index: int,
-    remaining_flex_chains: int,
     residual_flex_preferred_23: int,
     residual_flex_min_23: int,
     residual_side_preferred_23: int,
@@ -1420,19 +1427,13 @@ def _plan_next_residual_product(
     forbidden_primary_conversion_signatures: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     pool = deepcopy(getattr(iteration_ledger, "available_ids_by_su", {}) or {})
-    required_flex = int(remaining_flex_chains) > 0
     template_specs = _residual_template_specs(
-        remaining_flex_chains=remaining_flex_chains,
         residual_flex_preferred_23=residual_flex_preferred_23,
         residual_flex_min_23=residual_flex_min_23,
         residual_side_preferred_23=residual_side_preferred_23,
         residual_side_min_23=residual_side_min_23,
         remaining_optional_flex_capacity=remaining_optional_flex_capacity,
     )
-    if required_flex:
-        template_specs = [
-            item for item in template_specs if item[0] == "residual_flex_chain"
-        ]
     attempts: List[Dict[str, Any]] = []
 
     # First inspect every legal template against the unchanged ledger. A
@@ -1454,18 +1455,7 @@ def _plan_next_residual_product(
             special_degree_meta=special_degree_meta,
         )
         if transaction is not None:
-            # The midpoint of the flex window is only an upper capacity for
-            # optional residual flex products.  It is not a target.  Once the
-            # mandatory flex deficit is satisfied, consume a directly
-            # available side-chain closure before spending the same resources
-            # on an optional flex chain; optional flex is considered only when
-            # no side-chain closure can be materialized from the live pool.
-            if not required_flex:
-                role_priority = (
-                    0 if product_role == "residual_side_chain" else 1
-                )
-            else:
-                role_priority = 0
+            role_priority = 0 if product_role == "residual_side_chain" else 1
             direct_candidates.append((
                 (
                     int(role_priority),
@@ -1499,7 +1489,7 @@ def _plan_next_residual_product(
 
     total_available = sum(
         len(pool.get(int(su_type), []) or [])
-        for su_type in (11, 22, 23)
+        for su_type in RESIDUAL_SELF_CLOSURE_TYPES
     )
     conversion_candidates: List[Tuple[Tuple[float, ...], Dict[str, Any]]] = []
     target_h: Optional[float] = None
@@ -1510,10 +1500,7 @@ def _plan_next_residual_product(
     h_lower, h_upper = h_soft_bounds(target_h, h_tolerance)
 
     for template_index, (product_role, chain_23_count, required_counts) in enumerate(template_specs):
-        optional_flex = bool(
-            str(product_role) == "residual_flex_chain"
-            and not required_flex
-        )
+        optional_flex = str(product_role) == "residual_flex_chain"
         if optional_flex:
             attempts.append({
                 "product_role": product_role,
@@ -1528,7 +1515,7 @@ def _plan_next_residual_product(
             for su_type, count in required_counts.items()
         )
         template_size = sum(int(value) for value in required_counts.values())
-        if not required_flex and int(direct_coverage) <= 0:
+        if int(direct_coverage) <= 0:
             attempts.append({
                 "product_role": product_role,
                 "chain_23_count": int(chain_23_count),
@@ -1582,10 +1569,6 @@ def _plan_next_residual_product(
             # Released SU24 is a donor only in this internal residual phase;
             # the histogram scorer still binds it by concrete released ID.
             forbidden_conversion_su_types=[],
-            protected_resource_counts={
-                11: 2 * max(0, int(remaining_flex_chains)),
-                23: max(0, int(remaining_flex_chains)),
-            },
         )
         attempts.append({
             "product_role": product_role,
@@ -1626,7 +1609,7 @@ def _plan_next_residual_product(
                 else 0.0
             )
             missing_slot_count = max(0, int(template_size) - int(direct_coverage))
-            if not required_flex and int(primary_count) > int(missing_slot_count):
+            if int(primary_count) > int(missing_slot_count):
                 attempts.append({
                     "product_role": product_role,
                     "chain_23_count": int(chain_23_count),
@@ -1638,35 +1621,21 @@ def _plan_next_residual_product(
                     "h_after": float(h_after),
                 })
                 continue
-            if required_flex:
-                score = (
-                    float(primary_count),
-                    float(h_violation),
-                    float(h_error),
-                    float(-direct_coverage),
-                    float(-int(chain_23_count)),
-                    float(template_index),
-                )
-            else:
-                score = (
-                    float(primary_count),
-                    float(h_violation),
-                    float(h_error),
-                    float(-direct_coverage),
-                    float(-template_size),
-                    float(template_index),
-                )
+            score = (
+                float(primary_count),
+                float(h_violation),
+                float(h_error),
+                float(-direct_coverage),
+                float(-template_size),
+                float(template_index),
+            )
             candidate_plan.plan_kind = "residual_single_product_conversion"
             candidate_plan.diagnostics.update({
                 "residual_product_role": product_role,
                 "residual_chain_23_count": int(chain_23_count),
                 "residual_required_counts": dict(required_counts),
                 "residual_candidate_score": list(score),
-                "residual_selection_rule": (
-                    "minimum_conversion_then_h_then_existing_resource_use"
-                    if required_flex
-                    else "single_missing_slot_then_h_then_existing_resource_use"
-                ),
+                "residual_selection_rule": "single_missing_slot_then_h_then_existing_resource_use",
             })
             conversion_candidates.append((score, {
                 "mode": "conversion",
@@ -1679,11 +1648,7 @@ def _plan_next_residual_product(
         _, selected = min(conversion_candidates, key=lambda item: item[0])
         selected["attempt_count"] = len(attempts)
         selected["attempts"] = _diagnostic_attempt_samples(attempts)
-        selected["selection_reason"] = (
-            "ranked_required_flex_conversion_candidates"
-            if required_flex
-            else "ranked_single_gap_optional_conversion_candidates"
-        )
+        selected["selection_reason"] = "ranked_single_gap_optional_conversion_candidates"
         return selected
     su11_conversion = _plan_internal_surplus_su11_aromatic_conversion(
         phase_eval=phase_eval,
@@ -2256,43 +2221,119 @@ def _fixed_flex_capacity_candidate(
     }
 
 
-def validate_rebuilt_flex_window(nodes: Sequence[Any], fixed_partition_meta: Any = None) -> Dict[str, Any]:
-    """Recount physically materialized chains after a width conversion rebuild."""
+def validate_rebuilt_flex_window(
+    nodes: Sequence[Any], fixed_partition_meta: Any = None,
+    *, allow_resource_continuation: bool = False,
+    allow_window_continuation: bool = False,
+    previous_window: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Validate a rebuilt window, optionally admitting pending resource work.
+
+    Layer1/2 may change fragment connectivity and hence closure demand. The
+    old generation's preview cannot guarantee completion on the rebuilt graph.
+    Block C may admit a resource shortfall to the normal Stage3 planner, which
+    owns donor selection, conversion budgets and physical materialization.
+    Such admission is not a completed-flex or completed-Stage3 verdict.
+    """
     from .phase_eval import build_stage3_phase_evaluation
+    from .flex_coordination import flex_window_candidate_allowed
 
     classification = classify_topology_units(list(nodes), fixed_partition_meta=fixed_partition_meta)
     phase = build_stage3_phase_evaluation(list(nodes), classification=classification,
                                          fixed_partition_meta=fixed_partition_meta)
     audit = phase.flex_audit
+    width_ok = bool(audit.get("flex_window_width_ok", False))
+    window_progress = bool(
+        not width_ok and flex_window_candidate_allowed(
+            dict(previous_window or {}), audit, allow_intermediate=allow_window_continuation,
+        )
+    )
     if (phase.flex_reconciliation_block_reason
             or audit.get("scenario") == "above_range"
-            or not audit.get("flex_window_width_ok", False)):
+            or not (width_ok or window_progress)):
         return {"ok": False, "reason": "rebuilt_flex_window_invalid",
+                "flex_complete": False, "resource_continuation_required": False,
+                "window_continuation_required": False,
+                "previous_window": dict(previous_window or {}),
                 "flex_audit": audit}
     phase.flex_audit = {**audit, "stop_after_flex": True}
     phase = _evaluate_external_phases(phase_eval=phase, nodes=nodes, classification=classification)
     count = int(phase.flex_counts.get("final", 0))
     errors = _external_product_materialization_errors(phase)
-    ok = (not errors and "external_flex_closure" in phase.completed_phases
-          and int(audit["flex_lower"]) <= count <= int(audit["flex_upper"]))
-    return {"ok": ok, "reason": "ok" if ok else "rebuilt_flex_count_invalid",
-            "completed_flex_count": count, "flex_lower": audit["flex_lower"],
-            "flex_upper": audit["flex_upper"], "materialization_errors": errors}
+    pending_contracts = [
+        dict(contract) for contract in dict(phase.assembly_view or {}).get("pending_contracts", [])
+    ]
+    pending_flex_contracts = [
+        contract for contract in pending_contracts
+        if str(contract.get("target_role", "")) == "flex_chain"
+    ]
+    count_complete = (not errors and not pending_flex_contracts
+                      and phase.flex_audit.get("flex_physical_ok", False)
+                      and int(audit["flex_lower"]) <= count <= int(audit["flex_upper"]))
+    # Structural/ownership failures are not evidence that more SU11 will
+    # help. Only hand concrete resource deficits to the continuation planner.
+    structural_blockers = [
+        contract for contract in pending_contracts
+        if str(contract.get("contract_kind", "")) == "structural_blocker"
+        or str(contract.get("failure_domain", "")
+               or dict(contract.get("diagnostics", {}) or {}).get("failure_domain", ""))
+        not in {"", "resource_capacity"}
+    ]
+    resource_contracts = [
+        contract for contract in pending_flex_contracts
+        if _contract_reported_missing_counts(contract)
+        and set(_contract_reported_missing_counts(contract)).issubset(
+            GENERIC_CLOSURE_RESOURCE_TYPES
+        )
+    ]
+    continuation = bool(
+        allow_resource_continuation and not count_complete and not errors
+        and not structural_blockers
+        and count < int(audit["flex_lower"])
+        and pending_flex_contracts
+        and len(resource_contracts) == len(pending_flex_contracts)
+    )
+    accepted = bool((count_complete or continuation) and not structural_blockers)
+    complete = bool(accepted and count_complete and width_ok)
+    result = {"ok": accepted,
+              "reason": ("rebuilt_flex_window_continuation_required" if accepted and window_progress else
+                         "ok" if complete else
+                         "rebuilt_flex_resource_continuation_required" if continuation else
+                         "rebuilt_flex_count_invalid"),
+              "flex_complete": complete, "resource_continuation_required": continuation,
+              "window_continuation_required": bool(accepted and window_progress),
+              "previous_window": dict(previous_window or {}),
+              "flex_window_width": int(audit["flex_window_width"]),
+              "completed_flex_count": count, "flex_lower": audit["flex_lower"],
+              "flex_upper": audit["flex_upper"], "materialization_errors": errors}
+    if not complete:
+        result.update({
+            "completed_phases": list(phase.completed_phases),
+            "pending_flex_contract_count": len(pending_flex_contracts),
+            "pending_flex_contracts": pending_flex_contracts,
+            "remaining_resource_counts": {
+                str(su): len(ids) for su, ids in _resource_ids(phase).items()
+            },
+            "structural_blockers": structural_blockers,
+            "flex_audit": audit,
+        })
+    return result
 
 
 def _preview_narrowed_flex_completion(
     phase_eval: Any, window: Dict[str, Any], H: torch.Tensor,
+    *, selected_groups: Optional[Sequence[Dict[str, Any]]] = None,
+    donor_histogram: Optional[HistogramAdjustmentPlan] = None,
 ) -> Dict[str, Any]:
     """Materialize the new lower-bound gap without changing the live generation.
 
-    SU10-pair retirement affects the aromatic window, not the fixed fragments
-    or closure pool used here. The fresh Layer1/2 rebuild must still repeat
-    this physical check against its own graph before the conversion commits.
+    SU10-pair retirement affects the next generation only. Preview the donor
+    conversions on the current assembler without making retired SU10 nodes
+    available as closure resources.
     """
     from ..assembly.closure import chain
+    from ..assembly.closure.flex import run_external_flex_phase
     from ..assembly.state.ownership import fragment_available
-    from ..assembly.state.snapshot import validate_snapshot_state
-
     before_count = int(phase_eval.flex_counts.get("final", 0))
     lower, upper = int(window["flex_lower"]), int(window["flex_upper"])
     diagnostic = {
@@ -2305,21 +2346,55 @@ def _preview_narrowed_flex_completion(
     }
     if before_count > upper:
         return {**diagnostic, "ok": False, "reason": "completed_flex_above_new_window"}
-    if before_count >= lower:
-        return {**diagnostic, "ok": True, "reason": "existing_flex_count_in_range"}
     live = getattr(phase_eval, "external_assembler", None)
     if live is None:
         return {**diagnostic, "ok": False, "reason": "flex_completion_runtime_unavailable"}
 
     trial = deepcopy(live)
-    groups = [
+    if donor_histogram is not None and donor_histogram.groups:
+        donor_ops = [
+            op for group in donor_histogram.groups
+            for op in [group.primary_op] + list(group.h_compensation_ops or [])
+        ]
+        preview_nodes = deepcopy(trial.nodes)
+        preview_by_id = {int(node.global_id): node for node in preview_nodes}
+        available_ids = {
+            int(node_id)
+            for values in trial.allocator.remaining_ids_by_su.values()
+            for node_id in values
+        }
+        for op in donor_ops:
+            for node_id in op.node_ids:
+                node = preview_by_id.get(int(node_id))
+                if node is None or int(node.su_type) != int(op.from_su) or int(node_id) not in available_ids:
+                    return {**diagnostic, "ok": False,
+                            "reason": "su11_donor_identity_invalid",
+                            "node_id": int(node_id)}
+                node.su_type = int(op.to_su)
+        preview_H = apply_conversions_to_H(H, donor_ops)
+        if preview_H is None:
+            return {**diagnostic, "ok": False, "reason": "su11_donor_histogram_invalid"}
+        try:
+            trial.sync_after_resource_adjustments(
+                preview_nodes, H=preview_H,
+                applied_ops=[group.to_dict() for group in donor_histogram.groups],
+            )
+        except ValueError as exc:
+            return {**diagnostic, "ok": False,
+                    "reason": "su11_donor_identity_invalid", "detail": str(exc)}
+        H = preview_H
+    available_groups = [
         deepcopy(group)
         for group in trial.flex_audit.get("supplemental_flex_candidate_groups", [])
         if group.get("fragment_ids") and all(
             fragment_available(trial, int(fragment_id))
             for fragment_id in group["fragment_ids"]
         )
-    ][:lower - before_count]
+    ]
+    groups = (
+        [deepcopy(group) for group in selected_groups]
+        if selected_groups is not None else available_groups[:lower - before_count]
+    )
     trial.selected_flex_candidate_groups = groups
     trial.selected_flex_candidate_ids = {
         int(fragment_id) for group in groups for fragment_id in group["fragment_ids"]
@@ -2333,16 +2408,7 @@ def _preview_narrowed_flex_completion(
     trial.flex_bounds.update({"min": lower, "max": upper, "target": lower})
     before_resources = trial.allocator.available_counts()
     before_products = len(trial.products)
-    # Run only chain materialization. Ring and side allocation must wait until
-    # the quantity transaction has passed the fresh-generation checks.
-    branch_donors = chain.available_branch_donors(trial)
-    if groups:
-        chain.assemble_selected_supplemental_flex(trial, branch_donors)
-    else:
-        # Earlier products may have consumed one member of each canonical
-        # group. The remaining eligible fragments can still form new groups.
-        chain.assemble_remaining_flex(trial, branch_donors)
-    chain.release_satisfied_flex_selection(trial)
+    run_external_flex_phase(trial, complete_quantity=True)
     products = [
         normalize_stage3_product(raw, generation_id=trial.generation_id, index=index).to_dict()
         for index, raw in enumerate(trial.products)
@@ -2381,113 +2447,304 @@ def _preview_narrowed_flex_completion(
 def _narrow_flex_window_plan(
     *, phase_eval: Any, H: torch.Tensor, nodes: Sequence[Any],
     max_primary_adjustments: int, special_degree_meta: Optional[Dict[str, Any]],
+    E_target: Any = None, max_h_compensation_ops: int = 8,
+    h_tolerance: float = DEFAULT_STAGE3_H_SOFT_TOLERANCE,
+    su11_rotation_index: int = 0,
     forbidden_signatures: Optional[Sequence[str]] = None,
 ) -> Stage3AdjustmentPlan:
-    """Retire complete SU10 pairs before rebuilding the inverse graph.
+    """Jointly coordinate an aromatic window and its physical flex resources."""
+    from ..assembly.closure.flex import available_flex_candidate_groups
+    from .flex_coordination import (
+        aromatic_window_candidates,
+        available_su10_pairs,
+        bind_aromatic_window_candidate,
+        flex_window_candidate_allowed,
+        histogram_flex_window,
+    )
 
-    This dedicated transaction does not authorize SU10 in the ordinary
-    closure-resource conversion pool. Stop at the smallest feasible bundle.
-    """
+    def bundle_signature(ops: Sequence[HistogramConversion]) -> str:
+        identity = ";".join(
+            f"{int(op.from_su)}>{int(op.to_su)}:"
+            + ",".join(str(int(node_id)) for node_id in sorted(op.node_ids))
+            for op in ops
+        )
+        return f"{_stateful_conversion_bundle_signature(H, ops)}|ids:{identity}"
+
     audit = dict(phase_eval.flex_audit or {})
-    fixed_count = int(phase_eval.flex_counts.get("final", 0))
+    try:
+        before_window = histogram_flex_window(H)
+    except ValueError:
+        before_window = dict(audit)
     by_id = {int(node.global_id): node for node in nodes}
-    su10 = {key for key, node in by_id.items() if int(node.su_type) == 10}
-    neighbors = {
-        key: set(map(int, getattr(by_id[key], "hop1_ids", ()) or ())) & su10
-        for key in su10
-    }
-    pairs = sorted((left, right) for left in su10 for right in neighbors[left]
-                   if left < right and neighbors[left] == {right}
-                   and neighbors[right] == {left}
-                   and not any(getattr(by_id[key], "stage3_resource_claimed", False)
-                               or getattr(by_id[key], "stage3_locked_neighbor_ids", ())
-                               or any(int(getattr(by_id.get(int(neighbor)), "su_type", -1))
-                                      not in {*range(5, 14), 26, 30}
-                                      for neighbor in getattr(by_id[key], "hop1_ids", ()))
-                               for key in (left, right)))
-    counts = {index: int(value) for index, value in enumerate(H.tolist())}
+    pairs = available_su10_pairs(nodes)
     attempts = []
-    limit = min(len(pairs), max(0, int(max_primary_adjustments)) // 2)
-    for pair_count in range(1, limit + 1):
-        count = 2 * pair_count
-        after = H.detach().clone()
-        after[10] -= count
-        after[12] += count
-        trial = {**counts, 10: counts.get(10, 0) - count, 12: counts.get(12, 0) + count}
-        bridgeheads, perimeter, _five = staging_aromatic_counts(trial)
-        try:
-            aromatic = exact_aromatic_cluster_plan(bridgeheads, perimeter)
-        except ValueError:
-            continue
-        window = flex_count_window(aromatic["cluster_count"], trial[10])
-        su12_allowed = bool(su12_transition_diagnostics(H, after)["generation_allowed"])
-        attempt = {"converted_pairs": pair_count, **window,
-                   "completed_flex_count_before": fixed_count,
-                   "su12_generation_allowed": su12_allowed}
-        attempts.append(attempt)
-        if not (window["flex_window_ok"] and window["flex_window_width_ok"]):
-            attempt["rejection_reason"] = "flex_window_invalid"
-            continue
-        if not su12_allowed:
-            attempt["rejection_reason"] = "su12_generation_cap_reached"
-            continue
-        ids = [key for pair in pairs[:pair_count] for key in pair]
-        operation = HistogramConversion(from_su=10, to_su=12, count=count,
-                                        node_ids=ids, reason="narrow_flex_window")
-        signature = _stateful_conversion_bundle_signature(H, [operation])
-        if signature in set(forbidden_signatures or ()):
-            attempt["rejection_reason"] = "conversion_candidate_previously_rejected"
-            continue
-        completion = _preview_narrowed_flex_completion(phase_eval, window, H)
-        attempt["supplemental_flex_completion"] = completion
-        if not completion["ok"]:
-            attempt["rejection_reason"] = completion["reason"]
-            continue
-        h_before = _h_total(H, special_degree_meta)
-        h_after = _h_total(after, special_degree_meta)
-        group = AtomicAdjustmentGroup(
-            primary_op=operation, combined_delta={10: -count, 12: count},
-            h_before=h_before, h_after_primary=h_after, h_after_final=h_after,
-            scoring_diagnostics={"candidate_bundle_signature": signature},
-        )
-        histogram = HistogramAdjustmentPlan(
-            phase="flex_range_reconciliation", groups=[group],
-            primary_adjustment_count=count, physical_conversion_count=count,
-            H_before=H.detach().clone(), H_after=after,
-            inventory_before={10: len(su10), 12: counts.get(12, 0)},
-            inventory_after={10: len(su10) - count, 12: trial[12]},
-        )
-        return Stage3AdjustmentPlan(
-            ok=True, reason="stage3_rebuild_required", plan_kind="narrow_flex_window",
-            phase="flex_range_reconciliation", active_subphase="flex_range_reconciliation",
-            histogram_adjustment_plan=histogram,
-            planned_conversions=[Stage3AdjustmentOp(op="convert", from_su=10, to_su=12,
-                                 node_id=key, reason="narrow_flex_window") for key in ids],
-            phase_result=Stage3PhaseResult(
-                active_phase="flex_range_reconciliation", phase_completed=False,
-                rebuild_required=True, primary_adjustment_count=count,
-                stop_reason="stage3_rebuild_required",
-                transactions=[TopologyResourceTransaction(
-                    phase="flex_range_reconciliation", target_role="narrow_flex_window",
-                    converted_node_ids=ids, conversion_path=[operation.to_dict()],
-                    h_before=h_before, h_after_primary=h_after, h_after=h_after,
-                    commit_scope="physical_histogram", committed=True,
-                )],
-            ),
-            diagnostics={"realized_flex_before": audit, "realized_flex_after": window,
-                         "completed_flex_count_before_rebuild": fixed_count,
-                         "completed_flex_count_after_supplement": completion["completed_flex_count_after"],
-                         "supplemental_flex_completion": completion,
-                         "retired_su10_pairs": pairs[:pair_count],
-                         "idle_aromatic_count": aromatic["idle_aromatic_count"],
-                         "candidate_alternatives_enabled": True,
-                         "fresh_layer12_rebuild_required": True,
-                         "restart_stage3_after_rebuild": True},
-            runtime=_runtime_with_pool(phase_eval, _resource_ids(phase_eval)),
-        )
+    live = getattr(phase_eval, "external_assembler", None)
+    fixed_count = int(
+        phase_eval.flex_counts.get("final", 0) if live is not None
+        else audit.get("explicit_flex_count", 0)
+    )
+    raw_pool = (
+        getattr(getattr(live, "allocator", None), "remaining_ids_by_su", {})
+        if live is not None else phase_eval.flex_reconciliation_ids_by_su
+    )
+    pool = {
+        int(key): sorted({int(value) for value in values
+                          if int(value) in by_id
+                          and int(by_id[int(value)].su_type) == int(key)
+                          and not getattr(by_id[int(value)], "stage3_resource_claimed", False)})
+        for key, values in dict(raw_pool or {}).items()
+    }
+    available_groups = (
+        available_flex_candidate_groups(
+            live, groups=audit.get("supplemental_flex_candidate_groups", []),
+        ) if live is not None else []
+    )
+    candidates = aromatic_window_candidates(
+        H, pool, pairs, max_primary_adjustments=max_primary_adjustments,
+        fixed_flex_count=fixed_count, allow_intermediate=True,
+    )
+    if E_target is not None:
+        target_h = float(torch.as_tensor(E_target).detach().cpu().flatten()[1])
+        lower_h, upper_h = h_soft_bounds(target_h, h_tolerance)
+        if lower_h is not None and upper_h is not None:
+            candidates.sort(key=lambda candidate: (
+                *candidate["rank"][:2],
+                max(0.0, lower_h - _h_total(candidate["H_after"], special_degree_meta),
+                    _h_total(candidate["H_after"], special_degree_meta) - upper_h),
+                *candidate["rank"][2:],
+            ))
+    forbidden = set(forbidden_signatures or ())
+    last_pending: Dict[str, Any] = {}
+    for candidate in candidates:
+        for aromatic_ops in bind_aromatic_window_candidate(
+            candidate, pool, pairs, variant_limit=len(forbidden) + 1,
+        ):
+            reserved_ids = {node_id for op in aromatic_ops for node_id in op.node_ids}
+            donor_pool = {
+                key: [node_id for node_id in values if node_id not in reserved_ids]
+                for key, values in pool.items()
+            }
+            after = candidate["H_after"]
+            orders = [available_groups[index:] + available_groups[:index]
+                      for index in range(len(available_groups))] or [[]]
+            for ordered in orders:
+                window = dict(candidate["window"])
+                feedback: Counter = Counter()
+                donor_rejections: List[str] = []
+                attempt = {**window, "pair_delta": candidate["pair_delta"],
+                           "converted_pairs": max(0, -candidate["pair_delta"]),
+                           "completed_flex_count_before": fixed_count,
+                           "aromatic_operations": [op.to_dict() for op in aromatic_ops],
+                           "resource_rounds": []}
+                attempts.append(attempt)
+                for _round in range(2 * max_primary_adjustments + 4):
+                    gap = max(0, int(window["flex_lower"]) - fixed_count)
+                    selected, used_fragments = [], set()
+                    for group in ordered if gap else ():
+                        fragment_ids = {int(value) for value in group["fragment_ids"]}
+                        if fragment_ids & used_fragments:
+                            continue
+                        selected.append(group)
+                        used_fragments.update(fragment_ids)
+                        if len(selected) >= gap:
+                            break
+                    required: Counter = Counter()
+                    for group in selected:
+                        required.update({int(key): int(value) for key, value in
+                                         dict(group.get("resource_template", {}) or {}).items()})
+                    required |= feedback
+                    donor_histogram = None
+                    if any(count > len(donor_pool.get(su, ())) for su, count in required.items()):
+                        donor_plan = _transaction_plan(
+                            phase_eval=phase_eval,
+                            contract=TopologyClosureContract(
+                                phase="flex_range_reconciliation", target_role="flex_chain",
+                                required_counts=dict(required),
+                            ),
+                            pool=donor_pool, H=after, E_target=E_target,
+                            max_primary_adjustments=max_primary_adjustments - candidate["primary_count"],
+                            max_h_compensation_ops=max_h_compensation_ops,
+                            h_tolerance=h_tolerance, special_degree_meta=special_degree_meta,
+                            su11_rotation_index=su11_rotation_index,
+                            forbidden_primary_conversion_signatures=donor_rejections,
+                            forbidden_conversion_su_types=(10, 24),
+                            reserve_contract_after_conversion=False,
+                        )
+                        donor_histogram = donor_plan.histogram_adjustment_plan
+                        if not donor_plan.ok or donor_histogram is None:
+                            attempt["rejection_reason"] = "flex_resource_plan_unavailable"
+                            attempt["required_counts"] = dict(required)
+                            attempt["resource_proof"] = dict(donor_plan.phase_result.infeasibility_proof or {})
+                            if not last_pending:
+                                last_pending = {
+                                    "contract_kind": "flex_resource_demand", "target_role": "flex_chain",
+                                    "reason": "flex_resource_plan_unavailable",
+                                    "required_counts": dict(required),
+                                    "claimable_available_counts": {key: len(values) for key, values in donor_pool.items()},
+                                    "missing_counts": {key: count - len(donor_pool.get(key, ()))
+                                                       for key, count in required.items()
+                                                       if count > len(donor_pool.get(key, ()))},
+                                }
+                            break
+                    donor_groups = list(getattr(donor_histogram, "groups", []) or [])
+                    final_H = donor_histogram.H_after if donor_histogram is not None else after
+                    try:
+                        final_aromatic = exact_aromatic_cluster_plan(*staging_aromatic_counts(
+                            {index: int(value) for index, value in enumerate(final_H.tolist())}
+                        )[:2])
+                        final_window = flex_count_window(final_aromatic["cluster_count"], int(final_H[10]))
+                    except ValueError:
+                        final_window = {"flex_window_ok": False}
+                    valid = bool(
+                        flex_window_candidate_allowed(before_window, final_window, allow_intermediate=True)
+                        and fixed_count <= final_window["flex_upper"]
+                        and su12_transition_diagnostics(H, final_H)["generation_allowed"]
+                    )
+                    resource_round = {"required_counts": dict(required), "final_window": final_window}
+                    attempt["resource_rounds"].append(resource_round)
+                    if not valid:
+                        attempt["rejection_reason"] = "flex_window_invalid_after_resource_conversion"
+                        if not donor_groups:
+                            break
+                        first = donor_groups[0]
+                        rejected = _stateful_conversion_bundle_signature(
+                            after, [first.primary_op] + list(first.h_compensation_ops or [])
+                        )
+                        if rejected in donor_rejections:
+                            break
+                        donor_rejections.append(rejected)
+                        continue
+                    final_gap = max(0, int(final_window["flex_lower"]) - fixed_count)
+                    if final_gap != gap:
+                        feedback |= required
+                        window = final_window
+                        continue
+                    groups = []
+                    current_H = H.detach().clone()
+                    for op in aromatic_ops:
+                        next_H = apply_conversions_to_H(current_H, [op])
+                        groups.append(AtomicAdjustmentGroup(
+                            primary_op=op, combined_delta={op.from_su: -op.count, op.to_su: op.count},
+                            h_before=_h_total(current_H, special_degree_meta),
+                            h_after_primary=_h_total(next_H, special_degree_meta),
+                            h_after_final=_h_total(next_H, special_degree_meta),
+                        ))
+                        current_H = next_H
+                    groups.extend(donor_groups)
+                    operations = [op for group in groups for op in
+                                  [group.primary_op] + list(group.h_compensation_ops or [])]
+                    signature = bundle_signature(operations)
+                    if signature in forbidden:
+                        attempt["rejection_reason"] = "conversion_candidate_previously_rejected"
+                        break
+                    groups[-1].scoring_diagnostics["candidate_bundle_signature"] = signature
+                    inventory_before = {key: len(values) for key, values in pool.items()}
+                    inventory_before[10] = sum(int(node.su_type) == 10 for node in nodes)
+                    inventory_after = dict(inventory_before)
+                    for op in operations:
+                        inventory_after[op.from_su] = inventory_after.get(op.from_su, 0) - op.count
+                        inventory_after[op.to_su] = inventory_after.get(op.to_su, 0) + op.count
+                    histogram = HistogramAdjustmentPlan(
+                        phase="flex_range_reconciliation", groups=groups,
+                        primary_adjustment_count=sum(group.primary_op.count for group in groups),
+                        physical_conversion_count=sum(op.count for op in operations),
+                        H_before=H.detach().clone(), H_after=final_H.detach().clone(),
+                        inventory_before=inventory_before, inventory_after=inventory_after,
+                        demand_before=dict(required),
+                    )
+                    applied = apply_histogram_adjustment_plan(H, histogram, nodes=list(nodes))
+                    if not applied.changed:
+                        attempt["rejection_reason"] = "combined_conversion_invalid"
+                        attempt["conversion_errors"] = applied.rejected_ops
+                        break
+                    preview_groups = [group for group in groups
+                                      if 10 not in (group.primary_op.from_su, group.primary_op.to_su)]
+                    completion = (
+                        _preview_narrowed_flex_completion(
+                            phase_eval, final_window, H, selected_groups=selected,
+                            donor_histogram=HistogramAdjustmentPlan(groups=preview_groups),
+                        ) if live is not None else {
+                            "ok": True, "reason": "preassembly_window_coordinated",
+                            "completed_flex_count_before": 0, "completed_flex_count_after": 0,
+                            "resource_continuation_required": True,
+                        }
+                    )
+                    attempt["supplemental_flex_completion"] = completion
+                    if not completion["ok"]:
+                        attempt["rejection_reason"] = completion["reason"]
+                        pending = list(completion.get("pending_flex_contracts", []) or [])
+                        if pending:
+                            last_pending = dict(pending[0])
+                        resource_pending = [contract for contract in pending
+                                            if contract.get("failure_domain") == "resource_capacity"
+                                            and contract.get("missing_counts")]
+                        if not pending or len(resource_pending) != len(pending):
+                            break
+                        actual: Counter = Counter({int(key): int(value) for key, value in
+                                                   completion.get("consumed_resource_counts", {}).items()})
+                        for contract in resource_pending:
+                            actual.update({int(key): int(value) for key, value in
+                                           contract.get("required_counts", {}).items()})
+                        if not set(actual).issubset(GENERIC_CLOSURE_RESOURCE_TYPES) or actual <= required:
+                            break
+                        feedback |= actual
+                        window = final_window
+                        continue
+                    return Stage3AdjustmentPlan(
+                        ok=True, reason="stage3_rebuild_required", plan_kind="narrow_flex_window",
+                        phase="flex_range_reconciliation", active_subphase="flex_range_reconciliation",
+                        histogram_adjustment_plan=histogram,
+                        planned_conversions=[Stage3AdjustmentOp(
+                            op="convert", from_su=op.from_su, to_su=op.to_su,
+                            node_id=node_id, reason=op.reason,
+                        ) for op in operations for node_id in op.node_ids],
+                        phase_result=Stage3PhaseResult(
+                            active_phase="flex_range_reconciliation", phase_completed=False,
+                            rebuild_required=True, primary_adjustment_count=histogram.primary_adjustment_count,
+                            stop_reason="stage3_rebuild_required",
+                            transactions=[TopologyResourceTransaction(
+                                phase="flex_range_reconciliation", target_role="flex_window_coordination",
+                                converted_node_ids=[node_id for op in operations for node_id in op.node_ids],
+                                conversion_path=[op.to_dict() for op in operations],
+                                h_before=_h_total(H, special_degree_meta),
+                                h_after_primary=_h_total(after, special_degree_meta),
+                                h_after=_h_total(final_H, special_degree_meta),
+                                commit_scope="physical_histogram", committed=True,
+                            )],
+                        ),
+                        diagnostics={
+                            "realized_flex_before": audit, "realized_flex_after": final_window,
+                            "window_coordination_before": before_window,
+                            "window_coordination_required": not final_window["flex_window_width_ok"],
+                            "primary_budget_scope": "per_rebuild_batch",
+                            "completed_flex_count_before_rebuild": int(phase_eval.flex_counts.get("final", 0)),
+                            "completed_flex_count_after_supplement": completion["completed_flex_count_after"],
+                            "supplemental_flex_completion": completion,
+                            "required_counts": dict(required), "coordination_attempt": attempt,
+                            "pre_rebuild_port_audit": audit_layer1_port_roles(final_H, special_degree_meta),
+                            "candidate_alternatives_enabled": True,
+                            "fresh_layer12_rebuild_required": True, "restart_stage3_after_rebuild": True,
+                        },
+                        runtime=_runtime_with_pool(phase_eval, _resource_ids(phase_eval)),
+                    )
+                else:
+                    attempt["rejection_reason"] = "flex_resource_coordination_limit"
     proof = {"reason": "flex_window_coordination_exhausted", "attempts": attempts,
              "available_pair_count": len(pairs), "primary_adjustment_limit": max_primary_adjustments,
+             "window_before": before_window, "target_max_width": MAX_FLEX_WINDOW_WIDTH,
+             "primary_budget_scope": "per_rebuild_batch", "candidate_count": len(candidates),
+             "failure_kind": ("no_progress_candidate_within_batch_budget" if not candidates else
+                              "window_resource_coordination_failed"),
              "failure_scope": "aromatic_quantity_coordination", "candidate_space_complete": False}
+    if last_pending:
+        last_pending.setdefault("proof", {
+            "reason": last_pending.get("reason", "flex_resource_shortage"),
+            "missing_counts": dict(last_pending.get("missing_counts", {})),
+        })
+        proof.update({"failed_contract": last_pending,
+                      "required_counts": dict(last_pending.get("required_counts", {})),
+                      "available_counts": dict(last_pending.get("claimable_available_counts", {})),
+                      "missing_counts": dict(last_pending.get("missing_counts", {}))})
     return Stage3AdjustmentPlan(
         ok=False, reason="phase_resource_infeasible", blocked_reason=proof["reason"],
         phase="flex_range_reconciliation", plan_kind="narrow_flex_window",
@@ -2505,7 +2762,6 @@ def _fixed_flex_capacity_expansion_plan(
     E_target: Any,
     difference_spectrum: Optional[Dict[str, Any]],
     max_primary_adjustments: int,
-    max_h_compensation_ops: int,
     h_tolerance: float,
     special_degree_meta: Optional[Dict[str, Any]],
     su11_rotation_index: int,
@@ -3166,8 +3422,6 @@ def _bind_real_node_ids(
     *,
     protected_node_ids: Optional[Sequence[int]] = None,
 ) -> Dict[int, List[int]]:
-    work = {int(key): list(values) for key, values in pool.items()}
-    protected = {int(value) for value in list(protected_node_ids or [])}
     released_su24_ids = {
         int(value)
         for value in list(
@@ -3189,35 +3443,26 @@ def _bind_real_node_ids(
             released_map.get("24", []) or released_map.get(24, []) or []
         )
     )
-    for group in list(getattr(histogram_plan, "groups", []) or []):
-        for op in [group.primary_op] + list(group.h_compensation_ops or []):
-            all_candidates = list(work.get(int(op.from_su), []))
-            candidates = list(all_candidates)
-            if int(op.from_su) == SU24_RING_RESOURCE_TYPE and not (
-                bool(accounting_diagnostics.get("allow_unreleased_su24_conversion", False))
-                and int(op.to_su) in {12, 13}
-            ):
-                candidates = [
-                    int(value) for value in candidates
-                    if int(value) in released_su24_ids
-                ]
-            requested = [int(value) for value in list(op.node_ids or [])]
-            eligible = [
-                int(value) for value in candidates if int(value) not in protected
-            ]
-            selected = (
-                requested[: int(op.count)]
-                if len(requested) >= int(op.count)
-                and set(requested[: int(op.count)]).issubset(set(eligible))
-                else eligible[: int(op.count)]
-            )
-            op.node_ids = selected
-            selected_set = set(selected)
-            work[int(op.from_su)] = [
-                int(value) for value in all_candidates if int(value) not in selected_set
-            ]
-            work.setdefault(int(op.to_su), []).extend(selected)
-            work[int(op.to_su)] = sorted(work[int(op.to_su)])
+    donor_limits = {
+        (SU24_RING_RESOURCE_TYPE, int(operation.to_su)): sorted(released_su24_ids)
+        for group in list(getattr(histogram_plan, "groups", []) or [])
+        for operation in [group.primary_op] + list(group.h_compensation_ops or [])
+        if int(operation.from_su) == SU24_RING_RESOURCE_TYPE
+        and not (
+            bool(accounting_diagnostics.get("allow_unreleased_su24_conversion", False))
+            and int(operation.to_su) in {12, 13}
+        )
+    }
+    work, path_proof = bind_conversion_paths(
+        list(getattr(histogram_plan, "groups", []) or []), pool,
+        protected_node_ids=protected_node_ids, donor_ids_by_conversion=donor_limits,
+    )
+    histogram_plan.primary_adjustment_count = int(path_proof["primary_adjustment_count"])
+    histogram_plan.physical_conversion_count = int(path_proof["physical_conversion_count"])
+    histogram_plan.accounting_diagnostics = {
+        **dict(getattr(histogram_plan, "accounting_diagnostics", {}) or {}),
+        "conversion_path_audit": path_proof,
+    }
     return work
 
 
@@ -3433,6 +3678,39 @@ def _phase_infeasibility_labels(failure_domain: str) -> Tuple[str, str]:
     )
 
 
+def _invalid_conversion_plan(
+    *,
+    phase_eval: Any,
+    phase: str,
+    H: torch.Tensor,
+    initial_pool: Dict[int, List[int]],
+    proof: Dict[str, Any],
+    h_tolerance: float,
+    iteration_ledger: Any = None,
+) -> Stage3AdjustmentPlan:
+    proof = {
+        "reason": "invalid_conversion_path", **dict(proof),
+        "phase": str(phase), "atomic_rollback": True,
+    }
+    runtime = _runtime_with_pool(phase_eval, initial_pool)
+    if iteration_ledger is not None:
+        runtime["iteration_topology_ledger"] = deepcopy(iteration_ledger)
+    return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+        ok=False, reason="phase_resource_infeasible",
+        blocked_reason="invalid_conversion_path", phase=str(phase),
+        plan_kind="stage3_invalid_conversion_path", active_subphase=str(phase),
+        histogram_adjustment_plan=HistogramAdjustmentPlan(
+            phase=str(phase), H_before=H.detach().clone(), H_after=H.detach().clone(),
+            accounting_diagnostics={"invalid_batch": True, "invalid_batch_proof": proof},
+        ),
+        phase_result=Stage3PhaseResult(
+            active_phase=str(phase), phase_completed=False, rebuild_required=False,
+            stop_reason="phase_resource_infeasible", infeasibility_proof=proof,
+        ),
+        diagnostics={"stage3_phase": str(phase), **proof}, runtime=runtime,
+    ), h_tolerance)
+
+
 def _finalize_phase_plan(
     *,
     phase_eval: Any,
@@ -3524,70 +3802,13 @@ def _finalize_phase_plan(
         if int(value) > 0
     }
     demand_before: Dict[int, int] = {}
-    try:
-        finalized_primary_count = _external_primary_node_count(groups)
-    except ValueError as exc:
-        # Do not let a malformed atomic batch crash Block C.  In normal
-        # operation this is prevented by the residual 11-22 deferral above;
-        # this guard is the final boundary for stale/legacy plans that still
-        # contain a repeated concrete donor.  The live context is untouched
-        # and the caller receives an auditable infeasible plan that can be
-        # rolled back or retried after a fresh generation rebuild.
-        overlap = _primary_conversion_node_overlap(groups)
-        proof = {
-            "phase": str(phase),
-            "reason": "primary_conversion_reuses_concrete_node_id",
-            "error": str(exc),
-            "duplicate_primary_node_ids": {
-                str(key): list(value)
-                for key, value in sorted(overlap.items())
-            },
-            "atomic_rollback": True,
-        }
-        safe_histogram = HistogramAdjustmentPlan(
-            phase=str(phase),
-            groups=[],
-            primary_adjustment_count=0,
-            physical_conversion_count=0,
-            H_before=H_before.detach().clone(),
-            H_after=H_before.detach().clone(),
-            accounting_diagnostics={
-                "invalid_batch": True,
-                "invalid_batch_proof": dict(proof),
-            },
+    path_proof = audit_conversion_paths(groups, initial_ids_by_su=initial_pool)
+    if not path_proof["ok"]:
+        return _invalid_conversion_plan(
+            phase_eval=phase_eval, phase=phase, H=H_before,
+            initial_pool=initial_pool, proof=path_proof, h_tolerance=h_tolerance,
         )
-        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
-            ok=False,
-            reason="phase_resource_infeasible",
-            blocked_reason="primary_conversion_reuses_concrete_node_id",
-            phase=str(phase),
-            plan_kind="stage3_duplicate_primary_conversion_node",
-            active_subphase=str(phase),
-            histogram_adjustment_plan=safe_histogram,
-            phase_result=Stage3PhaseResult(
-                active_phase=str(phase),
-                phase_completed=False,
-                rebuild_required=False,
-                primary_adjustment_count=0,
-                ordinary_internal_primary_adjustment_count=0,
-                residual_1122_reclassification_primary_adjustment_count=0,
-                transactions=list(transactions or []),
-                stop_reason="phase_resource_infeasible",
-                infeasibility_proof=proof,
-            ),
-            diagnostics={
-                "stage3_phase": str(phase),
-                "sequential_single_topology": True,
-                "atomic_rollback": True,
-                **proof,
-            },
-            runtime={
-                **_runtime_with_pool(phase_eval, final_pool),
-                "iteration_topology_ledger": getattr(
-                    phase_eval, "iteration_topology_ledger", None
-                ),
-            },
-        ), h_tolerance)
+    finalized_primary_count = int(path_proof["primary_adjustment_count"])
     if str(phase) == "internal_topology":
         ordinary_internal_primary_count, residual_1122_primary_count = (
             _internal_primary_adjustment_counts(groups, stage_diagnostics)
@@ -3619,11 +3840,7 @@ def _finalize_phase_plan(
         residual_1122_reclassification_primary_adjustment_count=int(
             residual_1122_primary_count
         ),
-        physical_conversion_count=sum(
-            (2 if group.primary_op.via_su is not None else 1)
-            + sum(2 if op.via_su is not None else 1 for op in list(group.h_compensation_ops or []))
-            for group in list(groups)
-        ),
+        physical_conversion_count=int(path_proof["physical_conversion_count"]),
         H_before=H_before.detach().clone(),
         H_after=H_after.detach().clone(),
         inventory_before={
@@ -3648,6 +3865,7 @@ def _finalize_phase_plan(
             phase_eval,
             {
                 **dict(accounting or {}),
+                "conversion_path_audit": path_proof,
                 "ordinary_internal_primary_adjustment_count": int(
                     ordinary_internal_primary_count
                 ),
@@ -4008,21 +4226,34 @@ def _transaction_plan(
         h_tolerance=h_tolerance,
         special_degree_meta=special_degree_meta,
         su11_rotation_index=su11_rotation_index,
+        node_pool=pool,
+        protected_node_ids=list(contract.claimed_source_node_ids),
     )
-    pool_after = _bind_real_node_ids(
-        histogram,
-        pool,
-        protected_node_ids=contract.claimed_source_node_ids,
-    )
-    ledger_after_conversion = (
-        _ledger_after_histogram_conversions(
-            iteration_ledger,
+    try:
+        pool_after = _bind_real_node_ids(
             histogram,
+            pool,
             protected_node_ids=contract.claimed_source_node_ids,
         )
-        if iteration_ledger is not None
-        else None
-    )
+        path_proof = require_conversion_paths(
+            list(prefix_groups or []) + list(histogram.groups or []),
+            initial_ids_by_su=(
+                accounting_initial_pool if accounting_initial_pool is not None else pool
+            ),
+        )
+        ledger_after_conversion = (
+            _ledger_after_histogram_conversions(
+                iteration_ledger, histogram,
+                protected_node_ids=contract.claimed_source_node_ids,
+            )
+            if iteration_ledger is not None else None
+        )
+    except ConversionPathError as error:
+        return _invalid_conversion_plan(
+            phase_eval=phase_eval, phase=str(contract.phase), H=H,
+            initial_pool=pool, proof=error.proof, h_tolerance=h_tolerance,
+            iteration_ledger=iteration_ledger,
+        )
     assigned_slots: List[Any] = []
     proof: Dict[str, Any] = {}
     claimed: Optional[Dict[int, List[int]]] = None
@@ -4105,7 +4336,9 @@ def _transaction_plan(
                 int(dict(protected_resource_counts or {}).get(int(key), 0)),
             ) > 0
         }
-        histogram.accounting_diagnostics = dict(accounting)
+        histogram.accounting_diagnostics = {
+            **dict(accounting), "conversion_path_audit": path_proof,
+        }
     conversions = []
     compensation_ids: List[int] = []
     converted_ids: List[int] = []
@@ -4296,9 +4529,9 @@ def _transaction_plan(
 
 def _physical_conversion_count(groups: Sequence[Any]) -> int:
     return sum(
-        (2 if group.primary_op.via_su is not None else 1)
+        int(group.primary_op.count) * (2 if group.primary_op.via_su is not None else 1)
         + sum(
-            2 if op.via_su is not None else 1
+            int(op.count) * (2 if op.via_su is not None else 1)
             for op in list(group.h_compensation_ops or [])
         )
         for group in list(groups or [])
@@ -4306,60 +4539,8 @@ def _physical_conversion_count(groups: Sequence[Any]) -> int:
 
 
 def _concrete_primary_node_count(groups: Sequence[Any]) -> int:
-    """Count concrete primary donor nodes, excluding compensation operations.
-
-    ``HistogramConversion.via_su`` describes an intermediate chemical route;
-    it is not an additional physical donor node.  Both external and internal
-    budgets are therefore charged from the concrete ``node_ids`` attached to
-    primary operations.  Keeping this helper independent of phase avoids
-    accidentally charging H-compensation or a via-route twice.
-    """
-    node_ids: List[int] = []
-    for group in list(groups or []):
-        primary = getattr(group, "primary_op", None)
-        if primary is None:
-            continue
-        ids = [int(value) for value in list(getattr(primary, "node_ids", []) or [])]
-        expected = max(0, int(getattr(primary, "count", 0) or 0))
-        if expected <= 0 or len(ids) != expected:
-            raise ValueError(
-                "primary_conversion_requires_concrete_node_ids: "
-                f"expected={expected} provided={len(ids)}"
-            )
-        if any(int(value) < 0 for value in ids):
-            raise ValueError("primary_conversion_contains_invalid_node_id")
-        node_ids.extend(ids)
-    if len(node_ids) != len(set(node_ids)):
-        raise ValueError("primary_conversion_reuses_concrete_node_id")
-    return len(node_ids)
-
-
-def _external_primary_node_count(groups: Sequence[Any]) -> int:
-    """Backward-compatible name for external concrete-node accounting."""
-    return _concrete_primary_node_count(groups)
-
-
-def _primary_conversion_node_overlap(groups: Sequence[Any]) -> Dict[int, List[int]]:
-    """Return concrete node IDs reused by more than one primary operation.
-
-    A histogram plan is applied atomically, so a concrete node may not be the
-    primary donor of two operations in the same plan.  Keeping this audit
-    separate from ``_external_primary_node_count`` lets callers turn an
-    invalid batch into an actionable plan diagnostic instead of losing the
-    whole Stage3 workflow to an uncaught ``ValueError``.
-    """
-    occurrences: Dict[int, List[int]] = {}
-    for group_index, group in enumerate(list(groups or [])):
-        primary = getattr(group, "primary_op", None)
-        if primary is None:
-            continue
-        for node_id in list(getattr(primary, "node_ids", []) or []):
-            occurrences.setdefault(int(node_id), []).append(int(group_index))
-    return {
-        int(node_id): list(group_indexes)
-        for node_id, group_indexes in occurrences.items()
-        if len(group_indexes) > 1
-    }
+    """Charge each primary donor once after validating its complete ordered path."""
+    return int(require_conversion_paths(groups)["primary_adjustment_count"])
 
 
 def _internal_primary_adjustment_counts(
@@ -4388,30 +4569,8 @@ def _internal_primary_adjustment_counts(
     # dataclass fields default to zero, so consulting them first would erase a
     # real ordinary/reclassification split on plans produced by an older
     # caller or on a plan whose diagnostics were assembled before its groups.
-    ordinary = 0
-    reclassification = 0
-    has_group_provenance = False
-    for group in list(groups or []):
-        primary = getattr(group, "primary_op", None)
-        if primary is None:
-            continue
-        count = len(list(getattr(primary, "node_ids", []) or []))
-        if count <= 0:
-            count = max(0, int(getattr(primary, "count", 0) or 0))
-        if count > 0:
-            has_group_provenance = True
-        group_kind = str(
-            dict(getattr(group, "scoring_diagnostics", {}) or {}).get(
-                "plan_kind",
-                "",
-            )
-            or ""
-        )
-        if group_kind == "residual_1122_reclassification":
-            reclassification += int(count)
-        else:
-            ordinary += int(count)
-    if has_group_provenance:
+    ordinary, reclassification = internal_primary_adjustment_counts(groups)
+    if ordinary or reclassification:
         return int(ordinary), int(reclassification)
     # Treat the explicit pair as atomic when the plan is compact/serialized
     # and no primary groups remain.  A partially populated diagnostics
@@ -4704,7 +4863,6 @@ def _plan_recycled_su24_to_23(
         transaction_origin="recycled_ring_resource",
         committed=True,
     )
-    assembly = dict(getattr(phase_eval, "assembly_view", {}) or {})
     pool = _round_resource_ids(phase_eval)
     plan = Stage3AdjustmentPlan(
         ok=True,
@@ -5249,7 +5407,6 @@ def _build_residual_1122_reclassification_plan(
     transactions: Sequence[TopologyResourceTransaction],
     initial_pool: Dict[int, List[int]],
     cursor: int,
-    E_target: Any,
     h_tolerance: float,
     special_degree_meta: Optional[Dict[str, Any]],
     max_primary_adjustments: Optional[int] = None,
@@ -5888,6 +6045,7 @@ def _plan_internal_topology_stage(
     forbidden_primary_conversion_signatures: Optional[Sequence[str]],
 ) -> Stage3AdjustmentPlan:
     initial_pool = deepcopy(iteration_ledger.available_ids_by_su)
+    initial_ledger = deepcopy(iteration_ledger)
     H_work = H.detach().clone()
     groups: List[Any] = []
     transactions = list(initial_transactions or [])
@@ -5936,16 +6094,35 @@ def _plan_internal_topology_stage(
         if flex_window_valid
         else int(current_flex_count)
     )
-    remaining_required_flex_chains = (
-        max(0, int(flex_lower) - int(current_flex_count))
-        if flex_window_valid else 0
-    )
+    if flex_window_valid and current_flex_count < flex_lower:
+        missing = flex_lower - current_flex_count
+        required = {11: 2 * missing, 23: missing}
+        proof = {
+            "reason": "external_flex_quantity_incomplete",
+            "phase": "external_flex_closure",
+            "completed_flex_count": current_flex_count,
+            "flex_lower": flex_lower,
+            "flex_upper": flex_upper,
+            "required_flex_deficit_remaining": missing,
+            "required_counts": {str(key): value for key, value in required.items()},
+            "missing_counts": {str(key): value for key, value in _deficit(initial_pool, required).items()},
+            "available_counts": {str(key): len(values) for key, values in initial_pool.items()},
+        }
+        return Stage3AdjustmentPlan(
+            ok=False,
+            reason="phase_resource_infeasible",
+            blocked_reason=proof["reason"],
+            phase="external_flex_closure",
+            plan_kind="external_flex_quantity_required",
+            phase_result=Stage3PhaseResult(active_phase="external_flex_closure", infeasibility_proof=proof),
+            diagnostics=proof,
+            runtime=_runtime_with_pool(phase_eval, initial_pool),
+        )
     remaining_optional_flex_capacity = max(
         0,
         int(residual_flex_soft_cap)
         - max(int(current_flex_count), int(flex_lower)),
     )
-    initial_required_flex_chains = int(remaining_required_flex_chains)
     initial_optional_flex_capacity = int(remaining_optional_flex_capacity)
     residual_contract_id = 2_000_000
     assembly_view = dict(getattr(phase_eval, "assembly_view", {}) or {})
@@ -5976,35 +6153,43 @@ def _plan_internal_topology_stage(
         )
         tolerated = _tolerated_remaining_closure_ids(
             iteration_ledger.available_ids_by_su,
-            remaining_flex_goal=remaining_required_flex_chains,
             recycled_resource_ids=recycled_resource_ids,
         )
         # A singleton SU24 is not an acceptable terminal residual. Keep the
         # internal loop alive so it can be reclassified to SU12/SU13; the
         # ordinary <=3 residual tolerance applies only after SU24 is removed.
-        if (tolerated or not remaining_closure) and not remaining_su24:
+        if (
+            (tolerated or not remaining_closure)
+            and not remaining_su24
+        ):
             break
-        next_product = _plan_next_residual_product(
-            phase_eval=phase_eval,
-            iteration_ledger=iteration_ledger,
-            H=H_work,
-            E_target=E_target,
-            h_tolerance=h_tolerance,
-            special_degree_meta=special_degree_meta,
-            su11_rotation_index=cursor,
-            remaining_flex_chains=remaining_required_flex_chains,
-            residual_flex_preferred_23=residual_flex_preferred_23,
-            residual_flex_min_23=residual_flex_min_23,
-            residual_side_preferred_23=residual_side_preferred_23,
-            residual_side_min_23=residual_side_min_23,
-            max_conversions=remaining_budget,
-            max_h_compensation_ops=max_h_compensation_ops,
-            contract_id=residual_contract_id,
-            remaining_optional_flex_capacity=remaining_optional_flex_capacity,
-            prefix_groups=groups,
-            accounting_initial_pool=initial_pool,
-            forbidden_primary_conversion_signatures=forbidden_primary_conversion_signatures,
-        )
+        try:
+            next_product = _plan_next_residual_product(
+                phase_eval=phase_eval,
+                iteration_ledger=iteration_ledger,
+                H=H_work,
+                E_target=E_target,
+                h_tolerance=h_tolerance,
+                special_degree_meta=special_degree_meta,
+                su11_rotation_index=cursor,
+                residual_flex_preferred_23=residual_flex_preferred_23,
+                residual_flex_min_23=residual_flex_min_23,
+                residual_side_preferred_23=residual_side_preferred_23,
+                residual_side_min_23=residual_side_min_23,
+                max_conversions=remaining_budget,
+                max_h_compensation_ops=max_h_compensation_ops,
+                contract_id=residual_contract_id,
+                remaining_optional_flex_capacity=remaining_optional_flex_capacity,
+                prefix_groups=groups,
+                accounting_initial_pool=initial_pool,
+                forbidden_primary_conversion_signatures=forbidden_primary_conversion_signatures,
+            )
+        except ConversionPathError as error:
+            return _invalid_conversion_plan(
+                phase_eval=phase_eval, phase="internal_topology", H=H,
+                initial_pool=initial_pool, proof=error.proof, h_tolerance=h_tolerance,
+                iteration_ledger=initial_ledger,
+            )
         attempts = list(next_product.get("attempts", []) or [])
         residual_attempt_count += int(
             next_product.get("attempt_count", len(attempts)) or len(attempts)
@@ -6018,12 +6203,7 @@ def _plan_internal_topology_stage(
             transactions.append(next_product["transaction"])
             collect_new_residual_products(iteration_ledger)
             if str(next_product.get("product_role", "")) == "residual_flex_chain":
-                if remaining_required_flex_chains > 0:
-                    remaining_required_flex_chains -= 1
-                else:
-                    remaining_optional_flex_capacity = max(
-                        0, remaining_optional_flex_capacity - 1
-                    )
+                remaining_optional_flex_capacity = max(0, remaining_optional_flex_capacity - 1)
             residual_contract_id += 1
             continue
         if mode != "conversion" or remaining_budget <= 0:
@@ -6034,13 +6214,24 @@ def _plan_internal_topology_stage(
         # node.  ``_physical_conversion_count`` also expands ``via_su`` and
         # compensation operations, which is a separate diagnostic measure and
         # must never consume this budget.
-        step_count = _concrete_primary_node_count(
-            list(getattr(histogram, "groups", []) or [])
-        )
+        try:
+            step_count = _concrete_primary_node_count(
+                list(getattr(histogram, "groups", []) or [])
+            )
+            candidate_primary_count = int(require_conversion_paths(
+                groups + list(getattr(histogram, "groups", []) or []),
+                initial_ids_by_su=initial_pool,
+            )["primary_adjustment_count"])
+        except ConversionPathError as error:
+            return _invalid_conversion_plan(
+                phase_eval=phase_eval, phase="internal_topology", H=H,
+                initial_pool=initial_pool, proof=error.proof, h_tolerance=h_tolerance,
+                iteration_ledger=initial_ledger,
+            )
         if (
             histogram is None
             or step_count <= 0
-            or step_count > remaining_budget
+            or candidate_primary_count > budget
             or not _internal_conversion_is_allowed(histogram)
         ):
             break
@@ -6056,14 +6247,9 @@ def _plan_internal_topology_stage(
         transactions.extend(list(conversion_plan.phase_result.transactions or []))
         collect_new_residual_products(iteration_ledger)
         if str(next_product.get("product_role", "")) == "residual_flex_chain":
-            if remaining_required_flex_chains > 0:
-                remaining_required_flex_chains -= 1
-            else:
-                remaining_optional_flex_capacity = max(
-                    0, remaining_optional_flex_capacity - 1
-                )
+            remaining_optional_flex_capacity = max(0, remaining_optional_flex_capacity - 1)
         residual_contract_id += 1
-        remaining_budget = budget - _concrete_primary_node_count(groups)
+        remaining_budget = budget - candidate_primary_count
 
     invariant_errors = _internal_ledger_invariant_errors(
         ledger=iteration_ledger,
@@ -6084,12 +6270,10 @@ def _plan_internal_topology_stage(
     )
     tolerated_final = _tolerated_remaining_closure_ids(
         iteration_ledger.available_ids_by_su,
-        remaining_flex_goal=remaining_required_flex_chains,
         recycled_resource_ids=recycled_resource_ids,
     )
     internal_stage_completed = bool(
         (not remaining_closure_final or bool(tolerated_final))
-        and int(remaining_required_flex_chains) <= 0
         and not preserved_unassembled_su24_ids
     )
     ordinary_internal_count, residual_reclassification_count = (
@@ -6117,8 +6301,6 @@ def _plan_internal_topology_stage(
         "internal_ring_attempts": [],
         "residual_flex_count_before": int(current_flex_count),
         "residual_flex_soft_cap": int(residual_flex_soft_cap),
-        "required_flex_deficit_before": int(initial_required_flex_chains),
-        "required_flex_deficit_remaining": int(remaining_required_flex_chains),
         "optional_flex_capacity_before": int(initial_optional_flex_capacity),
         "optional_flex_direct_added_count": int(
             initial_optional_flex_capacity - remaining_optional_flex_capacity
@@ -6126,8 +6308,7 @@ def _plan_internal_topology_stage(
         "optional_flex_unused_capacity": int(remaining_optional_flex_capacity),
         "optional_flex_conversion_count": 0,
         "residual_flex_added_count": int(
-            initial_required_flex_chains - remaining_required_flex_chains
-            + initial_optional_flex_capacity - remaining_optional_flex_capacity
+            initial_optional_flex_capacity - remaining_optional_flex_capacity
         ),
         "residual_flex_slots_remaining": int(remaining_optional_flex_capacity),
         # Only SU24 owned by completed ring products may survive Stage3.  IDs
@@ -6169,7 +6350,6 @@ def _plan_internal_topology_stage(
             transactions=transactions,
             initial_pool=initial_pool,
             cursor=cursor,
-            E_target=E_target,
             h_tolerance=h_tolerance,
             special_degree_meta=special_degree_meta,
             # ``internal_max_primary_adjustments`` is the independent cap for
@@ -6247,6 +6427,9 @@ def _plan_internal_topology_stage(
             h_tolerance=h_tolerance,
             stage_diagnostics=diagnostics,
         )
+        if result.plan_kind == "stage3_invalid_conversion_path":
+            result.runtime["iteration_topology_ledger"] = initial_ledger
+            return result
         result.runtime["iteration_topology_ledger"] = iteration_ledger
         result.active_subphase = str(stop_subphase)
         result.phase_result.active_phase = "internal_topology"
@@ -6313,6 +6496,18 @@ def _plan_internal_topology_stage(
         proof = {
             "phase": "internal_topology",
             "reason": "internal_residual_assembly_incomplete",
+            "completed_flex_count": int(
+                current_flex_count
+                + initial_optional_flex_capacity - remaining_optional_flex_capacity
+            ),
+            "flex_lower": int(flex_lower),
+            "flex_upper": int(flex_upper),
+            "available_counts": {
+                str(key): len(values)
+                for key, values in iteration_ledger.available_ids_by_su.items()
+            },
+            "internal_residual_attempt_count": int(residual_attempt_count),
+            "internal_residual_attempts": list(residual_attempts),
             "remaining_closure_ids_by_su": {
                 str(key): list(values)
                 for key, values in remaining_closure_final.items()
@@ -6397,6 +6592,7 @@ def plan_stage3_state_machine(
     spectrum_hop1_template_options: Optional[Dict[int, Any]] = None,
     rejected_spectrum_histogram_signatures: Optional[Sequence[str]] = None,
     rejected_spectrum_bundle_signatures: Optional[Sequence[str]] = None,
+    rejected_spectrum_su24_signatures: Optional[Sequence[str]] = None,
     forbidden_spectrum_inverse_signatures: Optional[Sequence[str]] = None,
     flex_max_primary_adjustments: int = 10,
     external_max_primary_adjustments: int = 10,
@@ -6433,6 +6629,12 @@ def plan_stage3_state_machine(
         raise ValueError("residual flex configuration requires preferred >= minimum >= 1")
     if int(residual_side_min_23) < 0 or int(residual_side_preferred_23) < int(residual_side_min_23):
         raise ValueError("residual side configuration requires preferred >= minimum >= 0")
+    phase_eval = deepcopy(phase_eval)
+    phase_eval.flex_audit = {
+        **dict(phase_eval.flex_audit or {}),
+        "residual_flex_preferred_23": int(residual_flex_preferred_23),
+        "residual_flex_min_23": int(residual_flex_min_23),
+    }
     if not isinstance(progress_phase, Stage3ProgressPhase):
         raise TypeError("progress_phase must be a Stage3ProgressPhase")
     external_phases_pending = progress_phase in {
@@ -6440,8 +6642,16 @@ def plan_stage3_state_machine(
         Stage3ProgressPhase.EXTERNAL_TOPOLOGY,
         Stage3ProgressPhase.SPECTRUM_REBALANCE,
     }
-    restore_external_resource_context = progress_phase is Stage3ProgressPhase.INTERNAL_TOPOLOGY
     flex_block = str(getattr(phase_eval, "flex_reconciliation_block_reason", "") or "")
+    if external_phases_pending and flex_block == "flex_window_invalid":
+        return _narrow_flex_window_plan(
+            phase_eval=phase_eval, H=H, nodes=nodes,
+            max_primary_adjustments=flex_max_primary_adjustments,
+            special_degree_meta=special_degree_meta, E_target=E_target,
+            max_h_compensation_ops=max_h_compensation_ops_per_adjustment,
+            h_tolerance=h_tolerance, su11_rotation_index=su11_rotation_index,
+            forbidden_signatures=forbidden_resource_conversion_signatures,
+        )
     if external_phases_pending and flex_block:
         flex_contracts = [
             dict(item or {})
@@ -6484,13 +6694,12 @@ def plan_stage3_state_machine(
         )
         == "above_range"
     ):
-        return _fixed_flex_capacity_expansion_plan(
+        expansion_plan = _fixed_flex_capacity_expansion_plan(
             phase_eval=phase_eval,
             H=H,
             E_target=E_target,
             difference_spectrum=difference_spectrum,
             max_primary_adjustments=flex_max_primary_adjustments,
-            max_h_compensation_ops=max_h_compensation_ops_per_adjustment,
             h_tolerance=h_tolerance,
             special_degree_meta=special_degree_meta,
             su11_rotation_index=su11_rotation_index,
@@ -6498,9 +6707,27 @@ def plan_stage3_state_machine(
                 forbidden_resource_conversion_signatures
             ),
         )
+        if expansion_plan.ok:
+            return expansion_plan
+        return _narrow_flex_window_plan(
+            phase_eval=phase_eval, H=H, nodes=nodes,
+            max_primary_adjustments=flex_max_primary_adjustments,
+            special_degree_meta=special_degree_meta, E_target=E_target,
+            max_h_compensation_ops=max_h_compensation_ops_per_adjustment,
+            h_tolerance=h_tolerance, su11_rotation_index=su11_rotation_index,
+            forbidden_signatures=forbidden_resource_conversion_signatures,
+        )
     if classification is None:
         classification = classify_topology_units(list(nodes or []))
-    if external_phases_pending:
+    snapshot_error = ""
+    snapshot_consistency: Dict[str, Any] = {}
+    if not external_phases_pending:
+        external_assembler = external_assembler or getattr(phase_eval, "external_assembler", None)
+        if external_assembler is None:
+            snapshot_error = "external_assembly_snapshot_missing"
+        elif int(external_assembler.generation_id) != int(phase_eval.generation_id):
+            snapshot_error = "external_assembly_snapshot_generation_mismatch"
+    if not snapshot_error:
         phase_eval = _evaluate_external_phases(
             phase_eval=phase_eval,
             nodes=nodes,
@@ -6508,34 +6735,54 @@ def plan_stage3_state_machine(
             classification=classification,
             allow_ring_recovery=bool(allow_ring_recovery),
             external_assembler=external_assembler,
+            snapshot_only=not external_phases_pending,
         )
-    else:
-        # The internal phase consumes the exact external assembly snapshot
-        # from this generation. Re-running the assembler here would recreate
-        # SU24 rings after ring recovery and lose released-resource
-        # ownership. A Layer1/2 rebuild resets progress to FLEX_RECONCILIATION
-        # and is the only point at which external assembly runs again.
-        phase_eval = deepcopy(phase_eval)
-        phase_eval.external_closure_ok = True
-        phase_eval.flex_range_reconciliation_ok = True
+        if not external_phases_pending:
+            snapshot_consistency = validate_snapshot_state(nodes, phase_eval.assembly_view, H)
+            if not snapshot_consistency["ok"]:
+                snapshot_error = "external_assembly_snapshot_invalid"
+            elif not phase_eval.external_closure_ok or not {
+                "external_flex_closure",
+                "real_like24_ring_assembly",
+                "remaining_external_halfclosed_closure",
+            }.issubset(external_assembler.completed_phases):
+                snapshot_error = "external_assembly_snapshot_incomplete"
+    if snapshot_error:
+        proof = {
+            "reason": snapshot_error,
+            "phase": EXTERNAL_STAGE,
+            "generation_id": int(phase_eval.generation_id),
+            "assembler_generation_id": (
+                int(external_assembler.generation_id) if external_assembler is not None else None
+            ),
+            "completed_external_phases": sorted(
+                getattr(external_assembler, "completed_phases", set())
+            ),
+            "state_consistency": snapshot_consistency,
+        }
+        return _annotate_h_soft_rule(Stage3AdjustmentPlan(
+            ok=False,
+            reason="phase_resource_infeasible",
+            blocked_reason=snapshot_error,
+            phase=EXTERNAL_STAGE,
+            plan_kind="external_assembly_snapshot_required",
+            pending_contracts=list(phase_eval.canonical_contracts or []),
+            phase_result=Stage3PhaseResult(
+                active_phase=EXTERNAL_STAGE,
+                infeasibility_proof=proof,
+            ),
+            diagnostics=proof,
+            runtime=_runtime_with_pool(phase_eval, _round_resource_ids(phase_eval)),
+        ), h_tolerance)
+    if not external_phases_pending:
         phase_eval.active_phase = progress_phase.value
         phase_eval.phase = progress_phase.value
         phase_eval.active_external_subphase = progress_phase.value
-        phase_eval.canonical_contracts = []
-        phase_eval.completed_phases = [
-            "flex_range_reconciliation",
-            *[phase for phase, _role in EXTERNAL_ROLE_ORDER],
-        ]
         phase_eval.diagnostics = {
             **dict(getattr(phase_eval, "diagnostics", {}) or {}),
             "external_resource_context_preserved": True,
-            "external_closure_ok": True,
         }
-    materialization_errors = (
-        _external_product_materialization_errors(phase_eval)
-        if external_phases_pending
-        else []
-    )
+    materialization_errors = _external_product_materialization_errors(phase_eval)
     if materialization_errors:
         proof = {
             "phase": EXTERNAL_STAGE,
@@ -6564,31 +6811,21 @@ def plan_stage3_state_machine(
         ), h_tolerance)
     if external_phases_pending:
         audit = dict(phase_eval.flex_audit or {})
-        final_flex = int(phase_eval.flex_counts.get("final", 0))
         if (audit.get("enforced", False)
-                and int(audit.get("flex_window_width", 0)) > MAX_FLEX_WINDOW_WIDTH
-                and int(audit["flex_lower"]) <= final_flex <= int(audit["flex_upper"])
-                and "external_flex_closure" in phase_eval.completed_phases):
+                and (
+                    int(audit.get("flex_window_width", 0)) > MAX_FLEX_WINDOW_WIDTH
+                    or not audit.get("flex_window_ok", True)
+                    or int(phase_eval.flex_counts.get("final", 0)) > int(audit["flex_upper"])
+                )):
             return _narrow_flex_window_plan(
                 phase_eval=phase_eval, H=H, nodes=nodes,
                 max_primary_adjustments=flex_max_primary_adjustments,
                 special_degree_meta=special_degree_meta,
+                E_target=E_target,
+                max_h_compensation_ops=max_h_compensation_ops_per_adjustment,
+                h_tolerance=h_tolerance,
+                su11_rotation_index=su11_rotation_index,
                 forbidden_signatures=forbidden_resource_conversion_signatures,
-            )
-        if (audit.get("enforced", False)
-                and int(audit.get("flex_window_width", 0)) > MAX_FLEX_WINDOW_WIDTH
-                and final_flex < int(audit["flex_lower"])
-                and not phase_eval.canonical_contracts):
-            proof = {"reason": "flex_chain_candidates_exhausted",
-                     "completed_flex_count": final_flex,
-                     "required_flex_count": int(audit["flex_lower"]),
-                     "missing_flex_count": int(audit["flex_lower"]) - final_flex}
-            return Stage3AdjustmentPlan(
-                ok=False, reason="phase_resource_infeasible", blocked_reason=proof["reason"],
-                phase="flex_range_reconciliation", plan_kind="flex_count_infeasible",
-                phase_result=Stage3PhaseResult(active_phase="flex_range_reconciliation",
-                                              infeasibility_proof=proof),
-                diagnostics=proof, runtime=_runtime_with_pool(phase_eval, _resource_ids(phase_eval)),
             )
     # A recovery-enabled external pass reports its forced SU24->SU23
     # operations in the assembly ledger. The caller applies that operation as
@@ -6751,7 +6988,7 @@ def plan_stage3_state_machine(
     # external fragments and later let the ring allocator capture them.
     pool = _round_resource_ids(phase_eval)
     H_work = H.detach().clone()
-    all_contracts = _external_contracts(phase_eval, nodes)
+    all_contracts = _external_contracts(phase_eval)
     (
         active_contracts,
         dormant_contracts,
@@ -7051,7 +7288,7 @@ def plan_stage3_state_machine(
                 0,
                 int(external_max_primary_adjustments)
                 - int(external_primary_adjustments_used)
-                - _external_primary_node_count(phase_groups),
+                - _concrete_primary_node_count(phase_groups),
             )
             future_contracts = list(phase_contracts[int(contract_index) + 1:])
             for _, future_role in EXTERNAL_ROLE_ORDER[int(role_index) + 1:]:
@@ -7131,7 +7368,7 @@ def plan_stage3_state_machine(
                     # cannot produce SU24.  The failed transaction must remain
                     # atomic so it cannot mutate the next Stage3 generation.
                     partial_groups = []
-                partial_count = _external_primary_node_count(partial_groups)
+                partial_count = _concrete_primary_node_count(partial_groups)
                 # A legal prefix is still useful when the current contract
                 # needs more resources than this planner pass could provide.
                 # Commit that concrete prefix and continue the same live
@@ -7164,7 +7401,7 @@ def plan_stage3_state_machine(
                         transaction.product_node_ids = []
                         transaction.slot_assignments = []
                     direct_transactions.extend(partial_transactions)
-                    planned_primary = int(_external_primary_node_count(phase_groups))
+                    planned_primary = int(_concrete_primary_node_count(phase_groups))
                     remaining_budget = max(
                         0,
                         int(external_max_primary_adjustments)
@@ -7226,10 +7463,10 @@ def plan_stage3_state_machine(
                                 1,
                                 len(contracts) - int(external_contracts_seen) + 1,
                             ),
-                            "external_primary_count": _external_primary_node_count(phase_groups),
+                            "external_primary_count": _concrete_primary_node_count(phase_groups),
                             "external_primary_adjustments_used": int(
                                 external_primary_adjustments_used
-                                + _external_primary_node_count(phase_groups)
+                                + _concrete_primary_node_count(phase_groups)
                             ),
                             "external_remaining_budget": max(
                                 0, remaining_budget,
@@ -7286,16 +7523,16 @@ def plan_stage3_state_machine(
                                 1,
                                 len(contracts) - int(external_contracts_seen) + 1,
                             ),
-                            "external_primary_count": _external_primary_node_count(phase_groups),
+                            "external_primary_count": _concrete_primary_node_count(phase_groups),
                             "external_primary_adjustments_used": int(
                                 external_primary_adjustments_used
-                                + _external_primary_node_count(phase_groups)
+                                + _concrete_primary_node_count(phase_groups)
                             ),
                             "external_remaining_budget": max(
                                 0,
                                 int(external_max_primary_adjustments)
                                 - int(external_primary_adjustments_used)
-                                - _external_primary_node_count(phase_groups),
+                                - _concrete_primary_node_count(phase_groups),
                             ),
                             "external_conversion_budget_exhausted": bool(
                                 budget_exhausted
@@ -7352,7 +7589,7 @@ def plan_stage3_state_machine(
             direct_transactions.extend(list(candidate_plan.phase_result.transactions or []))
             external_completed_after_conversion += 1
             role_converted += 1
-            planned_count = _external_primary_node_count(phase_groups)
+            planned_count = _concrete_primary_node_count(phase_groups)
             budget_exhausted = bool(
                 int(external_primary_adjustments_used) + int(planned_count)
                 >= int(external_max_primary_adjustments)
@@ -7424,12 +7661,12 @@ def plan_stage3_state_machine(
         "external_materialized_product_count": len(materialized_external_products),
         "external_blocked": len(infeasible_contracts),
         "external_remaining_pending": len(infeasible_contracts) + len(dormant_contracts),
-        "external_primary_count": _external_primary_node_count(phase_groups),
+        "external_primary_count": _concrete_primary_node_count(phase_groups),
         "external_remaining_budget": max(
             0,
             int(external_max_primary_adjustments)
             - int(external_primary_adjustments_used)
-            - _external_primary_node_count(phase_groups),
+            - _concrete_primary_node_count(phase_groups),
         ),
         "external_primary_adjustments_used": int(
             external_primary_adjustments_used
@@ -7491,6 +7728,7 @@ def plan_stage3_state_machine(
             stage_diagnostics=external_diagnostics,
         )
 
+    spectrum_audit: Dict[str, Any] = {}
     if (
         progress_phase in {
             Stage3ProgressPhase.FLEX_RECONCILIATION,
@@ -7521,13 +7759,11 @@ def plan_stage3_state_machine(
                 max(0, int(spectrum_max_candidate_trials)),
             ),
             max_primary_adjustments=int(spectrum_max_primary_adjustments),
-            max_h_compensation_ops=0,
             rejected_histogram_signatures=rejected_spectrum_histogram_signatures,
             rejected_bundle_signatures=rejected_spectrum_bundle_signatures,
+            rejected_su24_signatures=rejected_spectrum_su24_signatures,
             forbidden_inverse_signatures=forbidden_spectrum_inverse_signatures,
             E_target=E_target,
-            special_degree_meta=special_degree_meta,
-            flex_audit=dict(getattr(phase_eval, "flex_audit", {}) or {}),
             aromatic_response_scale=float(
                 dict(difference_spectrum or {}).get(
                     "aromatic_response_scale",
@@ -7601,7 +7837,8 @@ def plan_stage3_state_machine(
     )
     internal_plan.diagnostics = {
         **dict(getattr(internal_plan, "diagnostics", {}) or {}),
-        "spectrum_stage_evaluated": bool(enable_post_external_spectrum),
+        "spectrum_stage_evaluated": bool(spectrum_audit),
+        "spectrum_audit": spectrum_audit,
     }
     internal_plan.runtime["rollback_runtime"] = internal_runtime_before
     return internal_plan

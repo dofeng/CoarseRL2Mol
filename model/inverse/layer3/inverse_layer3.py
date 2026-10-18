@@ -5,9 +5,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
 
-from ...shared.coarse_graph import E_SU, NUM_SU_TYPES, PPM_AXIS, get_su_ppm_range
+from ...shared.coarse_graph import E_SU, PPM_AXIS, get_su_ppm_range
 from ...shared.inverse_common import (
     _NodeV3,
     evaluate_spectrum_reconstruction,
@@ -21,9 +20,8 @@ class Layer3Estimator:
 
     SPECTRAL_SOURCE = 'template_sample_mu_layer3'
 
-    def __init__(self, device: torch.device, vae_model=None, lib_path: Optional[str] = None):
+    def __init__(self, device: torch.device, lib_path: Optional[str] = None):
         self.device = device
-        self.vae = vae_model
         self.lib_path = lib_path
         # Effective aromatic response used only in reconstructed spectra.
         self.aromatic_response_scale: float = 1.0
@@ -52,94 +50,6 @@ class Layer3Estimator:
         self._template_cache = {'templates': lib.get('templates', {})}
         return self._template_cache
 
-    def _global_embed_from_elements(self, E_target: torch.Tensor) -> torch.Tensor:
-        if self.vae is None:
-            raise RuntimeError("Layer3 requires a G2S model")
-        e = E_target.to(self.device).view(1, -1)
-        if float(e.max().item()) > 1.1:
-            e = e / e.sum(dim=1, keepdim=True).clamp(min=1.0)
-        try:
-            with torch.inference_mode():
-                embedding = 0.02 * self.vae.global_mlp(e)
-        except Exception as exc:
-            raise RuntimeError(f"Layer3 failed to compute the G2S global embedding: {exc}") from exc
-        if embedding.ndim != 2 or int(embedding.shape[0]) != 1 or not bool(torch.isfinite(embedding).all()):
-            raise RuntimeError(
-                f"Layer3 received an invalid G2S global embedding with shape={tuple(embedding.shape)}"
-            )
-        return embedding
-
-    def _decode_mu_batch(self,
-                         center_sus: List[int],
-                         z_vectors: List[torch.Tensor],
-                         g_embed: torch.Tensor,
-                         context: str) -> torch.Tensor:
-        if self.vae is None:
-            raise RuntimeError("Layer3 requires a G2S model")
-        if len(center_sus) != len(z_vectors):
-            raise RuntimeError(
-                f"Layer3 {context} decoder input mismatch: "
-                f"center_sus={len(center_sus)}, z_vectors={len(z_vectors)}"
-            )
-        if not z_vectors:
-            return torch.empty(0, dtype=torch.float, device=self.device)
-
-        normalized_z: List[torch.Tensor] = []
-        latent_dim: Optional[int] = None
-        for index, z_vec in enumerate(z_vectors):
-            if not torch.is_tensor(z_vec) or int(z_vec.numel()) <= 0:
-                raise RuntimeError(f"Layer3 {context} has missing z at index={index}")
-            z_flat = z_vec.detach().to(self.device).float().reshape(-1)
-            if not bool(torch.isfinite(z_flat).all()):
-                raise RuntimeError(f"Layer3 {context} has non-finite z at index={index}")
-            if latent_dim is None:
-                latent_dim = int(z_flat.numel())
-            elif int(z_flat.numel()) != int(latent_dim):
-                raise RuntimeError(
-                    f"Layer3 {context} has inconsistent z dimensions: "
-                    f"expected={latent_dim}, actual={int(z_flat.numel())}, index={index}"
-                )
-            normalized_z.append(z_flat)
-
-        z_batch = torch.stack(normalized_z, dim=0)
-        su_index = torch.tensor(center_sus, dtype=torch.long, device=self.device)
-        if bool(((su_index < 0) | (su_index >= NUM_SU_TYPES)).any()):
-            raise RuntimeError(f"Layer3 {context} contains an invalid center SU")
-        su_feat = F.one_hot(su_index, num_classes=NUM_SU_TYPES).float()
-        if int(g_embed.shape[0]) == 1:
-            global_batch = g_embed.expand(int(z_batch.shape[0]), -1)
-        elif int(g_embed.shape[0]) == int(z_batch.shape[0]):
-            global_batch = g_embed
-        else:
-            raise RuntimeError(
-                f"Layer3 {context} global embedding batch mismatch: "
-                f"g={int(g_embed.shape[0])}, z={int(z_batch.shape[0])}"
-            )
-
-        try:
-            with torch.inference_mode():
-                pred = self.vae.decoder(su_feat, z_batch, global_batch)
-        except Exception as exc:
-            raise RuntimeError(f"Layer3 {context} G2S decoding failed: {exc}") from exc
-        if pred.ndim != 2 or int(pred.shape[0]) != len(z_vectors) or int(pred.shape[1]) < 1:
-            raise RuntimeError(
-                f"Layer3 {context} G2S decoder returned invalid shape={tuple(pred.shape)}"
-            )
-        mu = pred[:, 0].detach()
-        if not bool(torch.isfinite(mu).all()):
-            raise RuntimeError(f"Layer3 {context} G2S decoder returned non-finite chemical shifts")
-        return mu
-
-    def _decode_nodes(self,
-                      carbon_nodes: List[_NodeV3],
-                      g_embed: torch.Tensor,
-                      context: str) -> torch.Tensor:
-        return self._decode_mu_batch(
-            [int(node.su_type) for node in carbon_nodes],
-            [getattr(node, 'z_vec', None) for node in carbon_nodes],
-            g_embed,
-            context=context,
-        )
 
     @staticmethod
     def _segment_mask(ppm_axis: torch.Tensor, lo: float, hi: float) -> torch.Tensor:

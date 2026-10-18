@@ -16,8 +16,6 @@ CLOSURE_TEMPLATE_SEQUENCES: Dict[str, Tuple[Tuple[int, ...], ...]] = {
 }
 
 DEFAULT_STAGE3_H_SOFT_TOLERANCE = 0.08
-H_SOFT_LOWER_RATIO = -DEFAULT_STAGE3_H_SOFT_TOLERANCE
-H_SOFT_UPPER_RATIO = DEFAULT_STAGE3_H_SOFT_TOLERANCE
 # Aromatic donor rotation used when an existing aromatic unit is converted
 # through SU11.  This is intentionally different from terminal SU24
 # aromatization: the two operations have different chemical roles.
@@ -110,6 +108,35 @@ def minimum_closure_required_counts(kind: str) -> Dict[int, int]:
 
 def alternative_closure_required_counts(kind: str) -> List[Dict[int, int]]:
     return [dict(item) for item in closure_required_count_options(str(kind))[1:]]
+
+
+def flex_resource_sequences(preferred_23: int, minimum_23: int) -> List[List[int]]:
+    return [
+        [11] + [23] * chain_length + [11]
+        for chain_length in range(max(int(preferred_23), int(minimum_23), 1), 0, -1)
+    ]
+
+
+def select_flex_candidate_groups(
+    groups: Sequence[Dict[str, Any]],
+    *,
+    limit: Optional[int] = None,
+    prefer_single_closures: bool = False,
+) -> List[Dict[str, Any]]:
+    ordered = list(groups or [])
+    if prefer_single_closures:
+        ordered.sort(key=lambda group: len(group.get("fragment_ids", []) or []))
+    selected: List[Dict[str, Any]] = []
+    used_fragments = set()
+    for group in ordered:
+        if limit is not None and len(selected) >= max(0, int(limit)):
+            break
+        fragment_ids = {int(value) for value in group.get("fragment_ids", []) or []}
+        if not fragment_ids or fragment_ids & used_fragments:
+            continue
+        selected.append(dict(group))
+        used_fragments.update(fragment_ids)
+    return selected
 
 
 def h_soft_bounds(
