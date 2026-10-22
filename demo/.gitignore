@@ -1,0 +1,6 @@
+!checkpoints_g2s_*/
+!checkpoints_s2n_*/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/

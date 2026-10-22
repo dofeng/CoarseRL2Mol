@@ -1,0 +1,14 @@
+.workspace{align-items:start}
+#graphArea{height:650px;min-height:0;max-height:75vh;flex:0 0 auto;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;position:relative;background:#fcfdfb;touch-action:pan-x pan-y}
+#graphArea svg{display:block;max-width:none;flex-shrink:0;touch-action:pan-x pan-y;cursor:default}
+#graphArea.pathway-3d svg{touch-action:none;cursor:grab}
+.path-browse{padding:8px 16px;background:#f4f8fc}.path-browse[hidden]{display:none}.path-browse label{display:flex;align-items:center;gap:10px;font-size:12px;white-space:nowrap}.path-browse input{flex:1;min-width:80px}.path-time-axis,.path-node-label{pointer-events:none}
+.graph-panel{min-width:0}.graph-panel .panel-heading{flex-wrap:wrap;padding:10px 14px;gap:8px}
+.graph-footer{flex-wrap:wrap;gap:8px}
+.pathway-settings p{font-size:11px;color:#53677d;line-height:1.7}
+.path-node{cursor:pointer;outline:none}.path-node:hover circle,.path-node:focus circle{stroke:#162b43;stroke-width:3}
+.path-label{font-family:system-ui,sans-serif;font-size:12px;fill:#20364b;paint-order:stroke;stroke:#fff;stroke-width:4px;stroke-linejoin:round}
+.path-subtitle{font-size:10px;fill:#50637a;paint-order:stroke;stroke:#fff;stroke-width:3px}
+.pathway-actions{display:flex;gap:5px;flex-wrap:wrap;margin:8px 0}
+.pathway-status{font-size:12px;color:#315879;padding:10px;line-height:1.8}
+@media(max-width:800px){#graphArea{height:560px;max-height:70vh}}

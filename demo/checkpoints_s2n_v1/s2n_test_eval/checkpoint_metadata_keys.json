@@ -1,0 +1,11 @@
+{
+  "keys": [
+    "config",
+    "data_files_json",
+    "epoch",
+    "metrics",
+    "model_state_dict",
+    "optimizer_state_dict",
+    "scheduler_state_dict"
+  ]
+}

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Coal Atlas | 反应网络分析</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/graph-ui.css">
+  <script src="/lucide.min.js" defer></script>
+  <script src="/graph-ui.js" defer></script>
+  <script src="/pathway-layout.js" defer></script>
+  <script src="/pathway-camera.js" defer></script>
+  <script src="/pathway-scene.js" defer></script>
+  <script src="/pathway-view.js" defer></script>
+  <script src="/coarse-network.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><i data-lucide="network" aria-hidden="true"></i><span>COAL ATLAS</span><span class="brand-divider"></span><small>反应网络分析</small></a>
+    <div class="top-status"><span class="status-dot"></span><span id="datasetStatus">未连接数据集</span></div>
+    <button id="toggleSetup" class="button secondary"><i data-lucide="sliders-horizontal"></i>计算任务</button>
+  </header>
+  <div class="dataset-bar">
+    <label for="database"><i data-lucide="database"></i><span>数据集</span></label>
+    <input id="database" value="results/reaction_network_v3/network.sqlite" aria-label="SQLite 数据库路径" spellcheck="false">
+    <button id="openDb" class="button primary"><i data-lucide="folder-open"></i>加载</button>
+  </div>
+  <div id="message" role="status" aria-live="polite" hidden></div>
+  <div id="jobBand" class="job" hidden><div><strong id="jobStage">等待任务</strong><span id="jobMeta"></span></div><progress id="jobProgress" max="100" value="0"></progress><button id="cancel" class="button ghost" disabled><i data-lucide="square"></i>取消</button></div>
+  <dialog id="setup">
+    <div class="dialog-heading"><div><span class="eyebrow">ANALYSIS TASK</span><h2>轨迹计算</h2></div><button id="closeSetup" type="button" class="icon-button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+    <form id="runForm">
+      <div class="setup-grid">
+        <label class="wide">输入目录 / 文件 / glob<input id="input" placeholder="/path/to/bond*.reaxff" spellcheck="false"></label>
+        <label>处理阶段<select id="runStage"><option value="all">完整流程 / 续算</option><option value="postprocess">仅后处理</option><option value="frames">仅逐帧分类</option><option value="transitions">事件识别与后处理</option></select></label>
+        <label>文件模式<input id="pattern" value="*.reaxff"></label>
+        <label>帧排序<select id="frameOrder"><option value="filename">文件名帧号</option><option value="timestep">Header timestep</option></select></label>
+        <label>键级阈值<input id="cutoff" type="number" min="0" step="0.01" value="0.3"></label>
+        <label>并行进程<input id="workers" type="number" min="1" max="8" value="2"></label>
+        <label>在途任务上限<input id="inflight" type="number" min="1" max="16" value="4"></label>
+        <label>内存预算 / MiB<input id="memory" type="number" min="128" max="4096" value="3072"></label>
+        <label>预期文件帧步长<input id="frameStep" type="number" min="1" placeholder="可选"></label>
+        <label>时间分析<select id="temporal"><option value="off">关闭</option><option value="annotate">标注候选</option><option value="exclude">过滤候选</option></select></label>
+        <label>最短驻留 / 帧<input id="lifetime" type="number" min="1" value="1"></label>
+        <label>逆转窗口 / 帧<input id="reversal" type="number" min="0" value="0"></label>
+        <label>配置文件<input id="config" placeholder="configs/network.json"></label>
+      </div>
+      <div class="setup-actions"><label class="check"><input id="tracksEnabled" type="checkbox">实例轨迹</label><label class="check"><input id="retry" type="checkbox" checked>重试失败帧</label><button type="submit" id="run" class="button primary"><i data-lucide="play"></i>开始 / 恢复</button></div>
+    </form>
+  </dialog>
+  <main>
+    <section class="overview">
+      <div class="overview-title"><span class="eyebrow">REACTION EXPLORER</span><h1>泛粗粒度反应网络</h1><p id="coverage">正在读取数据集</p></div>
+      <div id="metrics" class="metrics"><div class="metric"><span>完成帧</span><strong>--</strong></div><div class="metric"><span>类别</span><strong>--</strong></div><div class="metric"><span>反应事件</span><strong>--</strong></div><div class="metric"><span>计量通道</span><strong>--</strong></div></div>
+    </section>
+    <div class="workspace">
+      <aside class="filters collapsed">
+        <div class="panel-heading"><h3>筛选范围</h3><div class="filter-actions"><button id="toggleFilters" class="icon-button" title="展开 / 收起筛选" aria-label="展开 / 收起筛选" aria-expanded="false"><i data-lucide="chevron-down"></i></button><button id="resetFilters" class="icon-button" title="重置筛选" aria-label="重置筛选"><i data-lucide="rotate-ccw"></i></button></div></div>
+        <form id="filterForm">
+          <label>视图<select id="representation"><option value="selected">主要计量通道</option><option value="all">全部计量通道</option><option value="flow">物质流投影</option><option value="pathflow">路径 · 阶段概览</option><option value="path3d">路径 · 三维阶段</option><option value="pathdetail3d">路径 · 三维事件</option><option value="path2d">路径 · 二维事件</option></select></label>
+          <div class="filter-section"><h4>时间与类别</h4><div class="two"><label>起始帧<input id="start" type="number" min="0" value="0"></label><label>结束帧<input id="end" type="number" min="0" value="0"></label></div>
+          <label>聚焦类别<select id="species"><option value="">全部类别</option></select></label>
+          <div class="network-settings"><div class="two"><label>C 区间<select id="carbonFilter"><option value="">全部</option></select></label><label>R 区间<select id="ringFilter"><option value="">全部</option></select></label></div><label>O 区间<select id="oxygenFilter"><option value="">全部</option></select></label></div></div>
+          <div class="network-settings filter-section"><h4>事件口径</h4>
+            <label>统计对象<select id="activity"><option value="changes">类别数量变化</option><option value="internal">类别数量不变的活动</option><option value="all">全部非持续事件</option></select></label>
+            <label>事件视图<select id="view"><option value="raw">原始事件</option><option value="annotated">时间标注</option><option value="filtered">时间过滤</option></select></label>
+            <label>事件类型<select id="eventType"><option value="">全部类型</option><option value="fragmentation">裂解</option><option value="fusion">融合</option><option value="transformation">转化</option><option value="internal_rearrangement">类内重排</option><option value="many_to_many">多对多</option><option value="birth">出现</option><option value="death">消失</option></select></label>
+            <label>解析等级<select id="resolution"><option value="">全部等级</option><option value="resolved">已解析</option><option value="composite">复合事件</option><option value="unresolved">未解析</option></select></label>
+          </div>
+          <div class="network-settings filter-section"><h4>通道选择</h4>
+            <div class="weighted-settings"><label>排序权重<select id="flowWeight"><option value="events">事件次数</option><option value="carbon">碳转移</option><option value="oxygen">氧转移</option><option value="mass">质量转移</option></select></label><label>累计覆盖率<select id="targetCoverage"><option value="0.8">80%</option><option selected value="0.9">90%</option><option value="0.95">95%</option><option value="1">100%</option></select></label></div>
+            <div class="two"><label>最少次数<input id="minCount" type="number" min="1" value="1"></label><label>显示上限<select id="limit"><option selected>12</option><option>24</option><option>40</option><option>80</option><option>120</option></select></label></div>
+            <label class="check flow-setting" title="类内转移重复累计参与事件的片段原子，不代表产率"><input id="includeInternal" type="checkbox">计入类内物质流</label>
+          </div>
+          <div class="pathway-settings filter-section" hidden><h4>原子追踪</h4>
+            <label>锚点方向<select id="pathDirection"><option value="forward">起始帧</option><option value="backward">结束帧</option></select></label>
+            <label>锚点片段 ID<input id="pathFragment" type="number" min="1" placeholder="可选，优先于类别"></label>
+            <label>另一端类别<select id="pathTarget"><option value="">不限制</option></select></label>
+            <div class="two"><label>摘要阶段<select id="summaryStages"><option selected>4</option><option>8</option><option>12</option><option>16</option></select></label><label>事件页大小<select id="pathLimit"><option>1</option><option>5</option><option>10</option><option selected>30</option><option>100</option><option>200</option><option>300</option></select></label></div>
+            <label>事件偏移<input id="pathOffset" type="number" min="0" value="0"></label>
+            <div class="pathway-actions"><button id="pathStart" type="button" class="button primary"><i data-lucide="route"></i>追踪</button><button id="pathCancel" type="button" class="icon-button" title="取消追踪" aria-label="取消追踪" disabled><i data-lucide="square"></i></button><button id="pathNext" type="button" class="icon-button" title="后续事件" aria-label="后续事件" disabled><i data-lucide="arrow-right"></i></button><button id="pathExport" type="button" class="icon-button" title="导出路径 JSON" aria-label="导出路径 JSON"><i data-lucide="download"></i></button></div>
+            <label>比例 <output id="pathScaleValue">100%</output><input id="graphScale" type="range" min="5" max="400" value="100" step="1"></label>
+            <label>时间刻度<select id="pathTimeMetric"><option value="compact">紧凑刻度</option><option value="frames">真实帧距</option></select></label>
+            <label>纵深<input id="pathDepth" type="range" min="0" max="200" value="100" step="5"></label>
+            <label>旋转<select id="pathRotationMode"><option value="time">时间阅读</option><option value="free">自由观察</option></select></label>
+            <button id="pathFocus" type="button" class="button secondary"><i data-lucide="focus"></i>聚焦选中节点</button>
+          </div>
+          <button id="applyFilters" class="button primary full" type="submit"><i data-lucide="filter"></i>应用筛选</button>
+        </form>
+        <div class="legend"><h4>C 区间</h4><div><i style="--swatch:#64748b"></i>C0</div><div><i style="--swatch:#008577"></i>C1–5</div><div><i style="--swatch:#3d6cc0"></i>C6–20</div><div><i style="--swatch:#ae5f91"></i>C21–40</div><div><i style="--swatch:#bf7523"></i>C≥41</div></div>
+        <div id="networkLegend" class="note" hidden></div>
+      </aside>
+      <section class="graph-panel">
+        <div class="panel-heading graph-toolbar"><div class="tabs" role="tablist"><button id="graphTab" class="tab active" role="tab" aria-selected="true">网络图</button><button id="tableTab" class="tab" role="tab" aria-selected="false">通道表</button><button id="framesTab" class="tab" role="tab" aria-selected="false">片段</button></div><div class="tools"><button id="zoomOut" class="icon-button" title="缩小" aria-label="缩小"><i data-lucide="minus"></i></button><button id="zoomIn" class="icon-button" title="放大" aria-label="放大"><i data-lucide="plus"></i></button><button id="fit" class="icon-button" title="适应视窗" aria-label="适应视窗"><i data-lucide="maximize"></i></button><span class="tool-divider"></span><button id="exportSvg" class="icon-button" title="导出 SVG" aria-label="导出 SVG"><i data-lucide="image-down"></i></button><button id="exportSelection" class="icon-button" title="导出当前网络 JSON" aria-label="导出当前网络 JSON"><i data-lucide="download"></i></button></div></div>
+        <div id="graphSummary" class="graph-summary" aria-live="polite">正在加载网络</div>
+        <div id="graphArea" class="graph-area"><div class="empty"><i data-lucide="network"></i><h3>正在连接数据集</h3></div></div>
+        <div id="tableArea" class="table-area" hidden></div>
+        <div id="framesArea" class="table-area" hidden><div class="frame-controls"><label>帧<input id="frameNumber" type="number" min="0" value="0"></label><button id="loadFrame" class="button secondary">加载</button></div><div id="frameStates"></div><div id="frameRows"></div><button id="moreFragments" class="button ghost" hidden>下一页片段</button></div>
+        <div id="pathBrowseControls" class="path-browse" hidden><label>时间<input id="pathBrowse" type="range" min="0" max="1000" value="0" step="1" aria-label="三维时间浏览"></label></div>
+        <div class="graph-footer"><span id="pageInfo"></span><div><button id="firstPage" class="icon-button" title="第一页" aria-label="第一页"><i data-lucide="chevrons-left"></i></button><button id="nextPage" class="icon-button" title="下一页" aria-label="下一页" disabled><i data-lucide="chevron-right"></i></button></div></div>
+      </section>
+      <aside class="detail"><div class="panel-heading"><h3>证据与计量</h3><span class="mini-label">INSPECTOR</span></div><div id="detail"><div class="empty small"><i data-lucide="scan-search"></i><h3>未选择对象</h3></div></div></aside>
+    </div>
+    <section class="analytics-band">
+      <div class="timeline"><div class="panel-heading"><div><span class="eyebrow">COMPOSITION</span><h3 id="chartTitle">类别组成</h3></div><label><span class="sr-only">纵轴</span><select id="chartMetric"><option value="mass_fraction">质量占比</option><option value="carbon_fraction">碳占比</option><option value="oxygen_fraction">氧占比</option><option value="population">片段数量</option><option value="total_mass">总质量</option><option value="total_radical_sites">估计自由基</option></select></label></div><div id="chart" class="chart"></div><p id="chartNote" class="muted"></p></div>
+      <div class="activity-panel"><div class="panel-heading"><div><span class="eyebrow">EVENT ACCOUNTING</span><h3>区间事件统计</h3></div></div><div id="eventAccounting"></div></div>
+    </section>
+    <section class="coarse-diagnostics"><div class="panel-heading"><div><span class="eyebrow">CLASSIFICATION</span><h3>C/R/O 类别占用与守恒</h3></div><span id="auditStatus" class="badge">--</span></div><div id="coarseDiagnostics" class="diagnostics-table"></div></section>
+    <footer class="page-footer"><span>COAL ATLAS / REAXFF</span><span id="footerStatus">C / R / O</span></footer>
+  </main>
+</body>
+</html>

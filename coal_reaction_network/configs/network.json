@@ -1,0 +1,18 @@
+{
+  "elements": {"1": "C", "2": "H", "3": "O"},
+  "bond_order_cutoff": 0.3,
+  "execution": {
+    "workers": 2,
+    "memory_limit_mib": 3072
+  },
+  "matching": {
+    "minimum_event_conservation": 0.9
+  },
+  "temporal_filter": {
+    "mode": "off",
+    "minimum_lifetime_frames": 1,
+    "reversal_window_frames": 0,
+    "preserve_fast_intermediates": true
+  },
+  "network_views": ["raw", "annotated", "filtered"]
+}
