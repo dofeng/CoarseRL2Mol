@@ -1,0 +1,7 @@
+node_id,su_type,state,hop1_ids,reason
+477,22,remaining_closure_resource,[447],stage3_tolerated_unassembled_closure_resource
+480,22,remaining_closure_resource,[230],stage3_tolerated_unassembled_closure_resource
+369,19,unconnected,[],no_legal_connection
+387,19,unconnected,[],no_legal_connection
+593,29,unconnected,[],no_legal_connection
+611,29,unconnected,[],no_legal_connection

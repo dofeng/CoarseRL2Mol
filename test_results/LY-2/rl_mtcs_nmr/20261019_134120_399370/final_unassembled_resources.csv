@@ -1,0 +1,3 @@
+node_id,su_type,state,hop1_ids,reason
+589,23,remaining_closure_resource,"[572, 588]",stage3_tolerated_unassembled_closure_resource
+587,13,idle_aromatic,[],bounded_template_residual

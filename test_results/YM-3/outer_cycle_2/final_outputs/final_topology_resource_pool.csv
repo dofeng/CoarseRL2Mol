@@ -1,0 +1,2 @@
+node_id,su_type,state,completion_tolerated,tolerance_reason
+488,23,remaining_closure_resource,True,stage3_tolerated_unassembled_closure_resource

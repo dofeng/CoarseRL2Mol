@@ -1,0 +1,513 @@
+{
+  "actions": [
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:0-100",
+      "source_unit_id": "aromatic:2",
+      "source_node_id": 100,
+      "source_port_id": "rigid:100",
+      "target_unit_id": "aromatic:0",
+      "target_node_id": 0,
+      "target_port_id": "rigid:0",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:2",
+      "component_rotation": 1,
+      "component_reflection": false,
+      "component_translation": [
+        -57,
+        -60
+      ],
+      "moved_node_count": 6,
+      "site_bindings": {
+        "0": [
+          "aromatic:0",
+          4
+        ],
+        "100": [
+          "aromatic:2",
+          3
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:200-300",
+      "source_unit_id": "aromatic:3",
+      "source_node_id": 300,
+      "source_port_id": "rigid:300",
+      "target_unit_id": "aromatic:2",
+      "target_node_id": 200,
+      "target_port_id": "rigid:200",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:3",
+      "component_rotation": 2,
+      "component_reflection": false,
+      "component_translation": [
+        3,
+        -93
+      ],
+      "moved_node_count": 6,
+      "site_bindings": {
+        "200": [
+          "aromatic:2",
+          0
+        ],
+        "300": [
+          "aromatic:3",
+          4
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "H",
+      "topology_unit_id": "chain:0",
+      "contract_ids": [
+        "flex:a",
+        "flex:b"
+      ],
+      "attachment_contract_id": "flex:a",
+      "merge_contract_ids": [
+        "flex:b"
+      ],
+      "topology_rotation": 4,
+      "topology_reflection": true,
+      "topology_translation": [
+        2,
+        2
+      ],
+      "component_moves": [
+        {
+          "component_index": 1,
+          "component_unit_id": "aromatic:1",
+          "rotation": 2,
+          "reflection": false,
+          "translation": [
+            2,
+            -116
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "2": 5,
+        "202": 101
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    }
+  ],
+  "checkpoints": [
+    {
+      "phase": "flex",
+      "start_count": 0,
+      "end_count": 1,
+      "selected_attempt": 0,
+      "attempts": [
+        {
+          "attempt": 0,
+          "search": {
+            "simulations": 2,
+            "visited_states": 3,
+            "max_depth": 1,
+            "terminal_count": 2,
+            "backup_updates": 4,
+            "search_exhausted": false,
+            "stop_reason": "result_candidates_ready",
+            "result_candidate_count": 2,
+            "result_candidate_limit": 2,
+            "result_candidate_rewards": [
+              0.46010821967357896,
+              0.46010821967357896
+            ],
+            "selected_reward": 0.46010821967357896,
+            "selected_tie_break": 5,
+            "root_legal_action_count": 2,
+            "root_evaluated_action_count": 2,
+            "root_actions_covered": true,
+            "retained_nodes": 1,
+            "peak_retained_nodes": 3,
+            "transition_bytes": 0,
+            "peak_transition_bytes": 3187,
+            "elapsed_seconds": 0.06668678500136593,
+            "rss_mib": 26.6328125,
+            "search_seed": 9159915153942374056,
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.24,
+              "reference_backbone_nodes": 25,
+              "reference_su13_sites": 23,
+              "remaining_units": 3,
+              "remaining_nodes": 6,
+              "remaining_ports": 5,
+              "stages": {
+                "flex": {
+                  "units": 1,
+                  "nodes": 1,
+                  "ports": 2
+                },
+                "ring": {
+                  "units": 1,
+                  "nodes": 4,
+                  "ports": 2
+                },
+                "side": {
+                  "units": 1,
+                  "nodes": 1,
+                  "ports": 1
+                }
+              }
+            }
+          },
+          "forward": {
+            "total": 8,
+            "completed": 8,
+            "completion": 1.0,
+            "all_complete": true,
+            "stages": {
+              "rigid": {
+                "total": 4,
+                "completed": 4,
+                "unconnected": []
+              },
+              "flex": {
+                "total": 1,
+                "completed": 1,
+                "unconnected": []
+              },
+              "ring": {
+                "total": 1,
+                "completed": 1,
+                "unconnected": []
+              },
+              "side": {
+                "total": 1,
+                "completed": 1,
+                "unconnected": []
+              },
+              "substitution": {
+                "total": 1,
+                "completed": 1,
+                "unconnected": []
+              }
+            },
+            "main_component": [
+              "aromatic:0",
+              "aromatic:1",
+              "aromatic:2",
+              "aromatic:3",
+              "chain:0",
+              "ring:0",
+              "side:0"
+            ],
+            "main_anchor": "aromatic:0",
+            "excluded_units": [],
+            "forward_completion": 1.0,
+            "status": "complete",
+            "placed_unit_count": 7,
+            "unplaced_unit_count": 0,
+            "unplaced_units": {
+              "rigid": [],
+              "flex": [],
+              "ring": [],
+              "side": [],
+              "substitution": []
+            },
+            "unplaced_contracts": [],
+            "audit": {
+              "complete": true,
+              "input_valid": true,
+              "input_errors": [],
+              "rigid_stage_complete": true,
+              "rigid_connections_done": 2,
+              "rigid_connections_total": 2,
+              "stage": "substitution",
+              "placed_unit_count": 7,
+              "unit_count": 7,
+              "placed_node_count": 30,
+              "expected_node_count": 30,
+              "source_node_count": 30,
+              "unassembled_resource_count": 0,
+              "unassembled_resource_ids": [],
+              "idle_aromatic_nodes": [],
+              "idle_aromatic_count": 0,
+              "strict_all_nodes_assembled": true,
+              "completion_mode": "best_legal_partial_allowed",
+              "resource_partition_errors": [],
+              "resource_partition_valid": true,
+              "missing_node_ids": [],
+              "unexpected_node_ids": [],
+              "pending_contract_ids": [],
+              "duplicate_axials": {},
+              "non_hex_edges": [],
+              "su25_center_branch_errors": [],
+              "su25_center_branches_valid": true,
+              "topology_conformation_errors": [],
+              "topology_conformation_valid": true,
+              "port_direction_errors": [],
+              "port_directions_valid": true,
+              "substitution_errors": [],
+              "substitution_valid": true,
+              "flex_endpoint_su_errors": [],
+              "flex_endpoint_su_valid": true,
+              "ring_attachment_errors": [],
+              "ring_attachments_valid": true,
+              "shape_metrics": {
+                "q_span": 7,
+                "r_span": 9,
+                "q_over_r": 0.7777777777777778,
+                "min_q_over_r": 0.8,
+                "max_q_over_r": 2.0,
+                "valid": false,
+                "violation": 0.022222222222222254,
+                "total_span": 16,
+                "x_span": 6.06217782649107,
+                "y_span": 9.5,
+                "width_over_height": 0.6381239817359021,
+                "rotated_90_width_over_height": 1.5670935878004129,
+                "bbox_area": 57.59068935166517,
+                "principal_axis_ratio": 1.6118853754450635,
+                "principal_axis_angle": -71.54014986050262,
+                "linearity": 0.6151143758743035,
+                "covariance_eigenvalues": [
+                  6.979316838282292,
+                  2.686238717273263
+                ],
+                "node_density_cv": 0.7272474743090476,
+                "unit_density_cv": 1.0101525445522108,
+                "largest_void_radius": 1.0,
+                "large_void_fraction": 0.0,
+                "hull_area": 35.50704155516198,
+                "hull_fill": 0.7317073170731707,
+                "normalized_radius_of_gyration": 0.5676135879145118,
+                "layout_energy": 1.5156796786853626,
+                "layout_valid": true
+              },
+              "shape_valid": false,
+              "shape_warnings": [
+                "uneven_unit_density"
+              ],
+              "side_distribution": {
+                "attachment_count": 1,
+                "covered_aromatic_unit_count": 1,
+                "coverage_ratio": 1.0,
+                "max_unit_load": 1,
+                "unit_loads": {
+                  "aromatic:0": 1
+                }
+              },
+              "side_distribution_valid": true,
+              "side_distribution_warnings": [],
+              "actual_geometry_errors": [],
+              "main_anchor": "aromatic:0",
+              "excluded_unit_ids": [],
+              "geometry_valid": true,
+              "identity_valid": true,
+              "identity_errors": [],
+              "topology_valid": true,
+              "topology_errors": [],
+              "contract_errors": [],
+              "label_valid": true,
+              "label_errors": [],
+              "legal": true,
+              "component_count": 1,
+              "aromatic_template_errors": [],
+              "edge_count": 34,
+              "substitution_relaxed_edge_count": 0
+            },
+            "stage_no_actions": true,
+            "diagnostics": {
+              "flex": {
+                "connected": 0,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 17,
+                  "available_entries": 17,
+                  "blocked_entries": 0,
+                  "reasons": {
+                    "available": 17
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 17,
+                  "available_entries": 17,
+                  "blocked_entries": 0,
+                  "reasons": {
+                    "available": 17
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "ring": {
+                "connected": 1,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 17,
+                  "available_entries": 17,
+                  "blocked_entries": 0,
+                  "reasons": {
+                    "available": 17
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 15,
+                  "available_entries": 15,
+                  "blocked_entries": 0,
+                  "reasons": {
+                    "available": 15
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "side": {
+                "connected": 1,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 15,
+                  "available_entries": 15,
+                  "blocked_entries": 0,
+                  "reasons": {
+                    "available": 15
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 14,
+                  "available_entries": 14,
+                  "blocked_entries": 0,
+                  "reasons": {
+                    "available": 14
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "substitution": {
+                "connected": 1,
+                "no_actions": true,
+                "entries_before": null,
+                "entries_after": null,
+                "unconnected": {}
+              }
+            }
+          },
+          "rewards": {
+            "topology_completion": 0.625,
+            "nmr_quality": 0.0,
+            "forward_completion": 1.0,
+            "su13_clearance": 0.49901960784313726,
+            "shape_quality": 0.579896265079562,
+            "total": 0.6954023373206378,
+            "weights": [
+              0.47058823529411764,
+              0.0,
+              0.23529411764705882,
+              0.0564705882352941,
+              0.2376470588235294
+            ],
+            "base_weights": [
+              0.4,
+              0.15,
+              0.2,
+              0.2,
+              0.05
+            ],
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.24,
+              "reference_backbone_nodes": 25,
+              "reference_su13_sites": 23,
+              "remaining_units": 3,
+              "remaining_nodes": 6,
+              "remaining_ports": 5,
+              "stages": {
+                "flex": {
+                  "units": 1,
+                  "nodes": 1,
+                  "ports": 2
+                },
+                "ring": {
+                  "units": 1,
+                  "nodes": 4,
+                  "ports": 2
+                },
+                "side": {
+                  "units": 1,
+                  "nodes": 1,
+                  "ports": 1
+                }
+              }
+            },
+            "shape_metrics": {
+              "quality": 0.579896265079562,
+              "compactness_quality": 0.6227072389138696,
+              "aspect_quality": 0.40865236974233166,
+              "normalized_radius_of_gyration": 0.6058910793203676,
+              "node_count": 25,
+              "component_count": 1
+            },
+            "weighted_terms": {
+              "topology_completion": 0.29411764705882354,
+              "nmr_quality": 0.0,
+              "forward_completion": 0.23529411764705882,
+              "su13_clearance": 0.02817993079584774,
+              "shape_quality": 0.13781064181890768
+            }
+          },
+          "forward_valid": true
+        }
+      ],
+      "fallback": false,
+      "spatial_demand": {
+        "phase": "flex",
+        "pressure": 0.24,
+        "reference_backbone_nodes": 25,
+        "reference_su13_sites": 23,
+        "remaining_units": 3,
+        "remaining_nodes": 6,
+        "remaining_ports": 5,
+        "stages": {
+          "flex": {
+            "units": 1,
+            "nodes": 1,
+            "ports": 2
+          },
+          "ring": {
+            "units": 1,
+            "nodes": 4,
+            "ports": 2
+          },
+          "side": {
+            "units": 1,
+            "nodes": 1,
+            "ports": 1
+          }
+        }
+      }
+    }
+  ]
+}

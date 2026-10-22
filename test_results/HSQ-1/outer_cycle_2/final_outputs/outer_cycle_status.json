@@ -1,0 +1,6509 @@
+{
+  "outer_cycle": 2,
+  "run_id": "20261016-150824-84015",
+  "complete": true,
+  "published": true,
+  "errors": [],
+  "topology_valid": true,
+  "snapshot_ok": true,
+  "state_consistent": true,
+  "phase": "complete",
+  "stop_reason": "stage3_complete",
+  "pre_layer3_r2": 0.9054787158966064,
+  "post_layer3_r2": 0.9851171374320984,
+  "selected_r2": 0.9851171374320984,
+  "selection_r2": 0.9851171374320984,
+  "spectral_contract": "template_sample_mu_layer3",
+  "layer3_committed": true,
+  "eligible_for_best": true,
+  "best_so_far_at_cycle_end": true,
+  "input_spectral_contract": "template_center_mu",
+  "next_cycle_seed_contract": "template_center_mu",
+  "input_source_stage": "layer2",
+  "next_cycle_seed_source_stage": "layer2",
+  "h_constraint_mode": "soft",
+  "terminal_proof": {},
+  "stage3_snapshot": {
+    "generation_id": 2000013,
+    "stage3_complete": true,
+    "rebuild_required": false,
+    "rebuild_failure": {},
+    "state_consistency": {
+      "ok": true,
+      "checked": true,
+      "node_count": 495,
+      "errors": []
+    },
+    "products": [
+      {
+        "product_id": "g2000013:flex_chain:0",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          6
+        ],
+        "fixed_source_node_ids": [
+          6,
+          56,
+          67
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "56": 5,
+          "67": 9,
+          "6": 2
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:0:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 56,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              56,
+              6
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:0:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 6,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              6,
+              67
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-2-9",
+        "node_id_notation": "56-6-67",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:1",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          7
+        ],
+        "fixed_source_node_ids": [
+          7,
+          57,
+          69
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "57": 5,
+          "69": 9,
+          "7": 2
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:1:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 57,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              57,
+              7
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:1:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 7,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              7,
+              69
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-2-9",
+        "node_id_notation": "57-7-69",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:2",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          8
+        ],
+        "fixed_source_node_ids": [
+          8,
+          58,
+          64
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "8": 2,
+          "58": 5,
+          "64": 9
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:2:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 58,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              58,
+              8
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:2:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 8,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              8,
+              64
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-2-9",
+        "node_id_notation": "58-8-64",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:3",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          9
+        ],
+        "fixed_source_node_ids": [
+          9,
+          59,
+          68
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "9": 2,
+          "59": 5,
+          "68": 9
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:3:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 59,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              59,
+              9
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:3:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 9,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              9,
+              68
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-2-9",
+        "node_id_notation": "59-9-68",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:4",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          10
+        ],
+        "fixed_source_node_ids": [
+          10,
+          60,
+          71
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "10": 2,
+          "60": 5,
+          "71": 9
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:4:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 60,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              60,
+              10
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:4:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 10,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              10,
+              71
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-2-9",
+        "node_id_notation": "60-10-71",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:5",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          475
+        ],
+        "fixed_source_node_ids": [
+          20,
+          21,
+          475
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "475": 29,
+          "20": 5,
+          "21": 5
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:5:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 20,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              20,
+              475
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:5:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 475,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              475,
+              21
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "20-475-21",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:6",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          476
+        ],
+        "fixed_source_node_ids": [
+          22,
+          23,
+          476
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "476": 29,
+          "22": 5,
+          "23": 5
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:6:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 22,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              22,
+              476
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:6:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 476,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              476,
+              23
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "22-476-23",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:7",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          477
+        ],
+        "fixed_source_node_ids": [
+          24,
+          25,
+          477
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "24": 5,
+          "25": 5,
+          "477": 29
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:7:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 24,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              24,
+              477
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:7:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 477,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              477,
+              25
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "24-477-25",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:8",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          478
+        ],
+        "fixed_source_node_ids": [
+          26,
+          27,
+          478
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "26": 5,
+          "27": 5,
+          "478": 29
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:8:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 26,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              26,
+              478
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:8:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 478,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              478,
+              27
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "26-478-27",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:9",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          479
+        ],
+        "fixed_source_node_ids": [
+          28,
+          29,
+          479
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "28": 5,
+          "29": 5,
+          "479": 29
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:9:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 28,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              28,
+              479
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:9:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 479,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              479,
+              29
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "28-479-29",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:10",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          480
+        ],
+        "fixed_source_node_ids": [
+          30,
+          31,
+          480
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "480": 29,
+          "30": 5,
+          "31": 5
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:10:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 30,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              30,
+              480
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:10:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 480,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              480,
+              31
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "30-480-31",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:11",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          481
+        ],
+        "fixed_source_node_ids": [
+          32,
+          33,
+          481
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "32": 5,
+          "33": 5,
+          "481": 29
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:11:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 32,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              32,
+              481
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:11:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 481,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              481,
+              33
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "32-481-33",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:12",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          482
+        ],
+        "fixed_source_node_ids": [
+          34,
+          35,
+          482
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "482": 29,
+          "34": 5,
+          "35": 5
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:12:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 34,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              34,
+              482
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:12:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 482,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              482,
+              35
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "34-482-35",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:13",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          483
+        ],
+        "fixed_source_node_ids": [
+          36,
+          37,
+          483
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "483": 29,
+          "36": 5,
+          "37": 5
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:13:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 36,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              36,
+              483
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:13:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 483,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              483,
+              37
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "36-483-37",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:14",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          484
+        ],
+        "fixed_source_node_ids": [
+          38,
+          39,
+          484
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "484": 29,
+          "38": 5,
+          "39": 5
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:14:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 38,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              38,
+              484
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:14:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 484,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              484,
+              39
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "38-484-39",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:15",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          485
+        ],
+        "fixed_source_node_ids": [
+          40,
+          41,
+          485
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "40": 5,
+          "41": 5,
+          "485": 29
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:15:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 40,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              40,
+              485
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:15:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 485,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              485,
+              41
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "40-485-41",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:16",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          486
+        ],
+        "fixed_source_node_ids": [
+          42,
+          43,
+          486
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "42": 5,
+          "43": 5,
+          "486": 29
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:16:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 42,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              42,
+              486
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:16:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 486,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              486,
+              43
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "42-486-43",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:17",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          487
+        ],
+        "fixed_source_node_ids": [
+          44,
+          45,
+          487
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "44": 5,
+          "45": 5,
+          "487": 29
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:17:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 44,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              44,
+              487
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:17:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 487,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              487,
+              45
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "44-487-45",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:18",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          488
+        ],
+        "fixed_source_node_ids": [
+          46,
+          47,
+          488
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "488": 29,
+          "46": 5,
+          "47": 5
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:18:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 46,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              46,
+              488
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:18:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 488,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              488,
+              47
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "46-488-47",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:19",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          489
+        ],
+        "fixed_source_node_ids": [
+          48,
+          49,
+          489
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "48": 5,
+          "49": 5,
+          "489": 29
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:19:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 48,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              48,
+              489
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:19:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 489,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              489,
+              49
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "48-489-49",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:20",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          490
+        ],
+        "fixed_source_node_ids": [
+          50,
+          51,
+          490
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "490": 29,
+          "50": 5,
+          "51": 5
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:20:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 50,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              50,
+              490
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:20:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 490,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              490,
+              51
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "50-490-51",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:21",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          491
+        ],
+        "fixed_source_node_ids": [
+          52,
+          53,
+          491
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "491": 29,
+          "52": 5,
+          "53": 5
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:21:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 52,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              52,
+              491
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:21:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 491,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              491,
+              53
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "52-491-53",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:22",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          492
+        ],
+        "fixed_source_node_ids": [
+          54,
+          55,
+          492
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "492": 29,
+          "54": 5,
+          "55": 5
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:22:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 54,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              54,
+              492
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:22:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 492,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              492,
+              55
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-29-5",
+        "node_id_notation": "54-492-55",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:flex_chain:23",
+        "generation_id": 2000013,
+        "product_type": "flex_chain",
+        "phase": "external_flex_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          494
+        ],
+        "fixed_source_node_ids": [
+          62,
+          63,
+          494
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "494": 31,
+          "62": 7,
+          "63": 7
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:23:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 62,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              62,
+              494
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:23:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 494,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              494,
+              63
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "7-31-7",
+        "node_id_notation": "62-494-63",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_branch_closure"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:24",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          17,
+          323
+        ],
+        "fixed_source_node_ids": [
+          17,
+          160,
+          303,
+          323,
+          328,
+          353
+        ],
+        "claimed_resource_ids_by_su": {
+          "24": [
+            190,
+            209,
+            280,
+            284
+          ],
+          "23": [
+            387,
+            388,
+            389,
+            390
+          ],
+          "22": [
+            133,
+            134
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "160": 11,
+          "353": 22,
+          "323": 14,
+          "387": 23,
+          "388": 23,
+          "389": 23,
+          "390": 23,
+          "328": 15,
+          "133": 22,
+          "134": 22,
+          "303": 11,
+          "17": 3,
+          "209": 24,
+          "280": 24,
+          "284": 24,
+          "190": 24
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "11-24(-23-22)-24-[-23-14(-3-22)-15-23-]-24-24(-23-22)-11",
+        "node_id_notation": "303-280(-387-133)-190-[-389-323(-17-353)-328-390-]-209-284(-388-134)-160",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "fused",
+          "candidate_signature": "fused:303,280,190,209,284,160:190,389,323,328,390,209",
+          "cycles": [
+            [
+              303,
+              280,
+              190,
+              209,
+              284,
+              160
+            ],
+            [
+              190,
+              389,
+              323,
+              328,
+              390,
+              209
+            ]
+          ],
+          "like24_node_ids": [
+            190,
+            209,
+            280,
+            284,
+            323,
+            328
+          ],
+          "node_profiles_by_id": {
+            "280": "A",
+            "190": "C",
+            "323": "14_SUBSTITUTE",
+            "328": "14_SUBSTITUTE",
+            "209": "C",
+            "284": "A"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 280,
+              "node_ids": [
+                387,
+                133
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 323,
+              "node_ids": [
+                17,
+                353
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 284,
+              "node_ids": [
+                388,
+                134
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "24": [
+              190,
+              209,
+              280,
+              284
+            ],
+            "23": [
+              387,
+              388,
+              389,
+              390
+            ],
+            "22": [
+              133,
+              134
+            ]
+          },
+          "support_node_ids": [
+            160,
+            303
+          ],
+          "recyclable_resource_ids_by_su": {
+            "22": [
+              133,
+              134,
+              353
+            ],
+            "11": [
+              160,
+              303
+            ],
+            "24": [
+              190,
+              209,
+              280,
+              284
+            ],
+            "23": [
+              387,
+              388,
+              389,
+              390
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:fused_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:25",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          11,
+          351
+        ],
+        "fixed_source_node_ids": [
+          11,
+          19,
+          73,
+          351,
+          467,
+          474
+        ],
+        "claimed_resource_ids_by_su": {
+          "24": [
+            215
+          ],
+          "23": [
+            391
+          ],
+          "22": [
+            354
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "354": 22,
+          "391": 23,
+          "73": 9,
+          "11": 3,
+          "19": 5,
+          "467": 28,
+          "215": 24,
+          "474": 29,
+          "351": 19
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "9-3-24(-23-22)-double19d3(-28)-29-5",
+        "node_id_notation": "73-11-215(-391-354)-351(-467)-474-19",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:73,11,215,351,474,19",
+          "cycles": [
+            [
+              73,
+              11,
+              215,
+              351,
+              474,
+              19
+            ]
+          ],
+          "like24_node_ids": [
+            215,
+            351
+          ],
+          "node_profiles_by_id": {
+            "215": "C",
+            "351": "CD"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 215,
+              "node_ids": [
+                391,
+                354
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 351,
+              "node_ids": [
+                467
+              ],
+              "kind": "actual_fixed_connection_contract",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "24": [
+              215
+            ],
+            "23": [
+              391
+            ],
+            "22": [
+              354
+            ]
+          },
+          "support_node_ids": [],
+          "recyclable_resource_ids_by_su": {
+            "24": [
+              215
+            ],
+            "22": [
+              354
+            ],
+            "23": [
+              391
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:26",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          12,
+          13
+        ],
+        "fixed_source_node_ids": [
+          12,
+          13,
+          66,
+          72
+        ],
+        "claimed_resource_ids_by_su": {
+          "24": [
+            302,
+            455
+          ],
+          "23": [
+            392,
+            393
+          ],
+          "22": [
+            356,
+            358
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "66": 9,
+          "356": 22,
+          "358": 22,
+          "455": 24,
+          "72": 9,
+          "392": 23,
+          "393": 23,
+          "12": 3,
+          "13": 3,
+          "302": 24
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "9-3-24(-23-22)-24(-23-22)-3-9",
+        "node_id_notation": "66-12-302(-392-356)-455(-393-358)-13-72",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:66,12,302,455,13,72",
+          "cycles": [
+            [
+              66,
+              12,
+              302,
+              455,
+              13,
+              72
+            ]
+          ],
+          "like24_node_ids": [
+            302,
+            455
+          ],
+          "node_profiles_by_id": {
+            "302": "C",
+            "455": "C"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 302,
+              "node_ids": [
+                392,
+                356
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 455,
+              "node_ids": [
+                393,
+                358
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "24": [
+              302,
+              455
+            ],
+            "23": [
+              392,
+              393
+            ],
+            "22": [
+              356,
+              358
+            ]
+          },
+          "support_node_ids": [],
+          "recyclable_resource_ids_by_su": {
+            "24": [
+              302,
+              455
+            ],
+            "22": [
+              356,
+              358
+            ],
+            "23": [
+              392,
+              393
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:27",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          15
+        ],
+        "fixed_source_node_ids": [
+          15,
+          74,
+          110
+        ],
+        "claimed_resource_ids_by_su": {
+          "24": [
+            444,
+            457
+          ],
+          "23": [
+            394,
+            395,
+            396
+          ],
+          "22": [
+            360,
+            361
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "360": 22,
+          "457": 24,
+          "74": 9,
+          "394": 23,
+          "395": 23,
+          "396": 23,
+          "110": 11,
+          "15": 3,
+          "361": 22,
+          "444": 24
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "11-24(-23-22)-23-24(-23-22)-3-9",
+        "node_id_notation": "110-444(-394-360)-396-457(-395-361)-15-74",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:110,444,396,457,15,74",
+          "cycles": [
+            [
+              110,
+              444,
+              396,
+              457,
+              15,
+              74
+            ]
+          ],
+          "like24_node_ids": [
+            444,
+            457
+          ],
+          "node_profiles_by_id": {
+            "444": "A",
+            "457": "C"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 444,
+              "node_ids": [
+                394,
+                360
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 457,
+              "node_ids": [
+                395,
+                361
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "24": [
+              444,
+              457
+            ],
+            "23": [
+              394,
+              395,
+              396
+            ],
+            "22": [
+              360,
+              361
+            ]
+          },
+          "support_node_ids": [
+            110
+          ],
+          "recyclable_resource_ids_by_su": {
+            "11": [
+              110
+            ],
+            "22": [
+              360,
+              361
+            ],
+            "23": [
+              394,
+              395,
+              396
+            ],
+            "24": [
+              444,
+              457
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:28",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          324
+        ],
+        "fixed_source_node_ids": [
+          111,
+          112,
+          324,
+          325
+        ],
+        "claimed_resource_ids_by_su": {
+          "24": [
+            445,
+            446
+          ],
+          "23": [
+            397,
+            398
+          ],
+          "22": [
+            363,
+            365
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "324": 15,
+          "325": 15,
+          "363": 22,
+          "397": 23,
+          "398": 23,
+          "111": 11,
+          "112": 11,
+          "365": 22,
+          "445": 24,
+          "446": 24
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "11-24(-23-22)-15-15-24(-23-22)-11",
+        "node_id_notation": "111-445(-397-363)-324-325-446(-398-365)-112",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:111,445,324,325,446,112",
+          "cycles": [
+            [
+              111,
+              445,
+              324,
+              325,
+              446,
+              112
+            ]
+          ],
+          "like24_node_ids": [
+            445,
+            446
+          ],
+          "node_profiles_by_id": {
+            "445": "A",
+            "446": "A"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 445,
+              "node_ids": [
+                397,
+                363
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 446,
+              "node_ids": [
+                398,
+                365
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "24": [
+              445,
+              446
+            ],
+            "23": [
+              397,
+              398
+            ],
+            "22": [
+              363,
+              365
+            ]
+          },
+          "support_node_ids": [
+            111,
+            112
+          ],
+          "recyclable_resource_ids_by_su": {
+            "11": [
+              111,
+              112
+            ],
+            "22": [
+              363,
+              365
+            ],
+            "23": [
+              397,
+              398
+            ],
+            "24": [
+              445,
+              446
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:29",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [],
+        "fixed_source_node_ids": [
+          113,
+          114
+        ],
+        "claimed_resource_ids_by_su": {
+          "24": [
+            447,
+            448
+          ],
+          "23": [
+            399,
+            400,
+            401,
+            402
+          ],
+          "22": [
+            366,
+            368
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "448": 24,
+          "366": 22,
+          "399": 23,
+          "400": 23,
+          "113": 11,
+          "114": 11,
+          "401": 23,
+          "402": 23,
+          "368": 22,
+          "447": 24
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "11-24(-23-22)-23-23-24(-23-22)-11",
+        "node_id_notation": "113-447(-399-366)-401-402-448(-400-368)-114",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:113,447,401,402,448,114",
+          "cycles": [
+            [
+              113,
+              447,
+              401,
+              402,
+              448,
+              114
+            ]
+          ],
+          "like24_node_ids": [
+            447,
+            448
+          ],
+          "node_profiles_by_id": {
+            "447": "A",
+            "448": "A"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 447,
+              "node_ids": [
+                399,
+                366
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 448,
+              "node_ids": [
+                400,
+                368
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "24": [
+              447,
+              448
+            ],
+            "23": [
+              399,
+              400,
+              401,
+              402
+            ],
+            "22": [
+              366,
+              368
+            ]
+          },
+          "support_node_ids": [
+            113,
+            114
+          ],
+          "recyclable_resource_ids_by_su": {
+            "11": [
+              113,
+              114
+            ],
+            "22": [
+              366,
+              368
+            ],
+            "23": [
+              399,
+              400,
+              401,
+              402
+            ],
+            "24": [
+              447,
+              448
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:30",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [],
+        "fixed_source_node_ids": [
+          115,
+          116
+        ],
+        "claimed_resource_ids_by_su": {
+          "24": [
+            449,
+            450
+          ],
+          "23": [
+            403,
+            404,
+            405,
+            406
+          ],
+          "22": [
+            370,
+            372
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "449": 24,
+          "450": 24,
+          "370": 22,
+          "115": 11,
+          "116": 11,
+          "403": 23,
+          "404": 23,
+          "405": 23,
+          "406": 23,
+          "372": 22
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "11-24(-23-22)-23-23-24(-23-22)-11",
+        "node_id_notation": "115-449(-403-370)-405-406-450(-404-372)-116",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:115,449,405,406,450,116",
+          "cycles": [
+            [
+              115,
+              449,
+              405,
+              406,
+              450,
+              116
+            ]
+          ],
+          "like24_node_ids": [
+            449,
+            450
+          ],
+          "node_profiles_by_id": {
+            "449": "A",
+            "450": "A"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 449,
+              "node_ids": [
+                403,
+                370
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 450,
+              "node_ids": [
+                404,
+                372
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "24": [
+              449,
+              450
+            ],
+            "23": [
+              403,
+              404,
+              405,
+              406
+            ],
+            "22": [
+              370,
+              372
+            ]
+          },
+          "support_node_ids": [
+            115,
+            116
+          ],
+          "recyclable_resource_ids_by_su": {
+            "11": [
+              115,
+              116
+            ],
+            "22": [
+              370,
+              372
+            ],
+            "23": [
+              403,
+              404,
+              405,
+              406
+            ],
+            "24": [
+              449,
+              450
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:31",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [],
+        "fixed_source_node_ids": [
+          117,
+          118
+        ],
+        "claimed_resource_ids_by_su": {
+          "24": [
+            451,
+            453
+          ],
+          "23": [
+            407,
+            408,
+            409,
+            410
+          ],
+          "22": [
+            373,
+            375
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "451": 24,
+          "453": 24,
+          "117": 11,
+          "118": 11,
+          "407": 23,
+          "408": 23,
+          "409": 23,
+          "410": 23,
+          "373": 22,
+          "375": 22
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "11-24(-23-22)-23-23-24(-23-22)-11",
+        "node_id_notation": "117-451(-407-373)-409-410-453(-408-375)-118",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:117,451,409,410,453,118",
+          "cycles": [
+            [
+              117,
+              451,
+              409,
+              410,
+              453,
+              118
+            ]
+          ],
+          "like24_node_ids": [
+            451,
+            453
+          ],
+          "node_profiles_by_id": {
+            "451": "A",
+            "453": "A"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 451,
+              "node_ids": [
+                407,
+                373
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 453,
+              "node_ids": [
+                408,
+                375
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "24": [
+              451,
+              453
+            ],
+            "23": [
+              407,
+              408,
+              409,
+              410
+            ],
+            "22": [
+              373,
+              375
+            ]
+          },
+          "support_node_ids": [
+            117,
+            118
+          ],
+          "recyclable_resource_ids_by_su": {
+            "11": [
+              117,
+              118
+            ],
+            "22": [
+              373,
+              375
+            ],
+            "23": [
+              407,
+              408,
+              409,
+              410
+            ],
+            "24": [
+              451,
+              453
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:32",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [],
+        "fixed_source_node_ids": [
+          119,
+          124
+        ],
+        "claimed_resource_ids_by_su": {
+          "24": [
+            454,
+            456
+          ],
+          "23": [
+            411,
+            412,
+            413,
+            414
+          ],
+          "22": [
+            376,
+            378
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "454": 24,
+          "456": 24,
+          "119": 11,
+          "376": 22,
+          "412": 23,
+          "378": 22,
+          "411": 23,
+          "124": 11,
+          "413": 23,
+          "414": 23
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "11-24(-23-22)-23-23-24(-23-22)-11",
+        "node_id_notation": "119-454(-411-376)-413-414-456(-412-378)-124",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:119,454,413,414,456,124",
+          "cycles": [
+            [
+              119,
+              454,
+              413,
+              414,
+              456,
+              124
+            ]
+          ],
+          "like24_node_ids": [
+            454,
+            456
+          ],
+          "node_profiles_by_id": {
+            "454": "A",
+            "456": "A"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 454,
+              "node_ids": [
+                411,
+                376
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 456,
+              "node_ids": [
+                412,
+                378
+              ],
+              "kind": "H",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "24": [
+              454,
+              456
+            ],
+            "23": [
+              411,
+              412,
+              413,
+              414
+            ],
+            "22": [
+              376,
+              378
+            ]
+          },
+          "support_node_ids": [
+            119,
+            124
+          ],
+          "recyclable_resource_ids_by_su": {
+            "11": [
+              119,
+              124
+            ],
+            "22": [
+              376,
+              378
+            ],
+            "23": [
+              411,
+              412,
+              413,
+              414
+            ],
+            "24": [
+              454,
+              456
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:33",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [],
+        "fixed_source_node_ids": [
+          355,
+          359
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            100,
+            101
+          ],
+          "23": [
+            415,
+            416
+          ],
+          "24": [
+            286,
+            300
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "416": 23,
+          "355": 22,
+          "100": 11,
+          "101": 11,
+          "359": 22,
+          "300": 24,
+          "286": 24,
+          "415": 23
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "11-23-24(-22)-24(-22)-23-11",
+        "node_id_notation": "100-415-286(-355)-300(-359)-416-101",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:100,415,286,300,416,101",
+          "cycles": [
+            [
+              100,
+              415,
+              286,
+              300,
+              416,
+              101
+            ]
+          ],
+          "like24_node_ids": [
+            286,
+            300
+          ],
+          "node_profiles_by_id": {
+            "286": "D",
+            "300": "D"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 286,
+              "node_ids": [
+                355
+              ],
+              "kind": "FIXED22",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 300,
+              "node_ids": [
+                359
+              ],
+              "kind": "FIXED22",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "11": [
+              100,
+              101
+            ],
+            "23": [
+              415,
+              416
+            ],
+            "24": [
+              286,
+              300
+            ]
+          },
+          "support_node_ids": [
+            355,
+            359
+          ],
+          "recyclable_resource_ids_by_su": {
+            "11": [
+              100,
+              101
+            ],
+            "24": [
+              286,
+              300
+            ],
+            "22": [
+              355,
+              359
+            ],
+            "23": [
+              415,
+              416
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:34",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [],
+        "fixed_source_node_ids": [
+          362,
+          367
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            102,
+            103
+          ],
+          "23": [
+            417,
+            418
+          ],
+          "24": [
+            301,
+            381
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "417": 23,
+          "418": 23,
+          "102": 11,
+          "103": 11,
+          "362": 22,
+          "301": 24,
+          "367": 22,
+          "381": 24
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "11-23-24(-22)-24(-22)-23-11",
+        "node_id_notation": "102-417-301(-362)-381(-367)-418-103",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:102,417,301,381,418,103",
+          "cycles": [
+            [
+              102,
+              417,
+              301,
+              381,
+              418,
+              103
+            ]
+          ],
+          "like24_node_ids": [
+            301,
+            381
+          ],
+          "node_profiles_by_id": {
+            "301": "D",
+            "381": "D"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 301,
+              "node_ids": [
+                362
+              ],
+              "kind": "FIXED22",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 381,
+              "node_ids": [
+                367
+              ],
+              "kind": "FIXED22",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "11": [
+              102,
+              103
+            ],
+            "23": [
+              417,
+              418
+            ],
+            "24": [
+              301,
+              381
+            ]
+          },
+          "support_node_ids": [
+            362,
+            367
+          ],
+          "recyclable_resource_ids_by_su": {
+            "11": [
+              102,
+              103
+            ],
+            "24": [
+              301,
+              381
+            ],
+            "22": [
+              362,
+              367
+            ],
+            "23": [
+              417,
+              418
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:35",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [],
+        "fixed_source_node_ids": [
+          371,
+          374
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            104,
+            105
+          ],
+          "23": [
+            419,
+            420
+          ],
+          "24": [
+            386,
+            440
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "386": 24,
+          "419": 23,
+          "420": 23,
+          "104": 11,
+          "105": 11,
+          "371": 22,
+          "374": 22,
+          "440": 24
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "11-23-24(-22)-24(-22)-23-11",
+        "node_id_notation": "104-419-386(-371)-440(-374)-420-105",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:104,419,386,440,420,105",
+          "cycles": [
+            [
+              104,
+              419,
+              386,
+              440,
+              420,
+              105
+            ]
+          ],
+          "like24_node_ids": [
+            386,
+            440
+          ],
+          "node_profiles_by_id": {
+            "386": "D",
+            "440": "D"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 386,
+              "node_ids": [
+                371
+              ],
+              "kind": "FIXED22",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 440,
+              "node_ids": [
+                374
+              ],
+              "kind": "FIXED22",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "11": [
+              104,
+              105
+            ],
+            "23": [
+              419,
+              420
+            ],
+            "24": [
+              386,
+              440
+            ]
+          },
+          "support_node_ids": [
+            371,
+            374
+          ],
+          "recyclable_resource_ids_by_su": {
+            "11": [
+              104,
+              105
+            ],
+            "22": [
+              371,
+              374
+            ],
+            "24": [
+              386,
+              440
+            ],
+            "23": [
+              419,
+              420
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:aliphatic_ring:36",
+        "generation_id": 2000013,
+        "product_type": "aliphatic_ring",
+        "phase": "external_fatty_ring_closure",
+        "provisional": false,
+        "source_fragment_ids": [],
+        "fixed_source_node_ids": [
+          377,
+          383
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            106,
+            107
+          ],
+          "23": [
+            421,
+            422
+          ],
+          "24": [
+            442,
+            443
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "421": 23,
+          "422": 23,
+          "106": 11,
+          "107": 11,
+          "377": 22,
+          "442": 24,
+          "443": 24,
+          "383": 22
+        },
+        "mainline_slots": [],
+        "branch_slots": [],
+        "topology_notation": "11-23-24(-22)-24(-22)-23-11",
+        "node_id_notation": "106-421-442(-377)-443(-383)-422-107",
+        "ring_audit": {
+          "generation_id": 2000013,
+          "ring_kind": "side",
+          "candidate_signature": "side:106,421,442,443,422,107",
+          "cycles": [
+            [
+              106,
+              421,
+              442,
+              443,
+              422,
+              107
+            ]
+          ],
+          "like24_node_ids": [
+            442,
+            443
+          ],
+          "node_profiles_by_id": {
+            "442": "D",
+            "443": "D"
+          },
+          "external_attachments": [],
+          "branch_paths": [
+            {
+              "anchor_node_id": 442,
+              "node_ids": [
+                377
+              ],
+              "kind": "FIXED22",
+              "state": "FILLED"
+            },
+            {
+              "anchor_node_id": 443,
+              "node_ids": [
+                383
+              ],
+              "kind": "FIXED22",
+              "state": "FILLED"
+            }
+          ],
+          "claimed_resource_ids_by_su": {
+            "11": [
+              106,
+              107
+            ],
+            "23": [
+              421,
+              422
+            ],
+            "24": [
+              442,
+              443
+            ]
+          },
+          "support_node_ids": [
+            377,
+            383
+          ],
+          "recyclable_resource_ids_by_su": {
+            "11": [
+              106,
+              107
+            ],
+            "22": [
+              377,
+              383
+            ],
+            "23": [
+              421,
+              422
+            ],
+            "24": [
+              442,
+              443
+            ]
+          },
+          "complete": true,
+          "audit_reason": ""
+        },
+        "closed": true,
+        "reason": "ring:side_template"
+      },
+      {
+        "product_id": "g2000013:side_chain:37",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          5
+        ],
+        "fixed_source_node_ids": [
+          5,
+          65
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "65": 9,
+          "5": 1
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:37:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 65,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              65,
+              5
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "9-1",
+        "node_id_notation": "65-5",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_side_closure"
+      },
+      {
+        "product_id": "g2000013:side_chain:38",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          14
+        ],
+        "fixed_source_node_ids": [
+          14,
+          75,
+          364
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "75": 9,
+          "364": 22,
+          "14": 3
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:38:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 75,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              75,
+              14
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:38:mainline:1",
+            "kind": "OPEN_CONNECTION",
+            "anchor_node_id": 14,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [],
+            "connection_semantics": "open",
+            "state": "OPEN"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "9-3-22",
+        "node_id_notation": "75-14-364",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_side_closure"
+      },
+      {
+        "product_id": "g2000013:side_chain:39",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          16
+        ],
+        "fixed_source_node_ids": [
+          16,
+          70,
+          369
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "16": 3,
+          "369": 22,
+          "70": 9
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:39:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 70,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              70,
+              16
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:39:mainline:1",
+            "kind": "OPEN_CONNECTION",
+            "anchor_node_id": 16,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [],
+            "connection_semantics": "open",
+            "state": "OPEN"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "9-3-22",
+        "node_id_notation": "70-16-369",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_side_closure"
+      },
+      {
+        "product_id": "g2000013:side_chain:40",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          461
+        ],
+        "fixed_source_node_ids": [
+          61,
+          352,
+          461
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "352": 20,
+          "461": 27,
+          "61": 6
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:40:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 61,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              61,
+              461
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:40:mainline:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 461,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              461,
+              352
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "6-27-20d1",
+        "node_id_notation": "61-461-352",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_side_closure"
+      },
+      {
+        "product_id": "g2000013:side_chain:41",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          468
+        ],
+        "fixed_source_node_ids": [
+          18,
+          468
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "18": 5,
+          "468": 28
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:41:mainline:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 18,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              18,
+              468
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "5-28",
+        "node_id_notation": "18-468",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "explicit_side_closure"
+      },
+      {
+        "product_id": "g2000013:side_chain:42",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          0,
+          326,
+          459
+        ],
+        "fixed_source_node_ids": [
+          0,
+          126,
+          135,
+          326,
+          327,
+          357,
+          459
+        ],
+        "claimed_resource_ids_by_su": {},
+        "expected_su_type_by_node_id": {
+          "0": 1,
+          "357": 22,
+          "326": 15,
+          "327": 15,
+          "135": 22,
+          "459": 25,
+          "126": 11
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:42:mainline:0",
+            "kind": "OPEN_CONNECTION",
+            "anchor_node_id": 0,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [],
+            "connection_semantics": "open",
+            "state": "OPEN"
+          },
+          {
+            "slot_id": "product:42:mainline:1",
+            "kind": "OPEN_CONNECTION",
+            "anchor_node_id": 459,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [],
+            "connection_semantics": "open",
+            "state": "OPEN"
+          }
+        ],
+        "branch_slots": [
+          {
+            "slot_id": "product:42:branch:0:0",
+            "kind": "OPEN_CONNECTION",
+            "anchor_node_id": 459,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [],
+            "connection_semantics": "open",
+            "state": "OPEN"
+          },
+          {
+            "slot_id": "product:42:branch:0:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 327,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              327,
+              326
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:42:branch:0:2",
+            "kind": "OPEN_CONNECTION",
+            "anchor_node_id": 326,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [],
+            "connection_semantics": "open",
+            "state": "OPEN"
+          },
+          {
+            "slot_id": "product:42:branch:1:0",
+            "kind": "OPEN_CONNECTION",
+            "anchor_node_id": 459,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [],
+            "connection_semantics": "open",
+            "state": "OPEN"
+          }
+        ],
+        "topology_notation": "1-25(-15-15-22)(-22)-11",
+        "node_id_notation": "0-459(-327-326-357)(-135)-126",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "B_plus_E_or_G"
+      },
+      {
+        "product_id": "g2000013:side_chain:43",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          333,
+          458
+        ],
+        "fixed_source_node_ids": [
+          329,
+          333,
+          458
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            108
+          ],
+          "22": [
+            380,
+            384
+          ],
+          "23": [
+            423,
+            424
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "384": 22,
+          "423": 23,
+          "424": 23,
+          "329": 15,
+          "458": 25,
+          "108": 11,
+          "333": 16,
+          "380": 22
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:43:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 108,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              108,
+              423
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:43:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 423,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              423
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:43:mainline:2",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 458,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              424
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:43:mainline:3",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 424,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              384,
+              424
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [
+          {
+            "slot_id": "product:43:branch:0:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 458,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              380
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:43:branch:1:0",
+            "kind": "OPEN_CONNECTION",
+            "anchor_node_id": 458,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [],
+            "connection_semantics": "open",
+            "state": "OPEN"
+          },
+          {
+            "slot_id": "product:43:branch:1:1",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 329,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              329,
+              333
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "topology_notation": "11-23-25(-22)(-15-16)-23-22",
+        "node_id_notation": "108-423-458(-380)(-329-333)-424-384",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1+F2"
+      },
+      {
+        "product_id": "g2000013:side_chain:44",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          1
+        ],
+        "fixed_source_node_ids": [
+          1
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            109
+          ],
+          "23": [
+            425
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "1": 1,
+          "425": 23,
+          "109": 11
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:44:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 109,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              109,
+              425
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:44:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 425,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              425
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "11-23-1",
+        "node_id_notation": "109-425-1",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:45",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          2
+        ],
+        "fixed_source_node_ids": [
+          2
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            120
+          ],
+          "23": [
+            426
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "120": 11,
+          "426": 23,
+          "2": 1
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:45:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 120,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              120,
+              426
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:45:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 426,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              426
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "11-23-1",
+        "node_id_notation": "120-426-2",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:46",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          3
+        ],
+        "fixed_source_node_ids": [
+          3
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            121
+          ],
+          "23": [
+            427
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "121": 11,
+          "3": 1,
+          "427": 23
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:46:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 121,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              121,
+              427
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:46:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 427,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              427
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "11-23-1",
+        "node_id_notation": "121-427-3",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:47",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          4
+        ],
+        "fixed_source_node_ids": [
+          4
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            123
+          ],
+          "23": [
+            428
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "428": 23,
+          "123": 11,
+          "4": 1
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:47:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 123,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              123,
+              428
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:47:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 428,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              428
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "11-23-1",
+        "node_id_notation": "123-428-4",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:48",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          334
+        ],
+        "fixed_source_node_ids": [
+          330,
+          334
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            125
+          ],
+          "23": [
+            429
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "330": 15,
+          "125": 11,
+          "334": 16,
+          "429": 23
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:48:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 125,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              125,
+              429
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:48:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 429,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              429
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:48:mainline:2",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 330,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              330,
+              334
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "11-23-15-16",
+        "node_id_notation": "125-429-330-334",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:49",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          335
+        ],
+        "fixed_source_node_ids": [
+          331,
+          335
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            127
+          ],
+          "23": [
+            430
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "331": 15,
+          "127": 11,
+          "430": 23,
+          "335": 16
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:49:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 127,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              127,
+              430
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:49:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 430,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              430
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:49:mainline:2",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 331,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              331,
+              335
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "11-23-15-16",
+        "node_id_notation": "127-430-331-335",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:50",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          336
+        ],
+        "fixed_source_node_ids": [
+          332,
+          336
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            128
+          ],
+          "23": [
+            431
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "336": 16,
+          "332": 15,
+          "128": 11,
+          "431": 23
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:50:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 128,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              128,
+              431
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:50:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 431,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              431
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:50:mainline:2",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 332,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              332,
+              336
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "11-23-15-16",
+        "node_id_notation": "128-431-332-336",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:51",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          339
+        ],
+        "fixed_source_node_ids": [
+          337,
+          339
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            129
+          ],
+          "23": [
+            432
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "432": 23,
+          "337": 17,
+          "129": 11,
+          "339": 18
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:51:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 129,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              129,
+              432
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:51:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 432,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              432
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:51:mainline:2",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 337,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              337,
+              339
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "11-23-17-18",
+        "node_id_notation": "129-432-337-339",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:52",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          340
+        ],
+        "fixed_source_node_ids": [
+          338,
+          340
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            130
+          ],
+          "23": [
+            433
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "433": 23,
+          "338": 17,
+          "340": 18,
+          "130": 11
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:52:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 130,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              130,
+              433
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:52:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 433,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              433
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:52:mainline:2",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 338,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              338,
+              340
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [],
+        "topology_notation": "11-23-17-18",
+        "node_id_notation": "130-433-338-340",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:53",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          346
+        ],
+        "fixed_source_node_ids": [
+          341,
+          346,
+          462,
+          469
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            131
+          ],
+          "23": [
+            434
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "131": 11,
+          "462": 28,
+          "434": 23,
+          "469": 29,
+          "341": 19,
+          "346": 19
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:53:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 131,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              131,
+              434
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:53:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 434,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              434
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:53:mainline:2",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 346,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              346,
+              469
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:53:mainline:3",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 469,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              469,
+              341
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [
+          {
+            "slot_id": "product:53:branch:0:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 346,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              346,
+              462
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "topology_notation": "11-23-double19d3(-28)-29-19d1",
+        "node_id_notation": "131-434-346(-462)-469-341",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:54",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          347
+        ],
+        "fixed_source_node_ids": [
+          342,
+          347,
+          463,
+          470
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            132
+          ],
+          "23": [
+            435
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "132": 11,
+          "463": 28,
+          "435": 23,
+          "470": 29,
+          "342": 19,
+          "347": 19
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:54:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 132,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              132,
+              435
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:54:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 435,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              435
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:54:mainline:2",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 347,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              347,
+              470
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:54:mainline:3",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 470,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              470,
+              342
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [
+          {
+            "slot_id": "product:54:branch:0:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 347,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              347,
+              463
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "topology_notation": "11-23-double19d3(-28)-29-19d1",
+        "node_id_notation": "132-435-347(-463)-470-342",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:55",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          348
+        ],
+        "fixed_source_node_ids": [
+          343,
+          348,
+          464,
+          471
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            136
+          ],
+          "23": [
+            436
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "136": 11,
+          "464": 28,
+          "436": 23,
+          "471": 29,
+          "348": 19,
+          "343": 19
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:55:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 136,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              136,
+              436
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:55:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 436,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              436
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:55:mainline:2",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 348,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              348,
+              471
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:55:mainline:3",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 471,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              471,
+              343
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [
+          {
+            "slot_id": "product:55:branch:0:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 348,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              348,
+              464
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "topology_notation": "11-23-double19d3(-28)-29-19d1",
+        "node_id_notation": "136-436-348(-464)-471-343",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:56",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          349
+        ],
+        "fixed_source_node_ids": [
+          344,
+          349,
+          465,
+          472
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            171
+          ],
+          "23": [
+            437
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "472": 29,
+          "171": 11,
+          "465": 28,
+          "437": 23,
+          "344": 19,
+          "349": 19
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:56:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 171,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              171,
+              437
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:56:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 437,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              437
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:56:mainline:2",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 349,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              349,
+              472
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:56:mainline:3",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 472,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              472,
+              344
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [
+          {
+            "slot_id": "product:56:branch:0:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 349,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              349,
+              465
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "topology_notation": "11-23-double19d3(-28)-29-19d1",
+        "node_id_notation": "171-437-349(-465)-472-344",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      },
+      {
+        "product_id": "g2000013:side_chain:57",
+        "generation_id": 2000013,
+        "product_type": "side_chain",
+        "phase": "external_side_chain_closure",
+        "provisional": false,
+        "source_fragment_ids": [
+          350
+        ],
+        "fixed_source_node_ids": [
+          345,
+          350,
+          466,
+          473
+        ],
+        "claimed_resource_ids_by_su": {
+          "11": [
+            274
+          ],
+          "23": [
+            438
+          ]
+        },
+        "expected_su_type_by_node_id": {
+          "473": 29,
+          "466": 28,
+          "274": 11,
+          "438": 23,
+          "345": 19,
+          "350": 19
+        },
+        "mainline_slots": [
+          {
+            "slot_id": "product:57:mainline:0",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 274,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              274,
+              438
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:57:mainline:1",
+            "kind": "SYMBOLIC_CONNECTION",
+            "anchor_node_id": 438,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [],
+            "assigned_resource_ids": [
+              438
+            ],
+            "connection_semantics": "symbolic",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:57:mainline:2",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 350,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              350,
+              473
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          },
+          {
+            "slot_id": "product:57:mainline:3",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 473,
+            "anchor_role": "mainline",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              473,
+              345
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "branch_slots": [
+          {
+            "slot_id": "product:57:branch:0:0",
+            "kind": "FIXED_CONNECTION",
+            "anchor_node_id": 350,
+            "anchor_role": "branch",
+            "required_su_sequence": [],
+            "existing_node_ids": [
+              350,
+              466
+            ],
+            "assigned_resource_ids": [],
+            "connection_semantics": "fixed",
+            "state": "FILLED"
+          }
+        ],
+        "topology_notation": "11-23-double19d3(-28)-29-19d1",
+        "node_id_notation": "274-438-350(-466)-473-345",
+        "ring_audit": {},
+        "closed": true,
+        "reason": "main_close:F1"
+      }
+    ],
+    "pending_contracts": [],
+    "ownership_ledger": {
+      "states": {
+        "fixed_topology_core": [],
+        "pending_topology": [],
+        "completed_topology": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          110,
+          111,
+          112,
+          113,
+          114,
+          115,
+          116,
+          117,
+          118,
+          119,
+          124,
+          126,
+          135,
+          160,
+          303,
+          323,
+          324,
+          325,
+          326,
+          327,
+          328,
+          329,
+          330,
+          331,
+          332,
+          333,
+          334,
+          335,
+          336,
+          337,
+          338,
+          339,
+          340,
+          341,
+          342,
+          343,
+          344,
+          345,
+          346,
+          347,
+          348,
+          349,
+          350,
+          351,
+          352,
+          353,
+          355,
+          357,
+          359,
+          362,
+          364,
+          367,
+          369,
+          371,
+          374,
+          377,
+          383,
+          458,
+          459,
+          461,
+          462,
+          463,
+          464,
+          465,
+          466,
+          467,
+          468,
+          469,
+          470,
+          471,
+          472,
+          473,
+          474,
+          475,
+          476,
+          477,
+          478,
+          479,
+          480,
+          481,
+          482,
+          483,
+          484,
+          485,
+          486,
+          487,
+          488,
+          489,
+          490,
+          491,
+          492,
+          494
+        ],
+        "claimed_closure_resource": [
+          100,
+          101,
+          102,
+          103,
+          104,
+          105,
+          106,
+          107,
+          108,
+          109,
+          120,
+          121,
+          123,
+          125,
+          127,
+          128,
+          129,
+          130,
+          131,
+          132,
+          133,
+          134,
+          136,
+          171,
+          274,
+          354,
+          356,
+          358,
+          360,
+          361,
+          363,
+          365,
+          366,
+          368,
+          370,
+          372,
+          373,
+          375,
+          376,
+          378,
+          380,
+          384,
+          387,
+          388,
+          389,
+          390,
+          391,
+          392,
+          393,
+          394,
+          395,
+          396,
+          397,
+          398,
+          399,
+          400,
+          401,
+          402,
+          403,
+          404,
+          405,
+          406,
+          407,
+          408,
+          409,
+          410,
+          411,
+          412,
+          413,
+          414,
+          415,
+          416,
+          417,
+          418,
+          419,
+          420,
+          421,
+          422,
+          423,
+          424,
+          425,
+          426,
+          427,
+          428,
+          429,
+          430,
+          431,
+          432,
+          433,
+          434,
+          435,
+          436,
+          437,
+          438
+        ],
+        "remaining_closure_resource": [
+          281,
+          385,
+          439
+        ],
+        "claimed_su24_ring_resource": [
+          190,
+          209,
+          215,
+          280,
+          284,
+          286,
+          300,
+          301,
+          302,
+          381,
+          386,
+          440,
+          442,
+          443,
+          444,
+          445,
+          446,
+          447,
+          448,
+          449,
+          450,
+          451,
+          453,
+          454,
+          455,
+          456,
+          457
+        ],
+        "remaining_su24_ring_resource": [],
+        "remaining_aromatic_donor": [
+          122,
+          137,
+          138,
+          139,
+          140,
+          141,
+          142,
+          143,
+          144,
+          145,
+          146,
+          147,
+          148,
+          149,
+          150,
+          151,
+          152,
+          153,
+          154,
+          155,
+          156,
+          157,
+          158,
+          159,
+          161,
+          162,
+          163,
+          164,
+          165,
+          166,
+          167,
+          168,
+          169,
+          170,
+          172,
+          173,
+          174,
+          175,
+          176,
+          177,
+          178,
+          179,
+          180,
+          181,
+          182,
+          183,
+          184,
+          185,
+          186,
+          187,
+          188,
+          189,
+          191,
+          192,
+          193,
+          194,
+          195,
+          196,
+          197,
+          198,
+          199,
+          200,
+          201,
+          202,
+          203,
+          204,
+          205,
+          206,
+          207,
+          208,
+          210,
+          211,
+          212,
+          213,
+          214,
+          216,
+          217,
+          218,
+          219,
+          220,
+          221,
+          222,
+          223,
+          224,
+          225,
+          226,
+          227,
+          228,
+          229,
+          230,
+          231,
+          232,
+          233,
+          234,
+          235,
+          236,
+          237,
+          238,
+          239,
+          240,
+          241,
+          242,
+          243,
+          244,
+          245,
+          246,
+          247,
+          248,
+          249,
+          250,
+          251,
+          252,
+          253,
+          254,
+          255,
+          256,
+          257,
+          258,
+          259,
+          260,
+          261,
+          262,
+          263,
+          264,
+          265,
+          266,
+          267,
+          268,
+          269,
+          270,
+          271,
+          272,
+          273,
+          275,
+          276,
+          277,
+          278,
+          279,
+          282,
+          283,
+          285,
+          287,
+          288,
+          289,
+          290,
+          291,
+          292,
+          293,
+          294,
+          295,
+          296,
+          297,
+          298,
+          299,
+          304,
+          305,
+          306,
+          307,
+          308,
+          309,
+          310,
+          311,
+          312,
+          313,
+          314,
+          315,
+          316,
+          317,
+          318,
+          319,
+          320,
+          321,
+          322,
+          379,
+          382,
+          441,
+          452
+        ],
+        "support_context": [
+          76,
+          77,
+          78,
+          79,
+          80,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          87,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          95,
+          96,
+          97,
+          98,
+          99,
+          460,
+          493
+        ],
+        "unclassified_or_conflict": []
+      },
+      "generic_closure_pool_ids_by_su": {
+        "11": [
+          281
+        ],
+        "22": [
+          385
+        ],
+        "23": [
+          439
+        ]
+      },
+      "su24_ring_resource_ids": [],
+      "aromatic_donor_ids_by_su": {
+        "10": [],
+        "12": [
+          172,
+          173,
+          174,
+          175,
+          176,
+          177,
+          178,
+          179,
+          180,
+          181,
+          182,
+          183,
+          184,
+          185,
+          186,
+          187,
+          188,
+          189,
+          191,
+          192,
+          193,
+          194,
+          195,
+          196,
+          197,
+          198,
+          199,
+          200,
+          201,
+          202,
+          203,
+          204,
+          205,
+          206,
+          207,
+          208,
+          210,
+          211,
+          212,
+          213,
+          214,
+          216,
+          217,
+          218,
+          219,
+          220,
+          221,
+          222,
+          223,
+          224,
+          225,
+          231,
+          276,
+          277,
+          282,
+          312,
+          379,
+          382,
+          441,
+          452
+        ],
+        "13": [
+          122,
+          137,
+          138,
+          139,
+          140,
+          141,
+          142,
+          143,
+          144,
+          145,
+          146,
+          147,
+          148,
+          149,
+          150,
+          151,
+          152,
+          153,
+          154,
+          155,
+          156,
+          157,
+          158,
+          159,
+          161,
+          162,
+          163,
+          164,
+          165,
+          166,
+          167,
+          168,
+          169,
+          170,
+          226,
+          227,
+          228,
+          229,
+          230,
+          232,
+          233,
+          234,
+          235,
+          236,
+          237,
+          238,
+          239,
+          240,
+          241,
+          242,
+          243,
+          244,
+          245,
+          246,
+          247,
+          248,
+          249,
+          250,
+          251,
+          252,
+          253,
+          254,
+          255,
+          256,
+          257,
+          258,
+          259,
+          260,
+          261,
+          262,
+          263,
+          264,
+          265,
+          266,
+          267,
+          268,
+          269,
+          270,
+          271,
+          272,
+          273,
+          275,
+          278,
+          279,
+          283,
+          285,
+          287,
+          288,
+          289,
+          290,
+          291,
+          292,
+          293,
+          294,
+          295,
+          296,
+          297,
+          298,
+          299,
+          304,
+          305,
+          306,
+          307,
+          308,
+          309,
+          310,
+          311,
+          313,
+          314,
+          315,
+          316,
+          317,
+          318,
+          319,
+          320,
+          321,
+          322
+        ]
+      },
+      "released_su24_ids": [],
+      "released_resource_ids_by_su": {},
+      "recycled_su24_to_23_ids": [],
+      "invariant_errors": []
+    },
+    "resource_ledger": {
+      "initial_ids_by_su": {
+        "10": [
+          76,
+          77,
+          78,
+          79,
+          80,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          87,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          95,
+          96,
+          97,
+          98,
+          99
+        ],
+        "11": [
+          100,
+          101,
+          102,
+          103,
+          104,
+          105,
+          106,
+          107,
+          108,
+          109,
+          120,
+          121,
+          123,
+          125,
+          127,
+          128,
+          129,
+          130,
+          131,
+          132,
+          136,
+          171,
+          274,
+          281
+        ],
+        "12": [
+          172,
+          173,
+          174,
+          175,
+          176,
+          177,
+          178,
+          179,
+          180,
+          181,
+          182,
+          183,
+          184,
+          185,
+          186,
+          187,
+          188,
+          189,
+          191,
+          192,
+          193,
+          194,
+          195,
+          196,
+          197,
+          198,
+          199,
+          200,
+          201,
+          202,
+          203,
+          204,
+          205,
+          206,
+          207,
+          208,
+          210,
+          211,
+          212,
+          213,
+          214,
+          216,
+          217,
+          218,
+          219,
+          220,
+          221,
+          222,
+          223,
+          224,
+          225,
+          231,
+          276,
+          277,
+          282,
+          312,
+          379,
+          382,
+          441,
+          452
+        ],
+        "13": [
+          122,
+          137,
+          138,
+          139,
+          140,
+          141,
+          142,
+          143,
+          144,
+          145,
+          146,
+          147,
+          148,
+          149,
+          150,
+          151,
+          152,
+          153,
+          154,
+          155,
+          156,
+          157,
+          158,
+          159,
+          161,
+          162,
+          163,
+          164,
+          165,
+          166,
+          167,
+          168,
+          169,
+          170,
+          226,
+          227,
+          228,
+          229,
+          230,
+          232,
+          233,
+          234,
+          235,
+          236,
+          237,
+          238,
+          239,
+          240,
+          241,
+          242,
+          243,
+          244,
+          245,
+          246,
+          247,
+          248,
+          249,
+          250,
+          251,
+          252,
+          253,
+          254,
+          255,
+          256,
+          257,
+          258,
+          259,
+          260,
+          261,
+          262,
+          263,
+          264,
+          265,
+          266,
+          267,
+          268,
+          269,
+          270,
+          271,
+          272,
+          273,
+          275,
+          278,
+          279,
+          283,
+          285,
+          287,
+          288,
+          289,
+          290,
+          291,
+          292,
+          293,
+          294,
+          295,
+          296,
+          297,
+          298,
+          299,
+          304,
+          305,
+          306,
+          307,
+          308,
+          309,
+          310,
+          311,
+          313,
+          314,
+          315,
+          316,
+          317,
+          318,
+          319,
+          320,
+          321,
+          322
+        ],
+        "22": [
+          133,
+          134,
+          354,
+          356,
+          358,
+          360,
+          361,
+          363,
+          365,
+          366,
+          368,
+          370,
+          372,
+          373,
+          375,
+          376,
+          378,
+          380,
+          384,
+          385
+        ],
+        "23": [
+          387,
+          388,
+          389,
+          390,
+          391,
+          392,
+          393,
+          394,
+          395,
+          396,
+          397,
+          398,
+          399,
+          400,
+          401,
+          402,
+          403,
+          404,
+          405,
+          406,
+          407,
+          408,
+          409,
+          410,
+          411,
+          412,
+          413,
+          414,
+          415,
+          416,
+          417,
+          418,
+          419,
+          420,
+          421,
+          422,
+          423,
+          424,
+          425,
+          426,
+          427,
+          428,
+          429,
+          430,
+          431,
+          432,
+          433,
+          434,
+          435,
+          436,
+          437,
+          438,
+          439
+        ],
+        "24": [
+          190,
+          209,
+          215,
+          280,
+          284,
+          286,
+          300,
+          301,
+          302,
+          381,
+          386,
+          440,
+          442,
+          443,
+          444,
+          445,
+          446,
+          447,
+          448,
+          449,
+          450,
+          451,
+          453,
+          454,
+          455,
+          456,
+          457
+        ]
+      },
+      "consumed_ids_by_su": {
+        "10": [
+          76,
+          77,
+          78,
+          79,
+          80,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          87,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          95,
+          96,
+          97,
+          98,
+          99
+        ],
+        "11": [
+          100,
+          101,
+          102,
+          103,
+          104,
+          105,
+          106,
+          107,
+          108,
+          109,
+          120,
+          121,
+          123,
+          125,
+          127,
+          128,
+          129,
+          130,
+          131,
+          132,
+          136,
+          171,
+          274
+        ],
+        "12": [],
+        "13": [],
+        "22": [
+          133,
+          134,
+          354,
+          356,
+          358,
+          360,
+          361,
+          363,
+          365,
+          366,
+          368,
+          370,
+          372,
+          373,
+          375,
+          376,
+          378,
+          380,
+          384
+        ],
+        "23": [
+          387,
+          388,
+          389,
+          390,
+          391,
+          392,
+          393,
+          394,
+          395,
+          396,
+          397,
+          398,
+          399,
+          400,
+          401,
+          402,
+          403,
+          404,
+          405,
+          406,
+          407,
+          408,
+          409,
+          410,
+          411,
+          412,
+          413,
+          414,
+          415,
+          416,
+          417,
+          418,
+          419,
+          420,
+          421,
+          422,
+          423,
+          424,
+          425,
+          426,
+          427,
+          428,
+          429,
+          430,
+          431,
+          432,
+          433,
+          434,
+          435,
+          436,
+          437,
+          438
+        ],
+        "24": [
+          190,
+          209,
+          215,
+          280,
+          284,
+          286,
+          300,
+          301,
+          302,
+          381,
+          386,
+          440,
+          442,
+          443,
+          444,
+          445,
+          446,
+          447,
+          448,
+          449,
+          450,
+          451,
+          453,
+          454,
+          455,
+          456,
+          457
+        ]
+      },
+      "topology_consumed_ids_by_su": {
+        "10": [
+          76,
+          77,
+          78,
+          79,
+          80,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          87,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          95,
+          96,
+          97,
+          98,
+          99
+        ],
+        "11": [
+          100,
+          101,
+          102,
+          103,
+          104,
+          105,
+          106,
+          107,
+          108,
+          109,
+          120,
+          121,
+          123,
+          125,
+          127,
+          128,
+          129,
+          130,
+          131,
+          132,
+          136,
+          171,
+          274
+        ],
+        "12": [],
+        "13": [],
+        "22": [
+          133,
+          134,
+          354,
+          356,
+          358,
+          360,
+          361,
+          363,
+          365,
+          366,
+          368,
+          370,
+          372,
+          373,
+          375,
+          376,
+          378,
+          380,
+          384
+        ],
+        "23": [
+          387,
+          388,
+          389,
+          390,
+          391,
+          392,
+          393,
+          394,
+          395,
+          396,
+          397,
+          398,
+          399,
+          400,
+          401,
+          402,
+          403,
+          404,
+          405,
+          406,
+          407,
+          408,
+          409,
+          410,
+          411,
+          412,
+          413,
+          414,
+          415,
+          416,
+          417,
+          418,
+          419,
+          420,
+          421,
+          422,
+          423,
+          424,
+          425,
+          426,
+          427,
+          428,
+          429,
+          430,
+          431,
+          432,
+          433,
+          434,
+          435,
+          436,
+          437,
+          438
+        ],
+        "24": [
+          190,
+          209,
+          215,
+          280,
+          284,
+          286,
+          300,
+          301,
+          302,
+          381,
+          386,
+          440,
+          442,
+          443,
+          444,
+          445,
+          446,
+          447,
+          448,
+          449,
+          450,
+          451,
+          453,
+          454,
+          455,
+          456,
+          457
+        ]
+      },
+      "residual_consumed_ids_by_su": {
+        "10": [],
+        "11": [],
+        "12": [],
+        "13": [],
+        "22": [],
+        "23": [],
+        "24": []
+      },
+      "remaining_ids_by_su": {
+        "10": [],
+        "11": [
+          281
+        ],
+        "12": [
+          172,
+          173,
+          174,
+          175,
+          176,
+          177,
+          178,
+          179,
+          180,
+          181,
+          182,
+          183,
+          184,
+          185,
+          186,
+          187,
+          188,
+          189,
+          191,
+          192,
+          193,
+          194,
+          195,
+          196,
+          197,
+          198,
+          199,
+          200,
+          201,
+          202,
+          203,
+          204,
+          205,
+          206,
+          207,
+          208,
+          210,
+          211,
+          212,
+          213,
+          214,
+          216,
+          217,
+          218,
+          219,
+          220,
+          221,
+          222,
+          223,
+          224,
+          225,
+          231,
+          276,
+          277,
+          282,
+          312,
+          379,
+          382,
+          441,
+          452
+        ],
+        "13": [
+          122,
+          137,
+          138,
+          139,
+          140,
+          141,
+          142,
+          143,
+          144,
+          145,
+          146,
+          147,
+          148,
+          149,
+          150,
+          151,
+          152,
+          153,
+          154,
+          155,
+          156,
+          157,
+          158,
+          159,
+          161,
+          162,
+          163,
+          164,
+          165,
+          166,
+          167,
+          168,
+          169,
+          170,
+          226,
+          227,
+          228,
+          229,
+          230,
+          232,
+          233,
+          234,
+          235,
+          236,
+          237,
+          238,
+          239,
+          240,
+          241,
+          242,
+          243,
+          244,
+          245,
+          246,
+          247,
+          248,
+          249,
+          250,
+          251,
+          252,
+          253,
+          254,
+          255,
+          256,
+          257,
+          258,
+          259,
+          260,
+          261,
+          262,
+          263,
+          264,
+          265,
+          266,
+          267,
+          268,
+          269,
+          270,
+          271,
+          272,
+          273,
+          275,
+          278,
+          279,
+          283,
+          285,
+          287,
+          288,
+          289,
+          290,
+          291,
+          292,
+          293,
+          294,
+          295,
+          296,
+          297,
+          298,
+          299,
+          304,
+          305,
+          306,
+          307,
+          308,
+          309,
+          310,
+          311,
+          313,
+          314,
+          315,
+          316,
+          317,
+          318,
+          319,
+          320,
+          321,
+          322
+        ],
+        "22": [
+          385
+        ],
+        "23": [
+          439
+        ],
+        "24": []
+      },
+      "initial_counts": {
+        "10": 24,
+        "11": 24,
+        "12": 60,
+        "13": 117,
+        "22": 20,
+        "23": 53,
+        "24": 27
+      },
+      "consumed_counts": {
+        "10": 24,
+        "11": 23,
+        "12": 0,
+        "13": 0,
+        "22": 19,
+        "23": 52,
+        "24": 27
+      },
+      "topology_consumed_counts": {
+        "10": 24,
+        "11": 23,
+        "12": 0,
+        "13": 0,
+        "22": 19,
+        "23": 52,
+        "24": 27
+      },
+      "residual_consumed_counts": {
+        "10": 0,
+        "11": 0,
+        "12": 0,
+        "13": 0,
+        "22": 0,
+        "23": 0,
+        "24": 0
+      },
+      "remaining_counts": {
+        "10": 0,
+        "11": 1,
+        "12": 60,
+        "13": 117,
+        "22": 1,
+        "23": 1,
+        "24": 0
+      },
+      "shortage_counts": {},
+      "snapshot_stage": "stage3_committed",
+      "invariant_errors": [],
+      "released_su24_ids": [],
+      "released_resource_ids_by_su": {},
+      "recycled_su24_to_23_ids": [],
+      "recycled_resource_conversion_ops": []
+    }
+  },
+  "stage3_meta": {
+    "accepted_cycles": 13,
+    "total_cycle_count": 16
+  },
+  "aromatic_topology": {
+    "status": "complete",
+    "complete": true,
+    "generation_id": 2000013,
+    "cluster_count": 30,
+    "ring_count": 60,
+    "source_node_count": 495,
+    "assembly_node_count": 496,
+    "idle_aromatic_count": 0,
+    "unassembled_closure_resource_count": 2,
+    "completion_mode": "tolerated_unassembled_closure_resources"
+  },
+  "su_identity": {
+    "node_histogram": [
+      0,
+      6,
+      5,
+      7,
+      0,
+      43,
+      1,
+      2,
+      0,
+      12,
+      24,
+      38,
+      60,
+      117,
+      1,
+      9,
+      4,
+      2,
+      2,
+      11,
+      1,
+      0,
+      33,
+      53,
+      27,
+      2,
+      1,
+      1,
+      7,
+      24,
+      1,
+      1,
+      0
+    ],
+    "stage_histogram": [
+      0,
+      6,
+      5,
+      7,
+      0,
+      43,
+      1,
+      2,
+      0,
+      12,
+      24,
+      38,
+      60,
+      117,
+      1,
+      9,
+      4,
+      2,
+      2,
+      11,
+      1,
+      0,
+      33,
+      53,
+      27,
+      2,
+      1,
+      1,
+      7,
+      24,
+      1,
+      1,
+      0
+    ],
+    "histogram_matches": true,
+    "node_su24_count": 27,
+    "stage_h_su24_count": 27
+  },
+  "expected_paths": [
+    "final_su_distribution.csv",
+    "final_topology_specs.csv",
+    "final_aromatic_clusters.json",
+    "final_pending_topology_specs.csv",
+    "final_topology_node_ownership.csv",
+    "final_topology_resource_pool.csv",
+    "final_resource_usage_summary.csv",
+    "final_resource_usage_counts.csv",
+    "outer_cycle_status.json"
+  ]
+}

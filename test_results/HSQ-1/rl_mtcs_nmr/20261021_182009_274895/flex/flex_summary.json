@@ -1,0 +1,4725 @@
+{
+  "rewards": {
+    "topology_completion": 0.6,
+    "nmr_quality": 0.8895347554639745,
+    "forward_completion": 1.0,
+    "su13_clearance": 0.25030303030303036,
+    "shape_quality": 0.6968114949347346,
+    "total": 0.7261410873978136,
+    "weights": [
+      0.35,
+      0.2,
+      0.2,
+      0.08055555555555556,
+      0.16944444444444445
+    ],
+    "base_weights": [
+      0.35,
+      0.2,
+      0.2,
+      0.15,
+      0.1
+    ],
+    "spatial_demand": {
+      "phase": "flex",
+      "pressure": 0.5370370370370371,
+      "reference_backbone_nodes": 324,
+      "reference_su13_sites": 237,
+      "remaining_units": 38,
+      "remaining_nodes": 174,
+      "remaining_ports": 55,
+      "stages": {
+        "flex": {
+          "units": 4,
+          "nodes": 4,
+          "ports": 8
+        },
+        "ring": {
+          "units": 13,
+          "nodes": 101,
+          "ports": 26
+        },
+        "side": {
+          "units": 21,
+          "nodes": 69,
+          "ports": 21
+        }
+      }
+    },
+    "shape_metrics": {
+      "quality": 0.6968114949347346,
+      "compactness_quality": 0.6494084180465356,
+      "aspect_quality": 0.8864238024875302,
+      "normalized_radius_of_gyration": 0.5398630079481685,
+      "node_count": 324,
+      "component_count": 1
+    },
+    "weighted_terms": {
+      "topology_completion": 0.21,
+      "nmr_quality": 0.17790695109279492,
+      "forward_completion": 0.2,
+      "su13_clearance": 0.020163299663299668,
+      "shape_quality": 0.11807083664171893
+    }
+  },
+  "fast_rollout": {
+    "total": 90,
+    "completed": 90,
+    "completion": 1.0,
+    "tasks_complete": true,
+    "all_complete": true,
+    "completion_reasons": [],
+    "allowed_remaining_resources": [
+      {
+        "node_id": 281,
+        "source_su_type": 11,
+        "final_su_type": 13,
+        "state": "aromatic_residual",
+        "completion_tolerated": true,
+        "reason": "unused_su11_retained_as_su13"
+      },
+      {
+        "node_id": 385,
+        "source_su_type": 22,
+        "final_su_type": null,
+        "state": "remaining_closure_resource",
+        "completion_tolerated": true,
+        "reason": "stage3_tolerated_unassembled_closure_resource"
+      },
+      {
+        "node_id": 439,
+        "source_su_type": 23,
+        "final_su_type": null,
+        "state": "remaining_closure_resource",
+        "completion_tolerated": true,
+        "reason": "stage3_tolerated_unassembled_closure_resource"
+      }
+    ],
+    "allowed_remaining_resource_count": 3,
+    "stages": {
+      "rigid": {
+        "total": 30,
+        "completed": 30,
+        "unconnected": []
+      },
+      "flex": {
+        "total": 24,
+        "completed": 24,
+        "unconnected": []
+      },
+      "ring": {
+        "total": 13,
+        "completed": 13,
+        "unconnected": []
+      },
+      "side": {
+        "total": 21,
+        "completed": 21,
+        "unconnected": []
+      },
+      "substitution": {
+        "total": 2,
+        "completed": 2,
+        "unconnected": []
+      }
+    },
+    "main_component": [
+      "aromatic:0",
+      "aromatic:1",
+      "aromatic:10",
+      "aromatic:11",
+      "aromatic:12",
+      "aromatic:13",
+      "aromatic:14",
+      "aromatic:15",
+      "aromatic:16",
+      "aromatic:17",
+      "aromatic:18",
+      "aromatic:19",
+      "aromatic:2",
+      "aromatic:20",
+      "aromatic:21",
+      "aromatic:22",
+      "aromatic:23",
+      "aromatic:24",
+      "aromatic:25",
+      "aromatic:26",
+      "aromatic:27",
+      "aromatic:28",
+      "aromatic:29",
+      "aromatic:3",
+      "aromatic:4",
+      "aromatic:5",
+      "aromatic:6",
+      "aromatic:7",
+      "aromatic:8",
+      "aromatic:9",
+      "topology:0",
+      "topology:1",
+      "topology:10",
+      "topology:11",
+      "topology:12",
+      "topology:13",
+      "topology:14",
+      "topology:15",
+      "topology:16",
+      "topology:17",
+      "topology:18",
+      "topology:19",
+      "topology:2",
+      "topology:20",
+      "topology:21",
+      "topology:22",
+      "topology:23",
+      "topology:24",
+      "topology:25",
+      "topology:26",
+      "topology:27",
+      "topology:28",
+      "topology:29",
+      "topology:3",
+      "topology:30",
+      "topology:31",
+      "topology:32",
+      "topology:33",
+      "topology:34",
+      "topology:35",
+      "topology:36",
+      "topology:37",
+      "topology:38",
+      "topology:39",
+      "topology:4",
+      "topology:40",
+      "topology:41",
+      "topology:42",
+      "topology:43",
+      "topology:44",
+      "topology:45",
+      "topology:46",
+      "topology:47",
+      "topology:48",
+      "topology:49",
+      "topology:5",
+      "topology:50",
+      "topology:51",
+      "topology:52",
+      "topology:53",
+      "topology:54",
+      "topology:55",
+      "topology:56",
+      "topology:57",
+      "topology:6",
+      "topology:7",
+      "topology:8",
+      "topology:9"
+    ],
+    "main_anchor": "aromatic:2",
+    "excluded_units": [],
+    "forward_completion": 1.0,
+    "status": "complete",
+    "placed_unit_count": 88,
+    "unplaced_unit_count": 0,
+    "unplaced_units": {
+      "rigid": [],
+      "flex": [],
+      "ring": [],
+      "side": [],
+      "substitution": []
+    },
+    "unplaced_contracts": [],
+    "audit": {
+      "complete": true,
+      "tasks_complete": true,
+      "completion_reasons": [],
+      "allowed_remaining_resources": [
+        {
+          "node_id": 281,
+          "source_su_type": 11,
+          "final_su_type": 13,
+          "state": "aromatic_residual",
+          "completion_tolerated": true,
+          "reason": "unused_su11_retained_as_su13"
+        },
+        {
+          "node_id": 385,
+          "source_su_type": 22,
+          "final_su_type": null,
+          "state": "remaining_closure_resource",
+          "completion_tolerated": true,
+          "reason": "stage3_tolerated_unassembled_closure_resource"
+        },
+        {
+          "node_id": 439,
+          "source_su_type": 23,
+          "final_su_type": null,
+          "state": "remaining_closure_resource",
+          "completion_tolerated": true,
+          "reason": "stage3_tolerated_unassembled_closure_resource"
+        }
+      ],
+      "target_labels_complete": true,
+      "target_label_unfulfilled_ids": [],
+      "input_valid": true,
+      "input_errors": [],
+      "rigid_stage_complete": true,
+      "rigid_connections_done": 12,
+      "rigid_connections_total": 12,
+      "stage": "substitution",
+      "placed_unit_count": 88,
+      "unit_count": 88,
+      "placed_node_count": 493,
+      "expected_node_count": 493,
+      "source_node_count": 495,
+      "unassembled_resource_count": 2,
+      "unassembled_resource_ids": [
+        385,
+        439
+      ],
+      "idle_aromatic_nodes": [],
+      "idle_aromatic_count": 0,
+      "aromatic_residual_nodes": [
+        {
+          "node_id": 281,
+          "source_su_type": 11,
+          "final_su_type": 13,
+          "state": "aromatic_residual",
+          "completion_tolerated": true,
+          "reason": "unused_su11_retained_as_su13"
+        }
+      ],
+      "aromatic_residual_count": 1,
+      "strict_all_nodes_assembled": false,
+      "completion_mode": "best_legal_partial_allowed",
+      "resource_partition_errors": [],
+      "resource_partition_valid": true,
+      "missing_node_ids": [],
+      "unexpected_node_ids": [],
+      "pending_contract_ids": [],
+      "duplicate_axials": {},
+      "non_hex_edges": [],
+      "su25_center_branch_errors": [],
+      "su25_center_branches_valid": true,
+      "topology_conformation_errors": [],
+      "topology_conformation_valid": true,
+      "port_direction_errors": [],
+      "port_directions_valid": true,
+      "substitution_errors": [],
+      "substitution_valid": true,
+      "flex_endpoint_su_errors": [],
+      "flex_endpoint_su_valid": true,
+      "ring_attachment_errors": [],
+      "ring_attachments_valid": true,
+      "shape_metrics": {
+        "q_span": 40,
+        "r_span": 36,
+        "q_over_r": 1.1111111111111112,
+        "min_q_over_r": 0.8,
+        "max_q_over_r": 2.0,
+        "valid": true,
+        "violation": 0.0,
+        "total_span": 76,
+        "x_span": 34.6410161513777,
+        "y_span": 33.0,
+        "width_over_height": 1.0497277621629606,
+        "rotated_90_width_over_height": 0.9526279441628783,
+        "bbox_area": 1143.153532995464,
+        "principal_axis_ratio": 1.155109994125248,
+        "principal_axis_angle": -7.8428362075341775,
+        "linearity": 0.2505316158342026,
+        "covariance_eigenvalues": [
+          77.18983085117397,
+          57.85133780206057
+        ],
+        "node_density_cv": 0.49741254978041766,
+        "unit_density_cv": 0.46687814964032126,
+        "largest_void_radius": 3.0,
+        "large_void_fraction": 0.010351966873706004,
+        "hull_area": 826.188235210313,
+        "hull_fill": 0.5167714884696276,
+        "normalized_radius_of_gyration": 0.5233709753087264,
+        "layout_energy": 1.3622311521629016,
+        "layout_valid": true
+      },
+      "shape_valid": true,
+      "shape_warnings": [],
+      "side_distribution": {
+        "attachment_count": 21,
+        "covered_aromatic_unit_count": 14,
+        "coverage_ratio": 0.6666666666666666,
+        "max_unit_load": 2,
+        "unit_loads": {
+          "aromatic:0": 2,
+          "aromatic:1": 2,
+          "aromatic:2": 2,
+          "aromatic:3": 2,
+          "aromatic:4": 1,
+          "aromatic:5": 2,
+          "aromatic:13": 1,
+          "aromatic:21": 2,
+          "aromatic:22": 2,
+          "aromatic:23": 1,
+          "aromatic:24": 1,
+          "aromatic:25": 1,
+          "aromatic:26": 1,
+          "aromatic:29": 1
+        }
+      },
+      "side_distribution_valid": true,
+      "side_distribution_warnings": [],
+      "actual_geometry_errors": [],
+      "main_anchor": "aromatic:2",
+      "excluded_unit_ids": [],
+      "geometry_valid": true,
+      "identity_valid": true,
+      "identity_errors": [],
+      "topology_valid": true,
+      "topology_errors": [],
+      "contract_errors": [],
+      "label_valid": true,
+      "label_errors": [],
+      "legal": true,
+      "component_count": 1,
+      "aromatic_template_errors": [],
+      "edge_count": 573,
+      "substitution_relaxed_edge_count": 2
+    },
+    "stage_no_actions": true,
+    "diagnostics": {
+      "flex": {
+        "connected": 0,
+        "no_actions": true,
+        "entries_before": {
+          "free_su13": 165,
+          "available_entries": 140,
+          "blocked_entries": 25,
+          "reasons": {
+            "coordinate_collision": 25,
+            "available": 140
+          },
+          "scope": "placed_components",
+          "probe": "ordinary_single_node_axial_attachment"
+        },
+        "entries_after": {
+          "free_su13": 165,
+          "available_entries": 140,
+          "blocked_entries": 25,
+          "reasons": {
+            "coordinate_collision": 25,
+            "available": 140
+          },
+          "scope": "placed_components",
+          "probe": "ordinary_single_node_axial_attachment"
+        },
+        "unconnected": {}
+      },
+      "ring": {
+        "connected": 13,
+        "no_actions": true,
+        "entries_before": {
+          "free_su13": 165,
+          "available_entries": 140,
+          "blocked_entries": 25,
+          "reasons": {
+            "coordinate_collision": 25,
+            "available": 140
+          },
+          "scope": "placed_components",
+          "probe": "ordinary_single_node_axial_attachment"
+        },
+        "entries_after": {
+          "free_su13": 139,
+          "available_entries": 113,
+          "blocked_entries": 26,
+          "reasons": {
+            "available": 113,
+            "coordinate_collision": 26
+          },
+          "scope": "placed_components",
+          "probe": "ordinary_single_node_axial_attachment"
+        },
+        "unconnected": {}
+      },
+      "side": {
+        "connected": 21,
+        "no_actions": true,
+        "entries_before": {
+          "free_su13": 139,
+          "available_entries": 113,
+          "blocked_entries": 26,
+          "reasons": {
+            "available": 113,
+            "coordinate_collision": 26
+          },
+          "scope": "placed_components",
+          "probe": "ordinary_single_node_axial_attachment"
+        },
+        "entries_after": {
+          "free_su13": 118,
+          "available_entries": 77,
+          "blocked_entries": 41,
+          "reasons": {
+            "coordinate_collision": 41,
+            "available": 77
+          },
+          "scope": "placed_components",
+          "probe": "ordinary_single_node_axial_attachment"
+        },
+        "unconnected": {}
+      },
+      "substitution": {
+        "connected": 2,
+        "no_actions": true,
+        "entries_before": null,
+        "entries_after": null,
+        "unconnected": {}
+      }
+    }
+  },
+  "retry_selection": {
+    "phase": "flex",
+    "start_count": 20,
+    "end_count": 24,
+    "selected_attempt": 0,
+    "attempts": [
+      {
+        "attempt": 0,
+        "search": {
+          "simulations": 10,
+          "visited_states": 41,
+          "max_depth": 4,
+          "terminal_count": 10,
+          "backup_updates": 50,
+          "search_exhausted": false,
+          "stop_reason": "result_candidates_ready",
+          "result_candidate_count": 10,
+          "result_candidate_limit": 10,
+          "result_candidate_rewards": [
+            0.5259122298364027,
+            0.5261410781242543,
+            0.5261410873978135,
+            0.5261310034217834,
+            0.525078945038491,
+            0.5250789356030253,
+            0.525078945038491,
+            0.524986824331765,
+            0.5250399543940464,
+            0.5250399613409301
+          ],
+          "selected_reward": 0.5261410873978135,
+          "selected_tie_break": 55,
+          "root_legal_action_count": 10,
+          "root_evaluated_action_count": 10,
+          "root_actions_covered": true,
+          "retained_nodes": 1,
+          "peak_retained_nodes": 41,
+          "transition_bytes": 0,
+          "peak_transition_bytes": 1290848,
+          "elapsed_seconds": 165.56582296099805,
+          "rss_mib": 1413.30859375,
+          "search_seed": 4826240523698226673,
+          "spatial_demand": {
+            "phase": "flex",
+            "pressure": 0.5370370370370371,
+            "reference_backbone_nodes": 324,
+            "reference_su13_sites": 237,
+            "remaining_units": 38,
+            "remaining_nodes": 174,
+            "remaining_ports": 55,
+            "stages": {
+              "flex": {
+                "units": 4,
+                "nodes": 4,
+                "ports": 8
+              },
+              "ring": {
+                "units": 13,
+                "nodes": 101,
+                "ports": 26
+              },
+              "side": {
+                "units": 21,
+                "nodes": 69,
+                "ports": 21
+              }
+            }
+          }
+        },
+        "forward": {
+          "total": 90,
+          "completed": 90,
+          "completion": 1.0,
+          "tasks_complete": true,
+          "all_complete": true,
+          "completion_reasons": [],
+          "allowed_remaining_resources": [
+            {
+              "node_id": 281,
+              "source_su_type": 11,
+              "final_su_type": 13,
+              "state": "aromatic_residual",
+              "completion_tolerated": true,
+              "reason": "unused_su11_retained_as_su13"
+            },
+            {
+              "node_id": 385,
+              "source_su_type": 22,
+              "final_su_type": null,
+              "state": "remaining_closure_resource",
+              "completion_tolerated": true,
+              "reason": "stage3_tolerated_unassembled_closure_resource"
+            },
+            {
+              "node_id": 439,
+              "source_su_type": 23,
+              "final_su_type": null,
+              "state": "remaining_closure_resource",
+              "completion_tolerated": true,
+              "reason": "stage3_tolerated_unassembled_closure_resource"
+            }
+          ],
+          "allowed_remaining_resource_count": 3,
+          "stages": {
+            "rigid": {
+              "total": 30,
+              "completed": 30,
+              "unconnected": []
+            },
+            "flex": {
+              "total": 24,
+              "completed": 24,
+              "unconnected": []
+            },
+            "ring": {
+              "total": 13,
+              "completed": 13,
+              "unconnected": []
+            },
+            "side": {
+              "total": 21,
+              "completed": 21,
+              "unconnected": []
+            },
+            "substitution": {
+              "total": 2,
+              "completed": 2,
+              "unconnected": []
+            }
+          },
+          "main_component": [
+            "aromatic:0",
+            "aromatic:1",
+            "aromatic:10",
+            "aromatic:11",
+            "aromatic:12",
+            "aromatic:13",
+            "aromatic:14",
+            "aromatic:15",
+            "aromatic:16",
+            "aromatic:17",
+            "aromatic:18",
+            "aromatic:19",
+            "aromatic:2",
+            "aromatic:20",
+            "aromatic:21",
+            "aromatic:22",
+            "aromatic:23",
+            "aromatic:24",
+            "aromatic:25",
+            "aromatic:26",
+            "aromatic:27",
+            "aromatic:28",
+            "aromatic:29",
+            "aromatic:3",
+            "aromatic:4",
+            "aromatic:5",
+            "aromatic:6",
+            "aromatic:7",
+            "aromatic:8",
+            "aromatic:9",
+            "topology:0",
+            "topology:1",
+            "topology:10",
+            "topology:11",
+            "topology:12",
+            "topology:13",
+            "topology:14",
+            "topology:15",
+            "topology:16",
+            "topology:17",
+            "topology:18",
+            "topology:19",
+            "topology:2",
+            "topology:20",
+            "topology:21",
+            "topology:22",
+            "topology:23",
+            "topology:24",
+            "topology:25",
+            "topology:26",
+            "topology:27",
+            "topology:28",
+            "topology:29",
+            "topology:3",
+            "topology:30",
+            "topology:31",
+            "topology:32",
+            "topology:33",
+            "topology:34",
+            "topology:35",
+            "topology:36",
+            "topology:37",
+            "topology:38",
+            "topology:39",
+            "topology:4",
+            "topology:40",
+            "topology:41",
+            "topology:42",
+            "topology:43",
+            "topology:44",
+            "topology:45",
+            "topology:46",
+            "topology:47",
+            "topology:48",
+            "topology:49",
+            "topology:5",
+            "topology:50",
+            "topology:51",
+            "topology:52",
+            "topology:53",
+            "topology:54",
+            "topology:55",
+            "topology:56",
+            "topology:57",
+            "topology:6",
+            "topology:7",
+            "topology:8",
+            "topology:9"
+          ],
+          "main_anchor": "aromatic:2",
+          "excluded_units": [],
+          "forward_completion": 1.0,
+          "status": "complete",
+          "placed_unit_count": 88,
+          "unplaced_unit_count": 0,
+          "unplaced_units": {
+            "rigid": [],
+            "flex": [],
+            "ring": [],
+            "side": [],
+            "substitution": []
+          },
+          "unplaced_contracts": [],
+          "audit": {
+            "complete": true,
+            "tasks_complete": true,
+            "completion_reasons": [],
+            "allowed_remaining_resources": [
+              {
+                "node_id": 281,
+                "source_su_type": 11,
+                "final_su_type": 13,
+                "state": "aromatic_residual",
+                "completion_tolerated": true,
+                "reason": "unused_su11_retained_as_su13"
+              },
+              {
+                "node_id": 385,
+                "source_su_type": 22,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              },
+              {
+                "node_id": 439,
+                "source_su_type": 23,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              }
+            ],
+            "target_labels_complete": true,
+            "target_label_unfulfilled_ids": [],
+            "input_valid": true,
+            "input_errors": [],
+            "rigid_stage_complete": true,
+            "rigid_connections_done": 12,
+            "rigid_connections_total": 12,
+            "stage": "substitution",
+            "placed_unit_count": 88,
+            "unit_count": 88,
+            "placed_node_count": 493,
+            "expected_node_count": 493,
+            "source_node_count": 495,
+            "unassembled_resource_count": 2,
+            "unassembled_resource_ids": [
+              385,
+              439
+            ],
+            "idle_aromatic_nodes": [],
+            "idle_aromatic_count": 0,
+            "aromatic_residual_nodes": [
+              {
+                "node_id": 281,
+                "source_su_type": 11,
+                "final_su_type": 13,
+                "state": "aromatic_residual",
+                "completion_tolerated": true,
+                "reason": "unused_su11_retained_as_su13"
+              }
+            ],
+            "aromatic_residual_count": 1,
+            "strict_all_nodes_assembled": false,
+            "completion_mode": "best_legal_partial_allowed",
+            "resource_partition_errors": [],
+            "resource_partition_valid": true,
+            "missing_node_ids": [],
+            "unexpected_node_ids": [],
+            "pending_contract_ids": [],
+            "duplicate_axials": {},
+            "non_hex_edges": [],
+            "su25_center_branch_errors": [],
+            "su25_center_branches_valid": true,
+            "topology_conformation_errors": [],
+            "topology_conformation_valid": true,
+            "port_direction_errors": [],
+            "port_directions_valid": true,
+            "substitution_errors": [],
+            "substitution_valid": true,
+            "flex_endpoint_su_errors": [],
+            "flex_endpoint_su_valid": true,
+            "ring_attachment_errors": [],
+            "ring_attachments_valid": true,
+            "shape_metrics": {
+              "q_span": 40,
+              "r_span": 36,
+              "q_over_r": 1.1111111111111112,
+              "min_q_over_r": 0.8,
+              "max_q_over_r": 2.0,
+              "valid": true,
+              "violation": 0.0,
+              "total_span": 76,
+              "x_span": 34.6410161513777,
+              "y_span": 33.0,
+              "width_over_height": 1.0497277621629606,
+              "rotated_90_width_over_height": 0.9526279441628783,
+              "bbox_area": 1143.153532995464,
+              "principal_axis_ratio": 1.155109994125248,
+              "principal_axis_angle": -7.8428362075341775,
+              "linearity": 0.2505316158342026,
+              "covariance_eigenvalues": [
+                77.18983085117397,
+                57.85133780206057
+              ],
+              "node_density_cv": 0.49741254978041766,
+              "unit_density_cv": 0.46687814964032126,
+              "largest_void_radius": 3.0,
+              "large_void_fraction": 0.010351966873706004,
+              "hull_area": 826.188235210313,
+              "hull_fill": 0.5167714884696276,
+              "normalized_radius_of_gyration": 0.5233709753087264,
+              "layout_energy": 1.3622311521629016,
+              "layout_valid": true
+            },
+            "shape_valid": true,
+            "shape_warnings": [],
+            "side_distribution": {
+              "attachment_count": 21,
+              "covered_aromatic_unit_count": 14,
+              "coverage_ratio": 0.6666666666666666,
+              "max_unit_load": 2,
+              "unit_loads": {
+                "aromatic:0": 2,
+                "aromatic:1": 2,
+                "aromatic:2": 2,
+                "aromatic:3": 2,
+                "aromatic:4": 1,
+                "aromatic:5": 2,
+                "aromatic:13": 1,
+                "aromatic:21": 2,
+                "aromatic:22": 2,
+                "aromatic:23": 1,
+                "aromatic:24": 1,
+                "aromatic:25": 1,
+                "aromatic:26": 1,
+                "aromatic:29": 1
+              }
+            },
+            "side_distribution_valid": true,
+            "side_distribution_warnings": [],
+            "actual_geometry_errors": [],
+            "main_anchor": "aromatic:2",
+            "excluded_unit_ids": [],
+            "geometry_valid": true,
+            "identity_valid": true,
+            "identity_errors": [],
+            "topology_valid": true,
+            "topology_errors": [],
+            "contract_errors": [],
+            "label_valid": true,
+            "label_errors": [],
+            "legal": true,
+            "component_count": 1,
+            "aromatic_template_errors": [],
+            "edge_count": 573,
+            "substitution_relaxed_edge_count": 2
+          },
+          "stage_no_actions": true,
+          "diagnostics": {
+            "flex": {
+              "connected": 0,
+              "no_actions": true,
+              "entries_before": {
+                "free_su13": 165,
+                "available_entries": 140,
+                "blocked_entries": 25,
+                "reasons": {
+                  "coordinate_collision": 25,
+                  "available": 140
+                },
+                "scope": "placed_components",
+                "probe": "ordinary_single_node_axial_attachment"
+              },
+              "entries_after": {
+                "free_su13": 165,
+                "available_entries": 140,
+                "blocked_entries": 25,
+                "reasons": {
+                  "coordinate_collision": 25,
+                  "available": 140
+                },
+                "scope": "placed_components",
+                "probe": "ordinary_single_node_axial_attachment"
+              },
+              "unconnected": {}
+            },
+            "ring": {
+              "connected": 13,
+              "no_actions": true,
+              "entries_before": {
+                "free_su13": 165,
+                "available_entries": 140,
+                "blocked_entries": 25,
+                "reasons": {
+                  "coordinate_collision": 25,
+                  "available": 140
+                },
+                "scope": "placed_components",
+                "probe": "ordinary_single_node_axial_attachment"
+              },
+              "entries_after": {
+                "free_su13": 139,
+                "available_entries": 113,
+                "blocked_entries": 26,
+                "reasons": {
+                  "available": 113,
+                  "coordinate_collision": 26
+                },
+                "scope": "placed_components",
+                "probe": "ordinary_single_node_axial_attachment"
+              },
+              "unconnected": {}
+            },
+            "side": {
+              "connected": 21,
+              "no_actions": true,
+              "entries_before": {
+                "free_su13": 139,
+                "available_entries": 113,
+                "blocked_entries": 26,
+                "reasons": {
+                  "available": 113,
+                  "coordinate_collision": 26
+                },
+                "scope": "placed_components",
+                "probe": "ordinary_single_node_axial_attachment"
+              },
+              "entries_after": {
+                "free_su13": 118,
+                "available_entries": 77,
+                "blocked_entries": 41,
+                "reasons": {
+                  "coordinate_collision": 41,
+                  "available": 77
+                },
+                "scope": "placed_components",
+                "probe": "ordinary_single_node_axial_attachment"
+              },
+              "unconnected": {}
+            },
+            "substitution": {
+              "connected": 2,
+              "no_actions": true,
+              "entries_before": null,
+              "entries_after": null,
+              "unconnected": {}
+            }
+          }
+        },
+        "rewards": {
+          "topology_completion": 0.6,
+          "nmr_quality": 0.8895347554639745,
+          "forward_completion": 1.0,
+          "su13_clearance": 0.25030303030303036,
+          "shape_quality": 0.6968114949347346,
+          "total": 0.7261410873978136,
+          "weights": [
+            0.35,
+            0.2,
+            0.2,
+            0.08055555555555556,
+            0.16944444444444445
+          ],
+          "base_weights": [
+            0.35,
+            0.2,
+            0.2,
+            0.15,
+            0.1
+          ],
+          "spatial_demand": {
+            "phase": "flex",
+            "pressure": 0.5370370370370371,
+            "reference_backbone_nodes": 324,
+            "reference_su13_sites": 237,
+            "remaining_units": 38,
+            "remaining_nodes": 174,
+            "remaining_ports": 55,
+            "stages": {
+              "flex": {
+                "units": 4,
+                "nodes": 4,
+                "ports": 8
+              },
+              "ring": {
+                "units": 13,
+                "nodes": 101,
+                "ports": 26
+              },
+              "side": {
+                "units": 21,
+                "nodes": 69,
+                "ports": 21
+              }
+            }
+          },
+          "shape_metrics": {
+            "quality": 0.6968114949347346,
+            "compactness_quality": 0.6494084180465356,
+            "aspect_quality": 0.8864238024875302,
+            "normalized_radius_of_gyration": 0.5398630079481685,
+            "node_count": 324,
+            "component_count": 1
+          },
+          "weighted_terms": {
+            "topology_completion": 0.21,
+            "nmr_quality": 0.17790695109279492,
+            "forward_completion": 0.2,
+            "su13_clearance": 0.020163299663299668,
+            "shape_quality": 0.11807083664171893
+          }
+        },
+        "forward_valid": true
+      }
+    ],
+    "fallback": false,
+    "spatial_demand": {
+      "phase": "flex",
+      "pressure": 0.5370370370370371,
+      "reference_backbone_nodes": 324,
+      "reference_su13_sites": 237,
+      "remaining_units": 38,
+      "remaining_nodes": 174,
+      "remaining_ports": 55,
+      "stages": {
+        "flex": {
+          "units": 4,
+          "nodes": 4,
+          "ports": 8
+        },
+        "ring": {
+          "units": 13,
+          "nodes": 101,
+          "ports": 26
+        },
+        "side": {
+          "units": 21,
+          "nodes": 69,
+          "ports": 21
+        }
+      }
+    }
+  },
+  "checkpoints": [
+    {
+      "phase": "flex",
+      "start_count": 0,
+      "end_count": 4,
+      "selected_attempt": 0,
+      "attempts": [
+        {
+          "attempt": 0,
+          "search": {
+            "simulations": 10,
+            "visited_states": 41,
+            "max_depth": 4,
+            "terminal_count": 10,
+            "backup_updates": 50,
+            "search_exhausted": false,
+            "stop_reason": "result_candidates_ready",
+            "result_candidate_count": 10,
+            "result_candidate_limit": 10,
+            "result_candidate_rewards": [
+              0.37004736674905747,
+              0.36483742965735366,
+              0.3700587775212629,
+              0.36999222628010997,
+              0.3787868364475653,
+              0.3691506465857098,
+              0.3760956275800261,
+              0.37018902375068197,
+              0.3627835385149176,
+              0.37115349167744466
+            ],
+            "selected_reward": 0.3787868364475653,
+            "selected_tie_break": 66,
+            "root_legal_action_count": 10,
+            "root_evaluated_action_count": 10,
+            "root_actions_covered": true,
+            "retained_nodes": 1,
+            "peak_retained_nodes": 41,
+            "transition_bytes": 0,
+            "peak_transition_bytes": 2193136,
+            "elapsed_seconds": 222.15118543299832,
+            "rss_mib": 1353.1640625,
+            "search_seed": 13148042915688989108,
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5987654320987654,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 58,
+              "remaining_nodes": 194,
+              "remaining_ports": 95,
+              "stages": {
+                "flex": {
+                  "units": 24,
+                  "nodes": 24,
+                  "ports": 48
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            }
+          },
+          "forward": {
+            "total": 90,
+            "completed": 90,
+            "completion": 1.0,
+            "tasks_complete": true,
+            "all_complete": true,
+            "completion_reasons": [],
+            "allowed_remaining_resources": [
+              {
+                "node_id": 281,
+                "source_su_type": 11,
+                "final_su_type": 13,
+                "state": "aromatic_residual",
+                "completion_tolerated": true,
+                "reason": "unused_su11_retained_as_su13"
+              },
+              {
+                "node_id": 385,
+                "source_su_type": 22,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              },
+              {
+                "node_id": 439,
+                "source_su_type": 23,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              }
+            ],
+            "allowed_remaining_resource_count": 3,
+            "stages": {
+              "rigid": {
+                "total": 30,
+                "completed": 30,
+                "unconnected": []
+              },
+              "flex": {
+                "total": 24,
+                "completed": 24,
+                "unconnected": []
+              },
+              "ring": {
+                "total": 13,
+                "completed": 13,
+                "unconnected": []
+              },
+              "side": {
+                "total": 21,
+                "completed": 21,
+                "unconnected": []
+              },
+              "substitution": {
+                "total": 2,
+                "completed": 2,
+                "unconnected": []
+              }
+            },
+            "main_component": [
+              "aromatic:0",
+              "aromatic:1",
+              "aromatic:10",
+              "aromatic:11",
+              "aromatic:12",
+              "aromatic:13",
+              "aromatic:14",
+              "aromatic:15",
+              "aromatic:16",
+              "aromatic:17",
+              "aromatic:18",
+              "aromatic:19",
+              "aromatic:2",
+              "aromatic:20",
+              "aromatic:21",
+              "aromatic:22",
+              "aromatic:23",
+              "aromatic:24",
+              "aromatic:25",
+              "aromatic:26",
+              "aromatic:27",
+              "aromatic:28",
+              "aromatic:29",
+              "aromatic:3",
+              "aromatic:4",
+              "aromatic:5",
+              "aromatic:6",
+              "aromatic:7",
+              "aromatic:8",
+              "aromatic:9",
+              "topology:0",
+              "topology:1",
+              "topology:10",
+              "topology:11",
+              "topology:12",
+              "topology:13",
+              "topology:14",
+              "topology:15",
+              "topology:16",
+              "topology:17",
+              "topology:18",
+              "topology:19",
+              "topology:2",
+              "topology:20",
+              "topology:21",
+              "topology:22",
+              "topology:23",
+              "topology:24",
+              "topology:25",
+              "topology:26",
+              "topology:27",
+              "topology:28",
+              "topology:29",
+              "topology:3",
+              "topology:30",
+              "topology:31",
+              "topology:32",
+              "topology:33",
+              "topology:34",
+              "topology:35",
+              "topology:36",
+              "topology:37",
+              "topology:38",
+              "topology:39",
+              "topology:4",
+              "topology:40",
+              "topology:41",
+              "topology:42",
+              "topology:43",
+              "topology:44",
+              "topology:45",
+              "topology:46",
+              "topology:47",
+              "topology:48",
+              "topology:49",
+              "topology:5",
+              "topology:50",
+              "topology:51",
+              "topology:52",
+              "topology:53",
+              "topology:54",
+              "topology:55",
+              "topology:56",
+              "topology:57",
+              "topology:6",
+              "topology:7",
+              "topology:8",
+              "topology:9"
+            ],
+            "main_anchor": "aromatic:2",
+            "excluded_units": [],
+            "forward_completion": 1.0,
+            "status": "complete",
+            "placed_unit_count": 88,
+            "unplaced_unit_count": 0,
+            "unplaced_units": {
+              "rigid": [],
+              "flex": [],
+              "ring": [],
+              "side": [],
+              "substitution": []
+            },
+            "unplaced_contracts": [],
+            "audit": {
+              "complete": true,
+              "tasks_complete": true,
+              "completion_reasons": [],
+              "allowed_remaining_resources": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                },
+                {
+                  "node_id": 385,
+                  "source_su_type": 22,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                },
+                {
+                  "node_id": 439,
+                  "source_su_type": 23,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                }
+              ],
+              "target_labels_complete": true,
+              "target_label_unfulfilled_ids": [],
+              "input_valid": true,
+              "input_errors": [],
+              "rigid_stage_complete": true,
+              "rigid_connections_done": 12,
+              "rigid_connections_total": 12,
+              "stage": "substitution",
+              "placed_unit_count": 88,
+              "unit_count": 88,
+              "placed_node_count": 493,
+              "expected_node_count": 493,
+              "source_node_count": 495,
+              "unassembled_resource_count": 2,
+              "unassembled_resource_ids": [
+                385,
+                439
+              ],
+              "idle_aromatic_nodes": [],
+              "idle_aromatic_count": 0,
+              "aromatic_residual_nodes": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                }
+              ],
+              "aromatic_residual_count": 1,
+              "strict_all_nodes_assembled": false,
+              "completion_mode": "best_legal_partial_allowed",
+              "resource_partition_errors": [],
+              "resource_partition_valid": true,
+              "missing_node_ids": [],
+              "unexpected_node_ids": [],
+              "pending_contract_ids": [],
+              "duplicate_axials": {},
+              "non_hex_edges": [],
+              "su25_center_branch_errors": [],
+              "su25_center_branches_valid": true,
+              "topology_conformation_errors": [],
+              "topology_conformation_valid": true,
+              "port_direction_errors": [],
+              "port_directions_valid": true,
+              "substitution_errors": [],
+              "substitution_valid": true,
+              "flex_endpoint_su_errors": [],
+              "flex_endpoint_su_valid": true,
+              "ring_attachment_errors": [],
+              "ring_attachments_valid": true,
+              "shape_metrics": {
+                "q_span": 38,
+                "r_span": 42,
+                "q_over_r": 0.9047619047619048,
+                "min_q_over_r": 0.8,
+                "max_q_over_r": 2.0,
+                "valid": true,
+                "violation": 0.0,
+                "total_span": 80,
+                "x_span": 32.90896534380863,
+                "y_span": 35.0,
+                "width_over_height": 0.9402561526802466,
+                "rotated_90_width_over_height": 1.063539969559838,
+                "bbox_area": 1151.813787033302,
+                "principal_axis_ratio": 1.1962865231230866,
+                "principal_axis_angle": -78.54266093310879,
+                "linearity": 0.30123751659243414,
+                "covariance_eigenvalues": [
+                  85.98628916690977,
+                  60.08399295727095
+                ],
+                "node_density_cv": 0.46243460913501006,
+                "unit_density_cv": 0.5699971001811115,
+                "largest_void_radius": 4.0,
+                "large_void_fraction": 0.07863247863247863,
+                "hull_area": 917.1209026076831,
+                "hull_fill": 0.465533522190765,
+                "normalized_radius_of_gyration": 0.5443239887368208,
+                "layout_energy": 5.557027766349914,
+                "layout_valid": true
+              },
+              "shape_valid": true,
+              "shape_warnings": [],
+              "side_distribution": {
+                "attachment_count": 21,
+                "covered_aromatic_unit_count": 12,
+                "coverage_ratio": 0.5714285714285714,
+                "max_unit_load": 3,
+                "unit_loads": {
+                  "aromatic:2": 2,
+                  "aromatic:4": 3,
+                  "aromatic:5": 3,
+                  "aromatic:6": 1,
+                  "aromatic:10": 1,
+                  "aromatic:20": 1,
+                  "aromatic:21": 1,
+                  "aromatic:23": 1,
+                  "aromatic:24": 3,
+                  "aromatic:27": 1,
+                  "aromatic:28": 2,
+                  "aromatic:29": 2
+                }
+              },
+              "side_distribution_valid": false,
+              "side_distribution_warnings": [
+                "side_unit_overloaded",
+                "side_attachments_clustered"
+              ],
+              "actual_geometry_errors": [],
+              "main_anchor": "aromatic:2",
+              "excluded_unit_ids": [],
+              "geometry_valid": true,
+              "identity_valid": true,
+              "identity_errors": [],
+              "topology_valid": true,
+              "topology_errors": [],
+              "contract_errors": [],
+              "label_valid": true,
+              "label_errors": [],
+              "legal": true,
+              "component_count": 1,
+              "aromatic_template_errors": [],
+              "edge_count": 573,
+              "substitution_relaxed_edge_count": 2
+            },
+            "stage_no_actions": true,
+            "diagnostics": {
+              "flex": {
+                "connected": 20,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 205,
+                  "available_entries": 199,
+                  "blocked_entries": 6,
+                  "reasons": {
+                    "available": 199,
+                    "coordinate_collision": 6
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 165,
+                  "available_entries": 139,
+                  "blocked_entries": 26,
+                  "reasons": {
+                    "available": 139,
+                    "coordinate_collision": 26
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "ring": {
+                "connected": 13,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 165,
+                  "available_entries": 139,
+                  "blocked_entries": 26,
+                  "reasons": {
+                    "available": 139,
+                    "coordinate_collision": 26
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 139,
+                  "available_entries": 109,
+                  "blocked_entries": 30,
+                  "reasons": {
+                    "available": 109,
+                    "coordinate_collision": 30
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "side": {
+                "connected": 21,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 139,
+                  "available_entries": 109,
+                  "blocked_entries": 30,
+                  "reasons": {
+                    "available": 109,
+                    "coordinate_collision": 30
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 118,
+                  "available_entries": 77,
+                  "blocked_entries": 41,
+                  "reasons": {
+                    "coordinate_collision": 41,
+                    "available": 77
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "substitution": {
+                "connected": 2,
+                "no_actions": true,
+                "entries_before": null,
+                "entries_after": null,
+                "unconnected": {}
+              }
+            }
+          },
+          "rewards": {
+            "topology_completion": 0.2222222222222222,
+            "nmr_quality": 0.8106840257804487,
+            "forward_completion": 1.0,
+            "su13_clearance": 0.3557317073170733,
+            "shape_quality": 0.6674916658094652,
+            "total": 0.5787868364475653,
+            "weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.08981481481481482,
+              0.16018518518518518
+            ],
+            "base_weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.15,
+              0.1
+            ],
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5987654320987654,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 58,
+              "remaining_nodes": 194,
+              "remaining_ports": 95,
+              "stages": {
+                "flex": {
+                  "units": 24,
+                  "nodes": 24,
+                  "ports": 48
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            },
+            "shape_metrics": {
+              "quality": 0.6674916658094652,
+              "compactness_quality": 0.6090906756858799,
+              "aspect_quality": 0.9010956263038059,
+              "normalized_radius_of_gyration": 0.6417916739144431,
+              "node_count": 112,
+              "component_count": 1
+            },
+            "weighted_terms": {
+              "topology_completion": 0.07777777777777777,
+              "nmr_quality": 0.16213680515608975,
+              "forward_completion": 0.2,
+              "su13_clearance": 0.031949977416440845,
+              "shape_quality": 0.10692227609725692
+            }
+          },
+          "forward_valid": true
+        }
+      ],
+      "fallback": false,
+      "spatial_demand": {
+        "phase": "flex",
+        "pressure": 0.5987654320987654,
+        "reference_backbone_nodes": 324,
+        "reference_su13_sites": 237,
+        "remaining_units": 58,
+        "remaining_nodes": 194,
+        "remaining_ports": 95,
+        "stages": {
+          "flex": {
+            "units": 24,
+            "nodes": 24,
+            "ports": 48
+          },
+          "ring": {
+            "units": 13,
+            "nodes": 101,
+            "ports": 26
+          },
+          "side": {
+            "units": 21,
+            "nodes": 69,
+            "ports": 21
+          }
+        }
+      }
+    },
+    {
+      "phase": "flex",
+      "start_count": 4,
+      "end_count": 8,
+      "selected_attempt": 0,
+      "attempts": [
+        {
+          "attempt": 0,
+          "search": {
+            "simulations": 10,
+            "visited_states": 41,
+            "max_depth": 4,
+            "terminal_count": 10,
+            "backup_updates": 50,
+            "search_exhausted": false,
+            "stop_reason": "result_candidates_ready",
+            "result_candidate_count": 10,
+            "result_candidate_limit": 10,
+            "result_candidate_rewards": [
+              0.418385654571038,
+              0.41436926677029295,
+              0.41405381042288175,
+              0.4171195153693909,
+              0.41450048226733405,
+              0.41457984839206874,
+              0.41893488430768444,
+              0.41535946578586297,
+              0.4103201551506962,
+              0.4197431655377087
+            ],
+            "selected_reward": 0.4197431655377087,
+            "selected_tie_break": 87,
+            "root_legal_action_count": 10,
+            "root_evaluated_action_count": 10,
+            "root_actions_covered": true,
+            "retained_nodes": 1,
+            "peak_retained_nodes": 41,
+            "transition_bytes": 0,
+            "peak_transition_bytes": 2051199,
+            "elapsed_seconds": 214.37708553599805,
+            "rss_mib": 1412.42578125,
+            "search_seed": 832071555862946139,
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5864197530864198,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 54,
+              "remaining_nodes": 190,
+              "remaining_ports": 87,
+              "stages": {
+                "flex": {
+                  "units": 20,
+                  "nodes": 20,
+                  "ports": 40
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            }
+          },
+          "forward": {
+            "total": 90,
+            "completed": 90,
+            "completion": 1.0,
+            "tasks_complete": true,
+            "all_complete": true,
+            "completion_reasons": [],
+            "allowed_remaining_resources": [
+              {
+                "node_id": 281,
+                "source_su_type": 11,
+                "final_su_type": 13,
+                "state": "aromatic_residual",
+                "completion_tolerated": true,
+                "reason": "unused_su11_retained_as_su13"
+              },
+              {
+                "node_id": 385,
+                "source_su_type": 22,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              },
+              {
+                "node_id": 439,
+                "source_su_type": 23,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              }
+            ],
+            "allowed_remaining_resource_count": 3,
+            "stages": {
+              "rigid": {
+                "total": 30,
+                "completed": 30,
+                "unconnected": []
+              },
+              "flex": {
+                "total": 24,
+                "completed": 24,
+                "unconnected": []
+              },
+              "ring": {
+                "total": 13,
+                "completed": 13,
+                "unconnected": []
+              },
+              "side": {
+                "total": 21,
+                "completed": 21,
+                "unconnected": []
+              },
+              "substitution": {
+                "total": 2,
+                "completed": 2,
+                "unconnected": []
+              }
+            },
+            "main_component": [
+              "aromatic:0",
+              "aromatic:1",
+              "aromatic:10",
+              "aromatic:11",
+              "aromatic:12",
+              "aromatic:13",
+              "aromatic:14",
+              "aromatic:15",
+              "aromatic:16",
+              "aromatic:17",
+              "aromatic:18",
+              "aromatic:19",
+              "aromatic:2",
+              "aromatic:20",
+              "aromatic:21",
+              "aromatic:22",
+              "aromatic:23",
+              "aromatic:24",
+              "aromatic:25",
+              "aromatic:26",
+              "aromatic:27",
+              "aromatic:28",
+              "aromatic:29",
+              "aromatic:3",
+              "aromatic:4",
+              "aromatic:5",
+              "aromatic:6",
+              "aromatic:7",
+              "aromatic:8",
+              "aromatic:9",
+              "topology:0",
+              "topology:1",
+              "topology:10",
+              "topology:11",
+              "topology:12",
+              "topology:13",
+              "topology:14",
+              "topology:15",
+              "topology:16",
+              "topology:17",
+              "topology:18",
+              "topology:19",
+              "topology:2",
+              "topology:20",
+              "topology:21",
+              "topology:22",
+              "topology:23",
+              "topology:24",
+              "topology:25",
+              "topology:26",
+              "topology:27",
+              "topology:28",
+              "topology:29",
+              "topology:3",
+              "topology:30",
+              "topology:31",
+              "topology:32",
+              "topology:33",
+              "topology:34",
+              "topology:35",
+              "topology:36",
+              "topology:37",
+              "topology:38",
+              "topology:39",
+              "topology:4",
+              "topology:40",
+              "topology:41",
+              "topology:42",
+              "topology:43",
+              "topology:44",
+              "topology:45",
+              "topology:46",
+              "topology:47",
+              "topology:48",
+              "topology:49",
+              "topology:5",
+              "topology:50",
+              "topology:51",
+              "topology:52",
+              "topology:53",
+              "topology:54",
+              "topology:55",
+              "topology:56",
+              "topology:57",
+              "topology:6",
+              "topology:7",
+              "topology:8",
+              "topology:9"
+            ],
+            "main_anchor": "aromatic:2",
+            "excluded_units": [],
+            "forward_completion": 1.0,
+            "status": "complete",
+            "placed_unit_count": 88,
+            "unplaced_unit_count": 0,
+            "unplaced_units": {
+              "rigid": [],
+              "flex": [],
+              "ring": [],
+              "side": [],
+              "substitution": []
+            },
+            "unplaced_contracts": [],
+            "audit": {
+              "complete": true,
+              "tasks_complete": true,
+              "completion_reasons": [],
+              "allowed_remaining_resources": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                },
+                {
+                  "node_id": 385,
+                  "source_su_type": 22,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                },
+                {
+                  "node_id": 439,
+                  "source_su_type": 23,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                }
+              ],
+              "target_labels_complete": true,
+              "target_label_unfulfilled_ids": [],
+              "input_valid": true,
+              "input_errors": [],
+              "rigid_stage_complete": true,
+              "rigid_connections_done": 12,
+              "rigid_connections_total": 12,
+              "stage": "substitution",
+              "placed_unit_count": 88,
+              "unit_count": 88,
+              "placed_node_count": 493,
+              "expected_node_count": 493,
+              "source_node_count": 495,
+              "unassembled_resource_count": 2,
+              "unassembled_resource_ids": [
+                385,
+                439
+              ],
+              "idle_aromatic_nodes": [],
+              "idle_aromatic_count": 0,
+              "aromatic_residual_nodes": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                }
+              ],
+              "aromatic_residual_count": 1,
+              "strict_all_nodes_assembled": false,
+              "completion_mode": "best_legal_partial_allowed",
+              "resource_partition_errors": [],
+              "resource_partition_valid": true,
+              "missing_node_ids": [],
+              "unexpected_node_ids": [],
+              "pending_contract_ids": [],
+              "duplicate_axials": {},
+              "non_hex_edges": [],
+              "su25_center_branch_errors": [],
+              "su25_center_branches_valid": true,
+              "topology_conformation_errors": [],
+              "topology_conformation_valid": true,
+              "port_direction_errors": [],
+              "port_directions_valid": true,
+              "substitution_errors": [],
+              "substitution_valid": true,
+              "flex_endpoint_su_errors": [],
+              "flex_endpoint_su_valid": true,
+              "ring_attachment_errors": [],
+              "ring_attachments_valid": true,
+              "shape_metrics": {
+                "q_span": 36,
+                "r_span": 45,
+                "q_over_r": 0.8,
+                "min_q_over_r": 0.8,
+                "max_q_over_r": 2.0,
+                "valid": true,
+                "violation": 0.0,
+                "total_span": 81,
+                "x_span": 31.176914536239792,
+                "y_span": 40.0,
+                "width_over_height": 0.7794228634059948,
+                "rotated_90_width_over_height": 1.2830005981991683,
+                "bbox_area": 1247.0765814495917,
+                "principal_axis_ratio": 1.5212891968926925,
+                "principal_axis_angle": 64.9526656688146,
+                "linearity": 0.5679077891420672,
+                "covariance_eigenvalues": [
+                  100.5816641779632,
+                  43.46055364642626
+                ],
+                "node_density_cv": 0.5003156802915611,
+                "unit_density_cv": 0.7163598869306584,
+                "largest_void_radius": 3.0,
+                "large_void_fraction": 0.02962962962962963,
+                "hull_area": 880.3148229468497,
+                "hull_fill": 0.4849975405804407,
+                "normalized_radius_of_gyration": 0.5405320379266438,
+                "layout_energy": 1.6471515109351922,
+                "layout_valid": true
+              },
+              "shape_valid": false,
+              "shape_warnings": [
+                "uneven_unit_density"
+              ],
+              "side_distribution": {
+                "attachment_count": 21,
+                "covered_aromatic_unit_count": 14,
+                "coverage_ratio": 0.6666666666666666,
+                "max_unit_load": 3,
+                "unit_loads": {
+                  "aromatic:2": 2,
+                  "aromatic:3": 2,
+                  "aromatic:4": 1,
+                  "aromatic:5": 2,
+                  "aromatic:6": 2,
+                  "aromatic:7": 1,
+                  "aromatic:11": 1,
+                  "aromatic:21": 3,
+                  "aromatic:22": 1,
+                  "aromatic:23": 2,
+                  "aromatic:26": 1,
+                  "aromatic:27": 1,
+                  "aromatic:28": 1,
+                  "aromatic:29": 1
+                }
+              },
+              "side_distribution_valid": false,
+              "side_distribution_warnings": [
+                "side_unit_overloaded"
+              ],
+              "actual_geometry_errors": [],
+              "main_anchor": "aromatic:2",
+              "excluded_unit_ids": [],
+              "geometry_valid": true,
+              "identity_valid": true,
+              "identity_errors": [],
+              "topology_valid": true,
+              "topology_errors": [],
+              "contract_errors": [],
+              "label_valid": true,
+              "label_errors": [],
+              "legal": true,
+              "component_count": 1,
+              "aromatic_template_errors": [],
+              "edge_count": 573,
+              "substitution_relaxed_edge_count": 2
+            },
+            "stage_no_actions": true,
+            "diagnostics": {
+              "flex": {
+                "connected": 16,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 197,
+                  "available_entries": 184,
+                  "blocked_entries": 13,
+                  "reasons": {
+                    "available": 184,
+                    "coordinate_collision": 13
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 165,
+                  "available_entries": 138,
+                  "blocked_entries": 27,
+                  "reasons": {
+                    "coordinate_collision": 27,
+                    "available": 138
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "ring": {
+                "connected": 13,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 165,
+                  "available_entries": 138,
+                  "blocked_entries": 27,
+                  "reasons": {
+                    "coordinate_collision": 27,
+                    "available": 138
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 139,
+                  "available_entries": 108,
+                  "blocked_entries": 31,
+                  "reasons": {
+                    "coordinate_collision": 31,
+                    "available": 108
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "side": {
+                "connected": 21,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 139,
+                  "available_entries": 108,
+                  "blocked_entries": 31,
+                  "reasons": {
+                    "coordinate_collision": 31,
+                    "available": 108
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 118,
+                  "available_entries": 78,
+                  "blocked_entries": 40,
+                  "reasons": {
+                    "coordinate_collision": 40,
+                    "available": 78
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "substitution": {
+                "connected": 2,
+                "no_actions": true,
+                "entries_before": null,
+                "entries_after": null,
+                "unconnected": {}
+              }
+            }
+          },
+          "rewards": {
+            "topology_completion": 0.32222222222222224,
+            "nmr_quality": 0.8311898583052241,
+            "forward_completion": 1.0,
+            "su13_clearance": 0.3057529610829104,
+            "shape_quality": 0.7025090176224029,
+            "total": 0.6197431655377087,
+            "weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.08796296296296297,
+              0.16203703703703703
+            ],
+            "base_weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.15,
+              0.1
+            ],
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5864197530864198,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 54,
+              "remaining_nodes": 190,
+              "remaining_ports": 87,
+              "stages": {
+                "flex": {
+                  "units": 20,
+                  "nodes": 20,
+                  "ports": 40
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            },
+            "shape_metrics": {
+              "quality": 0.7025090176224029,
+              "compactness_quality": 0.6373664451298797,
+              "aspect_quality": 0.963079307592495,
+              "normalized_radius_of_gyration": 0.568956143896506,
+              "node_count": 194,
+              "component_count": 1
+            },
+            "weighted_terms": {
+              "topology_completion": 0.11277777777777778,
+              "nmr_quality": 0.16623797166104481,
+              "forward_completion": 0.2,
+              "su13_clearance": 0.026894936391552302,
+              "shape_quality": 0.1138324797073338
+            }
+          },
+          "forward_valid": true
+        }
+      ],
+      "fallback": false,
+      "spatial_demand": {
+        "phase": "flex",
+        "pressure": 0.5864197530864198,
+        "reference_backbone_nodes": 324,
+        "reference_su13_sites": 237,
+        "remaining_units": 54,
+        "remaining_nodes": 190,
+        "remaining_ports": 87,
+        "stages": {
+          "flex": {
+            "units": 20,
+            "nodes": 20,
+            "ports": 40
+          },
+          "ring": {
+            "units": 13,
+            "nodes": 101,
+            "ports": 26
+          },
+          "side": {
+            "units": 21,
+            "nodes": 69,
+            "ports": 21
+          }
+        }
+      }
+    },
+    {
+      "phase": "flex",
+      "start_count": 8,
+      "end_count": 12,
+      "selected_attempt": 0,
+      "attempts": [
+        {
+          "attempt": 0,
+          "search": {
+            "simulations": 10,
+            "visited_states": 41,
+            "max_depth": 4,
+            "terminal_count": 10,
+            "backup_updates": 50,
+            "search_exhausted": false,
+            "stop_reason": "result_candidates_ready",
+            "result_candidate_count": 10,
+            "result_candidate_limit": 10,
+            "result_candidate_rewards": [
+              0.45088746198156676,
+              0.4528995758617704,
+              0.4525702373545056,
+              0.45207001232265565,
+              0.45312459239813346,
+              0.45020744060900564,
+              0.447744648271601,
+              0.454066619549423,
+              0.45121603388509224,
+              0.45044519200893746
+            ],
+            "selected_reward": 0.454066619549423,
+            "selected_tie_break": 79,
+            "root_legal_action_count": 10,
+            "root_evaluated_action_count": 10,
+            "root_actions_covered": true,
+            "retained_nodes": 1,
+            "peak_retained_nodes": 41,
+            "transition_bytes": 0,
+            "peak_transition_bytes": 1833555,
+            "elapsed_seconds": 199.22046722999949,
+            "rss_mib": 1411.984375,
+            "search_seed": 15110279516464123910,
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5740740740740741,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 50,
+              "remaining_nodes": 186,
+              "remaining_ports": 79,
+              "stages": {
+                "flex": {
+                  "units": 16,
+                  "nodes": 16,
+                  "ports": 32
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            }
+          },
+          "forward": {
+            "total": 90,
+            "completed": 90,
+            "completion": 1.0,
+            "tasks_complete": true,
+            "all_complete": true,
+            "completion_reasons": [],
+            "allowed_remaining_resources": [
+              {
+                "node_id": 281,
+                "source_su_type": 11,
+                "final_su_type": 13,
+                "state": "aromatic_residual",
+                "completion_tolerated": true,
+                "reason": "unused_su11_retained_as_su13"
+              },
+              {
+                "node_id": 385,
+                "source_su_type": 22,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              },
+              {
+                "node_id": 439,
+                "source_su_type": 23,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              }
+            ],
+            "allowed_remaining_resource_count": 3,
+            "stages": {
+              "rigid": {
+                "total": 30,
+                "completed": 30,
+                "unconnected": []
+              },
+              "flex": {
+                "total": 24,
+                "completed": 24,
+                "unconnected": []
+              },
+              "ring": {
+                "total": 13,
+                "completed": 13,
+                "unconnected": []
+              },
+              "side": {
+                "total": 21,
+                "completed": 21,
+                "unconnected": []
+              },
+              "substitution": {
+                "total": 2,
+                "completed": 2,
+                "unconnected": []
+              }
+            },
+            "main_component": [
+              "aromatic:0",
+              "aromatic:1",
+              "aromatic:10",
+              "aromatic:11",
+              "aromatic:12",
+              "aromatic:13",
+              "aromatic:14",
+              "aromatic:15",
+              "aromatic:16",
+              "aromatic:17",
+              "aromatic:18",
+              "aromatic:19",
+              "aromatic:2",
+              "aromatic:20",
+              "aromatic:21",
+              "aromatic:22",
+              "aromatic:23",
+              "aromatic:24",
+              "aromatic:25",
+              "aromatic:26",
+              "aromatic:27",
+              "aromatic:28",
+              "aromatic:29",
+              "aromatic:3",
+              "aromatic:4",
+              "aromatic:5",
+              "aromatic:6",
+              "aromatic:7",
+              "aromatic:8",
+              "aromatic:9",
+              "topology:0",
+              "topology:1",
+              "topology:10",
+              "topology:11",
+              "topology:12",
+              "topology:13",
+              "topology:14",
+              "topology:15",
+              "topology:16",
+              "topology:17",
+              "topology:18",
+              "topology:19",
+              "topology:2",
+              "topology:20",
+              "topology:21",
+              "topology:22",
+              "topology:23",
+              "topology:24",
+              "topology:25",
+              "topology:26",
+              "topology:27",
+              "topology:28",
+              "topology:29",
+              "topology:3",
+              "topology:30",
+              "topology:31",
+              "topology:32",
+              "topology:33",
+              "topology:34",
+              "topology:35",
+              "topology:36",
+              "topology:37",
+              "topology:38",
+              "topology:39",
+              "topology:4",
+              "topology:40",
+              "topology:41",
+              "topology:42",
+              "topology:43",
+              "topology:44",
+              "topology:45",
+              "topology:46",
+              "topology:47",
+              "topology:48",
+              "topology:49",
+              "topology:5",
+              "topology:50",
+              "topology:51",
+              "topology:52",
+              "topology:53",
+              "topology:54",
+              "topology:55",
+              "topology:56",
+              "topology:57",
+              "topology:6",
+              "topology:7",
+              "topology:8",
+              "topology:9"
+            ],
+            "main_anchor": "aromatic:2",
+            "excluded_units": [],
+            "forward_completion": 1.0,
+            "status": "complete",
+            "placed_unit_count": 88,
+            "unplaced_unit_count": 0,
+            "unplaced_units": {
+              "rigid": [],
+              "flex": [],
+              "ring": [],
+              "side": [],
+              "substitution": []
+            },
+            "unplaced_contracts": [],
+            "audit": {
+              "complete": true,
+              "tasks_complete": true,
+              "completion_reasons": [],
+              "allowed_remaining_resources": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                },
+                {
+                  "node_id": 385,
+                  "source_su_type": 22,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                },
+                {
+                  "node_id": 439,
+                  "source_su_type": 23,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                }
+              ],
+              "target_labels_complete": true,
+              "target_label_unfulfilled_ids": [],
+              "input_valid": true,
+              "input_errors": [],
+              "rigid_stage_complete": true,
+              "rigid_connections_done": 12,
+              "rigid_connections_total": 12,
+              "stage": "substitution",
+              "placed_unit_count": 88,
+              "unit_count": 88,
+              "placed_node_count": 493,
+              "expected_node_count": 493,
+              "source_node_count": 495,
+              "unassembled_resource_count": 2,
+              "unassembled_resource_ids": [
+                385,
+                439
+              ],
+              "idle_aromatic_nodes": [],
+              "idle_aromatic_count": 0,
+              "aromatic_residual_nodes": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                }
+              ],
+              "aromatic_residual_count": 1,
+              "strict_all_nodes_assembled": false,
+              "completion_mode": "best_legal_partial_allowed",
+              "resource_partition_errors": [],
+              "resource_partition_valid": true,
+              "missing_node_ids": [],
+              "unexpected_node_ids": [],
+              "pending_contract_ids": [],
+              "duplicate_axials": {},
+              "non_hex_edges": [],
+              "su25_center_branch_errors": [],
+              "su25_center_branches_valid": true,
+              "topology_conformation_errors": [],
+              "topology_conformation_valid": true,
+              "port_direction_errors": [],
+              "port_directions_valid": true,
+              "substitution_errors": [],
+              "substitution_valid": true,
+              "flex_endpoint_su_errors": [],
+              "flex_endpoint_su_valid": true,
+              "ring_attachment_errors": [],
+              "ring_attachments_valid": true,
+              "shape_metrics": {
+                "q_span": 47,
+                "r_span": 38,
+                "q_over_r": 1.236842105263158,
+                "min_q_over_r": 0.8,
+                "max_q_over_r": 2.0,
+                "valid": true,
+                "violation": 0.0,
+                "total_span": 85,
+                "x_span": 40.70319397786875,
+                "y_span": 31.0,
+                "width_over_height": 1.313006257350605,
+                "rotated_90_width_over_height": 0.7616109933990782,
+                "bbox_area": 1261.7990133139313,
+                "principal_axis_ratio": 1.4886995206365214,
+                "principal_axis_angle": -2.2127431263493444,
+                "linearity": 0.5487825332589796,
+                "covariance_eigenvalues": [
+                  105.09803277624486,
+                  47.422068108761934
+                ],
+                "node_density_cv": 0.5076305534598167,
+                "unit_density_cv": 0.536382896418452,
+                "largest_void_radius": 5.0,
+                "large_void_fraction": 0.1013745704467354,
+                "hull_area": 915.821864502097,
+                "hull_fill": 0.4661938534278689,
+                "normalized_radius_of_gyration": 0.556211651612465,
+                "layout_energy": 13.583068809272397,
+                "layout_valid": true
+              },
+              "shape_valid": true,
+              "shape_warnings": [],
+              "side_distribution": {
+                "attachment_count": 21,
+                "covered_aromatic_unit_count": 13,
+                "coverage_ratio": 0.6190476190476191,
+                "max_unit_load": 3,
+                "unit_loads": {
+                  "aromatic:1": 1,
+                  "aromatic:2": 1,
+                  "aromatic:3": 1,
+                  "aromatic:4": 2,
+                  "aromatic:5": 2,
+                  "aromatic:6": 3,
+                  "aromatic:12": 1,
+                  "aromatic:22": 1,
+                  "aromatic:23": 1,
+                  "aromatic:24": 2,
+                  "aromatic:25": 3,
+                  "aromatic:26": 2,
+                  "aromatic:28": 1
+                }
+              },
+              "side_distribution_valid": false,
+              "side_distribution_warnings": [
+                "side_unit_overloaded",
+                "side_attachments_clustered"
+              ],
+              "actual_geometry_errors": [],
+              "main_anchor": "aromatic:2",
+              "excluded_unit_ids": [],
+              "geometry_valid": true,
+              "identity_valid": true,
+              "identity_errors": [],
+              "topology_valid": true,
+              "topology_errors": [],
+              "contract_errors": [],
+              "label_valid": true,
+              "label_errors": [],
+              "legal": true,
+              "component_count": 1,
+              "aromatic_template_errors": [],
+              "edge_count": 573,
+              "substitution_relaxed_edge_count": 2
+            },
+            "stage_no_actions": true,
+            "diagnostics": {
+              "flex": {
+                "connected": 12,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 189,
+                  "available_entries": 170,
+                  "blocked_entries": 19,
+                  "reasons": {
+                    "available": 170,
+                    "coordinate_collision": 19
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 165,
+                  "available_entries": 136,
+                  "blocked_entries": 29,
+                  "reasons": {
+                    "coordinate_collision": 29,
+                    "available": 136
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "ring": {
+                "connected": 13,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 165,
+                  "available_entries": 136,
+                  "blocked_entries": 29,
+                  "reasons": {
+                    "coordinate_collision": 29,
+                    "available": 136
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 139,
+                  "available_entries": 106,
+                  "blocked_entries": 33,
+                  "reasons": {
+                    "coordinate_collision": 33,
+                    "available": 106
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "side": {
+                "connected": 21,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 139,
+                  "available_entries": 106,
+                  "blocked_entries": 33,
+                  "reasons": {
+                    "coordinate_collision": 33,
+                    "available": 106
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 118,
+                  "available_entries": 76,
+                  "blocked_entries": 42,
+                  "reasons": {
+                    "coordinate_collision": 42,
+                    "available": 76
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "substitution": {
+                "connected": 2,
+                "no_actions": true,
+                "entries_before": null,
+                "entries_after": null,
+                "unconnected": {}
+              }
+            }
+          },
+          "rewards": {
+            "topology_completion": 0.4111111111111111,
+            "nmr_quality": 0.8517230394963783,
+            "forward_completion": 1.0,
+            "su13_clearance": 0.28474426807760134,
+            "shape_quality": 0.7036076590448714,
+            "total": 0.6540666195494231,
+            "weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.08611111111111111,
+              0.1638888888888889
+            ],
+            "base_weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.15,
+              0.1
+            ],
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5740740740740741,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 50,
+              "remaining_nodes": 186,
+              "remaining_ports": 79,
+              "stages": {
+                "flex": {
+                  "units": 16,
+                  "nodes": 16,
+                  "ports": 32
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            },
+            "shape_metrics": {
+              "quality": 0.7036076590448714,
+              "compactness_quality": 0.640127588179924,
+              "aspect_quality": 0.9575279425046611,
+              "normalized_radius_of_gyration": 0.5621885675062092,
+              "node_count": 234,
+              "component_count": 1
+            },
+            "weighted_terms": {
+              "topology_completion": 0.14388888888888887,
+              "nmr_quality": 0.17034460789927566,
+              "forward_completion": 0.2,
+              "su13_clearance": 0.02451964530668234,
+              "shape_quality": 0.11531347745457615
+            }
+          },
+          "forward_valid": true
+        }
+      ],
+      "fallback": false,
+      "spatial_demand": {
+        "phase": "flex",
+        "pressure": 0.5740740740740741,
+        "reference_backbone_nodes": 324,
+        "reference_su13_sites": 237,
+        "remaining_units": 50,
+        "remaining_nodes": 186,
+        "remaining_ports": 79,
+        "stages": {
+          "flex": {
+            "units": 16,
+            "nodes": 16,
+            "ports": 32
+          },
+          "ring": {
+            "units": 13,
+            "nodes": 101,
+            "ports": 26
+          },
+          "side": {
+            "units": 21,
+            "nodes": 69,
+            "ports": 21
+          }
+        }
+      }
+    },
+    {
+      "phase": "flex",
+      "start_count": 12,
+      "end_count": 16,
+      "selected_attempt": 0,
+      "attempts": [
+        {
+          "attempt": 0,
+          "search": {
+            "simulations": 10,
+            "visited_states": 41,
+            "max_depth": 4,
+            "terminal_count": 10,
+            "backup_updates": 50,
+            "search_exhausted": false,
+            "stop_reason": "result_candidates_ready",
+            "result_candidate_count": 10,
+            "result_candidate_limit": 10,
+            "result_candidate_rewards": [
+              0.484044602767624,
+              0.4849580785644333,
+              0.48469027632620665,
+              0.48484383270584575,
+              0.48657904961700654,
+              0.4824107414762219,
+              0.48656867657360103,
+              0.48402667822574563,
+              0.48627968587605147,
+              0.4838895822078913
+            ],
+            "selected_reward": 0.48657904961700654,
+            "selected_tie_break": 71,
+            "root_legal_action_count": 10,
+            "root_evaluated_action_count": 10,
+            "root_actions_covered": true,
+            "retained_nodes": 1,
+            "peak_retained_nodes": 41,
+            "transition_bytes": 0,
+            "peak_transition_bytes": 1553811,
+            "elapsed_seconds": 218.60563850900144,
+            "rss_mib": 1413.296875,
+            "search_seed": 5095693576358171752,
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5617283950617284,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 46,
+              "remaining_nodes": 182,
+              "remaining_ports": 71,
+              "stages": {
+                "flex": {
+                  "units": 12,
+                  "nodes": 12,
+                  "ports": 24
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            }
+          },
+          "forward": {
+            "total": 90,
+            "completed": 90,
+            "completion": 1.0,
+            "tasks_complete": true,
+            "all_complete": true,
+            "completion_reasons": [],
+            "allowed_remaining_resources": [
+              {
+                "node_id": 281,
+                "source_su_type": 11,
+                "final_su_type": 13,
+                "state": "aromatic_residual",
+                "completion_tolerated": true,
+                "reason": "unused_su11_retained_as_su13"
+              },
+              {
+                "node_id": 385,
+                "source_su_type": 22,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              },
+              {
+                "node_id": 439,
+                "source_su_type": 23,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              }
+            ],
+            "allowed_remaining_resource_count": 3,
+            "stages": {
+              "rigid": {
+                "total": 30,
+                "completed": 30,
+                "unconnected": []
+              },
+              "flex": {
+                "total": 24,
+                "completed": 24,
+                "unconnected": []
+              },
+              "ring": {
+                "total": 13,
+                "completed": 13,
+                "unconnected": []
+              },
+              "side": {
+                "total": 21,
+                "completed": 21,
+                "unconnected": []
+              },
+              "substitution": {
+                "total": 2,
+                "completed": 2,
+                "unconnected": []
+              }
+            },
+            "main_component": [
+              "aromatic:0",
+              "aromatic:1",
+              "aromatic:10",
+              "aromatic:11",
+              "aromatic:12",
+              "aromatic:13",
+              "aromatic:14",
+              "aromatic:15",
+              "aromatic:16",
+              "aromatic:17",
+              "aromatic:18",
+              "aromatic:19",
+              "aromatic:2",
+              "aromatic:20",
+              "aromatic:21",
+              "aromatic:22",
+              "aromatic:23",
+              "aromatic:24",
+              "aromatic:25",
+              "aromatic:26",
+              "aromatic:27",
+              "aromatic:28",
+              "aromatic:29",
+              "aromatic:3",
+              "aromatic:4",
+              "aromatic:5",
+              "aromatic:6",
+              "aromatic:7",
+              "aromatic:8",
+              "aromatic:9",
+              "topology:0",
+              "topology:1",
+              "topology:10",
+              "topology:11",
+              "topology:12",
+              "topology:13",
+              "topology:14",
+              "topology:15",
+              "topology:16",
+              "topology:17",
+              "topology:18",
+              "topology:19",
+              "topology:2",
+              "topology:20",
+              "topology:21",
+              "topology:22",
+              "topology:23",
+              "topology:24",
+              "topology:25",
+              "topology:26",
+              "topology:27",
+              "topology:28",
+              "topology:29",
+              "topology:3",
+              "topology:30",
+              "topology:31",
+              "topology:32",
+              "topology:33",
+              "topology:34",
+              "topology:35",
+              "topology:36",
+              "topology:37",
+              "topology:38",
+              "topology:39",
+              "topology:4",
+              "topology:40",
+              "topology:41",
+              "topology:42",
+              "topology:43",
+              "topology:44",
+              "topology:45",
+              "topology:46",
+              "topology:47",
+              "topology:48",
+              "topology:49",
+              "topology:5",
+              "topology:50",
+              "topology:51",
+              "topology:52",
+              "topology:53",
+              "topology:54",
+              "topology:55",
+              "topology:56",
+              "topology:57",
+              "topology:6",
+              "topology:7",
+              "topology:8",
+              "topology:9"
+            ],
+            "main_anchor": "aromatic:2",
+            "excluded_units": [],
+            "forward_completion": 1.0,
+            "status": "complete",
+            "placed_unit_count": 88,
+            "unplaced_unit_count": 0,
+            "unplaced_units": {
+              "rigid": [],
+              "flex": [],
+              "ring": [],
+              "side": [],
+              "substitution": []
+            },
+            "unplaced_contracts": [],
+            "audit": {
+              "complete": true,
+              "tasks_complete": true,
+              "completion_reasons": [],
+              "allowed_remaining_resources": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                },
+                {
+                  "node_id": 385,
+                  "source_su_type": 22,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                },
+                {
+                  "node_id": 439,
+                  "source_su_type": 23,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                }
+              ],
+              "target_labels_complete": true,
+              "target_label_unfulfilled_ids": [],
+              "input_valid": true,
+              "input_errors": [],
+              "rigid_stage_complete": true,
+              "rigid_connections_done": 12,
+              "rigid_connections_total": 12,
+              "stage": "substitution",
+              "placed_unit_count": 88,
+              "unit_count": 88,
+              "placed_node_count": 493,
+              "expected_node_count": 493,
+              "source_node_count": 495,
+              "unassembled_resource_count": 2,
+              "unassembled_resource_ids": [
+                385,
+                439
+              ],
+              "idle_aromatic_nodes": [],
+              "idle_aromatic_count": 0,
+              "aromatic_residual_nodes": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                }
+              ],
+              "aromatic_residual_count": 1,
+              "strict_all_nodes_assembled": false,
+              "completion_mode": "best_legal_partial_allowed",
+              "resource_partition_errors": [],
+              "resource_partition_valid": true,
+              "missing_node_ids": [],
+              "unexpected_node_ids": [],
+              "pending_contract_ids": [],
+              "duplicate_axials": {},
+              "non_hex_edges": [],
+              "su25_center_branch_errors": [],
+              "su25_center_branches_valid": true,
+              "topology_conformation_errors": [],
+              "topology_conformation_valid": true,
+              "port_direction_errors": [],
+              "port_directions_valid": true,
+              "substitution_errors": [],
+              "substitution_valid": true,
+              "flex_endpoint_su_errors": [],
+              "flex_endpoint_su_valid": true,
+              "ring_attachment_errors": [],
+              "ring_attachments_valid": true,
+              "shape_metrics": {
+                "q_span": 40,
+                "r_span": 34,
+                "q_over_r": 1.1764705882352942,
+                "min_q_over_r": 0.8,
+                "max_q_over_r": 2.0,
+                "valid": true,
+                "violation": 0.0,
+                "total_span": 74,
+                "x_span": 34.64101615137747,
+                "y_span": 33.0,
+                "width_over_height": 1.0497277621629537,
+                "rotated_90_width_over_height": 0.9526279441628845,
+                "bbox_area": 1143.1535329954565,
+                "principal_axis_ratio": 1.1466411280610216,
+                "principal_axis_angle": -12.488687170670763,
+                "linearity": 0.23941987982438995,
+                "covariance_eigenvalues": [
+                  77.18816625548791,
+                  58.707784766733965
+                ],
+                "node_density_cv": 0.47631940588782423,
+                "unit_density_cv": 0.4568125282327677,
+                "largest_void_radius": 4.0,
+                "large_void_fraction": 0.03592814371257485,
+                "hull_area": 839.6116289690253,
+                "hull_fill": 0.5085095410005084,
+                "normalized_radius_of_gyration": 0.5250247768174902,
+                "layout_energy": 5.380551005496912,
+                "layout_valid": true
+              },
+              "shape_valid": true,
+              "shape_warnings": [],
+              "side_distribution": {
+                "attachment_count": 21,
+                "covered_aromatic_unit_count": 14,
+                "coverage_ratio": 0.6666666666666666,
+                "max_unit_load": 3,
+                "unit_loads": {
+                  "aromatic:0": 1,
+                  "aromatic:1": 2,
+                  "aromatic:2": 1,
+                  "aromatic:5": 2,
+                  "aromatic:6": 3,
+                  "aromatic:13": 1,
+                  "aromatic:21": 2,
+                  "aromatic:22": 2,
+                  "aromatic:23": 1,
+                  "aromatic:24": 2,
+                  "aromatic:25": 1,
+                  "aromatic:26": 1,
+                  "aromatic:27": 1,
+                  "aromatic:29": 1
+                }
+              },
+              "side_distribution_valid": false,
+              "side_distribution_warnings": [
+                "side_unit_overloaded"
+              ],
+              "actual_geometry_errors": [],
+              "main_anchor": "aromatic:2",
+              "excluded_unit_ids": [],
+              "geometry_valid": true,
+              "identity_valid": true,
+              "identity_errors": [],
+              "topology_valid": true,
+              "topology_errors": [],
+              "contract_errors": [],
+              "label_valid": true,
+              "label_errors": [],
+              "legal": true,
+              "component_count": 1,
+              "aromatic_template_errors": [],
+              "edge_count": 573,
+              "substitution_relaxed_edge_count": 2
+            },
+            "stage_no_actions": true,
+            "diagnostics": {
+              "flex": {
+                "connected": 8,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 181,
+                  "available_entries": 158,
+                  "blocked_entries": 23,
+                  "reasons": {
+                    "available": 158,
+                    "coordinate_collision": 23
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 165,
+                  "available_entries": 141,
+                  "blocked_entries": 24,
+                  "reasons": {
+                    "available": 141,
+                    "coordinate_collision": 24
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "ring": {
+                "connected": 13,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 165,
+                  "available_entries": 141,
+                  "blocked_entries": 24,
+                  "reasons": {
+                    "available": 141,
+                    "coordinate_collision": 24
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 139,
+                  "available_entries": 115,
+                  "blocked_entries": 24,
+                  "reasons": {
+                    "available": 115,
+                    "coordinate_collision": 24
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "side": {
+                "connected": 21,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 139,
+                  "available_entries": 115,
+                  "blocked_entries": 24,
+                  "reasons": {
+                    "available": 115,
+                    "coordinate_collision": 24
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 118,
+                  "available_entries": 85,
+                  "blocked_entries": 33,
+                  "reasons": {
+                    "coordinate_collision": 33,
+                    "available": 85
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "substitution": {
+                "connected": 2,
+                "no_actions": true,
+                "entries_before": null,
+                "entries_after": null,
+                "unconnected": {}
+              }
+            }
+          },
+          "rewards": {
+            "topology_completion": 0.5,
+            "nmr_quality": 0.8637759008200454,
+            "forward_completion": 1.0,
+            "su13_clearance": 0.26160220994475136,
+            "shape_quality": 0.7046032285154463,
+            "total": 0.6865790496170064,
+            "weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.08425925925925927,
+              0.16574074074074074
+            ],
+            "base_weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.15,
+              0.1
+            ],
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5617283950617284,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 46,
+              "remaining_nodes": 182,
+              "remaining_ports": 71,
+              "stages": {
+                "flex": {
+                  "units": 12,
+                  "nodes": 12,
+                  "ports": 24
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            },
+            "shape_metrics": {
+              "quality": 0.7046032285154463,
+              "compactness_quality": 0.6458622053961024,
+              "aspect_quality": 0.9395673209928216,
+              "normalized_radius_of_gyration": 0.5483178790229836,
+              "node_count": 298,
+              "component_count": 1
+            },
+            "weighted_terms": {
+              "topology_completion": 0.175,
+              "nmr_quality": 0.1727551801640091,
+              "forward_completion": 0.2,
+              "su13_clearance": 0.02204240843052998,
+              "shape_quality": 0.11678146102246749
+            }
+          },
+          "forward_valid": true
+        }
+      ],
+      "fallback": false,
+      "spatial_demand": {
+        "phase": "flex",
+        "pressure": 0.5617283950617284,
+        "reference_backbone_nodes": 324,
+        "reference_su13_sites": 237,
+        "remaining_units": 46,
+        "remaining_nodes": 182,
+        "remaining_ports": 71,
+        "stages": {
+          "flex": {
+            "units": 12,
+            "nodes": 12,
+            "ports": 24
+          },
+          "ring": {
+            "units": 13,
+            "nodes": 101,
+            "ports": 26
+          },
+          "side": {
+            "units": 21,
+            "nodes": 69,
+            "ports": 21
+          }
+        }
+      }
+    },
+    {
+      "phase": "flex",
+      "start_count": 16,
+      "end_count": 20,
+      "selected_attempt": 0,
+      "attempts": [
+        {
+          "attempt": 0,
+          "search": {
+            "simulations": 10,
+            "visited_states": 41,
+            "max_depth": 4,
+            "terminal_count": 10,
+            "backup_updates": 50,
+            "search_exhausted": false,
+            "stop_reason": "result_candidates_ready",
+            "result_candidate_count": 10,
+            "result_candidate_limit": 10,
+            "result_candidate_rewards": [
+              0.5076528700005746,
+              0.507392201290557,
+              0.5073835466286274,
+              0.5072208172437511,
+              0.5069040409782685,
+              0.5064387293606032,
+              0.505904095922069,
+              0.5047384239037849,
+              0.5027262441065767,
+              0.5021475116236787
+            ],
+            "selected_reward": 0.5076528700005746,
+            "selected_tie_break": 63,
+            "root_legal_action_count": 10,
+            "root_evaluated_action_count": 10,
+            "root_actions_covered": true,
+            "retained_nodes": 1,
+            "peak_retained_nodes": 41,
+            "transition_bytes": 0,
+            "peak_transition_bytes": 1282323,
+            "elapsed_seconds": 177.3094363789969,
+            "rss_mib": 1413.30859375,
+            "search_seed": 4722213724205314701,
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5493827160493827,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 42,
+              "remaining_nodes": 178,
+              "remaining_ports": 63,
+              "stages": {
+                "flex": {
+                  "units": 8,
+                  "nodes": 8,
+                  "ports": 16
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            }
+          },
+          "forward": {
+            "total": 90,
+            "completed": 90,
+            "completion": 1.0,
+            "tasks_complete": true,
+            "all_complete": true,
+            "completion_reasons": [],
+            "allowed_remaining_resources": [
+              {
+                "node_id": 281,
+                "source_su_type": 11,
+                "final_su_type": 13,
+                "state": "aromatic_residual",
+                "completion_tolerated": true,
+                "reason": "unused_su11_retained_as_su13"
+              },
+              {
+                "node_id": 385,
+                "source_su_type": 22,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              },
+              {
+                "node_id": 439,
+                "source_su_type": 23,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              }
+            ],
+            "allowed_remaining_resource_count": 3,
+            "stages": {
+              "rigid": {
+                "total": 30,
+                "completed": 30,
+                "unconnected": []
+              },
+              "flex": {
+                "total": 24,
+                "completed": 24,
+                "unconnected": []
+              },
+              "ring": {
+                "total": 13,
+                "completed": 13,
+                "unconnected": []
+              },
+              "side": {
+                "total": 21,
+                "completed": 21,
+                "unconnected": []
+              },
+              "substitution": {
+                "total": 2,
+                "completed": 2,
+                "unconnected": []
+              }
+            },
+            "main_component": [
+              "aromatic:0",
+              "aromatic:1",
+              "aromatic:10",
+              "aromatic:11",
+              "aromatic:12",
+              "aromatic:13",
+              "aromatic:14",
+              "aromatic:15",
+              "aromatic:16",
+              "aromatic:17",
+              "aromatic:18",
+              "aromatic:19",
+              "aromatic:2",
+              "aromatic:20",
+              "aromatic:21",
+              "aromatic:22",
+              "aromatic:23",
+              "aromatic:24",
+              "aromatic:25",
+              "aromatic:26",
+              "aromatic:27",
+              "aromatic:28",
+              "aromatic:29",
+              "aromatic:3",
+              "aromatic:4",
+              "aromatic:5",
+              "aromatic:6",
+              "aromatic:7",
+              "aromatic:8",
+              "aromatic:9",
+              "topology:0",
+              "topology:1",
+              "topology:10",
+              "topology:11",
+              "topology:12",
+              "topology:13",
+              "topology:14",
+              "topology:15",
+              "topology:16",
+              "topology:17",
+              "topology:18",
+              "topology:19",
+              "topology:2",
+              "topology:20",
+              "topology:21",
+              "topology:22",
+              "topology:23",
+              "topology:24",
+              "topology:25",
+              "topology:26",
+              "topology:27",
+              "topology:28",
+              "topology:29",
+              "topology:3",
+              "topology:30",
+              "topology:31",
+              "topology:32",
+              "topology:33",
+              "topology:34",
+              "topology:35",
+              "topology:36",
+              "topology:37",
+              "topology:38",
+              "topology:39",
+              "topology:4",
+              "topology:40",
+              "topology:41",
+              "topology:42",
+              "topology:43",
+              "topology:44",
+              "topology:45",
+              "topology:46",
+              "topology:47",
+              "topology:48",
+              "topology:49",
+              "topology:5",
+              "topology:50",
+              "topology:51",
+              "topology:52",
+              "topology:53",
+              "topology:54",
+              "topology:55",
+              "topology:56",
+              "topology:57",
+              "topology:6",
+              "topology:7",
+              "topology:8",
+              "topology:9"
+            ],
+            "main_anchor": "aromatic:2",
+            "excluded_units": [],
+            "forward_completion": 1.0,
+            "status": "complete",
+            "placed_unit_count": 88,
+            "unplaced_unit_count": 0,
+            "unplaced_units": {
+              "rigid": [],
+              "flex": [],
+              "ring": [],
+              "side": [],
+              "substitution": []
+            },
+            "unplaced_contracts": [],
+            "audit": {
+              "complete": true,
+              "tasks_complete": true,
+              "completion_reasons": [],
+              "allowed_remaining_resources": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                },
+                {
+                  "node_id": 385,
+                  "source_su_type": 22,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                },
+                {
+                  "node_id": 439,
+                  "source_su_type": 23,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                }
+              ],
+              "target_labels_complete": true,
+              "target_label_unfulfilled_ids": [],
+              "input_valid": true,
+              "input_errors": [],
+              "rigid_stage_complete": true,
+              "rigid_connections_done": 12,
+              "rigid_connections_total": 12,
+              "stage": "substitution",
+              "placed_unit_count": 88,
+              "unit_count": 88,
+              "placed_node_count": 493,
+              "expected_node_count": 493,
+              "source_node_count": 495,
+              "unassembled_resource_count": 2,
+              "unassembled_resource_ids": [
+                385,
+                439
+              ],
+              "idle_aromatic_nodes": [],
+              "idle_aromatic_count": 0,
+              "aromatic_residual_nodes": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                }
+              ],
+              "aromatic_residual_count": 1,
+              "strict_all_nodes_assembled": false,
+              "completion_mode": "best_legal_partial_allowed",
+              "resource_partition_errors": [],
+              "resource_partition_valid": true,
+              "missing_node_ids": [],
+              "unexpected_node_ids": [],
+              "pending_contract_ids": [],
+              "duplicate_axials": {},
+              "non_hex_edges": [],
+              "su25_center_branch_errors": [],
+              "su25_center_branches_valid": true,
+              "topology_conformation_errors": [],
+              "topology_conformation_valid": true,
+              "port_direction_errors": [],
+              "port_directions_valid": true,
+              "substitution_errors": [],
+              "substitution_valid": true,
+              "flex_endpoint_su_errors": [],
+              "flex_endpoint_su_valid": true,
+              "ring_attachment_errors": [],
+              "ring_attachments_valid": true,
+              "shape_metrics": {
+                "q_span": 40,
+                "r_span": 36,
+                "q_over_r": 1.1111111111111112,
+                "min_q_over_r": 0.8,
+                "max_q_over_r": 2.0,
+                "valid": true,
+                "violation": 0.0,
+                "total_span": 76,
+                "x_span": 34.6410161513777,
+                "y_span": 33.0,
+                "width_over_height": 1.0497277621629606,
+                "rotated_90_width_over_height": 0.9526279441628783,
+                "bbox_area": 1143.153532995464,
+                "principal_axis_ratio": 1.1624282747720502,
+                "principal_axis_angle": -9.090654540301394,
+                "linearity": 0.2599387418380533,
+                "covariance_eigenvalues": [
+                  77.58933003818878,
+                  57.420857208004506
+                ],
+                "node_density_cv": 0.5091843547607581,
+                "unit_density_cv": 0.4887684810819674,
+                "largest_void_radius": 3.0,
+                "large_void_fraction": 0.012422360248447204,
+                "hull_area": 826.188235210313,
+                "hull_fill": 0.5167714884696276,
+                "normalized_radius_of_gyration": 0.5233109354723788,
+                "layout_energy": 1.393097966197743,
+                "layout_valid": true
+              },
+              "shape_valid": true,
+              "shape_warnings": [],
+              "side_distribution": {
+                "attachment_count": 21,
+                "covered_aromatic_unit_count": 13,
+                "coverage_ratio": 0.6190476190476191,
+                "max_unit_load": 3,
+                "unit_loads": {
+                  "aromatic:1": 3,
+                  "aromatic:2": 1,
+                  "aromatic:3": 2,
+                  "aromatic:4": 1,
+                  "aromatic:5": 3,
+                  "aromatic:6": 2,
+                  "aromatic:13": 1,
+                  "aromatic:21": 1,
+                  "aromatic:22": 3,
+                  "aromatic:23": 1,
+                  "aromatic:25": 1,
+                  "aromatic:26": 1,
+                  "aromatic:29": 1
+                }
+              },
+              "side_distribution_valid": false,
+              "side_distribution_warnings": [
+                "side_unit_overloaded",
+                "side_attachments_clustered"
+              ],
+              "actual_geometry_errors": [],
+              "main_anchor": "aromatic:2",
+              "excluded_unit_ids": [],
+              "geometry_valid": true,
+              "identity_valid": true,
+              "identity_errors": [],
+              "topology_valid": true,
+              "topology_errors": [],
+              "contract_errors": [],
+              "label_valid": true,
+              "label_errors": [],
+              "legal": true,
+              "component_count": 1,
+              "aromatic_template_errors": [],
+              "edge_count": 573,
+              "substitution_relaxed_edge_count": 2
+            },
+            "stage_no_actions": true,
+            "diagnostics": {
+              "flex": {
+                "connected": 4,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 173,
+                  "available_entries": 148,
+                  "blocked_entries": 25,
+                  "reasons": {
+                    "available": 148,
+                    "coordinate_collision": 25
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 165,
+                  "available_entries": 140,
+                  "blocked_entries": 25,
+                  "reasons": {
+                    "coordinate_collision": 25,
+                    "available": 140
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "ring": {
+                "connected": 13,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 165,
+                  "available_entries": 140,
+                  "blocked_entries": 25,
+                  "reasons": {
+                    "coordinate_collision": 25,
+                    "available": 140
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 139,
+                  "available_entries": 113,
+                  "blocked_entries": 26,
+                  "reasons": {
+                    "coordinate_collision": 26,
+                    "available": 113
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "side": {
+                "connected": 21,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 139,
+                  "available_entries": 113,
+                  "blocked_entries": 26,
+                  "reasons": {
+                    "coordinate_collision": 26,
+                    "available": 113
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 118,
+                  "available_entries": 79,
+                  "blocked_entries": 39,
+                  "reasons": {
+                    "coordinate_collision": 39,
+                    "available": 79
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "substitution": {
+                "connected": 2,
+                "no_actions": true,
+                "entries_before": null,
+                "entries_after": null,
+                "unconnected": {}
+              }
+            }
+          },
+          "rewards": {
+            "topology_completion": 0.5555555555555556,
+            "nmr_quality": 0.8801984988700274,
+            "forward_completion": 1.0,
+            "su13_clearance": 0.2516377649325626,
+            "shape_quality": 0.6947318384845114,
+            "total": 0.7076528700005746,
+            "weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.0824074074074074,
+              0.1675925925925926
+            ],
+            "base_weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.15,
+              0.1
+            ],
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5493827160493827,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 42,
+              "remaining_nodes": 178,
+              "remaining_ports": 63,
+              "stages": {
+                "flex": {
+                  "units": 8,
+                  "nodes": 8,
+                  "ports": 16
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            },
+            "shape_metrics": {
+              "quality": 0.6947318384845114,
+              "compactness_quality": 0.647179434738489,
+              "aspect_quality": 0.8849414534686005,
+              "normalized_radius_of_gyration": 0.545166527740607,
+              "node_count": 320,
+              "component_count": 1
+            },
+            "weighted_terms": {
+              "topology_completion": 0.19444444444444445,
+              "nmr_quality": 0.1760396997740055,
+              "forward_completion": 0.2,
+              "su13_clearance": 0.020736815813887102,
+              "shape_quality": 0.11643190996823756
+            }
+          },
+          "forward_valid": true
+        }
+      ],
+      "fallback": false,
+      "spatial_demand": {
+        "phase": "flex",
+        "pressure": 0.5493827160493827,
+        "reference_backbone_nodes": 324,
+        "reference_su13_sites": 237,
+        "remaining_units": 42,
+        "remaining_nodes": 178,
+        "remaining_ports": 63,
+        "stages": {
+          "flex": {
+            "units": 8,
+            "nodes": 8,
+            "ports": 16
+          },
+          "ring": {
+            "units": 13,
+            "nodes": 101,
+            "ports": 26
+          },
+          "side": {
+            "units": 21,
+            "nodes": 69,
+            "ports": 21
+          }
+        }
+      }
+    },
+    {
+      "phase": "flex",
+      "start_count": 20,
+      "end_count": 24,
+      "selected_attempt": 0,
+      "attempts": [
+        {
+          "attempt": 0,
+          "search": {
+            "simulations": 10,
+            "visited_states": 41,
+            "max_depth": 4,
+            "terminal_count": 10,
+            "backup_updates": 50,
+            "search_exhausted": false,
+            "stop_reason": "result_candidates_ready",
+            "result_candidate_count": 10,
+            "result_candidate_limit": 10,
+            "result_candidate_rewards": [
+              0.5259122298364027,
+              0.5261410781242543,
+              0.5261410873978135,
+              0.5261310034217834,
+              0.525078945038491,
+              0.5250789356030253,
+              0.525078945038491,
+              0.524986824331765,
+              0.5250399543940464,
+              0.5250399613409301
+            ],
+            "selected_reward": 0.5261410873978135,
+            "selected_tie_break": 55,
+            "root_legal_action_count": 10,
+            "root_evaluated_action_count": 10,
+            "root_actions_covered": true,
+            "retained_nodes": 1,
+            "peak_retained_nodes": 41,
+            "transition_bytes": 0,
+            "peak_transition_bytes": 1290848,
+            "elapsed_seconds": 165.56582296099805,
+            "rss_mib": 1413.30859375,
+            "search_seed": 4826240523698226673,
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5370370370370371,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 38,
+              "remaining_nodes": 174,
+              "remaining_ports": 55,
+              "stages": {
+                "flex": {
+                  "units": 4,
+                  "nodes": 4,
+                  "ports": 8
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            }
+          },
+          "forward": {
+            "total": 90,
+            "completed": 90,
+            "completion": 1.0,
+            "tasks_complete": true,
+            "all_complete": true,
+            "completion_reasons": [],
+            "allowed_remaining_resources": [
+              {
+                "node_id": 281,
+                "source_su_type": 11,
+                "final_su_type": 13,
+                "state": "aromatic_residual",
+                "completion_tolerated": true,
+                "reason": "unused_su11_retained_as_su13"
+              },
+              {
+                "node_id": 385,
+                "source_su_type": 22,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              },
+              {
+                "node_id": 439,
+                "source_su_type": 23,
+                "final_su_type": null,
+                "state": "remaining_closure_resource",
+                "completion_tolerated": true,
+                "reason": "stage3_tolerated_unassembled_closure_resource"
+              }
+            ],
+            "allowed_remaining_resource_count": 3,
+            "stages": {
+              "rigid": {
+                "total": 30,
+                "completed": 30,
+                "unconnected": []
+              },
+              "flex": {
+                "total": 24,
+                "completed": 24,
+                "unconnected": []
+              },
+              "ring": {
+                "total": 13,
+                "completed": 13,
+                "unconnected": []
+              },
+              "side": {
+                "total": 21,
+                "completed": 21,
+                "unconnected": []
+              },
+              "substitution": {
+                "total": 2,
+                "completed": 2,
+                "unconnected": []
+              }
+            },
+            "main_component": [
+              "aromatic:0",
+              "aromatic:1",
+              "aromatic:10",
+              "aromatic:11",
+              "aromatic:12",
+              "aromatic:13",
+              "aromatic:14",
+              "aromatic:15",
+              "aromatic:16",
+              "aromatic:17",
+              "aromatic:18",
+              "aromatic:19",
+              "aromatic:2",
+              "aromatic:20",
+              "aromatic:21",
+              "aromatic:22",
+              "aromatic:23",
+              "aromatic:24",
+              "aromatic:25",
+              "aromatic:26",
+              "aromatic:27",
+              "aromatic:28",
+              "aromatic:29",
+              "aromatic:3",
+              "aromatic:4",
+              "aromatic:5",
+              "aromatic:6",
+              "aromatic:7",
+              "aromatic:8",
+              "aromatic:9",
+              "topology:0",
+              "topology:1",
+              "topology:10",
+              "topology:11",
+              "topology:12",
+              "topology:13",
+              "topology:14",
+              "topology:15",
+              "topology:16",
+              "topology:17",
+              "topology:18",
+              "topology:19",
+              "topology:2",
+              "topology:20",
+              "topology:21",
+              "topology:22",
+              "topology:23",
+              "topology:24",
+              "topology:25",
+              "topology:26",
+              "topology:27",
+              "topology:28",
+              "topology:29",
+              "topology:3",
+              "topology:30",
+              "topology:31",
+              "topology:32",
+              "topology:33",
+              "topology:34",
+              "topology:35",
+              "topology:36",
+              "topology:37",
+              "topology:38",
+              "topology:39",
+              "topology:4",
+              "topology:40",
+              "topology:41",
+              "topology:42",
+              "topology:43",
+              "topology:44",
+              "topology:45",
+              "topology:46",
+              "topology:47",
+              "topology:48",
+              "topology:49",
+              "topology:5",
+              "topology:50",
+              "topology:51",
+              "topology:52",
+              "topology:53",
+              "topology:54",
+              "topology:55",
+              "topology:56",
+              "topology:57",
+              "topology:6",
+              "topology:7",
+              "topology:8",
+              "topology:9"
+            ],
+            "main_anchor": "aromatic:2",
+            "excluded_units": [],
+            "forward_completion": 1.0,
+            "status": "complete",
+            "placed_unit_count": 88,
+            "unplaced_unit_count": 0,
+            "unplaced_units": {
+              "rigid": [],
+              "flex": [],
+              "ring": [],
+              "side": [],
+              "substitution": []
+            },
+            "unplaced_contracts": [],
+            "audit": {
+              "complete": true,
+              "tasks_complete": true,
+              "completion_reasons": [],
+              "allowed_remaining_resources": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                },
+                {
+                  "node_id": 385,
+                  "source_su_type": 22,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                },
+                {
+                  "node_id": 439,
+                  "source_su_type": 23,
+                  "final_su_type": null,
+                  "state": "remaining_closure_resource",
+                  "completion_tolerated": true,
+                  "reason": "stage3_tolerated_unassembled_closure_resource"
+                }
+              ],
+              "target_labels_complete": true,
+              "target_label_unfulfilled_ids": [],
+              "input_valid": true,
+              "input_errors": [],
+              "rigid_stage_complete": true,
+              "rigid_connections_done": 12,
+              "rigid_connections_total": 12,
+              "stage": "substitution",
+              "placed_unit_count": 88,
+              "unit_count": 88,
+              "placed_node_count": 493,
+              "expected_node_count": 493,
+              "source_node_count": 495,
+              "unassembled_resource_count": 2,
+              "unassembled_resource_ids": [
+                385,
+                439
+              ],
+              "idle_aromatic_nodes": [],
+              "idle_aromatic_count": 0,
+              "aromatic_residual_nodes": [
+                {
+                  "node_id": 281,
+                  "source_su_type": 11,
+                  "final_su_type": 13,
+                  "state": "aromatic_residual",
+                  "completion_tolerated": true,
+                  "reason": "unused_su11_retained_as_su13"
+                }
+              ],
+              "aromatic_residual_count": 1,
+              "strict_all_nodes_assembled": false,
+              "completion_mode": "best_legal_partial_allowed",
+              "resource_partition_errors": [],
+              "resource_partition_valid": true,
+              "missing_node_ids": [],
+              "unexpected_node_ids": [],
+              "pending_contract_ids": [],
+              "duplicate_axials": {},
+              "non_hex_edges": [],
+              "su25_center_branch_errors": [],
+              "su25_center_branches_valid": true,
+              "topology_conformation_errors": [],
+              "topology_conformation_valid": true,
+              "port_direction_errors": [],
+              "port_directions_valid": true,
+              "substitution_errors": [],
+              "substitution_valid": true,
+              "flex_endpoint_su_errors": [],
+              "flex_endpoint_su_valid": true,
+              "ring_attachment_errors": [],
+              "ring_attachments_valid": true,
+              "shape_metrics": {
+                "q_span": 40,
+                "r_span": 36,
+                "q_over_r": 1.1111111111111112,
+                "min_q_over_r": 0.8,
+                "max_q_over_r": 2.0,
+                "valid": true,
+                "violation": 0.0,
+                "total_span": 76,
+                "x_span": 34.6410161513777,
+                "y_span": 33.0,
+                "width_over_height": 1.0497277621629606,
+                "rotated_90_width_over_height": 0.9526279441628783,
+                "bbox_area": 1143.153532995464,
+                "principal_axis_ratio": 1.155109994125248,
+                "principal_axis_angle": -7.8428362075341775,
+                "linearity": 0.2505316158342026,
+                "covariance_eigenvalues": [
+                  77.18983085117397,
+                  57.85133780206057
+                ],
+                "node_density_cv": 0.49741254978041766,
+                "unit_density_cv": 0.46687814964032126,
+                "largest_void_radius": 3.0,
+                "large_void_fraction": 0.010351966873706004,
+                "hull_area": 826.188235210313,
+                "hull_fill": 0.5167714884696276,
+                "normalized_radius_of_gyration": 0.5233709753087264,
+                "layout_energy": 1.3622311521629016,
+                "layout_valid": true
+              },
+              "shape_valid": true,
+              "shape_warnings": [],
+              "side_distribution": {
+                "attachment_count": 21,
+                "covered_aromatic_unit_count": 14,
+                "coverage_ratio": 0.6666666666666666,
+                "max_unit_load": 2,
+                "unit_loads": {
+                  "aromatic:0": 2,
+                  "aromatic:1": 2,
+                  "aromatic:2": 2,
+                  "aromatic:3": 2,
+                  "aromatic:4": 1,
+                  "aromatic:5": 2,
+                  "aromatic:13": 1,
+                  "aromatic:21": 2,
+                  "aromatic:22": 2,
+                  "aromatic:23": 1,
+                  "aromatic:24": 1,
+                  "aromatic:25": 1,
+                  "aromatic:26": 1,
+                  "aromatic:29": 1
+                }
+              },
+              "side_distribution_valid": true,
+              "side_distribution_warnings": [],
+              "actual_geometry_errors": [],
+              "main_anchor": "aromatic:2",
+              "excluded_unit_ids": [],
+              "geometry_valid": true,
+              "identity_valid": true,
+              "identity_errors": [],
+              "topology_valid": true,
+              "topology_errors": [],
+              "contract_errors": [],
+              "label_valid": true,
+              "label_errors": [],
+              "legal": true,
+              "component_count": 1,
+              "aromatic_template_errors": [],
+              "edge_count": 573,
+              "substitution_relaxed_edge_count": 2
+            },
+            "stage_no_actions": true,
+            "diagnostics": {
+              "flex": {
+                "connected": 0,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 165,
+                  "available_entries": 140,
+                  "blocked_entries": 25,
+                  "reasons": {
+                    "coordinate_collision": 25,
+                    "available": 140
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 165,
+                  "available_entries": 140,
+                  "blocked_entries": 25,
+                  "reasons": {
+                    "coordinate_collision": 25,
+                    "available": 140
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "ring": {
+                "connected": 13,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 165,
+                  "available_entries": 140,
+                  "blocked_entries": 25,
+                  "reasons": {
+                    "coordinate_collision": 25,
+                    "available": 140
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 139,
+                  "available_entries": 113,
+                  "blocked_entries": 26,
+                  "reasons": {
+                    "available": 113,
+                    "coordinate_collision": 26
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "side": {
+                "connected": 21,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 139,
+                  "available_entries": 113,
+                  "blocked_entries": 26,
+                  "reasons": {
+                    "available": 113,
+                    "coordinate_collision": 26
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 118,
+                  "available_entries": 77,
+                  "blocked_entries": 41,
+                  "reasons": {
+                    "coordinate_collision": 41,
+                    "available": 77
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "substitution": {
+                "connected": 2,
+                "no_actions": true,
+                "entries_before": null,
+                "entries_after": null,
+                "unconnected": {}
+              }
+            }
+          },
+          "rewards": {
+            "topology_completion": 0.6,
+            "nmr_quality": 0.8895347554639745,
+            "forward_completion": 1.0,
+            "su13_clearance": 0.25030303030303036,
+            "shape_quality": 0.6968114949347346,
+            "total": 0.7261410873978136,
+            "weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.08055555555555556,
+              0.16944444444444445
+            ],
+            "base_weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.15,
+              0.1
+            ],
+            "spatial_demand": {
+              "phase": "flex",
+              "pressure": 0.5370370370370371,
+              "reference_backbone_nodes": 324,
+              "reference_su13_sites": 237,
+              "remaining_units": 38,
+              "remaining_nodes": 174,
+              "remaining_ports": 55,
+              "stages": {
+                "flex": {
+                  "units": 4,
+                  "nodes": 4,
+                  "ports": 8
+                },
+                "ring": {
+                  "units": 13,
+                  "nodes": 101,
+                  "ports": 26
+                },
+                "side": {
+                  "units": 21,
+                  "nodes": 69,
+                  "ports": 21
+                }
+              }
+            },
+            "shape_metrics": {
+              "quality": 0.6968114949347346,
+              "compactness_quality": 0.6494084180465356,
+              "aspect_quality": 0.8864238024875302,
+              "normalized_radius_of_gyration": 0.5398630079481685,
+              "node_count": 324,
+              "component_count": 1
+            },
+            "weighted_terms": {
+              "topology_completion": 0.21,
+              "nmr_quality": 0.17790695109279492,
+              "forward_completion": 0.2,
+              "su13_clearance": 0.020163299663299668,
+              "shape_quality": 0.11807083664171893
+            }
+          },
+          "forward_valid": true
+        }
+      ],
+      "fallback": false,
+      "spatial_demand": {
+        "phase": "flex",
+        "pressure": 0.5370370370370371,
+        "reference_backbone_nodes": 324,
+        "reference_su13_sites": 237,
+        "remaining_units": 38,
+        "remaining_nodes": 174,
+        "remaining_ports": 55,
+        "stages": {
+          "flex": {
+            "units": 4,
+            "nodes": 4,
+            "ports": 8
+          },
+          "ring": {
+            "units": 13,
+            "nodes": 101,
+            "ports": 26
+          },
+          "side": {
+            "units": 21,
+            "nodes": 69,
+            "ports": 21
+          }
+        }
+      }
+    }
+  ],
+  "status": "complete",
+  "done": true,
+  "stage_no_actions": true,
+  "all_complete": false,
+  "units_done": 24,
+  "units_total": 24,
+  "completion_report": {
+    "total": 90,
+    "completed": 54,
+    "completion": 0.6,
+    "tasks_complete": false,
+    "all_complete": false,
+    "completion_reasons": [
+      "unconnected_topology_tasks",
+      "pending_connection_contracts"
+    ],
+    "allowed_remaining_resources": [
+      {
+        "node_id": 281,
+        "source_su_type": 11,
+        "final_su_type": 13,
+        "state": "aromatic_residual",
+        "completion_tolerated": true,
+        "reason": "unused_su11_retained_as_su13"
+      },
+      {
+        "node_id": 385,
+        "source_su_type": 22,
+        "final_su_type": null,
+        "state": "remaining_closure_resource",
+        "completion_tolerated": true,
+        "reason": "stage3_tolerated_unassembled_closure_resource"
+      },
+      {
+        "node_id": 439,
+        "source_su_type": 23,
+        "final_su_type": null,
+        "state": "remaining_closure_resource",
+        "completion_tolerated": true,
+        "reason": "stage3_tolerated_unassembled_closure_resource"
+      }
+    ],
+    "allowed_remaining_resource_count": 3,
+    "stages": {
+      "rigid": {
+        "total": 30,
+        "completed": 30,
+        "unconnected": []
+      },
+      "flex": {
+        "total": 24,
+        "completed": 24,
+        "unconnected": []
+      },
+      "ring": {
+        "total": 13,
+        "completed": 0,
+        "unconnected": [
+          "topology:24",
+          "topology:25",
+          "topology:26",
+          "topology:27",
+          "topology:28",
+          "topology:29",
+          "topology:30",
+          "topology:31",
+          "topology:32",
+          "topology:33",
+          "topology:34",
+          "topology:35",
+          "topology:36"
+        ]
+      },
+      "side": {
+        "total": 21,
+        "completed": 0,
+        "unconnected": [
+          "topology:37",
+          "topology:38",
+          "topology:39",
+          "topology:40",
+          "topology:41",
+          "topology:42",
+          "topology:43",
+          "topology:44",
+          "topology:45",
+          "topology:46",
+          "topology:47",
+          "topology:48",
+          "topology:49",
+          "topology:50",
+          "topology:51",
+          "topology:52",
+          "topology:53",
+          "topology:54",
+          "topology:55",
+          "topology:56",
+          "topology:57"
+        ]
+      },
+      "substitution": {
+        "total": 2,
+        "completed": 0,
+        "unconnected": [
+          493,
+          460
+        ]
+      }
+    },
+    "main_component": [
+      "aromatic:0",
+      "aromatic:1",
+      "aromatic:10",
+      "aromatic:11",
+      "aromatic:12",
+      "aromatic:13",
+      "aromatic:14",
+      "aromatic:15",
+      "aromatic:16",
+      "aromatic:17",
+      "aromatic:18",
+      "aromatic:19",
+      "aromatic:2",
+      "aromatic:20",
+      "aromatic:21",
+      "aromatic:22",
+      "aromatic:23",
+      "aromatic:24",
+      "aromatic:25",
+      "aromatic:26",
+      "aromatic:27",
+      "aromatic:28",
+      "aromatic:29",
+      "aromatic:3",
+      "aromatic:4",
+      "aromatic:5",
+      "aromatic:6",
+      "aromatic:7",
+      "aromatic:8",
+      "aromatic:9",
+      "topology:0",
+      "topology:1",
+      "topology:10",
+      "topology:11",
+      "topology:12",
+      "topology:13",
+      "topology:14",
+      "topology:15",
+      "topology:16",
+      "topology:17",
+      "topology:18",
+      "topology:19",
+      "topology:2",
+      "topology:20",
+      "topology:21",
+      "topology:22",
+      "topology:23",
+      "topology:3",
+      "topology:4",
+      "topology:5",
+      "topology:6",
+      "topology:7",
+      "topology:8",
+      "topology:9"
+    ],
+    "main_anchor": "aromatic:2",
+    "excluded_units": []
+  },
+  "legal": true,
+  "main_anchor": "aromatic:2",
+  "excluded_units": [],
+  "optimality": "best_in_searched_candidates",
+  "connection_policy": "direct",
+  "remaining_spatial_demand": {
+    "phase": "ring",
+    "pressure": 0.5246913580246914,
+    "reference_backbone_nodes": 324,
+    "reference_su13_sites": 237,
+    "remaining_units": 34,
+    "remaining_nodes": 170,
+    "remaining_ports": 47,
+    "stages": {
+      "ring": {
+        "units": 13,
+        "nodes": 101,
+        "ports": 26
+      },
+      "side": {
+        "units": 21,
+        "nodes": 69,
+        "ports": 21
+      }
+    }
+  },
+  "stage_outputs": {
+    "directory": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/flex",
+    "molecule_json": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/flex/flex_molecule.json",
+    "summary_json": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/flex/flex_summary.json",
+    "png": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/flex/flex_molecule.png",
+    "svg": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/flex/flex_molecule.svg",
+    "pdf": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/flex/flex_molecule.pdf"
+  }
+}

@@ -1,0 +1,195 @@
+{
+  "actions": [
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:0-100",
+      "source_unit_id": "aromatic:2",
+      "source_node_id": 100,
+      "source_port_id": "rigid:100",
+      "target_unit_id": "aromatic:0",
+      "target_node_id": 0,
+      "target_port_id": "rigid:0",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:2",
+      "component_rotation": 1,
+      "component_reflection": false,
+      "component_translation": [
+        -57,
+        -60
+      ],
+      "moved_node_count": 6,
+      "site_bindings": {
+        "0": [
+          "aromatic:0",
+          4
+        ],
+        "100": [
+          "aromatic:2",
+          3
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:200-300",
+      "source_unit_id": "aromatic:3",
+      "source_node_id": 300,
+      "source_port_id": "rigid:300",
+      "target_unit_id": "aromatic:2",
+      "target_node_id": 200,
+      "target_port_id": "rigid:200",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:3",
+      "component_rotation": 2,
+      "component_reflection": false,
+      "component_translation": [
+        3,
+        -93
+      ],
+      "moved_node_count": 6,
+      "site_bindings": {
+        "200": [
+          "aromatic:2",
+          0
+        ],
+        "300": [
+          "aromatic:3",
+          4
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "H",
+      "topology_unit_id": "chain:0",
+      "contract_ids": [
+        "flex:a",
+        "flex:b"
+      ],
+      "attachment_contract_id": "flex:a",
+      "merge_contract_ids": [
+        "flex:b"
+      ],
+      "topology_rotation": 4,
+      "topology_reflection": true,
+      "topology_translation": [
+        2,
+        2
+      ],
+      "component_moves": [
+        {
+          "component_index": 1,
+          "component_unit_id": "aromatic:1",
+          "rotation": 2,
+          "reflection": false,
+          "translation": [
+            2,
+            -116
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "2": 5,
+        "202": 101
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "ring",
+      "topology_unit_id": "ring:0",
+      "contract_ids": [
+        "ring:a",
+        "ring:b"
+      ],
+      "topology_rotation": 4,
+      "topology_reflection": false,
+      "topology_translation": [
+        1,
+        -5
+      ],
+      "boundary_site_assignments": {
+        "4": 303,
+        "5": 301
+      },
+      "connection_axis": "H",
+      "connection_mode": "internal",
+      "stage": "ring"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "side:0",
+      "contract_ids": [
+        "side:a"
+      ],
+      "topology_rotation": 4,
+      "topology_reflection": false,
+      "topology_translation": [
+        3,
+        2
+      ],
+      "boundary_site_assignments": {
+        "101": 205
+      },
+      "stage": "side"
+    }
+  ],
+  "diagnostics": {
+    "simulations": 2,
+    "visited_states": 3,
+    "max_depth": 1,
+    "terminal_count": 2,
+    "backup_updates": 4,
+    "search_exhausted": false,
+    "stop_reason": "result_candidates_ready",
+    "result_candidate_count": 2,
+    "result_candidate_limit": 2,
+    "result_candidate_rewards": [
+      0.576616821662262,
+      0.5759078475850399
+    ],
+    "selected_reward": 0.576616821662262,
+    "selected_tie_break": 0,
+    "root_legal_action_count": 2,
+    "root_evaluated_action_count": 2,
+    "root_actions_covered": true,
+    "retained_nodes": 1,
+    "peak_retained_nodes": 3,
+    "transition_bytes": 0,
+    "peak_transition_bytes": 2257,
+    "elapsed_seconds": 0.0663700869990862,
+    "rss_mib": 27.0859375,
+    "search_seed": 17872442769638760907,
+    "spatial_demand": {
+      "phase": "side",
+      "pressure": 0.043478260869565216,
+      "reference_backbone_nodes": 25,
+      "reference_su13_sites": 23,
+      "remaining_units": 1,
+      "remaining_nodes": 1,
+      "remaining_ports": 1,
+      "stages": {
+        "side": {
+          "units": 1,
+          "nodes": 1,
+          "ports": 1
+        }
+      }
+    }
+  }
+}

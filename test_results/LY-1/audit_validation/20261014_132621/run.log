@@ -1,0 +1,73 @@
+[RL_MTCS][input] units=57 aromatic=28 flex_chain=16 aliphatic_ring=2 side_chain=11
+[RL_MTCS][input] rigid_mode=dynamic_su10_sites rigid_ports=26 source_pairs=13 flex_contracts=32 ring_contracts=4 side_contracts=11
+[RL_MTCS][rigid][search] start_count=28 candidate_limit=1 space_pressure=0.188 pending_nodes=104 pending_ports=47
+[RL_MTCS][rigid][search] selected candidates=1/1 root_actions=1/1 reward=0.22118147419802764 stop=result_candidates_ready elapsed=2.4s
+[RL_MTCS][rigid][forward] start attempt=0
+[RL_MTCS][rigid][forward:flex] start connected=0 elapsed=0.0s
+[RL_MTCS][rigid][forward:flex] no_actions connected=16 elapsed=4.6s entries=202/266
+[RL_MTCS][rigid][forward:ring] start connected=0 elapsed=4.7s
+[RL_MTCS][rigid][forward:ring] no_actions connected=2 elapsed=4.9s entries=198/262
+[RL_MTCS][rigid][forward:side] start connected=0 elapsed=4.9s
+[RL_MTCS][rigid][forward:side] no_actions connected=11 elapsed=6.4s entries=186/251
+[RL_MTCS][rigid][forward:substitution] start connected=0 elapsed=6.4s
+[RL_MTCS][rigid][forward:substitution] no_actions connected=5 elapsed=7.1s
+[RL_MTCS][rigid][checkpoint=28] attempt=0 forward_completion=1.000 forward_valid=True
+[RL_MTCS][rigid] status=complete units=28/28 legal=True
+[RL_MTCS][flex][search] start_count=0 candidate_limit=1 space_pressure=0.188 pending_nodes=104 pending_ports=47
+[RL_MTCS][flex][search] selected candidates=1/1 root_actions=1/1 reward=0.2968862775862914 stop=result_candidates_ready elapsed=0.5s
+[RL_MTCS][flex][forward] start attempt=0
+[RL_MTCS][flex][forward:flex] start connected=0 elapsed=0.0s
+[RL_MTCS][flex][forward:flex] no_actions connected=12 elapsed=4.2s entries=224/266
+[RL_MTCS][flex][forward:ring] start connected=0 elapsed=4.2s
+[RL_MTCS][flex][forward:ring] no_actions connected=2 elapsed=4.5s entries=220/262
+[RL_MTCS][flex][forward:side] start connected=0 elapsed=4.5s
+[RL_MTCS][flex][forward:side] no_actions connected=11 elapsed=6.1s entries=204/251
+[RL_MTCS][flex][forward:substitution] start connected=0 elapsed=6.1s
+[RL_MTCS][flex][forward:substitution] no_actions connected=5 elapsed=6.8s
+[RL_MTCS][flex][checkpoint=4] attempt=0 forward_completion=1.000 forward_valid=True
+[RL_MTCS][flex][search] start_count=4 candidate_limit=1 space_pressure=0.159 pending_nodes=88 pending_ports=39
+[RL_MTCS][flex][search] selected candidates=1/1 root_actions=1/1 reward=0.38409366445110865 stop=result_candidates_ready elapsed=0.6s
+[RL_MTCS][flex][forward] start attempt=0
+[RL_MTCS][flex][forward:flex] start connected=0 elapsed=0.0s
+[RL_MTCS][flex][forward:flex] no_actions connected=8 elapsed=2.7s entries=205/266
+[RL_MTCS][flex][forward:ring] start connected=0 elapsed=2.7s
+[RL_MTCS][flex][forward:ring] no_actions connected=2 elapsed=3.0s entries=201/262
+[RL_MTCS][flex][forward:side] start connected=0 elapsed=3.0s
+[RL_MTCS][flex][forward:side] no_actions connected=11 elapsed=4.6s entries=185/251
+[RL_MTCS][flex][forward:substitution] start connected=0 elapsed=4.6s
+[RL_MTCS][flex][forward:substitution] no_actions connected=5 elapsed=5.3s
+[RL_MTCS][flex][checkpoint=8] attempt=0 forward_completion=1.000 forward_valid=True
+[RL_MTCS][flex][search] start_count=8 candidate_limit=1 space_pressure=0.136 pending_nodes=75 pending_ports=31
+[RL_MTCS][flex][search] selected candidates=1/1 root_actions=1/1 reward=0.4604106691775799 stop=result_candidates_ready elapsed=0.7s
+[RL_MTCS][flex][forward] start attempt=0
+[RL_MTCS][flex][forward:flex] start connected=0 elapsed=0.0s
+[RL_MTCS][flex][forward:flex] no_actions connected=4 elapsed=0.8s entries=199/266
+[RL_MTCS][flex][forward:ring] start connected=0 elapsed=0.8s
+[RL_MTCS][flex][forward:ring] no_actions connected=2 elapsed=1.1s entries=195/262
+[RL_MTCS][flex][forward:side] start connected=0 elapsed=1.1s
+[RL_MTCS][flex][forward:side] no_actions connected=11 elapsed=2.7s entries=181/251
+[RL_MTCS][flex][forward:substitution] start connected=0 elapsed=2.7s
+[RL_MTCS][flex][forward:substitution] no_actions connected=5 elapsed=3.3s
+[RL_MTCS][flex][checkpoint=12] attempt=0 forward_completion=1.000 forward_valid=True
+[RL_MTCS][flex][search] start_count=12 candidate_limit=1 space_pressure=0.118 pending_nodes=65 pending_ports=23
+[RL_MTCS][flex][search] selected candidates=1/1 root_actions=1/1 reward=0.506225840441811 stop=result_candidates_ready elapsed=0.6s
+[RL_MTCS][flex][forward] start attempt=0
+[RL_MTCS][flex][forward:flex] start connected=0 elapsed=0.0s
+[RL_MTCS][flex][forward:flex] no_actions connected=0 elapsed=0.0s entries=202/266
+[RL_MTCS][flex][forward:ring] start connected=0 elapsed=0.0s
+[RL_MTCS][flex][forward:ring] no_actions connected=2 elapsed=0.3s entries=198/262
+[RL_MTCS][flex][forward:side] start connected=0 elapsed=0.3s
+[RL_MTCS][flex][forward:side] no_actions connected=11 elapsed=1.9s entries=182/251
+[RL_MTCS][flex][forward:substitution] start connected=0 elapsed=1.9s
+[RL_MTCS][flex][forward:substitution] no_actions connected=5 elapsed=2.5s
+[RL_MTCS][flex][checkpoint=16] attempt=0 forward_completion=1.000 forward_valid=True
+[RL_MTCS][flex] status=complete units=16/16 legal=True
+[RL_MTCS][ring][search] start_count=0 candidate_limit=1 space_pressure=0.109 pending_nodes=60 pending_ports=15
+[RL_MTCS][ring][search] selected candidates=1/1 root_actions=1/1 reward=0.5154635193910345 stop=result_candidates_ready elapsed=0.3s
+[RL_MTCS][ring] status=complete units=2/2 legal=True
+[RL_MTCS][side][search] start_count=0 candidate_limit=1 space_pressure=0.071 pending_nodes=39 pending_ports=11
+[RL_MTCS][side][search] selected candidates=1/1 root_actions=1/1 reward=0.5950554580566527 stop=result_candidates_ready elapsed=1.6s
+[RL_MTCS][side] status=complete units=11/11 legal=True
+[RL_MTCS][substitution][search] start_count=0 candidate_limit=1 space_pressure=0.000 pending_nodes=0 pending_ports=0
+[RL_MTCS][substitution][search] selected candidates=1/1 root_actions=1/1 reward=0.6372729738309284 stop=result_candidates_ready elapsed=0.7s
+[RL_MTCS][substitution] status=complete units=5/5 legal=True

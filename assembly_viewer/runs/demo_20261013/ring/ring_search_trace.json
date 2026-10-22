@@ -1,0 +1,183 @@
+{
+  "actions": [
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:0-100",
+      "source_unit_id": "aromatic:2",
+      "source_node_id": 100,
+      "source_port_id": "rigid:100",
+      "target_unit_id": "aromatic:0",
+      "target_node_id": 0,
+      "target_port_id": "rigid:0",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:2",
+      "component_rotation": 1,
+      "component_reflection": false,
+      "component_translation": [
+        -57,
+        -60
+      ],
+      "moved_node_count": 6,
+      "site_bindings": {
+        "0": [
+          "aromatic:0",
+          4
+        ],
+        "100": [
+          "aromatic:2",
+          3
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:200-300",
+      "source_unit_id": "aromatic:3",
+      "source_node_id": 300,
+      "source_port_id": "rigid:300",
+      "target_unit_id": "aromatic:2",
+      "target_node_id": 200,
+      "target_port_id": "rigid:200",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:3",
+      "component_rotation": 2,
+      "component_reflection": false,
+      "component_translation": [
+        3,
+        -93
+      ],
+      "moved_node_count": 6,
+      "site_bindings": {
+        "200": [
+          "aromatic:2",
+          0
+        ],
+        "300": [
+          "aromatic:3",
+          4
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "H",
+      "topology_unit_id": "chain:0",
+      "contract_ids": [
+        "flex:a",
+        "flex:b"
+      ],
+      "attachment_contract_id": "flex:a",
+      "merge_contract_ids": [
+        "flex:b"
+      ],
+      "topology_rotation": 4,
+      "topology_reflection": true,
+      "topology_translation": [
+        2,
+        2
+      ],
+      "component_moves": [
+        {
+          "component_index": 1,
+          "component_unit_id": "aromatic:1",
+          "rotation": 2,
+          "reflection": false,
+          "translation": [
+            2,
+            -116
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "2": 5,
+        "202": 101
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "ring",
+      "topology_unit_id": "ring:0",
+      "contract_ids": [
+        "ring:a",
+        "ring:b"
+      ],
+      "topology_rotation": 4,
+      "topology_reflection": false,
+      "topology_translation": [
+        1,
+        -5
+      ],
+      "boundary_site_assignments": {
+        "4": 303,
+        "5": 301
+      },
+      "connection_axis": "H",
+      "connection_mode": "internal",
+      "stage": "ring"
+    }
+  ],
+  "diagnostics": {
+    "simulations": 2,
+    "visited_states": 3,
+    "max_depth": 1,
+    "terminal_count": 2,
+    "backup_updates": 4,
+    "search_exhausted": false,
+    "stop_reason": "result_candidates_ready",
+    "result_candidate_count": 2,
+    "result_candidate_limit": 2,
+    "result_candidate_rewards": [
+      0.5137189551444559,
+      0.5121320092159757
+    ],
+    "selected_reward": 0.5137189551444559,
+    "selected_tie_break": 3,
+    "root_legal_action_count": 2,
+    "root_evaluated_action_count": 2,
+    "root_actions_covered": true,
+    "retained_nodes": 1,
+    "peak_retained_nodes": 3,
+    "transition_bytes": 0,
+    "peak_transition_bytes": 3239,
+    "elapsed_seconds": 0.06254685799649451,
+    "rss_mib": 26.90625,
+    "search_seed": 1786018106136821648,
+    "spatial_demand": {
+      "phase": "ring",
+      "pressure": 0.2,
+      "reference_backbone_nodes": 25,
+      "reference_su13_sites": 23,
+      "remaining_units": 2,
+      "remaining_nodes": 5,
+      "remaining_ports": 3,
+      "stages": {
+        "ring": {
+          "units": 1,
+          "nodes": 4,
+          "ports": 2
+        },
+        "side": {
+          "units": 1,
+          "nodes": 1,
+          "ports": 1
+        }
+      }
+    }
+  }
+}

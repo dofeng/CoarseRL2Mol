@@ -1,0 +1,35 @@
+{
+  "created_at_unix": 1791875351.9521205,
+  "eval_lib_path": "/home/dofengqi/Graphnmr/z_library/subgraph_library_filtered.pt",
+  "files": [
+    "E_target.pt",
+    "H.pt",
+    "S_target.pt",
+    "current_diff.json",
+    "fixed_partition_meta.json",
+    "layer1_runtime_config.json",
+    "node_hops.json",
+    "nodes.pt",
+    "nodes_by_global_id.csv",
+    "stage3_resource_config.json"
+  ],
+  "format": "graphnmr_stage3_input_snapshot",
+  "node_count": 610,
+  "outer_idx": 0,
+  "run_id": "20261013-150125-77846",
+  "sha256": {
+    "E_target.pt": "ae7a3d0ea8320ece295aec818f820fda62735a62896feb7455ef4b1e232f712a",
+    "H.pt": "dd96cb31274541dec8d5047d8e07296b3c36fc6d756d44c1ce7eb9bfe3ef5ab3",
+    "S_target.pt": "f5f3ffe6834daed1dc0c77e2c89871661726112c1aa8aa3ebedbae034f138072",
+    "current_diff.json": "17313b2d026c61ec7fddde98a1df13f54c3c0cc3fe2b828352899b9b6d675a69",
+    "fixed_partition_meta.json": "0291c49e894fa195e309c1d586c2720398c34e218076b0698da3147b668b7ceb",
+    "layer1_runtime_config.json": "865b5ddd414d5e6351777f62d468bbacfe560c18b8a86430c1c704f437244a0d",
+    "node_hops.json": "08077785f25ea940e686f0af9388ae0c8d96074cf298d2073f717b0dd7df886a",
+    "nodes.pt": "a0272b77b9ed161035018a5add24842dfe2ce1b9c9f0296202148d19cfeb9cd2",
+    "nodes_by_global_id.csv": "02c84c284dec0e8672fc3d2c95014264b2ce78b3bbae7f091c1d298917bdc512",
+    "stage3_resource_config.json": "25ef95695790b19608c5d219457ad603717e5829d7821344210b09f41d6c397b"
+  },
+  "source_stage": "layer2",
+  "spectral_contract": "template_center_mu",
+  "version": 1
+}

@@ -1,0 +1,294 @@
+{
+  "search_diagnostics": {
+    "simulations": 10,
+    "visited_states": 211,
+    "max_depth": 21,
+    "terminal_count": 10,
+    "backup_updates": 220,
+    "search_exhausted": false,
+    "stop_reason": "result_candidates_ready",
+    "result_candidate_count": 10,
+    "result_candidate_limit": 10,
+    "result_candidate_rewards": [
+      0.6963168551010539,
+      0.6954706505708258,
+      0.6967905537328718,
+      0.6973941452688939,
+      0.695056600786866,
+      0.696073576721562,
+      0.695644621126338,
+      0.6963583502420334,
+      0.6961241061934793,
+      0.6943108701096967
+    ],
+    "selected_reward": 0.6973941452688939,
+    "selected_tie_break": 0,
+    "root_legal_action_count": 10,
+    "root_evaluated_action_count": 10,
+    "root_actions_covered": true,
+    "retained_nodes": 1,
+    "peak_retained_nodes": 211,
+    "transition_bytes": 0,
+    "peak_transition_bytes": 13810736,
+    "elapsed_seconds": 1241.4089310519994,
+    "rss_mib": 1424.421875,
+    "search_seed": 2939926853106398730,
+    "spatial_demand": {
+      "phase": "side",
+      "pressure": 0.21296296296296297,
+      "reference_backbone_nodes": 324,
+      "reference_su13_sites": 237,
+      "remaining_units": 21,
+      "remaining_nodes": 69,
+      "remaining_ports": 21,
+      "stages": {
+        "side": {
+          "units": 21,
+          "nodes": 69,
+          "ports": 21
+        }
+      }
+    }
+  },
+  "rewards": {
+    "topology_completion": 0.9777777777777777,
+    "nmr_quality": 0.9722635394909735,
+    "forward_completion": 0.0,
+    "su13_clearance": 0.1333333333333334,
+    "shape_quality": 0.717523461140592,
+    "total": 0.697394166322833,
+    "weights": [
+      0.35,
+      0.2,
+      0.2,
+      0.031944444444444456,
+      0.21805555555555556
+    ],
+    "base_weights": [
+      0.35,
+      0.2,
+      0.2,
+      0.15,
+      0.1
+    ],
+    "spatial_demand": {
+      "phase": "side",
+      "pressure": 0.21296296296296297,
+      "reference_backbone_nodes": 324,
+      "reference_su13_sites": 237,
+      "remaining_units": 21,
+      "remaining_nodes": 69,
+      "remaining_ports": 21,
+      "stages": {
+        "side": {
+          "units": 21,
+          "nodes": 69,
+          "ports": 21
+        }
+      }
+    },
+    "shape_metrics": {
+      "quality": 0.717523461140592,
+      "compactness_quality": 0.6612152262886087,
+      "aspect_quality": 0.9427564005485243,
+      "normalized_radius_of_gyration": 0.5123668667053919,
+      "node_count": 494,
+      "component_count": 1
+    },
+    "weighted_terms": {
+      "topology_completion": 0.3422222222222222,
+      "nmr_quality": 0.19445270789819472,
+      "forward_completion": 0.0,
+      "su13_clearance": 0.004259259259259262,
+      "shape_quality": 0.15645997694315686
+    }
+  },
+  "status": "complete",
+  "done": true,
+  "stage_no_actions": true,
+  "all_complete": false,
+  "units_done": 21,
+  "units_total": 21,
+  "completion_report": {
+    "total": 90,
+    "completed": 88,
+    "completion": 0.9777777777777777,
+    "tasks_complete": false,
+    "all_complete": false,
+    "completion_reasons": [
+      "unconnected_topology_tasks"
+    ],
+    "allowed_remaining_resources": [
+      {
+        "node_id": 281,
+        "source_su_type": 11,
+        "final_su_type": 13,
+        "state": "aromatic_residual",
+        "completion_tolerated": true,
+        "reason": "unused_su11_retained_as_su13"
+      },
+      {
+        "node_id": 385,
+        "source_su_type": 22,
+        "final_su_type": null,
+        "state": "remaining_closure_resource",
+        "completion_tolerated": true,
+        "reason": "stage3_tolerated_unassembled_closure_resource"
+      },
+      {
+        "node_id": 439,
+        "source_su_type": 23,
+        "final_su_type": null,
+        "state": "remaining_closure_resource",
+        "completion_tolerated": true,
+        "reason": "stage3_tolerated_unassembled_closure_resource"
+      }
+    ],
+    "allowed_remaining_resource_count": 3,
+    "stages": {
+      "rigid": {
+        "total": 30,
+        "completed": 30,
+        "unconnected": []
+      },
+      "flex": {
+        "total": 24,
+        "completed": 24,
+        "unconnected": []
+      },
+      "ring": {
+        "total": 13,
+        "completed": 13,
+        "unconnected": []
+      },
+      "side": {
+        "total": 21,
+        "completed": 21,
+        "unconnected": []
+      },
+      "substitution": {
+        "total": 2,
+        "completed": 0,
+        "unconnected": [
+          493,
+          460
+        ]
+      }
+    },
+    "main_component": [
+      "aromatic:0",
+      "aromatic:1",
+      "aromatic:10",
+      "aromatic:11",
+      "aromatic:12",
+      "aromatic:13",
+      "aromatic:14",
+      "aromatic:15",
+      "aromatic:16",
+      "aromatic:17",
+      "aromatic:18",
+      "aromatic:19",
+      "aromatic:2",
+      "aromatic:20",
+      "aromatic:21",
+      "aromatic:22",
+      "aromatic:23",
+      "aromatic:24",
+      "aromatic:25",
+      "aromatic:26",
+      "aromatic:27",
+      "aromatic:28",
+      "aromatic:29",
+      "aromatic:3",
+      "aromatic:4",
+      "aromatic:5",
+      "aromatic:6",
+      "aromatic:7",
+      "aromatic:8",
+      "aromatic:9",
+      "topology:0",
+      "topology:1",
+      "topology:10",
+      "topology:11",
+      "topology:12",
+      "topology:13",
+      "topology:14",
+      "topology:15",
+      "topology:16",
+      "topology:17",
+      "topology:18",
+      "topology:19",
+      "topology:2",
+      "topology:20",
+      "topology:21",
+      "topology:22",
+      "topology:23",
+      "topology:24",
+      "topology:25",
+      "topology:26",
+      "topology:27",
+      "topology:28",
+      "topology:29",
+      "topology:3",
+      "topology:30",
+      "topology:31",
+      "topology:32",
+      "topology:33",
+      "topology:34",
+      "topology:35",
+      "topology:36",
+      "topology:37",
+      "topology:38",
+      "topology:39",
+      "topology:4",
+      "topology:40",
+      "topology:41",
+      "topology:42",
+      "topology:43",
+      "topology:44",
+      "topology:45",
+      "topology:46",
+      "topology:47",
+      "topology:48",
+      "topology:49",
+      "topology:5",
+      "topology:50",
+      "topology:51",
+      "topology:52",
+      "topology:53",
+      "topology:54",
+      "topology:55",
+      "topology:56",
+      "topology:57",
+      "topology:6",
+      "topology:7",
+      "topology:8",
+      "topology:9"
+    ],
+    "main_anchor": "aromatic:2",
+    "excluded_units": []
+  },
+  "legal": true,
+  "main_anchor": "aromatic:2",
+  "excluded_units": [],
+  "optimality": "best_in_searched_candidates",
+  "connection_policy": "direct_then_single_side_repacking",
+  "remaining_spatial_demand": {
+    "phase": "substitution",
+    "pressure": 0.0,
+    "reference_backbone_nodes": 324,
+    "reference_su13_sites": 237,
+    "remaining_units": 0,
+    "remaining_nodes": 0,
+    "remaining_ports": 0,
+    "stages": {}
+  },
+  "stage_outputs": {
+    "directory": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/side",
+    "molecule_json": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/side/side_molecule.json",
+    "summary_json": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/side/side_summary.json",
+    "png": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/side/side_molecule.png",
+    "svg": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/side/side_molecule.svg",
+    "pdf": "/home/dofengqi/Graphnmr/test_results/HSQ-1/rl_mtcs_nmr/20261021_182009_274895/side/side_molecule.pdf"
+  }
+}

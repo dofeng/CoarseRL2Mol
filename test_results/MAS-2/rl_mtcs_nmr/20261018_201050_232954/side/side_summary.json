@@ -1,0 +1,244 @@
+{
+  "search_diagnostics": {
+    "simulations": 10,
+    "visited_states": 141,
+    "max_depth": 14,
+    "terminal_count": 10,
+    "backup_updates": 150,
+    "search_exhausted": false,
+    "stop_reason": "result_candidates_ready",
+    "result_candidate_count": 10,
+    "result_candidate_limit": 10,
+    "result_candidate_rewards": [
+      0.6638024607008339,
+      0.6639051116706074,
+      0.6642315758458088,
+      0.6638598209187313,
+      0.6634140019322927,
+      0.6638024607008339,
+      0.6638897393471441,
+      0.6652966154895492,
+      0.6635351422834784,
+      0.6650526022101242
+    ],
+    "selected_reward": 0.6652966154895492,
+    "selected_tie_break": 0,
+    "root_legal_action_count": 10,
+    "root_evaluated_action_count": 10,
+    "root_actions_covered": true,
+    "retained_nodes": 1,
+    "peak_retained_nodes": 141,
+    "transition_bytes": 0,
+    "peak_transition_bytes": 8371396,
+    "elapsed_seconds": 768.547068726999,
+    "rss_mib": 1416.7890625,
+    "search_seed": 17122189588421607721,
+    "spatial_demand": {
+      "phase": "side",
+      "pressure": 0.08713692946058091,
+      "reference_backbone_nodes": 482,
+      "reference_su13_sites": 260,
+      "remaining_units": 14,
+      "remaining_nodes": 42,
+      "remaining_ports": 14,
+      "stages": {
+        "side": {
+          "units": 14,
+          "nodes": 42,
+          "ports": 14
+        }
+      }
+    }
+  },
+  "rewards": {
+    "topology_completion": 0.8923076923076924,
+    "nmr_quality": 0.9163331531786105,
+    "forward_completion": 0.0,
+    "su13_clearance": 0.10342592592592585,
+    "shape_quality": 0.7106353911900495,
+    "total": 0.6652966154895492,
+    "weights": [
+      0.35,
+      0.2,
+      0.2,
+      0.013070539419087146,
+      0.23692946058091285
+    ],
+    "base_weights": [
+      0.35,
+      0.2,
+      0.2,
+      0.15,
+      0.1
+    ],
+    "spatial_demand": {
+      "phase": "side",
+      "pressure": 0.08713692946058091,
+      "reference_backbone_nodes": 482,
+      "reference_su13_sites": 260,
+      "remaining_units": 14,
+      "remaining_nodes": 42,
+      "remaining_ports": 14,
+      "stages": {
+        "side": {
+          "units": 14,
+          "nodes": 42,
+          "ports": 14
+        }
+      }
+    },
+    "shape_metrics": {
+      "quality": 0.7106353911900495,
+      "compactness_quality": 0.6408790785256949,
+      "aspect_quality": 0.9896606418474673,
+      "normalized_radius_of_gyration": 0.5603567560676842,
+      "node_count": 576,
+      "component_count": 1
+    },
+    "weighted_terms": {
+      "topology_completion": 0.3123076923076923,
+      "nmr_quality": 0.18326663063572213,
+      "forward_completion": 0.0,
+      "su13_clearance": 0.001351832641770401,
+      "shape_quality": 0.16837045990436442
+    }
+  },
+  "status": "complete",
+  "done": true,
+  "stage_no_actions": true,
+  "all_complete": false,
+  "units_done": 14,
+  "units_total": 14,
+  "completion_report": {
+    "total": 65,
+    "completed": 58,
+    "completion": 0.8923076923076924,
+    "tasks_complete": false,
+    "all_complete": false,
+    "completion_reasons": [
+      "unconnected_topology_tasks"
+    ],
+    "allowed_remaining_resources": [],
+    "allowed_remaining_resource_count": 0,
+    "stages": {
+      "rigid": {
+        "total": 23,
+        "completed": 23,
+        "unconnected": []
+      },
+      "flex": {
+        "total": 14,
+        "completed": 14,
+        "unconnected": []
+      },
+      "ring": {
+        "total": 7,
+        "completed": 7,
+        "unconnected": []
+      },
+      "side": {
+        "total": 14,
+        "completed": 14,
+        "unconnected": []
+      },
+      "substitution": {
+        "total": 7,
+        "completed": 0,
+        "unconnected": [
+          560,
+          569,
+          570,
+          561,
+          562,
+          563,
+          564
+        ]
+      }
+    },
+    "main_component": [
+      "aromatic:0",
+      "aromatic:1",
+      "aromatic:10",
+      "aromatic:11",
+      "aromatic:12",
+      "aromatic:13",
+      "aromatic:14",
+      "aromatic:15",
+      "aromatic:16",
+      "aromatic:17",
+      "aromatic:18",
+      "aromatic:19",
+      "aromatic:2",
+      "aromatic:20",
+      "aromatic:21",
+      "aromatic:22",
+      "aromatic:3",
+      "aromatic:4",
+      "aromatic:5",
+      "aromatic:6",
+      "aromatic:7",
+      "aromatic:8",
+      "aromatic:9",
+      "topology:0",
+      "topology:1",
+      "topology:10",
+      "topology:11",
+      "topology:12",
+      "topology:13",
+      "topology:14",
+      "topology:15",
+      "topology:16",
+      "topology:17",
+      "topology:18",
+      "topology:19",
+      "topology:2",
+      "topology:20",
+      "topology:21",
+      "topology:22",
+      "topology:23",
+      "topology:24",
+      "topology:25",
+      "topology:26",
+      "topology:27",
+      "topology:28",
+      "topology:29",
+      "topology:3",
+      "topology:30",
+      "topology:31",
+      "topology:32",
+      "topology:33",
+      "topology:34",
+      "topology:4",
+      "topology:5",
+      "topology:6",
+      "topology:7",
+      "topology:8",
+      "topology:9"
+    ],
+    "main_anchor": "aromatic:2",
+    "excluded_units": []
+  },
+  "legal": true,
+  "main_anchor": "aromatic:2",
+  "excluded_units": [],
+  "optimality": "best_in_searched_candidates",
+  "connection_policy": "direct_then_single_side_repacking",
+  "remaining_spatial_demand": {
+    "phase": "substitution",
+    "pressure": 0.0,
+    "reference_backbone_nodes": 482,
+    "reference_su13_sites": 260,
+    "remaining_units": 0,
+    "remaining_nodes": 0,
+    "remaining_ports": 0,
+    "stages": {}
+  },
+  "stage_outputs": {
+    "directory": "/home/dofengqi/Graphnmr/test_results/MAS-2/rl_mtcs_nmr/20261018_201050_232954/side",
+    "molecule_json": "/home/dofengqi/Graphnmr/test_results/MAS-2/rl_mtcs_nmr/20261018_201050_232954/side/side_molecule.json",
+    "summary_json": "/home/dofengqi/Graphnmr/test_results/MAS-2/rl_mtcs_nmr/20261018_201050_232954/side/side_summary.json",
+    "png": "/home/dofengqi/Graphnmr/test_results/MAS-2/rl_mtcs_nmr/20261018_201050_232954/side/side_molecule.png",
+    "svg": "/home/dofengqi/Graphnmr/test_results/MAS-2/rl_mtcs_nmr/20261018_201050_232954/side/side_molecule.svg",
+    "pdf": "/home/dofengqi/Graphnmr/test_results/MAS-2/rl_mtcs_nmr/20261018_201050_232954/side/side_molecule.pdf"
+  }
+}

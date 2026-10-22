@@ -1,0 +1,1352 @@
+{
+  "actions": [
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:44-45",
+      "source_unit_id": "aromatic:4",
+      "source_node_id": 44,
+      "source_port_id": "aromatic:0:rigid:44",
+      "target_unit_id": "aromatic:12",
+      "target_node_id": 45,
+      "target_port_id": "aromatic:2:rigid:45",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:4",
+      "component_rotation": 4,
+      "component_reflection": false,
+      "component_translation": [
+        1184,
+        331
+      ],
+      "moved_node_count": 20,
+      "site_bindings": {
+        "44": [
+          "aromatic:4",
+          14
+        ],
+        "45": [
+          "aromatic:12",
+          1
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:46-47",
+      "source_unit_id": "aromatic:4",
+      "source_node_id": 46,
+      "source_port_id": "aromatic:3:rigid:46",
+      "target_unit_id": "aromatic:13",
+      "target_node_id": 47,
+      "target_port_id": "aromatic:4:rigid:47",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:4",
+      "component_rotation": 1,
+      "component_reflection": false,
+      "component_translation": [
+        69,
+        -849
+      ],
+      "moved_node_count": 40,
+      "site_bindings": {
+        "46": [
+          "aromatic:4",
+          18
+        ],
+        "47": [
+          "aromatic:13",
+          3
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:48-49",
+      "source_unit_id": "aromatic:15",
+      "source_node_id": 48,
+      "source_port_id": "aromatic:5:rigid:48",
+      "target_unit_id": "aromatic:18",
+      "target_node_id": 49,
+      "target_port_id": "aromatic:6:rigid:49",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:15",
+      "component_rotation": 3,
+      "component_reflection": false,
+      "component_translation": [
+        2319,
+        0
+      ],
+      "moved_node_count": 20,
+      "site_bindings": {
+        "48": [
+          "aromatic:15",
+          18
+        ],
+        "49": [
+          "aromatic:18",
+          18
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:50-51",
+      "source_unit_id": "aromatic:7",
+      "source_node_id": 50,
+      "source_port_id": "aromatic:7:rigid:50",
+      "target_unit_id": "aromatic:13",
+      "target_node_id": 51,
+      "target_port_id": "aromatic:8:rigid:51",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:7",
+      "component_rotation": 0,
+      "component_reflection": true,
+      "component_translation": [
+        1448,
+        523
+      ],
+      "moved_node_count": 20,
+      "site_bindings": {
+        "50": [
+          "aromatic:7",
+          3
+        ],
+        "51": [
+          "aromatic:13",
+          2
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:52-53",
+      "source_unit_id": "aromatic:7",
+      "source_node_id": 53,
+      "source_port_id": "aromatic:10:rigid:53",
+      "target_unit_id": "aromatic:5",
+      "target_node_id": 52,
+      "target_port_id": "aromatic:9:rigid:52",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:7",
+      "component_rotation": 1,
+      "component_reflection": false,
+      "component_translation": [
+        -535,
+        -923
+      ],
+      "moved_node_count": 80,
+      "site_bindings": {
+        "52": [
+          "aromatic:5",
+          1
+        ],
+        "53": [
+          "aromatic:7",
+          2
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:54-55",
+      "source_unit_id": "aromatic:5",
+      "source_node_id": 54,
+      "source_port_id": "aromatic:11:rigid:54",
+      "target_unit_id": "aromatic:14",
+      "target_node_id": 55,
+      "target_port_id": "aromatic:12:rigid:55",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:5",
+      "component_rotation": 0,
+      "component_reflection": false,
+      "component_translation": [
+        590,
+        -5
+      ],
+      "moved_node_count": 100,
+      "site_bindings": {
+        "54": [
+          "aromatic:5",
+          14
+        ],
+        "55": [
+          "aromatic:14",
+          2
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:56-57",
+      "source_unit_id": "aromatic:20",
+      "source_node_id": 56,
+      "source_port_id": "aromatic:13:rigid:56",
+      "target_unit_id": "aromatic:21",
+      "target_node_id": 57,
+      "target_port_id": "aromatic:14:rigid:57",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:20",
+      "component_rotation": 0,
+      "component_reflection": false,
+      "component_translation": [
+        58,
+        -1
+      ],
+      "moved_node_count": 20,
+      "site_bindings": {
+        "56": [
+          "aromatic:20",
+          18
+        ],
+        "57": [
+          "aromatic:21",
+          1
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:58-59",
+      "source_unit_id": "aromatic:13",
+      "source_node_id": 58,
+      "source_port_id": "aromatic:15:rigid:58",
+      "target_unit_id": "aromatic:15",
+      "target_node_id": 59,
+      "target_port_id": "aromatic:16:rigid:59",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:13",
+      "component_rotation": 0,
+      "component_reflection": true,
+      "component_translation": [
+        2245,
+        980
+      ],
+      "moved_node_count": 120,
+      "site_bindings": {
+        "58": [
+          "aromatic:13",
+          17
+        ],
+        "59": [
+          "aromatic:15",
+          3
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:60-61",
+      "source_unit_id": "aromatic:2",
+      "source_node_id": 60,
+      "source_port_id": "aromatic:17:rigid:60",
+      "target_unit_id": "aromatic:17",
+      "target_node_id": 61,
+      "target_port_id": "aromatic:18:rigid:61",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:2",
+      "component_rotation": 0,
+      "component_reflection": false,
+      "component_translation": [
+        982,
+        -1
+      ],
+      "moved_node_count": 20,
+      "site_bindings": {
+        "60": [
+          "aromatic:2",
+          18
+        ],
+        "61": [
+          "aromatic:17",
+          1
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:62-63",
+      "source_unit_id": "aromatic:5",
+      "source_node_id": 62,
+      "source_port_id": "aromatic:19:rigid:62",
+      "target_unit_id": "aromatic:21",
+      "target_node_id": 63,
+      "target_port_id": "aromatic:20:rigid:63",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:5",
+      "component_rotation": 2,
+      "component_reflection": true,
+      "component_translation": [
+        180,
+        -18
+      ],
+      "moved_node_count": 160,
+      "site_bindings": {
+        "62": [
+          "aromatic:5",
+          18
+        ],
+        "63": [
+          "aromatic:21",
+          2
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:64-65",
+      "source_unit_id": "aromatic:2",
+      "source_node_id": 64,
+      "source_port_id": "aromatic:21:rigid:64",
+      "target_unit_id": "aromatic:13",
+      "target_node_id": 65,
+      "target_port_id": "aromatic:22:rigid:65",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:2",
+      "component_rotation": 3,
+      "component_reflection": true,
+      "component_translation": [
+        276,
+        -1194
+      ],
+      "moved_node_count": 40,
+      "site_bindings": {
+        "64": [
+          "aromatic:2",
+          0
+        ],
+        "65": [
+          "aromatic:13",
+          1
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:66-67",
+      "source_unit_id": "aromatic:7",
+      "source_node_id": 67,
+      "source_port_id": "aromatic:1:rigid:67",
+      "target_unit_id": "aromatic:6",
+      "target_node_id": 66,
+      "target_port_id": "aromatic:0:rigid:66",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:7",
+      "component_rotation": 5,
+      "component_reflection": true,
+      "component_translation": [
+        1923,
+        3
+      ],
+      "moved_node_count": 238,
+      "site_bindings": {
+        "66": [
+          "aromatic:6",
+          2
+        ],
+        "67": [
+          "aromatic:7",
+          18
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "H",
+      "topology_unit_id": "topology:11",
+      "contract_ids": [
+        "flex:11:80-502",
+        "flex:11:82-503"
+      ],
+      "attachment_contract_id": "flex:11:80-502",
+      "merge_contract_ids": [
+        "flex:11:82-503"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        456,
+        1
+      ],
+      "component_moves": [
+        {
+          "component_index": 3,
+          "component_unit_id": "aromatic:3",
+          "rotation": 4,
+          "reflection": false,
+          "translation": [
+            7516,
+            7058
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "80": 405,
+        "82": 110
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "V",
+      "topology_unit_id": "topology:33",
+      "contract_ids": [
+        "flex:33:109-537",
+        "flex:33:110-540"
+      ],
+      "attachment_contract_id": "flex:33:109-537",
+      "merge_contract_ids": [
+        "flex:33:110-540"
+      ],
+      "topology_rotation": 2,
+      "topology_reflection": true,
+      "topology_translation": [
+        468,
+        -8
+      ],
+      "component_moves": [
+        {
+          "component_index": 9,
+          "component_unit_id": "aromatic:22",
+          "rotation": 0,
+          "reflection": true,
+          "translation": [
+            20684,
+            20203
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "109": 365,
+        "110": 79
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "H",
+      "topology_unit_id": "topology:5",
+      "contract_ids": [
+        "flex:5:31-6",
+        "flex:5:33-7"
+      ],
+      "attachment_contract_id": "flex:5:31-6",
+      "merge_contract_ids": [
+        "flex:5:33-7"
+      ],
+      "topology_rotation": 3,
+      "topology_reflection": true,
+      "topology_translation": [
+        465,
+        5
+      ],
+      "component_moves": [
+        {
+          "component_index": 1,
+          "component_unit_id": "aromatic:1",
+          "rotation": 0,
+          "reflection": false,
+          "translation": [
+            -4390,
+            7
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "31": 237,
+        "33": 76
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "V",
+      "topology_unit_id": "topology:2",
+      "contract_ids": [
+        "flex:2:17-567",
+        "flex:2:18-567"
+      ],
+      "attachment_contract_id": "flex:2:17-567",
+      "merge_contract_ids": [
+        "flex:2:18-567"
+      ],
+      "topology_rotation": 5,
+      "topology_reflection": true,
+      "topology_translation": [
+        453,
+        -13
+      ],
+      "component_moves": [
+        {
+          "component_index": 5,
+          "component_unit_id": "aromatic:11",
+          "rotation": 0,
+          "reflection": true,
+          "translation": [
+            11888,
+            11425
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "17": 263,
+        "18": 17
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "H",
+      "topology_unit_id": "topology:0",
+      "contract_ids": [
+        "flex:0:21-0",
+        "flex:0:25-0"
+      ],
+      "attachment_contract_id": "flex:0:21-0",
+      "merge_contract_ids": [
+        "flex:0:25-0"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": true,
+      "topology_translation": [
+        452,
+        -19
+      ],
+      "component_moves": [
+        {
+          "component_index": 3,
+          "component_unit_id": "aromatic:9",
+          "rotation": 1,
+          "reflection": false,
+          "translation": [
+            -6606,
+            -7077
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "21": 336,
+        "25": 22
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "V",
+      "topology_unit_id": "topology:1",
+      "contract_ids": [
+        "flex:1:15-5",
+        "flex:1:35-5"
+      ],
+      "attachment_contract_id": "flex:1:15-5",
+      "merge_contract_ids": [
+        "flex:1:35-5"
+      ],
+      "topology_rotation": 4,
+      "topology_reflection": false,
+      "topology_translation": [
+        469,
+        -18
+      ],
+      "component_moves": [
+        {
+          "component_index": 4,
+          "component_unit_id": "aromatic:16",
+          "rotation": 1,
+          "reflection": false,
+          "translation": [
+            -8782,
+            -9269
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "15": 418,
+        "35": 29
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "H",
+      "topology_unit_id": "topology:4",
+      "contract_ids": [
+        "flex:4:22-571",
+        "flex:4:23-571"
+      ],
+      "attachment_contract_id": "flex:4:22-571",
+      "merge_contract_ids": [
+        "flex:4:23-571"
+      ],
+      "topology_rotation": 2,
+      "topology_reflection": false,
+      "topology_translation": [
+        451,
+        -9
+      ],
+      "component_moves": [
+        {
+          "component_index": 4,
+          "component_unit_id": "aromatic:19",
+          "rotation": 5,
+          "reflection": true,
+          "translation": [
+            9696,
+            -6
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "22": 121,
+        "23": 276
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "V",
+      "topology_unit_id": "topology:6",
+      "contract_ids": [
+        "flex:6:24-12",
+        "flex:6:27-11"
+      ],
+      "attachment_contract_id": "flex:6:24-12",
+      "merge_contract_ids": [
+        "flex:6:27-11"
+      ],
+      "topology_rotation": 4,
+      "topology_reflection": false,
+      "topology_translation": [
+        476,
+        5
+      ],
+      "component_moves": [
+        {
+          "component_index": 0,
+          "component_unit_id": "aromatic:0",
+          "rotation": 2,
+          "reflection": false,
+          "translation": [
+            476,
+            -2663
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "24": 443,
+        "27": 16
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "H",
+      "topology_unit_id": "topology:7",
+      "contract_ids": [
+        "flex:7:26-13",
+        "flex:7:29-14"
+      ],
+      "attachment_contract_id": "flex:7:26-13",
+      "merge_contract_ids": [
+        "flex:7:29-14"
+      ],
+      "topology_rotation": 5,
+      "topology_reflection": false,
+      "topology_translation": [
+        469,
+        -20
+      ],
+      "component_moves": [
+        {
+          "component_index": 1,
+          "component_unit_id": "aromatic:8",
+          "rotation": 3,
+          "reflection": false,
+          "translation": [
+            3147,
+            -21
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "26": 392,
+        "29": 20
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "connection_axis": "V",
+      "topology_unit_id": "topology:3",
+      "contract_ids": [
+        "flex:3:19-568",
+        "flex:3:20-568"
+      ],
+      "attachment_contract_id": "flex:3:19-568",
+      "merge_contract_ids": [
+        "flex:3:20-568"
+      ],
+      "topology_rotation": 1,
+      "topology_reflection": false,
+      "topology_translation": [
+        477,
+        5
+      ],
+      "component_moves": [
+        {
+          "component_index": 1,
+          "component_unit_id": "aromatic:10",
+          "rotation": 3,
+          "reflection": true,
+          "translation": [
+            -2192,
+            -2665
+          ]
+        }
+      ],
+      "boundary_site_assignments": {
+        "19": 442,
+        "20": 92
+      },
+      "attachment_group_count": 2,
+      "merged_component_count": 2,
+      "anchor_port_indices": [
+        0
+      ],
+      "connection_mode": "merge",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "topology_unit_id": "topology:8",
+      "contract_ids": [
+        "flex:8:28-4",
+        "flex:8:78-559"
+      ],
+      "topology_rotation": 3,
+      "topology_reflection": false,
+      "topology_translation": [
+        458,
+        -18
+      ],
+      "boundary_site_assignments": {
+        "28": 335,
+        "78": 361
+      },
+      "connection_axis": "H",
+      "connection_mode": "internal",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "topology_unit_id": "topology:10",
+      "contract_ids": [
+        "flex:10:77-500",
+        "flex:10:79-501"
+      ],
+      "topology_rotation": 4,
+      "topology_reflection": false,
+      "topology_translation": [
+        481,
+        6
+      ],
+      "boundary_site_assignments": {
+        "77": 320,
+        "79": 438
+      },
+      "connection_axis": "V",
+      "connection_mode": "internal",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "topology_unit_id": "topology:34",
+      "contract_ids": [
+        "flex:34:383-541",
+        "flex:34:426-543"
+      ],
+      "topology_rotation": 4,
+      "topology_reflection": true,
+      "topology_translation": [
+        466,
+        3
+      ],
+      "boundary_site_assignments": {
+        "383": 287,
+        "426": 279
+      },
+      "connection_axis": "H",
+      "connection_mode": "internal",
+      "stage": "flex"
+    },
+    {
+      "kind": "flex",
+      "topology_unit_id": "topology:9",
+      "contract_ids": [
+        "flex:9:72-340",
+        "flex:9:73-499"
+      ],
+      "topology_rotation": 5,
+      "topology_reflection": false,
+      "topology_translation": [
+        473,
+        5
+      ],
+      "boundary_site_assignments": {
+        "72": 405,
+        "73": 446
+      },
+      "connection_axis": "V",
+      "connection_mode": "internal",
+      "stage": "flex"
+    },
+    {
+      "kind": "ring",
+      "topology_unit_id": "topology:13",
+      "contract_ids": [
+        "ring:13:81-548",
+        "ring:13:89-550"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        451,
+        0
+      ],
+      "boundary_site_assignments": {
+        "81": 411,
+        "89": 361
+      },
+      "connection_axis": "H",
+      "connection_mode": "internal",
+      "stage": "ring"
+    },
+    {
+      "kind": "ring",
+      "topology_unit_id": "topology:16",
+      "contract_ids": [
+        "ring:16:76-558",
+        "ring:16:83-510"
+      ],
+      "topology_rotation": 3,
+      "topology_reflection": true,
+      "topology_translation": [
+        461,
+        -27
+      ],
+      "boundary_site_assignments": {
+        "76": 101,
+        "83": 375
+      },
+      "connection_axis": "H",
+      "connection_mode": "internal",
+      "stage": "ring"
+    },
+    {
+      "kind": "ring",
+      "topology_unit_id": "topology:17",
+      "contract_ids": [
+        "ring:17:84-511",
+        "ring:17:85-512"
+      ],
+      "topology_rotation": 2,
+      "topology_reflection": false,
+      "topology_translation": [
+        446,
+        -28
+      ],
+      "boundary_site_assignments": {
+        "84": 267,
+        "85": 90
+      },
+      "connection_axis": "V",
+      "connection_mode": "internal",
+      "stage": "ring"
+    },
+    {
+      "kind": "ring",
+      "topology_unit_id": "topology:12",
+      "contract_ids": [
+        "ring:12:16-566",
+        "ring:12:87-547"
+      ],
+      "topology_rotation": 5,
+      "topology_reflection": false,
+      "topology_translation": [
+        464,
+        9
+      ],
+      "boundary_site_assignments": {
+        "16": 201,
+        "87": 265
+      },
+      "connection_axis": "H",
+      "connection_mode": "internal",
+      "stage": "ring"
+    },
+    {
+      "kind": "ring",
+      "topology_unit_id": "topology:15",
+      "contract_ids": [
+        "ring:15:74-556",
+        "ring:15:75-557"
+      ],
+      "topology_rotation": 2,
+      "topology_reflection": true,
+      "topology_translation": [
+        444,
+        -17
+      ],
+      "boundary_site_assignments": {
+        "74": 334,
+        "75": 375
+      },
+      "connection_axis": "H",
+      "connection_mode": "internal",
+      "stage": "ring"
+    },
+    {
+      "kind": "ring",
+      "topology_unit_id": "topology:14",
+      "contract_ids": [
+        "ring:14:111-546",
+        "ring:14:91-551"
+      ],
+      "topology_rotation": 2,
+      "topology_reflection": true,
+      "topology_translation": [
+        445,
+        -6
+      ],
+      "boundary_site_assignments": {
+        "111": 446,
+        "91": 431
+      },
+      "connection_axis": "H",
+      "connection_mode": "internal",
+      "stage": "ring"
+    },
+    {
+      "kind": "ring",
+      "topology_unit_id": "topology:18",
+      "contract_ids": [
+        "ring:18:86-514",
+        "ring:18:88-515"
+      ],
+      "topology_rotation": 5,
+      "topology_reflection": true,
+      "topology_translation": [
+        486,
+        11
+      ],
+      "boundary_site_assignments": {
+        "86": 325,
+        "88": 276
+      },
+      "connection_axis": "H",
+      "connection_mode": "internal",
+      "stage": "ring"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:23",
+      "contract_ids": [
+        "side:23:92-518"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        484,
+        13
+      ],
+      "boundary_site_assignments": {
+        "92": 323
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:32",
+      "contract_ids": [
+        "side:32:107-534"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        474,
+        -23
+      ],
+      "boundary_site_assignments": {
+        "107": 302
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:30",
+      "contract_ids": [
+        "side:30:102-530"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        478,
+        -18
+      ],
+      "boundary_site_assignments": {
+        "102": 346
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:22",
+      "contract_ids": [
+        "side:22:90-517"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        472,
+        10
+      ],
+      "boundary_site_assignments": {
+        "90": 121
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:24",
+      "contract_ids": [
+        "side:24:93-519"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        447,
+        -4
+      ],
+      "boundary_site_assignments": {
+        "93": 433
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:25",
+      "contract_ids": [
+        "side:25:94-520"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        485,
+        9
+      ],
+      "boundary_site_assignments": {
+        "94": 324
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:26",
+      "contract_ids": [
+        "side:26:98-522"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        444,
+        -26
+      ],
+      "boundary_site_assignments": {
+        "98": 309
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:27",
+      "contract_ids": [
+        "side:27:99-524"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        470,
+        -24
+      ],
+      "boundary_site_assignments": {
+        "99": 306
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:31",
+      "contract_ids": [
+        "side:31:106-532"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        482,
+        12
+      ],
+      "boundary_site_assignments": {
+        "106": 321
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:29",
+      "contract_ids": [
+        "side:29:101-528"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        478,
+        -20
+      ],
+      "boundary_site_assignments": {
+        "101": 34
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:28",
+      "contract_ids": [
+        "side:28:100-526"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        476,
+        9
+      ],
+      "boundary_site_assignments": {
+        "100": 320
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:21",
+      "contract_ids": [
+        "side:21:34-3"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        448,
+        -20
+      ],
+      "boundary_site_assignments": {
+        "34": 315
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:19",
+      "contract_ids": [
+        "side:19:30-1"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        458,
+        -15
+      ],
+      "boundary_site_assignments": {
+        "30": 359
+      },
+      "stage": "side"
+    },
+    {
+      "kind": "side",
+      "topology_unit_id": "topology:20",
+      "contract_ids": [
+        "side:20:32-2"
+      ],
+      "topology_rotation": 0,
+      "topology_reflection": false,
+      "topology_translation": [
+        451,
+        -15
+      ],
+      "boundary_site_assignments": {
+        "32": 326
+      },
+      "stage": "side"
+    }
+  ],
+  "diagnostics": {
+    "simulations": 10,
+    "visited_states": 141,
+    "max_depth": 14,
+    "terminal_count": 10,
+    "backup_updates": 150,
+    "search_exhausted": false,
+    "stop_reason": "result_candidates_ready",
+    "result_candidate_count": 10,
+    "result_candidate_limit": 10,
+    "result_candidate_rewards": [
+      0.6638024607008339,
+      0.6639051116706074,
+      0.6642315758458088,
+      0.6638598209187313,
+      0.6634140019322927,
+      0.6638024607008339,
+      0.6638897393471441,
+      0.6652966154895492,
+      0.6635351422834784,
+      0.6650526022101242
+    ],
+    "selected_reward": 0.6652966154895492,
+    "selected_tie_break": 0,
+    "root_legal_action_count": 10,
+    "root_evaluated_action_count": 10,
+    "root_actions_covered": true,
+    "retained_nodes": 1,
+    "peak_retained_nodes": 141,
+    "transition_bytes": 0,
+    "peak_transition_bytes": 8371396,
+    "elapsed_seconds": 768.547068726999,
+    "rss_mib": 1416.7890625,
+    "search_seed": 17122189588421607721,
+    "spatial_demand": {
+      "phase": "side",
+      "pressure": 0.08713692946058091,
+      "reference_backbone_nodes": 482,
+      "reference_su13_sites": 260,
+      "remaining_units": 14,
+      "remaining_nodes": 42,
+      "remaining_ports": 14,
+      "stages": {
+        "side": {
+          "units": 14,
+          "nodes": 42,
+          "ports": 14
+        }
+      }
+    }
+  }
+}

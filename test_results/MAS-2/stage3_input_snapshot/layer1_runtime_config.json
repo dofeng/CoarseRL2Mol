@@ -1,0 +1,11 @@
+{
+  "layer1_multistart_branch_limit": 2,
+  "layer1_multistart_count": 2,
+  "layer1_multistart_refine_count": 2,
+  "max_candidate_trials_per_region": 10,
+  "max_moves_per_region": 3,
+  "neg_peak_threshold": -0.8,
+  "pos_peak_threshold": 0.8,
+  "region_adjustment_cycles": 2,
+  "verbose": false
+}

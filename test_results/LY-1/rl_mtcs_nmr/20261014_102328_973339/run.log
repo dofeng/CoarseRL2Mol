@@ -1,0 +1,127 @@
+输入已读取，等待点击开始组装。
+[RL_MTCS][input] units=57 aromatic=28 flex_chain=16 aliphatic_ring=2 side_chain=11
+[RL_MTCS][input][issue] {'reason': 'input_task_coverage_error', 'node_id': 103, 'planned_su_type': 11}
+[RL_MTCS][input][issue] {'reason': 'input_task_coverage_error', 'node_id': 108, 'planned_su_type': 11}
+[RL_MTCS][input] rigid_mode=dynamic_su10_sites rigid_ports=26 source_pairs=13 flex_contracts=32 ring_contracts=4 side_contracts=11
+[RL_MTCS][rigid][search] start_count=28 candidate_limit=10 space_pressure=0.188 pending_nodes=104 pending_ports=47
+[RL_MTCS][rigid][search] candidates=0/10 root_actions=0/10 visited=8 retained=8 delta_mib=0.28 rss_mib=50.0 elapsed=15.1s
+[RL_MTCS][rigid][search] candidates=0/10 root_actions=0/10 visited=13 retained=13 delta_mib=0.54 rss_mib=53.7 elapsed=30.1s
+[RL_MTCS][rigid][search] candidates=1/10 root_actions=1/10 visited=21 retained=21 delta_mib=0.80 rss_mib=58.2 elapsed=45.2s
+[RL_MTCS][rigid][search] candidates=2/10 root_actions=2/10 visited=28 retained=28 delta_mib=1.09 rss_mib=61.6 elapsed=60.3s
+[RL_MTCS][rigid][search] candidates=2/10 root_actions=2/10 visited=35 retained=35 delta_mib=1.37 rss_mib=60.5 elapsed=75.4s
+[RL_MTCS][rigid][search] candidates=3/10 root_actions=3/10 visited=42 retained=42 delta_mib=1.68 rss_mib=64.3 elapsed=90.5s
+[RL_MTCS][rigid][search] candidates=3/10 root_actions=3/10 visited=49 retained=49 delta_mib=1.94 rss_mib=63.4 elapsed=105.6s
+[RL_MTCS][rigid][search] candidates=4/10 root_actions=4/10 visited=56 retained=56 delta_mib=2.20 rss_mib=65.0 elapsed=121.0s
+[RL_MTCS][rigid][search] candidates=4/10 root_actions=4/10 visited=63 retained=63 delta_mib=2.48 rss_mib=63.9 elapsed=136.1s
+[RL_MTCS][rigid][search] candidates=5/10 root_actions=5/10 visited=70 retained=70 delta_mib=2.74 rss_mib=65.6 elapsed=151.2s
+[RL_MTCS][rigid][search] candidates=5/10 root_actions=5/10 visited=77 retained=77 delta_mib=3.03 rss_mib=64.9 elapsed=166.7s
+[RL_MTCS][rigid][search] candidates=6/10 root_actions=6/10 visited=83 retained=83 delta_mib=3.25 rss_mib=66.8 elapsed=181.7s
+[RL_MTCS][rigid][search] candidates=6/10 root_actions=6/10 visited=89 retained=89 delta_mib=3.54 rss_mib=66.8 elapsed=196.8s
+[RL_MTCS][rigid][search] candidates=7/10 root_actions=7/10 visited=97 retained=97 delta_mib=3.82 rss_mib=67.1 elapsed=211.9s
+[RL_MTCS][rigid][search] candidates=7/10 root_actions=7/10 visited=103 retained=103 delta_mib=4.11 rss_mib=67.4 elapsed=227.2s
+[RL_MTCS][rigid][search] candidates=8/10 root_actions=8/10 visited=110 retained=110 delta_mib=4.35 rss_mib=69.0 elapsed=242.4s
+[RL_MTCS][rigid][search] candidates=8/10 root_actions=8/10 visited=116 retained=116 delta_mib=4.62 rss_mib=68.5 elapsed=258.5s
+[RL_MTCS][rigid][search] candidates=9/10 root_actions=9/10 visited=123 retained=123 delta_mib=4.87 rss_mib=70.3 elapsed=273.8s
+[RL_MTCS][rigid][search] candidates=9/10 root_actions=9/10 visited=130 retained=130 delta_mib=5.20 rss_mib=69.4 elapsed=288.9s
+[RL_MTCS][rigid][search] selected candidates=10/10 root_actions=10/10 reward=0.2809357391251257 stop=result_candidates_ready elapsed=290.5s
+[RL_MTCS][rigid][forward] start attempt=0
+[RL_MTCS][rigid][forward:flex] start connected=0 elapsed=0.0s
+[RL_MTCS][rigid][forward:flex] no_actions connected=16 elapsed=4.3s entries=227/266
+[RL_MTCS][rigid][forward:ring] start connected=0 elapsed=4.3s
+[RL_MTCS][rigid][forward:ring] no_actions connected=2 elapsed=4.6s entries=223/262
+[RL_MTCS][rigid][forward:side] start connected=0 elapsed=4.6s
+[RL_MTCS][rigid][forward:side] no_actions connected=11 elapsed=7.0s entries=210/251
+[RL_MTCS][rigid][forward:substitution] start connected=0 elapsed=7.0s
+[RL_MTCS][rigid][forward:substitution] no_actions connected=5 elapsed=8.0s
+[RL_MTCS][rigid][checkpoint=28] attempt=0 forward_completion=1.000 forward_valid=True
+[RL_MTCS][rigid] status=complete units=28/28 legal=True
+[RL_MTCS][flex][search] start_count=0 candidate_limit=10 space_pressure=0.188 pending_nodes=104 pending_ports=47
+[RL_MTCS][flex][search] candidates=2/10 root_actions=2/10 visited=11 retained=11 delta_mib=0.62 rss_mib=140.3 elapsed=15.0s
+[RL_MTCS][flex][search] candidates=5/10 root_actions=5/10 visited=22 retained=22 delta_mib=1.23 rss_mib=141.8 elapsed=30.1s
+[RL_MTCS][flex][search] candidates=7/10 root_actions=7/10 visited=32 retained=32 delta_mib=1.87 rss_mib=143.5 elapsed=45.2s
+[RL_MTCS][flex][search] selected candidates=10/10 root_actions=10/10 reward=0.3524845525443552 stop=result_candidates_ready elapsed=57.2s
+[RL_MTCS][flex][forward] start attempt=0
+[RL_MTCS][flex][forward:flex] start connected=0 elapsed=0.0s
+[RL_MTCS][flex][forward:flex] no_actions connected=12 elapsed=3.2s entries=219/266
+[RL_MTCS][flex][forward:ring] start connected=0 elapsed=3.2s
+[RL_MTCS][flex][forward:ring] no_actions connected=2 elapsed=3.7s entries=215/262
+[RL_MTCS][flex][forward:side] start connected=0 elapsed=3.7s
+[RL_MTCS][flex][forward:side] no_actions connected=11 elapsed=5.9s entries=201/251
+[RL_MTCS][flex][forward:substitution] start connected=0 elapsed=5.9s
+[RL_MTCS][flex][forward:substitution] no_actions connected=5 elapsed=6.8s
+[RL_MTCS][flex][checkpoint=4] attempt=0 forward_completion=1.000 forward_valid=True
+[RL_MTCS][flex][search] start_count=4 candidate_limit=10 space_pressure=0.167 pending_nodes=92 pending_ports=39
+[RL_MTCS][flex][search] candidates=2/10 root_actions=2/10 visited=10 retained=10 delta_mib=0.53 rss_mib=145.3 elapsed=15.1s
+[RL_MTCS][flex][search] candidates=4/10 root_actions=4/10 visited=20 retained=20 delta_mib=1.02 rss_mib=145.5 elapsed=30.2s
+[RL_MTCS][flex][search] candidates=7/10 root_actions=7/10 visited=31 retained=31 delta_mib=1.53 rss_mib=145.7 elapsed=45.2s
+[RL_MTCS][flex][search] candidates=9/10 root_actions=9/10 visited=40 retained=40 delta_mib=2.03 rss_mib=145.9 elapsed=60.3s
+[RL_MTCS][flex][search] selected candidates=10/10 root_actions=10/10 reward=0.4160800438452821 stop=result_candidates_ready elapsed=60.7s
+[RL_MTCS][flex][forward] start attempt=0
+[RL_MTCS][flex][forward:flex] start connected=0 elapsed=0.0s
+[RL_MTCS][flex][forward:flex] no_actions connected=8 elapsed=2.0s entries=225/266
+[RL_MTCS][flex][forward:ring] start connected=0 elapsed=2.0s
+[RL_MTCS][flex][forward:ring] no_actions connected=2 elapsed=2.4s entries=221/262
+[RL_MTCS][flex][forward:side] start connected=0 elapsed=2.4s
+[RL_MTCS][flex][forward:side] no_actions connected=11 elapsed=4.7s entries=209/251
+[RL_MTCS][flex][forward:substitution] start connected=0 elapsed=4.7s
+[RL_MTCS][flex][forward:substitution] no_actions connected=5 elapsed=5.7s
+[RL_MTCS][flex][checkpoint=8] attempt=0 forward_completion=1.000 forward_valid=True
+[RL_MTCS][flex][search] start_count=8 candidate_limit=10 space_pressure=0.150 pending_nodes=83 pending_ports=31
+[RL_MTCS][flex][search] candidates=2/10 root_actions=2/10 visited=10 retained=10 delta_mib=0.48 rss_mib=145.9 elapsed=15.0s
+[RL_MTCS][flex][search] candidates=4/10 root_actions=4/10 visited=20 retained=20 delta_mib=0.96 rss_mib=145.9 elapsed=30.0s
+[RL_MTCS][flex][search] candidates=7/10 root_actions=7/10 visited=31 retained=31 delta_mib=1.46 rss_mib=145.9 elapsed=45.1s
+[RL_MTCS][flex][search] selected candidates=10/10 root_actions=10/10 reward=0.4778410511461161 stop=result_candidates_ready elapsed=58.3s
+[RL_MTCS][flex][forward] start attempt=0
+[RL_MTCS][flex][forward:flex] start connected=0 elapsed=0.0s
+[RL_MTCS][flex][forward:flex] no_actions connected=4 elapsed=0.9s entries=215/266
+[RL_MTCS][flex][forward:ring] start connected=0 elapsed=0.9s
+[RL_MTCS][flex][forward:ring] no_actions connected=2 elapsed=1.3s entries=211/262
+[RL_MTCS][flex][forward:side] start connected=0 elapsed=1.3s
+[RL_MTCS][flex][forward:side] no_actions connected=11 elapsed=3.5s entries=198/251
+[RL_MTCS][flex][forward:substitution] start connected=0 elapsed=3.5s
+[RL_MTCS][flex][forward:substitution] no_actions connected=5 elapsed=4.5s
+[RL_MTCS][flex][checkpoint=12] attempt=0 forward_completion=1.000 forward_valid=True
+[RL_MTCS][flex][search] start_count=12 candidate_limit=10 space_pressure=0.129 pending_nodes=71 pending_ports=23
+[RL_MTCS][flex][search] candidates=2/10 root_actions=2/10 visited=11 retained=11 delta_mib=0.49 rss_mib=146.1 elapsed=15.0s
+[RL_MTCS][flex][search] candidates=5/10 root_actions=5/10 visited=23 retained=23 delta_mib=0.96 rss_mib=146.1 elapsed=30.2s
+[RL_MTCS][flex][search] candidates=8/10 root_actions=8/10 visited=35 retained=35 delta_mib=1.43 rss_mib=146.1 elapsed=45.3s
+[RL_MTCS][flex][search] selected candidates=10/10 root_actions=10/10 reward=0.526151100530067 stop=result_candidates_ready elapsed=54.3s
+[RL_MTCS][flex][forward] start attempt=0
+[RL_MTCS][flex][forward:flex] start connected=0 elapsed=0.0s
+[RL_MTCS][flex][forward:flex] no_actions connected=0 elapsed=0.1s entries=220/266
+[RL_MTCS][flex][forward:ring] start connected=0 elapsed=0.1s
+[RL_MTCS][flex][forward:ring] no_actions connected=2 elapsed=0.5s entries=216/262
+[RL_MTCS][flex][forward:side] start connected=0 elapsed=0.5s
+[RL_MTCS][flex][forward:side] no_actions connected=11 elapsed=3.4s entries=202/251
+[RL_MTCS][flex][forward:substitution] start connected=0 elapsed=3.4s
+[RL_MTCS][flex][forward:substitution] no_actions connected=5 elapsed=4.4s
+[RL_MTCS][flex][checkpoint=16] attempt=0 forward_completion=1.000 forward_valid=True
+[RL_MTCS][flex] status=complete units=16/16 legal=True
+[RL_MTCS][ring][search] start_count=0 candidate_limit=10 space_pressure=0.109 pending_nodes=60 pending_ports=15
+[RL_MTCS][ring][search] candidates=7/10 root_actions=7/10 visited=16 retained=16 delta_mib=0.45 rss_mib=146.7 elapsed=15.1s
+[RL_MTCS][ring][search] selected candidates=10/10 root_actions=10/10 reward=0.5446614432218037 stop=result_candidates_ready elapsed=20.0s
+[RL_MTCS][ring] status=complete units=2/2 legal=True
+[RL_MTCS][side][search] start_count=0 candidate_limit=10 space_pressure=0.071 pending_nodes=39 pending_ports=11
+[RL_MTCS][side][search] candidates=0/10 root_actions=0/10 visited=8 retained=8 delta_mib=0.45 rss_mib=148.5 elapsed=15.1s
+[RL_MTCS][side][search] candidates=1/10 root_actions=1/10 visited=16 retained=16 delta_mib=0.89 rss_mib=148.5 elapsed=30.3s
+[RL_MTCS][side][search] candidates=2/10 root_actions=2/10 visited=25 retained=25 delta_mib=1.29 rss_mib=148.5 elapsed=45.4s
+[RL_MTCS][side][search] candidates=2/10 root_actions=2/10 visited=32 retained=32 delta_mib=1.72 rss_mib=148.5 elapsed=60.5s
+[RL_MTCS][side][search] candidates=3/10 root_actions=3/10 visited=40 retained=40 delta_mib=2.14 rss_mib=148.5 elapsed=75.7s
+[RL_MTCS][side][search] candidates=4/10 root_actions=4/10 visited=48 retained=48 delta_mib=2.55 rss_mib=148.5 elapsed=90.8s
+[RL_MTCS][side][search] candidates=5/10 root_actions=5/10 visited=57 retained=57 delta_mib=2.97 rss_mib=148.5 elapsed=106.1s
+[RL_MTCS][side][search] candidates=5/10 root_actions=5/10 visited=64 retained=64 delta_mib=3.41 rss_mib=148.7 elapsed=121.3s
+[RL_MTCS][side][search] candidates=6/10 root_actions=6/10 visited=73 retained=73 delta_mib=3.84 rss_mib=149.0 elapsed=136.5s
+[RL_MTCS][side][search] candidates=7/10 root_actions=7/10 visited=81 retained=81 delta_mib=4.26 rss_mib=149.5 elapsed=151.7s
+[RL_MTCS][side][search] candidates=8/10 root_actions=8/10 visited=90 retained=90 delta_mib=4.69 rss_mib=150.2 elapsed=166.8s
+[RL_MTCS][side][search] candidates=8/10 root_actions=8/10 visited=97 retained=97 delta_mib=5.12 rss_mib=151.4 elapsed=182.0s
+[RL_MTCS][side][search] candidates=9/10 root_actions=9/10 visited=106 retained=106 delta_mib=5.55 rss_mib=151.6 elapsed=197.1s
+[RL_MTCS][side][search] selected candidates=10/10 root_actions=10/10 reward=0.6334814442491624 stop=result_candidates_ready elapsed=206.6s
+[RL_MTCS][side] status=complete units=11/11 legal=True
+[RL_MTCS][substitution][search] start_count=0 candidate_limit=10 space_pressure=0.000 pending_nodes=0 pending_ports=0
+[RL_MTCS][substitution][search] candidates=1/10 root_actions=1/10 visited=9 retained=9 delta_mib=1.07 rss_mib=155.1 elapsed=15.1s
+[RL_MTCS][substitution][search] candidates=3/10 root_actions=3/10 visited=18 retained=18 delta_mib=1.92 rss_mib=155.1 elapsed=30.2s
+[RL_MTCS][substitution][search] candidates=5/10 root_actions=5/10 visited=28 retained=28 delta_mib=2.74 rss_mib=155.1 elapsed=45.3s
+[RL_MTCS][substitution][search] candidates=7/10 root_actions=7/10 visited=37 retained=37 delta_mib=3.52 rss_mib=155.1 elapsed=60.3s
+[RL_MTCS][substitution][search] candidates=9/10 root_actions=9/10 visited=47 retained=47 delta_mib=4.36 rss_mib=155.1 elapsed=75.5s
+[RL_MTCS][substitution][search] selected candidates=10/10 root_actions=10/10 reward=0.6799709948350346 stop=result_candidates_ready elapsed=81.9s
+[RL_MTCS][substitution] status=complete units=5/5 legal=True

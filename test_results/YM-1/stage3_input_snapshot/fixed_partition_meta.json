@@ -1,0 +1,130 @@
+{
+  "degree_parity_adjustment": {
+    "adjusted": false,
+    "audit_source": "actual_layer12_nodes",
+    "reason": "already_even",
+    "target_degree_sum_after": 1324,
+    "target_degree_sum_before": 1304
+  },
+  "layer1_port_role_balance": {
+    "adjusted": true,
+    "after": {
+      "aromatic_degree_ports": 774,
+      "aromatic_external_role_ports": 136,
+      "aromatic_internal_even": true,
+      "aromatic_internal_ports": 638,
+      "non_aromatic_degree_ports": 550,
+      "non_aromatic_external_partner_ports": 106,
+      "non_aromatic_internal_even": true,
+      "non_aromatic_internal_ports": 444,
+      "ok": true,
+      "role_balance_required": false,
+      "role_parity_consistent": true,
+      "scope": "pre_layer1_port_roles",
+      "total_even": true,
+      "total_ports": 1324
+    },
+    "audit_source": "actual_layer12_nodes",
+    "before": {
+      "aromatic_degree_ports": 758,
+      "aromatic_external_role_ports": 119,
+      "aromatic_internal_even": false,
+      "aromatic_internal_ports": 639,
+      "non_aromatic_degree_ports": 546,
+      "non_aromatic_external_partner_ports": 89,
+      "non_aromatic_internal_even": false,
+      "non_aromatic_internal_ports": 457,
+      "ok": false,
+      "role_balance_required": true,
+      "role_parity_consistent": true,
+      "scope": "pre_layer1_port_roles",
+      "total_even": true,
+      "total_ports": 1304
+    },
+    "count": 1,
+    "from_su": 12,
+    "reason": "layer1_port_roles_balanced_before_rebuild",
+    "to_su": 11
+  },
+  "n19_total": 89,
+  "n5_total": 81,
+  "n7_total": 0,
+  "n9_total": 23,
+  "o_base_19": 89,
+  "o_fixed_edges_19": 96,
+  "s_fixed_edges_19": 0,
+  "s_reserved_19": 0,
+  "special_anchor_mode_meta": {
+    "19": {
+      "ether_double": {
+        "2": 0,
+        "3": 7
+      },
+      "ether_single": {
+        "1": 55,
+        "2": 13,
+        "3": 14
+      },
+      "thio_double": {
+        "2": 0,
+        "3": 0
+      },
+      "thio_single": {
+        "1": 0,
+        "2": 0,
+        "3": 0
+      }
+    },
+    "20": {
+      "double": {
+        "2": 0,
+        "3": 0
+      },
+      "single": {
+        "1": 0,
+        "2": 0,
+        "3": 3
+      }
+    },
+    "21": {
+      "double": {
+        "2": 0,
+        "3": 0
+      },
+      "single": {
+        "2": 0,
+        "3": 0
+      }
+    }
+  },
+  "special_degree_meta": {
+    "19": {
+      "1": 55,
+      "2": 13,
+      "3": 21
+    },
+    "20": {
+      "1": 0,
+      "2": 0,
+      "3": 3
+    },
+    "21": {
+      "2": 0,
+      "3": 0
+    }
+  },
+  "special_partition_meta": {
+    "19": {
+      "ether": {
+        "1": 55,
+        "2": 13,
+        "3": 21
+      },
+      "thio": {
+        "1": 0,
+        "2": 0,
+        "3": 0
+      }
+    }
+  }
+}

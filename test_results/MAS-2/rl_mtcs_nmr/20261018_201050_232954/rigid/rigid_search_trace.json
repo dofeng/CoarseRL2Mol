@@ -1,0 +1,894 @@
+{
+  "actions": [
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:44-45",
+      "source_unit_id": "aromatic:4",
+      "source_node_id": 44,
+      "source_port_id": "aromatic:0:rigid:44",
+      "target_unit_id": "aromatic:12",
+      "target_node_id": 45,
+      "target_port_id": "aromatic:2:rigid:45",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:4",
+      "component_rotation": 4,
+      "component_reflection": false,
+      "component_translation": [
+        1184,
+        331
+      ],
+      "moved_node_count": 20,
+      "site_bindings": {
+        "44": [
+          "aromatic:4",
+          14
+        ],
+        "45": [
+          "aromatic:12",
+          1
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:46-47",
+      "source_unit_id": "aromatic:4",
+      "source_node_id": 46,
+      "source_port_id": "aromatic:3:rigid:46",
+      "target_unit_id": "aromatic:13",
+      "target_node_id": 47,
+      "target_port_id": "aromatic:4:rigid:47",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:4",
+      "component_rotation": 1,
+      "component_reflection": false,
+      "component_translation": [
+        69,
+        -849
+      ],
+      "moved_node_count": 40,
+      "site_bindings": {
+        "46": [
+          "aromatic:4",
+          18
+        ],
+        "47": [
+          "aromatic:13",
+          3
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:48-49",
+      "source_unit_id": "aromatic:15",
+      "source_node_id": 48,
+      "source_port_id": "aromatic:5:rigid:48",
+      "target_unit_id": "aromatic:18",
+      "target_node_id": 49,
+      "target_port_id": "aromatic:6:rigid:49",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:15",
+      "component_rotation": 3,
+      "component_reflection": false,
+      "component_translation": [
+        2319,
+        0
+      ],
+      "moved_node_count": 20,
+      "site_bindings": {
+        "48": [
+          "aromatic:15",
+          18
+        ],
+        "49": [
+          "aromatic:18",
+          18
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:50-51",
+      "source_unit_id": "aromatic:7",
+      "source_node_id": 50,
+      "source_port_id": "aromatic:7:rigid:50",
+      "target_unit_id": "aromatic:13",
+      "target_node_id": 51,
+      "target_port_id": "aromatic:8:rigid:51",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:7",
+      "component_rotation": 0,
+      "component_reflection": true,
+      "component_translation": [
+        1448,
+        523
+      ],
+      "moved_node_count": 20,
+      "site_bindings": {
+        "50": [
+          "aromatic:7",
+          3
+        ],
+        "51": [
+          "aromatic:13",
+          2
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:52-53",
+      "source_unit_id": "aromatic:7",
+      "source_node_id": 53,
+      "source_port_id": "aromatic:10:rigid:53",
+      "target_unit_id": "aromatic:5",
+      "target_node_id": 52,
+      "target_port_id": "aromatic:9:rigid:52",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:7",
+      "component_rotation": 1,
+      "component_reflection": false,
+      "component_translation": [
+        -535,
+        -923
+      ],
+      "moved_node_count": 80,
+      "site_bindings": {
+        "52": [
+          "aromatic:5",
+          1
+        ],
+        "53": [
+          "aromatic:7",
+          2
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:54-55",
+      "source_unit_id": "aromatic:5",
+      "source_node_id": 54,
+      "source_port_id": "aromatic:11:rigid:54",
+      "target_unit_id": "aromatic:14",
+      "target_node_id": 55,
+      "target_port_id": "aromatic:12:rigid:55",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:5",
+      "component_rotation": 0,
+      "component_reflection": false,
+      "component_translation": [
+        590,
+        -5
+      ],
+      "moved_node_count": 100,
+      "site_bindings": {
+        "54": [
+          "aromatic:5",
+          14
+        ],
+        "55": [
+          "aromatic:14",
+          2
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:56-57",
+      "source_unit_id": "aromatic:20",
+      "source_node_id": 56,
+      "source_port_id": "aromatic:13:rigid:56",
+      "target_unit_id": "aromatic:21",
+      "target_node_id": 57,
+      "target_port_id": "aromatic:14:rigid:57",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:20",
+      "component_rotation": 0,
+      "component_reflection": false,
+      "component_translation": [
+        58,
+        -1
+      ],
+      "moved_node_count": 20,
+      "site_bindings": {
+        "56": [
+          "aromatic:20",
+          18
+        ],
+        "57": [
+          "aromatic:21",
+          1
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:58-59",
+      "source_unit_id": "aromatic:13",
+      "source_node_id": 58,
+      "source_port_id": "aromatic:15:rigid:58",
+      "target_unit_id": "aromatic:15",
+      "target_node_id": 59,
+      "target_port_id": "aromatic:16:rigid:59",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:13",
+      "component_rotation": 0,
+      "component_reflection": true,
+      "component_translation": [
+        2245,
+        980
+      ],
+      "moved_node_count": 120,
+      "site_bindings": {
+        "58": [
+          "aromatic:13",
+          17
+        ],
+        "59": [
+          "aromatic:15",
+          3
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:60-61",
+      "source_unit_id": "aromatic:2",
+      "source_node_id": 60,
+      "source_port_id": "aromatic:17:rigid:60",
+      "target_unit_id": "aromatic:17",
+      "target_node_id": 61,
+      "target_port_id": "aromatic:18:rigid:61",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:2",
+      "component_rotation": 0,
+      "component_reflection": false,
+      "component_translation": [
+        982,
+        -1
+      ],
+      "moved_node_count": 20,
+      "site_bindings": {
+        "60": [
+          "aromatic:2",
+          18
+        ],
+        "61": [
+          "aromatic:17",
+          1
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:62-63",
+      "source_unit_id": "aromatic:5",
+      "source_node_id": 62,
+      "source_port_id": "aromatic:19:rigid:62",
+      "target_unit_id": "aromatic:21",
+      "target_node_id": 63,
+      "target_port_id": "aromatic:20:rigid:63",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:5",
+      "component_rotation": 2,
+      "component_reflection": true,
+      "component_translation": [
+        180,
+        -18
+      ],
+      "moved_node_count": 160,
+      "site_bindings": {
+        "62": [
+          "aromatic:5",
+          18
+        ],
+        "63": [
+          "aromatic:21",
+          2
+        ]
+      },
+      "connection_axis": "V"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:64-65",
+      "source_unit_id": "aromatic:2",
+      "source_node_id": 64,
+      "source_port_id": "aromatic:21:rigid:64",
+      "target_unit_id": "aromatic:13",
+      "target_node_id": 65,
+      "target_port_id": "aromatic:22:rigid:65",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:2",
+      "component_rotation": 3,
+      "component_reflection": true,
+      "component_translation": [
+        276,
+        -1194
+      ],
+      "moved_node_count": 40,
+      "site_bindings": {
+        "64": [
+          "aromatic:2",
+          0
+        ],
+        "65": [
+          "aromatic:13",
+          1
+        ]
+      },
+      "connection_axis": "H"
+    },
+    {
+      "kind": "rigid",
+      "contract_id": "rigid:dynamic:66-67",
+      "source_unit_id": "aromatic:7",
+      "source_node_id": 67,
+      "source_port_id": "aromatic:1:rigid:67",
+      "target_unit_id": "aromatic:6",
+      "target_node_id": 66,
+      "target_port_id": "aromatic:0:rigid:66",
+      "source_rotation": 0,
+      "source_translation": [
+        0,
+        0
+      ],
+      "move_component_unit_id": "aromatic:7",
+      "component_rotation": 5,
+      "component_reflection": true,
+      "component_translation": [
+        1923,
+        3
+      ],
+      "moved_node_count": 238,
+      "site_bindings": {
+        "66": [
+          "aromatic:6",
+          2
+        ],
+        "67": [
+          "aromatic:7",
+          18
+        ]
+      },
+      "connection_axis": "V"
+    }
+  ],
+  "checkpoints": [
+    {
+      "phase": "rigid",
+      "start_count": 23,
+      "end_count": 23,
+      "selected_attempt": 0,
+      "attempts": [
+        {
+          "attempt": 0,
+          "search": {
+            "simulations": 10,
+            "visited_states": 121,
+            "max_depth": 12,
+            "terminal_count": 10,
+            "backup_updates": 130,
+            "search_exhausted": false,
+            "stop_reason": "result_candidates_ready",
+            "result_candidate_count": 10,
+            "result_candidate_limit": 10,
+            "result_candidate_rewards": [
+              0.2643190621527911,
+              0.2638490211161249,
+              0.2754107082922932,
+              0.24738265140024385,
+              0.24623733140736337,
+              0.26123981386065037,
+              0.2714850662537941,
+              0.26240610080605437,
+              0.2634894265163056,
+              0.25545432458963857
+            ],
+            "selected_reward": 0.2754107082922932,
+            "selected_tie_break": 56,
+            "root_legal_action_count": 10,
+            "root_evaluated_action_count": 10,
+            "root_actions_covered": true,
+            "retained_nodes": 1,
+            "peak_retained_nodes": 121,
+            "transition_bytes": 0,
+            "peak_transition_bytes": 5033493,
+            "elapsed_seconds": 258.0764292640015,
+            "rss_mib": 889.32421875,
+            "search_seed": 13959298734883060978,
+            "spatial_demand": {
+              "phase": "rigid",
+              "pressure": 0.26556016597510373,
+              "reference_backbone_nodes": 482,
+              "reference_su13_sites": 260,
+              "remaining_units": 35,
+              "remaining_nodes": 128,
+              "remaining_ports": 56,
+              "stages": {
+                "flex": {
+                  "units": 14,
+                  "nodes": 34,
+                  "ports": 28
+                },
+                "ring": {
+                  "units": 7,
+                  "nodes": 52,
+                  "ports": 14
+                },
+                "side": {
+                  "units": 14,
+                  "nodes": 42,
+                  "ports": 14
+                }
+              }
+            }
+          },
+          "forward": {
+            "total": 65,
+            "completed": 65,
+            "completion": 1.0,
+            "tasks_complete": true,
+            "all_complete": true,
+            "completion_reasons": [],
+            "allowed_remaining_resources": [],
+            "allowed_remaining_resource_count": 0,
+            "stages": {
+              "rigid": {
+                "total": 23,
+                "completed": 23,
+                "unconnected": []
+              },
+              "flex": {
+                "total": 14,
+                "completed": 14,
+                "unconnected": []
+              },
+              "ring": {
+                "total": 7,
+                "completed": 7,
+                "unconnected": []
+              },
+              "side": {
+                "total": 14,
+                "completed": 14,
+                "unconnected": []
+              },
+              "substitution": {
+                "total": 7,
+                "completed": 7,
+                "unconnected": []
+              }
+            },
+            "main_component": [
+              "aromatic:0",
+              "aromatic:1",
+              "aromatic:10",
+              "aromatic:11",
+              "aromatic:12",
+              "aromatic:13",
+              "aromatic:14",
+              "aromatic:15",
+              "aromatic:16",
+              "aromatic:17",
+              "aromatic:18",
+              "aromatic:19",
+              "aromatic:2",
+              "aromatic:20",
+              "aromatic:21",
+              "aromatic:22",
+              "aromatic:3",
+              "aromatic:4",
+              "aromatic:5",
+              "aromatic:6",
+              "aromatic:7",
+              "aromatic:8",
+              "aromatic:9",
+              "topology:0",
+              "topology:1",
+              "topology:10",
+              "topology:11",
+              "topology:12",
+              "topology:13",
+              "topology:14",
+              "topology:15",
+              "topology:16",
+              "topology:17",
+              "topology:18",
+              "topology:19",
+              "topology:2",
+              "topology:20",
+              "topology:21",
+              "topology:22",
+              "topology:23",
+              "topology:24",
+              "topology:25",
+              "topology:26",
+              "topology:27",
+              "topology:28",
+              "topology:29",
+              "topology:3",
+              "topology:30",
+              "topology:31",
+              "topology:32",
+              "topology:33",
+              "topology:34",
+              "topology:4",
+              "topology:5",
+              "topology:6",
+              "topology:7",
+              "topology:8",
+              "topology:9"
+            ],
+            "main_anchor": "aromatic:2",
+            "excluded_units": [],
+            "forward_completion": 1.0,
+            "status": "complete",
+            "placed_unit_count": 58,
+            "unplaced_unit_count": 0,
+            "unplaced_units": {
+              "rigid": [],
+              "flex": [],
+              "ring": [],
+              "side": [],
+              "substitution": []
+            },
+            "unplaced_contracts": [],
+            "audit": {
+              "complete": true,
+              "tasks_complete": true,
+              "completion_reasons": [],
+              "allowed_remaining_resources": [],
+              "target_labels_complete": true,
+              "target_label_unfulfilled_ids": [],
+              "input_valid": true,
+              "input_errors": [],
+              "rigid_stage_complete": true,
+              "rigid_connections_done": 12,
+              "rigid_connections_total": 12,
+              "stage": "substitution",
+              "placed_unit_count": 58,
+              "unit_count": 58,
+              "placed_node_count": 573,
+              "expected_node_count": 573,
+              "source_node_count": 573,
+              "unassembled_resource_count": 0,
+              "unassembled_resource_ids": [],
+              "idle_aromatic_nodes": [],
+              "idle_aromatic_count": 0,
+              "aromatic_residual_nodes": [],
+              "aromatic_residual_count": 0,
+              "strict_all_nodes_assembled": true,
+              "completion_mode": "best_legal_partial_allowed",
+              "resource_partition_errors": [],
+              "resource_partition_valid": true,
+              "missing_node_ids": [],
+              "unexpected_node_ids": [],
+              "pending_contract_ids": [],
+              "duplicate_axials": {},
+              "non_hex_edges": [],
+              "su25_center_branch_errors": [],
+              "su25_center_branches_valid": true,
+              "topology_conformation_errors": [],
+              "topology_conformation_valid": true,
+              "port_direction_errors": [],
+              "port_directions_valid": true,
+              "substitution_errors": [],
+              "substitution_valid": true,
+              "flex_endpoint_su_errors": [],
+              "flex_endpoint_su_valid": true,
+              "ring_attachment_errors": [],
+              "ring_attachments_valid": true,
+              "shape_metrics": {
+                "q_span": 56,
+                "r_span": 42,
+                "q_over_r": 1.3333333333333333,
+                "min_q_over_r": 0.8,
+                "max_q_over_r": 2.0,
+                "valid": true,
+                "violation": 0.0,
+                "total_span": 98,
+                "x_span": 48.49742261192853,
+                "y_span": 37.5,
+                "width_over_height": 1.2932646029847608,
+                "rotated_90_width_over_height": 0.773236967664678,
+                "bbox_area": 1818.6533479473198,
+                "principal_axis_ratio": 1.4407545743651737,
+                "principal_axis_angle": -7.775978944670169,
+                "linearity": 0.5182519274534305,
+                "covariance_eigenvalues": [
+                  140.39966875141096,
+                  67.63726980716905
+                ],
+                "node_density_cv": 0.5328523867856908,
+                "unit_density_cv": 0.5126230602523622,
+                "largest_void_radius": 7.0,
+                "large_void_fraction": 0.18506834910620398,
+                "hull_area": 1302.9352199936839,
+                "hull_fill": 0.3808574277168506,
+                "normalized_radius_of_gyration": 0.6025497576125294,
+                "layout_energy": 41.714441519147286,
+                "layout_valid": true
+              },
+              "shape_valid": true,
+              "shape_warnings": [],
+              "side_distribution": {
+                "attachment_count": 14,
+                "covered_aromatic_unit_count": 7,
+                "coverage_ratio": 0.5,
+                "max_unit_load": 3,
+                "unit_loads": {
+                  "aromatic:0": 3,
+                  "aromatic:9": 1,
+                  "aromatic:11": 1,
+                  "aromatic:12": 1,
+                  "aromatic:16": 2,
+                  "aromatic:18": 3,
+                  "aromatic:20": 3
+                }
+              },
+              "side_distribution_valid": false,
+              "side_distribution_warnings": [
+                "side_unit_overloaded",
+                "side_attachments_clustered"
+              ],
+              "actual_geometry_errors": [],
+              "main_anchor": "aromatic:2",
+              "excluded_unit_ids": [],
+              "geometry_valid": true,
+              "identity_valid": true,
+              "identity_errors": [],
+              "topology_valid": true,
+              "topology_errors": [],
+              "contract_errors": [],
+              "label_valid": true,
+              "label_errors": [],
+              "legal": true,
+              "component_count": 1,
+              "aromatic_template_errors": [],
+              "edge_count": 695,
+              "substitution_relaxed_edge_count": 6
+            },
+            "stage_no_actions": true,
+            "diagnostics": {
+              "flex": {
+                "connected": 14,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 236,
+                  "available_entries": 219,
+                  "blocked_entries": 17,
+                  "reasons": {
+                    "available": 219,
+                    "coordinate_collision": 17
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 208,
+                  "available_entries": 172,
+                  "blocked_entries": 36,
+                  "reasons": {
+                    "available": 172,
+                    "coordinate_collision": 36
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "ring": {
+                "connected": 7,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 208,
+                  "available_entries": 172,
+                  "blocked_entries": 36,
+                  "reasons": {
+                    "available": 172,
+                    "coordinate_collision": 36
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 194,
+                  "available_entries": 158,
+                  "blocked_entries": 36,
+                  "reasons": {
+                    "available": 158,
+                    "coordinate_collision": 36
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "side": {
+                "connected": 14,
+                "no_actions": true,
+                "entries_before": {
+                  "free_su13": 194,
+                  "available_entries": 158,
+                  "blocked_entries": 36,
+                  "reasons": {
+                    "available": 158,
+                    "coordinate_collision": 36
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "entries_after": {
+                  "free_su13": 180,
+                  "available_entries": 144,
+                  "blocked_entries": 36,
+                  "reasons": {
+                    "coordinate_collision": 36,
+                    "available": 144
+                  },
+                  "scope": "placed_components",
+                  "probe": "ordinary_single_node_axial_attachment"
+                },
+                "unconnected": {}
+              },
+              "substitution": {
+                "connected": 7,
+                "no_actions": true,
+                "entries_before": null,
+                "entries_after": null,
+                "unconnected": {}
+              }
+            }
+          },
+          "rewards": {
+            "topology_completion": 0.2,
+            "nmr_quality": 0.0,
+            "forward_completion": 1.0,
+            "su13_clearance": 0.18151041666666656,
+            "shape_quality": 0.6808822222853729,
+            "total": 0.5254107082922932,
+            "weights": [
+              0.43749999999999994,
+              0.0,
+              0.25,
+              0.049792531120331926,
+              0.26270746887966806
+            ],
+            "base_weights": [
+              0.35,
+              0.2,
+              0.2,
+              0.15,
+              0.1
+            ],
+            "spatial_demand": {
+              "phase": "rigid",
+              "pressure": 0.26556016597510373,
+              "reference_backbone_nodes": 482,
+              "reference_su13_sites": 260,
+              "remaining_units": 35,
+              "remaining_nodes": 128,
+              "remaining_ports": 56,
+              "stages": {
+                "flex": {
+                  "units": 14,
+                  "nodes": 34,
+                  "ports": 28
+                },
+                "ring": {
+                  "units": 7,
+                  "nodes": 52,
+                  "ports": 14
+                },
+                "side": {
+                  "units": 14,
+                  "nodes": 42,
+                  "ports": 14
+                }
+              }
+            },
+            "shape_metrics": {
+              "quality": 0.6808822222853729,
+              "compactness_quality": 0.6499535937079743,
+              "aspect_quality": 0.804596736594967,
+              "normalized_radius_of_gyration": 0.5404301595830734,
+              "node_count": 448,
+              "component_count": 11
+            },
+            "weighted_terms": {
+              "topology_completion": 0.0875,
+              "nmr_quality": 0.0,
+              "forward_completion": 0.25,
+              "su13_clearance": 0.00903786307053941,
+              "shape_quality": 0.1788728452217538
+            }
+          },
+          "forward_valid": true
+        }
+      ],
+      "fallback": false,
+      "spatial_demand": {
+        "phase": "rigid",
+        "pressure": 0.26556016597510373,
+        "reference_backbone_nodes": 482,
+        "reference_su13_sites": 260,
+        "remaining_units": 35,
+        "remaining_nodes": 128,
+        "remaining_ports": 56,
+        "stages": {
+          "flex": {
+            "units": 14,
+            "nodes": 34,
+            "ports": 28
+          },
+          "ring": {
+            "units": 7,
+            "nodes": 52,
+            "ports": 14
+          },
+          "side": {
+            "units": 14,
+            "nodes": 42,
+            "ports": 14
+          }
+        }
+      }
+    }
+  ]
+}

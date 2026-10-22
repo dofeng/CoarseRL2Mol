@@ -1,0 +1,2 @@
+r2,r2_carbonyl,r2_aromatic,r2_aliphatic,exact_match,approx_match,missing,forced_approx,ambiguous_approx,approx_residual_fill,approx_least_damage,inventory_filtered_candidates,inventory_filtered_su_types,matched_ratio,n_nodes,n_carbon_nodes,selected_spectral_source
+0.5922263860702515,0.41520869731903076,-0.2586745023727417,0.7478392124176025,388,112,0,31,81,44,37,1399,"{4: 100, 7: 149, 30: 655, 31: 538}",1.0,616,500,template

@@ -1,5 +1,6 @@
 z_library/
 test_results/
+!/test_results/
 data/test_results copy/
 test_RL/
 __pycache__/
@@ -11,3 +12,5 @@ checkpoints_s2n_*/
 analysis_report/
 inverse_result/
 tests/inverse/topology/results/
+*.sqlite3-wal
+*.sqlite3-shm

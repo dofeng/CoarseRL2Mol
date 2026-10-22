@@ -1,0 +1,16 @@
+{
+  "best_outer_cycle": 2,
+  "last_outer_cycle": 2,
+  "best_selected_r2": 0.9925970435142517,
+  "pre_layer3_r2": 0.8113114237785339,
+  "selection_contract": "template_sample_mu_layer3",
+  "source_stage": "post_layer3",
+  "stage3_complete": true,
+  "layer3_committed": true,
+  "h_constraint_mode": "soft",
+  "next_cycle_seed_source_stage": "layer2",
+  "next_cycle_seed_contract": "template_center_mu",
+  "final_output_detail": "compact",
+  "aromatic_plan_file": "final_aromatic_clusters.json",
+  "aromatic_plan_authoritative": true
+}

@@ -1,0 +1,40 @@
+{
+  "target_spectrum_csv": "/home/dofengqi/Graphnmr/data/MAS.csv",
+  "target_elements": {
+    "C": 560.0,
+    "H": 388.0,
+    "O": 20.0,
+    "N": 10.0,
+    "S": 4.0,
+    "X": 0.0
+  },
+  "final_metrics": {
+    "loss": 0.04868382393185977,
+    "cosine_similarity": 0.9513161760681402,
+    "r2": 0.8106657266616821,
+    "rmse": 5.699252886078372,
+    "normalized_rmse": 0.3797048958349823,
+    "mae": 3.317819118499756,
+    "carbon_centers": 458,
+    "scored": true,
+    "coverage": 1.0,
+    "reason": ""
+  },
+  "statistics": {
+    "enabled": true,
+    "device": "cuda",
+    "model_checkpoint": "/home/dofengqi/Graphnmr/checkpoints_g2s_k3/best_g2s_model.pt",
+    "k_hop": 3,
+    "batch_size": 1,
+    "candidate_evaluations": 5481,
+    "unique_graphs_scored": 5095,
+    "graph_cache_hits": 386,
+    "batch_duplicate_graphs": 0,
+    "node_cache_hits": 1786339,
+    "node_predictions": 112729,
+    "model_calls": 112729,
+    "unscored_candidates": 0,
+    "aromatic_response_scale": 1.0,
+    "center_limit": 8
+  }
+}

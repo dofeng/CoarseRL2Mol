@@ -1,0 +1,80 @@
+{
+  "cg_node_count": 615,
+  "cg_bond_count": 682,
+  "atom_count": 1187,
+  "bond_count": 1254,
+  "element_counts": {
+    "C": 499,
+    "O": 166,
+    "N": 6,
+    "H": 516
+  },
+  "edge_kind_counts": {
+    "aromatic": 288,
+    "flex": 64,
+    "ring": 109,
+    "side": 208,
+    "rigid": 13
+  },
+  "multiple_bond_count": 8,
+  "final_su_counts": {
+    "0": 1,
+    "1": 10,
+    "2": 11,
+    "3": 12,
+    "5": 81,
+    "6": 2,
+    "9": 23,
+    "10": 26,
+    "11": 62,
+    "12": 42,
+    "13": 28,
+    "14": 1,
+    "15": 8,
+    "16": 3,
+    "17": 2,
+    "18": 2,
+    "19": 89,
+    "20": 3,
+    "22": 20,
+    "23": 55,
+    "24": 17,
+    "25": 1,
+    "26": 3,
+    "27": 2,
+    "28": 56,
+    "29": 55
+  },
+  "pyrrolic_nitrogen_node_ids": [
+    500
+  ],
+  "created_at": "2026-10-19T23:19:44.230149",
+  "source_format": "rl_mtcs",
+  "assembly_status": "complete",
+  "assembly_complete": true,
+  "legal": true,
+  "unassembled_resource_count": 0,
+  "strict_all_nodes_assembled": false,
+  "allowed_remaining_resources": [
+    {
+      "node_id": 498,
+      "source_su_type": 13,
+      "final_su_type": null,
+      "state": "idle_aromatic",
+      "completion_tolerated": true,
+      "reason": "bounded_template_residual"
+    }
+  ],
+  "source_file": "/home/dofengqi/Graphnmr/test_results/YM-1/rl_mtcs_nmr/20261019_142850_682077/final.json",
+  "coord_mode": "3d",
+  "sanitized": true,
+  "formula": "C499H516N6O166",
+  "connected_component_count": 1,
+  "radical_atom_count": 0,
+  "optimization_converged": true,
+  "optimization_max_iters": 5000,
+  "random_seed": 42,
+  "force_field": "MMFF94",
+  "coordinate_method": "cg_layout_seeded",
+  "stereochemistry": "unspecified_centers_are_not_inferred_from_coarse_grained_layout"
+}

@@ -29,7 +29,176 @@ cg_simplify.py - 将MCTS输出的粗粒度分子JSON简化为节点+连接格式
 import json
 import os
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Mapping
+
+
+def _rl_mtcs_payload(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return the RL_MTCS molecule payload when the input uses that schema."""
+    if not isinstance(payload, Mapping):
+        return None
+    molecule = payload.get("molecule")
+    if isinstance(molecule, Mapping):
+        return dict(molecule)
+    if isinstance(payload.get("nodes"), list) and isinstance(payload.get("edges"), list):
+        return dict(payload)
+    return None
+
+
+def _is_rl_mtcs_molecule(payload: Mapping[str, Any]) -> bool:
+    """Detect the current RL_MTCS node/edge export without rejecting legacy input."""
+    molecule = _rl_mtcs_payload(payload)
+    if molecule is None:
+        return False
+    nodes = molecule.get("nodes", [])
+    edges = molecule.get("edges", [])
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        return False
+    if nodes and isinstance(nodes[0], Mapping) and "node_id" in nodes[0]:
+        return True
+    if edges and isinstance(edges[0], Mapping):
+        return "source_node_id" in edges[0] and "target_node_id" in edges[0]
+    return False
+
+
+def simplify_rl_mtcs_molecule(payload: Mapping[str, Any]) -> Dict:
+    """Adapt an RL_MTCS ``final.json``/``final_molecule.json`` graph.
+
+    The inverse/assembly pipeline stores the final SU label on each node and
+    the actual assembled connectivity on ``molecule.nodes``/``molecule.edges``.
+    This adapter deliberately preserves edge kinds and node metadata so the
+    all-atom stage can distinguish aromatic ring edges from inter-unit rigid
+    connections.
+    """
+    molecule = _rl_mtcs_payload(payload)
+    if molecule is None or not _is_rl_mtcs_molecule(payload):
+        raise ValueError("input is not an RL_MTCS node/edge molecule export")
+
+    raw_nodes = list(molecule.get("nodes", []) or [])
+    raw_edges = list(molecule.get("edges", []) or [])
+    if not raw_nodes:
+        raise ValueError("RL_MTCS molecule contains no nodes")
+    ring_sizes: Dict[int, int] = {}
+    for action in molecule.get("action_history", []) or []:
+        if action.get("kind") != "substitution":
+            continue
+        node_id = action.get("representative_node_id", action.get("request_target"))
+        if node_id is not None and action.get("ring_size") is not None:
+            ring_sizes[int(node_id)] = int(action["ring_size"])
+    nodes: List[Dict[str, Any]] = []
+    node_id_to_seq: Dict[int, int] = {}
+
+    for seq, raw_node in enumerate(raw_nodes):
+        if not isinstance(raw_node, Mapping):
+            raise ValueError(f"RL_MTCS node {seq} is not an object")
+        if "node_id" not in raw_node or "su_type" not in raw_node:
+            raise ValueError(f"RL_MTCS node {seq} is missing node_id or su_type")
+        node_id = int(raw_node["node_id"])
+        if node_id in node_id_to_seq:
+            raise ValueError(f"duplicate RL_MTCS node_id: {node_id}")
+        su_type = int(raw_node["su_type"])
+        axial = raw_node.get("axial", raw_node.get("axial_coord", [0, 0]))
+        if not isinstance(axial, (list, tuple)) or len(axial) < 2:
+            raise ValueError(f"RL_MTCS node {node_id} has invalid axial coordinates")
+        axial_coord = [int(round(float(axial[0]))), int(round(float(axial[1])))]
+        position = raw_node.get("final_position", axial_coord)
+        x, y = hex_to_cartesian(float(position[0]), float(position[1]))
+        node = {
+            "id": str(node_id),
+            "node_id": node_id,
+            "seq": seq,
+            "su_type": su_type,
+            "axial_coord": axial_coord,
+            "xy_coord": [x, y],
+        }
+        for key in (
+            "original_su_type", "planned_su_type", "assembly_target_su_type",
+            "actual_degree", "label_state", "role", "unit_id",
+            "physical_slot_id", "source_unit_id", "su25_center_parent_id",
+        ):
+            if key in raw_node:
+                node[key] = raw_node[key]
+        if node_id in ring_sizes:
+            node["aromatic_ring_size"] = ring_sizes[node_id]
+        nodes.append(node)
+        node_id_to_seq[node_id] = seq
+
+    bonds: List[List[int]] = []
+    bond_details: List[Dict[str, Any]] = []
+    seen_pairs: set[Tuple[int, int]] = set()
+    for edge_index, raw_edge in enumerate(raw_edges):
+        if not isinstance(raw_edge, Mapping):
+            raise ValueError(f"RL_MTCS edge {edge_index} is not an object")
+        try:
+            source_id = int(raw_edge["source_node_id"])
+            target_id = int(raw_edge["target_node_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"RL_MTCS edge {edge_index} has invalid node ids") from exc
+        if source_id == target_id:
+            raise ValueError(f"RL_MTCS self-edge at node {source_id}")
+        if source_id not in node_id_to_seq or target_id not in node_id_to_seq:
+            raise ValueError(
+                f"RL_MTCS edge {source_id}-{target_id} references an unknown node"
+            )
+        pair = tuple(sorted((source_id, target_id)))
+        if pair in seen_pairs:
+            raise ValueError(f"duplicate RL_MTCS edge: {pair[0]}-{pair[1]}")
+        seen_pairs.add(pair)
+        source_seq = node_id_to_seq[source_id]
+        target_seq = node_id_to_seq[target_id]
+        bonds.append([source_seq, target_seq])
+        detail = {
+            "source_seq": source_seq,
+            "target_seq": target_seq,
+            "source_node_id": source_id,
+            "target_node_id": target_id,
+            "kind": str(raw_edge.get("kind", "internal")),
+        }
+        for key in ("contract_id", "direction"):
+            if key in raw_edge:
+                detail[key] = raw_edge[key]
+        bond_details.append(detail)
+
+    wrapper_status = payload.get("status") if isinstance(payload, Mapping) else None
+    metadata = {
+        "source_format": "rl_mtcs",
+        "assembly_status": str(wrapper_status or "unknown"),
+        "assembly_complete": (
+            bool(payload.get("all_complete"))
+            if isinstance(payload, Mapping) and "all_complete" in payload
+            else None
+        ),
+        "legal": (
+            bool(payload.get("legal"))
+            if isinstance(payload, Mapping) and "legal" in payload
+            else None
+        ),
+        "node_count": len(nodes),
+        "bond_count": len(bonds),
+        "unassembled_resource_count": len(molecule.get("unassembled_resources", []) or []),
+        "allowed_remaining_resources": list(payload.get("allowed_remaining_resources", []) or []),
+        "created_at": datetime.now().isoformat(),
+    }
+    audit = molecule.get("audit", {}) or {}
+    if metadata["assembly_complete"] is None and "complete" in audit:
+        metadata["assembly_complete"] = bool(audit["complete"])
+    if metadata["assembly_status"] == "unknown" and metadata["assembly_complete"] is not None:
+        metadata["assembly_status"] = "complete" if metadata["assembly_complete"] else "partial"
+    metadata["strict_all_nodes_assembled"] = audit.get(
+        "strict_all_nodes_assembled", payload.get("strict_all_nodes_assembled")
+    )
+    if not metadata.get("allowed_remaining_resources"):
+        metadata["allowed_remaining_resources"] = list(audit.get("allowed_remaining_resources", []) or [])
+    if not payload.get("completion_reasons") and audit.get("completion_reasons"):
+        metadata["completion_reasons"] = list(audit["completion_reasons"])
+    if isinstance(payload, Mapping) and payload.get("completion_reasons"):
+        metadata["completion_reasons"] = list(payload["completion_reasons"])
+
+    return {
+        "nodes": nodes,
+        "bonds": bonds,
+        "bond_details": bond_details,
+        "metadata": metadata,
+    }
 
 
 def simplify_cg_molecule(mcts_json: Dict) -> Dict:
@@ -42,6 +211,9 @@ def simplify_cg_molecule(mcts_json: Dict) -> Dict:
     Returns:
         简化后的JSON字典
     """
+    if _is_rl_mtcs_molecule(mcts_json):
+        return simplify_rl_mtcs_molecule(mcts_json)
+
     # 节点列表和ID到序号的映射
     nodes: List[Dict] = []
     id_to_seq: Dict[str, int] = {}

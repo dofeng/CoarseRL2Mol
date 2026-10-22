@@ -1,0 +1,7 @@
+su_type,inverse_count,assembly_target_count,pre_substitution_count,final_count,idle_aromatic_count,other_unassembled_count,substitution_delta,unconnected_count,pending_label_delta,unexplained_delta
+10,4,4,4,4,0,0,0,0,0,0
+11,5,5,5,5,0,0,0,0,0,0
+13,14,14,15,14,0,0,-1,0,0,0
+22,1,1,1,1,0,0,0,0,0,0
+23,5,5,5,5,0,0,0,0,0,0
+26,1,1,0,1,0,0,1,0,0,0

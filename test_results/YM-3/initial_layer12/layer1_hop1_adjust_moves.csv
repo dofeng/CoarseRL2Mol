@@ -1,0 +1,2 @@
+cycle,region,move,trial,global_id,center_su,old_hop1,new_hop1,negative_peak_min,negative_peak_max,positive_peak_min,positive_peak_max,affected_nodes
+1,180-240,1,7,28,3,"[9, 24]","[9, 14]",195.60000610351562,203.10000610351562,180.0,184.40000915527344,"[28, 321, 395, 494]"

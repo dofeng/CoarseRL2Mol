@@ -1,0 +1,19 @@
+{
+  "enable_post_external_spectrum": true,
+  "enabled": true,
+  "external_max_primary_adjustments": 12,
+  "flex_max_primary_adjustments": 12,
+  "h_tolerance": 0.08,
+  "internal_max_primary_adjustments": 10,
+  "max_h_compensation_ops_per_adjustment": 8,
+  "residual_flex_min_23": 2,
+  "residual_flex_preferred_23": 3,
+  "residual_side_min_23": 1,
+  "residual_side_preferred_23": 2,
+  "spectrum_active_through_cycle": 14,
+  "spectrum_candidate_limit": 2,
+  "spectrum_max_candidate_trials": 2,
+  "spectrum_max_primary_adjustments": 10,
+  "spectrum_min_r2_gain": 0.0002,
+  "verbose": false
+}

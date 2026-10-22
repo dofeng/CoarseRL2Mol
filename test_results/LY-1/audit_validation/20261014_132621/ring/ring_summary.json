@@ -1,0 +1,272 @@
+{
+  "search_diagnostics": {
+    "simulations": 1,
+    "visited_states": 3,
+    "max_depth": 2,
+    "terminal_count": 1,
+    "backup_updates": 3,
+    "search_exhausted": false,
+    "stop_reason": "result_candidates_ready",
+    "result_candidate_count": 1,
+    "result_candidate_limit": 1,
+    "result_candidate_rewards": [
+      0.5154635193910345
+    ],
+    "selected_reward": 0.5154635193910345,
+    "selected_tie_break": 15,
+    "root_legal_action_count": 1,
+    "root_evaluated_action_count": 1,
+    "root_actions_covered": true,
+    "retained_nodes": 1,
+    "peak_retained_nodes": 3,
+    "transition_bytes": 0,
+    "peak_transition_bytes": 11907,
+    "elapsed_seconds": 0.2629316000002291,
+    "rss_mib": 30.046875,
+    "search_seed": 3384041599027677449,
+    "spatial_demand": {
+      "phase": "ring",
+      "pressure": 0.10869565217391304,
+      "reference_backbone_nodes": 552,
+      "reference_su13_sites": 324,
+      "remaining_units": 13,
+      "remaining_nodes": 60,
+      "remaining_ports": 15,
+      "stages": {
+        "ring": {
+          "units": 2,
+          "nodes": 21,
+          "ports": 4
+        },
+        "side": {
+          "units": 11,
+          "nodes": 39,
+          "ports": 11
+        }
+      }
+    }
+  },
+  "rewards": {
+    "topology_completion": 0.7419354838709677,
+    "nmr_quality": 0.0,
+    "forward_completion": 0.0,
+    "su13_clearance": 0.13307888040712473,
+    "shape_quality": 0.6441011221360137,
+    "total": 0.5154635193910345,
+    "weights": [
+      0.43749999999999994,
+      0.0,
+      0.25,
+      0.020380434782608717,
+      0.29211956521739124
+    ],
+    "base_weights": [
+      0.35,
+      0.2,
+      0.2,
+      0.15,
+      0.1
+    ],
+    "spatial_demand": {
+      "phase": "ring",
+      "pressure": 0.10869565217391304,
+      "reference_backbone_nodes": 552,
+      "reference_su13_sites": 324,
+      "remaining_units": 13,
+      "remaining_nodes": 60,
+      "remaining_ports": 15,
+      "stages": {
+        "ring": {
+          "units": 2,
+          "nodes": 21,
+          "ports": 4
+        },
+        "side": {
+          "units": 11,
+          "nodes": 39,
+          "ports": 11
+        }
+      }
+    },
+    "shape_metrics": {
+      "quality": 0.6441011221360137,
+      "compactness_quality": 0.6247601672219423,
+      "aspect_quality": 0.721464941792299,
+      "normalized_radius_of_gyration": 0.6006142076032129,
+      "node_count": 573,
+      "component_count": 1
+    },
+    "weighted_terms": {
+      "topology_completion": 0.3245967741935484,
+      "nmr_quality": 0.0,
+      "forward_completion": 0.0,
+      "su13_clearance": 0.0027122054430799908,
+      "shape_quality": 0.18815453975440613
+    }
+  },
+  "status": "complete",
+  "done": true,
+  "stage_no_actions": true,
+  "all_complete": false,
+  "units_done": 2,
+  "units_total": 2,
+  "completion_report": {
+    "total": 62,
+    "completed": 46,
+    "completion": 0.7419354838709677,
+    "tasks_complete": false,
+    "all_complete": false,
+    "completion_reasons": [
+      "unconnected_topology_tasks",
+      "pending_connection_contracts"
+    ],
+    "allowed_remaining_resources": [
+      {
+        "node_id": 103,
+        "source_su_type": 11,
+        "final_su_type": 13,
+        "state": "aromatic_residual",
+        "completion_tolerated": true,
+        "reason": "unused_su11_retained_as_su13"
+      },
+      {
+        "node_id": 108,
+        "source_su_type": 11,
+        "final_su_type": 13,
+        "state": "aromatic_residual",
+        "completion_tolerated": true,
+        "reason": "unused_su11_retained_as_su13"
+      },
+      {
+        "node_id": 594,
+        "source_su_type": 13,
+        "final_su_type": null,
+        "state": "idle_aromatic",
+        "completion_tolerated": true,
+        "reason": "bounded_template_residual"
+      }
+    ],
+    "allowed_remaining_resource_count": 3,
+    "stages": {
+      "rigid": {
+        "total": 28,
+        "completed": 28,
+        "unconnected": []
+      },
+      "flex": {
+        "total": 16,
+        "completed": 16,
+        "unconnected": []
+      },
+      "ring": {
+        "total": 2,
+        "completed": 2,
+        "unconnected": []
+      },
+      "side": {
+        "total": 11,
+        "completed": 0,
+        "unconnected": [
+          "topology:18",
+          "topology:19",
+          "topology:20",
+          "topology:21",
+          "topology:22",
+          "topology:23",
+          "topology:24",
+          "topology:25",
+          "topology:26",
+          "topology:27",
+          "topology:28"
+        ]
+      },
+      "substitution": {
+        "total": 5,
+        "completed": 0,
+        "unconnected": [
+          600,
+          606,
+          607,
+          601,
+          602
+        ]
+      }
+    },
+    "main_component": [
+      "aromatic:0",
+      "aromatic:1",
+      "aromatic:10",
+      "aromatic:11",
+      "aromatic:12",
+      "aromatic:13",
+      "aromatic:14",
+      "aromatic:15",
+      "aromatic:16",
+      "aromatic:17",
+      "aromatic:18",
+      "aromatic:19",
+      "aromatic:2",
+      "aromatic:20",
+      "aromatic:21",
+      "aromatic:22",
+      "aromatic:23",
+      "aromatic:24",
+      "aromatic:25",
+      "aromatic:26",
+      "aromatic:27",
+      "aromatic:3",
+      "aromatic:4",
+      "aromatic:5",
+      "aromatic:6",
+      "aromatic:7",
+      "aromatic:8",
+      "aromatic:9",
+      "topology:0",
+      "topology:1",
+      "topology:10",
+      "topology:11",
+      "topology:12",
+      "topology:13",
+      "topology:14",
+      "topology:15",
+      "topology:16",
+      "topology:17",
+      "topology:2",
+      "topology:3",
+      "topology:4",
+      "topology:5",
+      "topology:6",
+      "topology:7",
+      "topology:8",
+      "topology:9"
+    ],
+    "main_anchor": "aromatic:1",
+    "excluded_units": []
+  },
+  "legal": true,
+  "main_anchor": "aromatic:1",
+  "excluded_units": [],
+  "optimality": "best_in_searched_candidates",
+  "connection_policy": "direct",
+  "remaining_spatial_demand": {
+    "phase": "side",
+    "pressure": 0.07065217391304347,
+    "reference_backbone_nodes": 552,
+    "reference_su13_sites": 324,
+    "remaining_units": 11,
+    "remaining_nodes": 39,
+    "remaining_ports": 11,
+    "stages": {
+      "side": {
+        "units": 11,
+        "nodes": 39,
+        "ports": 11
+      }
+    }
+  },
+  "stage_outputs": {
+    "directory": "test_results/LY-1/audit_validation/20261014_132621/ring",
+    "molecule_json": "test_results/LY-1/audit_validation/20261014_132621/ring/ring_molecule.json",
+    "summary_json": "test_results/LY-1/audit_validation/20261014_132621/ring/ring_summary.json"
+  }
+}
