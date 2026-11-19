@@ -1,0 +1,494 @@
+{
+  "schema_version": 1,
+  "purpose": "Audited larger single-molecule alternatives only; not used by the default selection or default output. Size/type screening, not best-prediction selection.",
+  "molecules": [
+    {
+      "source_path": "coarsedata_v1/test_single/1588.pt",
+      "smiles": "CC1C(=O)N(C2CSSCC(C(=O)N(C(C(=O)OCC(C(=O)N1)NC(=O)C3=NC4=CC=CC=C4N=C3)C(C)C)C)N(C(=O)C(NC(=O)C(COC(=O)C(N(C2=O)C)C(C)C)NC(=O)C5=NC6=CC=CC=C6N=C5)C)C)C",
+      "molecular_formula": "C50H62N12O12S2",
+      "reference_su_histogram": [
+        8.0,
+        0.0,
+        2.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2.0,
+        0.0,
+        0.0,
+        4.0,
+        10.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        4.0,
+        12.0,
+        0.0,
+        6.0,
+        0.0,
+        2.0,
+        0.0,
+        4.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2.0,
+        0.0
+      ],
+      "reference_carbon_centers": [
+        {
+          "original_center_id": 0,
+          "center_su": 22,
+          "true_ppm": 13.84000015258789
+        },
+        {
+          "original_center_id": 1,
+          "center_su": 20,
+          "true_ppm": 46.43000030517578
+        },
+        {
+          "original_center_id": 2,
+          "center_su": 0,
+          "true_ppm": 173.84999084472656
+        },
+        {
+          "original_center_id": 3,
+          "center_su": 20,
+          "true_ppm": 57.68000030517578
+        },
+        {
+          "original_center_id": 4,
+          "center_su": 19,
+          "true_ppm": 40.380001068115234
+        },
+        {
+          "original_center_id": 7,
+          "center_su": 19,
+          "true_ppm": 40.380001068115234
+        },
+        {
+          "original_center_id": 8,
+          "center_su": 20,
+          "true_ppm": 57.68000030517578
+        },
+        {
+          "original_center_id": 9,
+          "center_su": 0,
+          "true_ppm": 169.5800018310547
+        },
+        {
+          "original_center_id": 10,
+          "center_su": 20,
+          "true_ppm": 60.43999862670898
+        },
+        {
+          "original_center_id": 11,
+          "center_su": 2,
+          "true_ppm": 171.5399932861328
+        },
+        {
+          "original_center_id": 12,
+          "center_su": 19,
+          "true_ppm": 69.22000122070312
+        },
+        {
+          "original_center_id": 13,
+          "center_su": 20,
+          "true_ppm": 53.09999847412109
+        },
+        {
+          "original_center_id": 14,
+          "center_su": 0,
+          "true_ppm": 170.6300048828125
+        },
+        {
+          "original_center_id": 15,
+          "center_su": 0,
+          "true_ppm": 162.8699951171875
+        },
+        {
+          "original_center_id": 16,
+          "center_su": 9,
+          "true_ppm": 142.97000122070312
+        },
+        {
+          "original_center_id": 18,
+          "center_su": 12,
+          "true_ppm": 140.27000427246094
+        },
+        {
+          "original_center_id": 19,
+          "center_su": 13,
+          "true_ppm": 129.77000427246094
+        },
+        {
+          "original_center_id": 20,
+          "center_su": 13,
+          "true_ppm": 131.6300048828125
+        },
+        {
+          "original_center_id": 21,
+          "center_su": 13,
+          "true_ppm": 130.8300018310547
+        },
+        {
+          "original_center_id": 22,
+          "center_su": 13,
+          "true_ppm": 129.42999267578125
+        },
+        {
+          "original_center_id": 23,
+          "center_su": 12,
+          "true_ppm": 144.0
+        },
+        {
+          "original_center_id": 25,
+          "center_su": 13,
+          "true_ppm": 143.77000427246094
+        },
+        {
+          "original_center_id": 26,
+          "center_su": 24,
+          "true_ppm": 27.25
+        },
+        {
+          "original_center_id": 27,
+          "center_su": 22,
+          "true_ppm": 17.420000076293945
+        },
+        {
+          "original_center_id": 28,
+          "center_su": 22,
+          "true_ppm": 17.420000076293945
+        },
+        {
+          "original_center_id": 29,
+          "center_su": 20,
+          "true_ppm": 29.59000015258789
+        },
+        {
+          "original_center_id": 30,
+          "center_su": 0,
+          "true_ppm": 173.84999084472656
+        },
+        {
+          "original_center_id": 31,
+          "center_su": 20,
+          "true_ppm": 46.43000030517578
+        },
+        {
+          "original_center_id": 32,
+          "center_su": 0,
+          "true_ppm": 170.6300048828125
+        },
+        {
+          "original_center_id": 33,
+          "center_su": 20,
+          "true_ppm": 53.09999847412109
+        },
+        {
+          "original_center_id": 34,
+          "center_su": 19,
+          "true_ppm": 69.22000122070312
+        },
+        {
+          "original_center_id": 35,
+          "center_su": 2,
+          "true_ppm": 171.5399932861328
+        },
+        {
+          "original_center_id": 36,
+          "center_su": 20,
+          "true_ppm": 60.43999862670898
+        },
+        {
+          "original_center_id": 37,
+          "center_su": 0,
+          "true_ppm": 169.5800018310547
+        },
+        {
+          "original_center_id": 38,
+          "center_su": 20,
+          "true_ppm": 29.59000015258789
+        },
+        {
+          "original_center_id": 39,
+          "center_su": 24,
+          "true_ppm": 27.25
+        },
+        {
+          "original_center_id": 40,
+          "center_su": 22,
+          "true_ppm": 17.420000076293945
+        },
+        {
+          "original_center_id": 41,
+          "center_su": 22,
+          "true_ppm": 17.420000076293945
+        },
+        {
+          "original_center_id": 42,
+          "center_su": 0,
+          "true_ppm": 162.8699951171875
+        },
+        {
+          "original_center_id": 43,
+          "center_su": 9,
+          "true_ppm": 142.97000122070312
+        },
+        {
+          "original_center_id": 45,
+          "center_su": 12,
+          "true_ppm": 140.27000427246094
+        },
+        {
+          "original_center_id": 46,
+          "center_su": 13,
+          "true_ppm": 129.77000427246094
+        },
+        {
+          "original_center_id": 47,
+          "center_su": 13,
+          "true_ppm": 131.6300048828125
+        },
+        {
+          "original_center_id": 48,
+          "center_su": 13,
+          "true_ppm": 130.8300018310547
+        },
+        {
+          "original_center_id": 49,
+          "center_su": 13,
+          "true_ppm": 129.42999267578125
+        },
+        {
+          "original_center_id": 50,
+          "center_su": 12,
+          "true_ppm": 144.0
+        },
+        {
+          "original_center_id": 52,
+          "center_su": 13,
+          "true_ppm": 143.77000427246094
+        },
+        {
+          "original_center_id": 53,
+          "center_su": 22,
+          "true_ppm": 13.84000015258789
+        },
+        {
+          "original_center_id": 54,
+          "center_su": 20,
+          "true_ppm": 31.529998779296875
+        },
+        {
+          "original_center_id": 55,
+          "center_su": 20,
+          "true_ppm": 31.529998779296875
+        }
+      ],
+      "provenance": {
+        "smiles_file": {
+          "path": "/mnt/e/code/spectra-scraper/NMR_spectral_data/organized_data/1588.txt",
+          "sha256": "9e378c3b3dd21f7eeff81a0b6dce994bd34334c08d773b246454211b910e0acb"
+        },
+        "graph_file": {
+          "path": "/mnt/e/code/NMRer-result/coarse_graph_data/1588.pt",
+          "sha256": "5b3ce5b1b8387dfdf8c67fdd1491cff88c747a1529311c68fede4001c4c377a0"
+        }
+      },
+      "audit_note": "Original SMILES and graph match the saved test-reference SU counts and all carbon shifts; verified using the current graph builder.",
+      "reference_version_note": "Uses the original coarse_graph_data graph that matches the saved evaluation references; no other shift CSV is substituted."
+    },
+    {
+      "source_path": "coarsedata_v1/test_single/51277.pt",
+      "smiles": "CCN(CC)C1=CC2=C(C=C1)C3(C4=CC=CC=C4C(=O)O3)C5=C(C=C(C=C5O2)C)C",
+      "molecular_formula": "C26H25NO3",
+      "reference_su_histogram": [
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        2.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        5.0,
+        0.0,
+        9.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        2.0,
+        0.0,
+        4.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "reference_carbon_centers": [
+        {
+          "original_center_id": 0,
+          "center_su": 22,
+          "true_ppm": 12.380000114440918
+        },
+        {
+          "original_center_id": 1,
+          "center_su": 20,
+          "true_ppm": 44.32999801635742
+        },
+        {
+          "original_center_id": 3,
+          "center_su": 20,
+          "true_ppm": 44.32999801635742
+        },
+        {
+          "original_center_id": 4,
+          "center_su": 22,
+          "true_ppm": 12.380000114440918
+        },
+        {
+          "original_center_id": 5,
+          "center_su": 6,
+          "true_ppm": 154.39999389648438
+        },
+        {
+          "original_center_id": 6,
+          "center_su": 13,
+          "true_ppm": 97.4000015258789
+        },
+        {
+          "original_center_id": 7,
+          "center_su": 5,
+          "true_ppm": 156.0699920654297
+        },
+        {
+          "original_center_id": 8,
+          "center_su": 11,
+          "true_ppm": 123.04999542236328
+        },
+        {
+          "original_center_id": 9,
+          "center_su": 13,
+          "true_ppm": 127.86000061035156
+        },
+        {
+          "original_center_id": 10,
+          "center_su": 13,
+          "true_ppm": 112.81999969482422
+        },
+        {
+          "original_center_id": 11,
+          "center_su": 19,
+          "true_ppm": 84.87000274658203
+        },
+        {
+          "original_center_id": 12,
+          "center_su": 11,
+          "true_ppm": 150.0800018310547
+        },
+        {
+          "original_center_id": 13,
+          "center_su": 13,
+          "true_ppm": 124.3699951171875
+        },
+        {
+          "original_center_id": 14,
+          "center_su": 13,
+          "true_ppm": 130.0699920654297
+        },
+        {
+          "original_center_id": 15,
+          "center_su": 13,
+          "true_ppm": 129.9499969482422
+        },
+        {
+          "original_center_id": 16,
+          "center_su": 13,
+          "true_ppm": 125.4499969482422
+        },
+        {
+          "original_center_id": 17,
+          "center_su": 9,
+          "true_ppm": 125.5
+        },
+        {
+          "original_center_id": 18,
+          "center_su": 2,
+          "true_ppm": 170.5
+        },
+        {
+          "original_center_id": 19,
+          "center_su": 11,
+          "true_ppm": 129.52000427246094
+        },
+        {
+          "original_center_id": 20,
+          "center_su": 11,
+          "true_ppm": 137.3699951171875
+        },
+        {
+          "original_center_id": 21,
+          "center_su": 13,
+          "true_ppm": 129.42999267578125
+        },
+        {
+          "original_center_id": 22,
+          "center_su": 11,
+          "true_ppm": 144.89999389648438
+        },
+        {
+          "original_center_id": 23,
+          "center_su": 13,
+          "true_ppm": 111.91999816894533
+        },
+        {
+          "original_center_id": 24,
+          "center_su": 5,
+          "true_ppm": 156.0699920654297
+        },
+        {
+          "original_center_id": 26,
+          "center_su": 22,
+          "true_ppm": 22.0
+        },
+        {
+          "original_center_id": 27,
+          "center_su": 22,
+          "true_ppm": 20.049999237060547
+        }
+      ],
+      "provenance": {
+        "smiles_file": {
+          "path": "/mnt/e/code/spectra-scraper/NMR_spectral_data/organized_data/51277.txt",
+          "sha256": "fa312af2244516160a5814e821cfa84c02499fe1fcd260ea0b761d102a3eb68b"
+        },
+        "graph_file": {
+          "path": "/mnt/e/code/NMRer-result/coarse_graph_data/51277.pt",
+          "sha256": "531d7d1be76a5b92050c865267972b5e3048005b198efd44320eca6c92ff88b8"
+        }
+      },
+      "audit_note": "Original SMILES and graph match the saved test-reference SU counts and all carbon shifts; verified using the current graph builder.",
+      "reference_version_note": "Uses the original coarse_graph_data graph that matches the saved evaluation references; no other shift CSV is substituted."
+    }
+  ]
+}

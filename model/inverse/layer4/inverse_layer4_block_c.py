@@ -9,6 +9,7 @@ from collections import Counter
 import hashlib
 import math
 import time
+import warnings
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -65,6 +66,11 @@ from ..topology.assembly.state.iteration_ledger import (
 from ..layer1.port_role_balance import (
     audit_layer1_port_roles,
     select_layer1_port_balance,
+)
+from .stage3_convergence import Stage3SearchBudget, Stage3StateMemory
+from ..topology.stage3.flex_coordination import (
+    histogram_flex_window,
+    flex_window_candidate_allowed,
 )
 
 
@@ -985,12 +991,11 @@ def _stage3_chemical_state_signature(
     nodes: List[Any],
     H: torch.Tensor,
 ) -> str:
-    """Hash the chemical assignment independently of rebuilt Layer1 edges.
+    """Legacy ID/assignment fingerprint retained for diagnostic comparisons.
 
-    Layer1/2 reconstruction can choose a different valid edge realization for
-    the same real-node SU assignment.  Such a graph is still the same physical
-    resource state for Stage3 convergence purposes, so edge-free detection is
-    kept alongside the stricter full graph signature.
+    This deliberately omits edges and must not decide convergence: different
+    topologies can share an assignment, while equivalent graphs can have
+    different IDs. Stage3StateMemory performs the actual chemical comparison.
     """
     histogram = tuple(
         int(value)
@@ -1075,6 +1080,7 @@ def _evaluate_su24_next_cycle(
     baseline_context: Any, candidate_context: Any,
     context_restore_fn: Any, cycle_number: int, generation: int,
     options: Dict[str, Any],
+    state_memory: Optional[Stage3StateMemory] = None,
 ) -> Tuple[Stage3WorkflowResult, bool]:
     # The nested runner starts a fresh assembler. Keep the original live
     # assembler (and its ledger) untouched so failure can resume that baseline.
@@ -1093,12 +1099,15 @@ def _evaluate_su24_next_cycle(
             context_restore_fn=context_restore_fn, **options,
         )
         final_r2 = float(result.diff.get("r2", float("nan")))
-        accepted = bool(result.ok and math.isfinite(final_r2)
+        equivalent = bool(result.ok and state_memory is not None
+                          and state_memory.identify(list(result.nodes or []), result.H)[1])
+        accepted = bool(result.ok and not equivalent and math.isfinite(final_r2)
                         and final_r2 >= baseline_r2 - 1e-12)
         result.diagnostics["su24_evaluation"] = {
             "baseline_r2": baseline_r2, "followup_r2": final_r2,
             "accepted": accepted,
-            "reason": ("su24_next_cycle_passed" if accepted else
+            "reason": ("su24_next_cycle_equivalent_state" if equivalent else
+                       "su24_next_cycle_passed" if accepted else
                        "su24_next_cycle_r2_decreased" if result.ok else result.stop_reason),
         }
         return result, accepted
@@ -1905,6 +1914,47 @@ def _stage3_used_conversion_ids(histogram_plan: Any) -> set[int]:
     return used
 
 
+def _narrow_flex_progress(plan: Any, histogram_plan: Any,
+                          candidate_H: torch.Tensor) -> Dict[str, Any]:
+    """Balance the complete transaction without undoing its aromatic move.
+
+    A live external continuation may already have converted SU12 to SU11.
+    Comparing only this last histogram batch misses a round trip back to the
+    previous generation.  Preserve its planned SU10/SU12 direction as well
+    as the flex-window and completed-product constraints.
+    """
+    if str(getattr(plan, 'plan_kind', '')) != 'narrow_flex_window':
+        return {'enforced': False, 'ok': True}
+    diagnostics = dict(getattr(plan, 'diagnostics', {}) or {})
+    before_H = histogram_plan.H_before
+    planned_H = histogram_plan.H_after
+    for su in (10, 12):
+        delta = int(planned_H[su]) - int(before_H[su])
+        actual = int(candidate_H[su]) - int(before_H[su])
+        if delta and actual * (1 if delta > 0 else -1) < abs(delta):
+            return {'enforced': True, 'ok': False,
+                    'reason': 'port_balance_cancels_flex_window_adjustment',
+                    'su_type': su, 'planned_delta': delta, 'balanced_delta': actual}
+    try:
+        after = histogram_flex_window(candidate_H)
+    except ValueError as exc:
+        return {'enforced': True, 'ok': False,
+                'reason': 'port_balance_invalidates_flex_window', 'error': str(exc)}
+    before = dict(diagnostics.get('window_coordination_before', {}) or {})
+    fixed_count = int(diagnostics.get('completed_flex_count_before_rebuild', 0) or 0)
+    completion = dict(diagnostics.get('supplemental_flex_completion', {}) or {})
+    completed = int(completion.get('completed_flex_count_after', fixed_count) or 0)
+    continuation = bool(completion.get('resource_continuation_required', False))
+    ok = bool(
+        flex_window_candidate_allowed(before, after, allow_intermediate=True)
+        and fixed_count <= int(after['flex_upper'])
+        and (continuation or int(after['flex_lower']) <= completed <= int(after['flex_upper']))
+    )
+    return {'enforced': True, 'ok': ok, 'window_after': after,
+            'reason': 'flex_window_progress_preserved' if ok
+            else 'port_balance_invalidates_flex_window'}
+
+
 def _append_stage3_parity_balance(
     *,
     plan: Any,
@@ -1928,6 +1978,9 @@ def _append_stage3_parity_balance(
     audit_before = _stage3_port_capacity_diagnostics(H_after, special_degree_meta)
     cap_before = su12_generation_cap(H_after)
     if bool(audit_before["port_roles_ok"]) and bool(cap_before["within_limit"]):
+        objective = _narrow_flex_progress(plan, histogram_plan, H_after)
+        if not objective['ok']:
+            return False, objective
         return True, {
             "enforced": True,
             "reason": "pre_rebuild_ports_balanced",
@@ -2251,6 +2304,36 @@ def _append_stage3_parity_balance(
                         "su12_cap": dict(su12_cap),
                     })
                     continue
+                # Check both parity steps jointly.  Checking the first step
+                # alone would reject its temporary odd bridgehead count;
+                # choosing it greedily can force the second step to cancel
+                # the primary aromatic adjustment.
+                if str(getattr(plan, 'plan_kind', '')) == 'narrow_flex_window':
+                    final_options = [candidate_H]
+                    if kind == 'total_port_parity':
+                        role_audit = audit_layer1_port_roles(candidate_H, special_degree_meta)
+                        if bool(select_layer1_port_balance(candidate_H, role_audit).get('required', False)):
+                            final_options = []
+                            for role_source, role_target in ((11, 12), (12, 11)):
+                                donors = [value for value in remaining.get(role_source, ())
+                                          if value not in used_ids and value != node_id
+                                          and node_types.get(value) == role_source
+                                          and (role_source == 12 or (
+                                              str(ownership.get(value, '') or '') in allowed_states | {''}
+                                              and (not strict_resource_accounting or (
+                                                  value in authorized_before.get(role_source, ())
+                                                  and value in aggregate_before.get(role_source, ())))))]
+                                if not donors or int(candidate_H[role_source]) < 1:
+                                    continue
+                                final_H = candidate_H.detach().clone()
+                                final_H[role_source] -= 1
+                                final_H[role_target] += 1
+                                if (su12_transition_diagnostics(candidate_H, final_H)['generation_allowed']
+                                        and audit_layer1_port_roles(final_H, special_degree_meta)['ok']):
+                                    final_options.append(final_H)
+                    if not any(_narrow_flex_progress(plan, histogram_plan, final_H)['ok']
+                               for final_H in final_options):
+                        continue
                 aromatic_donor = int(source) in {12, 13}
                 if not aromatic_donor:
                     owner_state = str(ownership.get(int(node_id), "") or "")
@@ -2643,6 +2726,10 @@ def _append_stage3_parity_balance(
         working_histogram.aggregate_inventory_after = {}
         working_histogram.aggregate_required_counts = {}
 
+    window_objective = _narrow_flex_progress(plan, histogram_plan, H_balanced)
+    if not window_objective['ok']:
+        return False, {**window_objective, 'balance_applied': False,
+                       'attempted_directions': attempted_directions}
     objective_audit = _fixed_flex_progress(H_balanced)
     if not bool(objective_audit.get("ok", False)):
         return False, {
@@ -2691,6 +2778,7 @@ def _append_stage3_parity_balance(
         ],
         "attempted_directions": attempted_directions,
         "fixed_flex_objective": objective_audit,
+        "flex_window_objective": window_objective,
         "h_after": float(current_h),
         "h_soft_bounds": (
             [float(h_lower), float(h_upper)]
@@ -3549,11 +3637,43 @@ def run_block_c_resource_adjustment_loop_impl(
     verbose = bool(kwargs.pop("verbose", False))
     context_snapshot_fn = kwargs.pop("context_snapshot_fn", None)
     context_restore_fn = kwargs.pop("context_restore_fn", None)
+    checkpoint_callback = kwargs.pop("checkpoint_callback", None)
+    budget_options = {
+        'max_rebuilds': kwargs.pop('max_rebuilds', 64),
+        'max_planner_attempts': kwargs.pop('max_planner_attempts', 256),
+        'max_attempts_per_generation': kwargs.pop('max_attempts_per_generation', 32),
+        'max_no_progress_rebuilds': kwargs.pop('max_no_progress_rebuilds', 8),
+    }
+    search_budget = getattr(rebuild_fn, '_stage3_search_budget', None)
+    if search_budget is None:
+        search_budget = Stage3SearchBudget(**budget_options)
+        if callable(rebuild_fn):
+            original_rebuild_fn = rebuild_fn
+
+            def rebuild_fn(**options):
+                search_budget.rebuild()
+                return original_rebuild_fn(**options)
+
+            rebuild_fn._stage3_search_budget = search_budget
     if kwargs:
         raise ValueError(
             "unsupported block_c_resource options: "
             + ", ".join(sorted(str(key) for key in kwargs))
         )
+    def observe(stage, **payload):
+        if checkpoint_callback is not None:
+            try:
+                checkpoint_callback(stage=stage, **payload)
+            except Exception as exc:
+                warnings.warn(f'Stage3 spectral observer failed: {exc}', RuntimeWarning)
+
+    def append_cycle(records, record):
+        _append_stage3_cycle(records, record)
+        if checkpoint_callback is not None:
+            observe('stage3_cycle_decision', spectrum_available=False,
+                    iteration=int(record.cycle), action=record.to_dict(),
+                    metadata={'note': 'Ledger event only; a pending resource conversion may require a later Layer1/2 rebuild.'})
+
     _reset_stage3_generation_cursors(adjuster)
     # One live assembler belongs to one Layer1/2 generation.  It is discarded
     # only after a fresh rebuild, never after an ordinary SU conversion.
@@ -3582,7 +3702,15 @@ def run_block_c_resource_adjustment_loop_impl(
     rejected_spectrum_histogram_signatures: set[str] = set()
     rejected_spectrum_bundle_signatures: set[str] = set()
     forbidden_spectrum_inverse_signatures: set[str] = set()
-    rejected_resource_conversion_signatures: set[str] = set()
+    state_memory = Stage3StateMemory()
+    generation_state_key, _ = state_memory.identify(nodes_current, H_current, remember=True)
+    rejected_resource_conversion_signatures = state_memory.rejected_candidates[generation_state_key]
+
+    def committed_snapshot():
+        return (deepcopy(nodes_current), H_current.detach().clone(), deepcopy(diff_current),
+                context_snapshot_fn() if callable(context_snapshot_fn) else None)
+
+    committed_state = committed_snapshot()
     console_reporter = _Stage3CycleConsoleReporter(
         verbose=verbose,
         flex_limit=flex_primary_limit,
@@ -3634,6 +3762,8 @@ def run_block_c_resource_adjustment_loop_impl(
     attempt_idx = 0
     generation_cycle_number: Optional[int] = None
     generation_attempt_number = 0
+    plan = SimpleNamespace(runtime={}, diagnostics={}, phase='flex_range_reconciliation',
+                           phase_result=None)
     while True:
         attempt_idx += 1
         if generation_cycle_number is None:
@@ -3651,6 +3781,15 @@ def run_block_c_resource_adjustment_loop_impl(
         generation_attempt_number += 1
         cycle_number = int(generation_cycle_number)
         attempt_number = int(generation_attempt_number)
+        if not search_budget.plan(generation_attempt_number):
+            stop_reason = search_budget.reason
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
+                cycle=cycle_number, phase=str(getattr(plan, 'phase', 'unknown')),
+                accepted=False, applied=False, accepted_state_retained=True,
+                stop_reason=stop_reason, blocked_reason=stop_reason,
+                acceptance_reason=stop_reason,
+            ))
+            break
         spectrum_enabled_this_cycle = bool(
             enable_post_external_spectrum
             and cycle_number <= spectrum_active_through_cycle
@@ -4057,12 +4196,8 @@ def run_block_c_resource_adjustment_loop_impl(
                     else ""
                 )
                 repeated_state = bool(
-                    candidate_state_signature
-                    and candidate_state_signature in visited_state_signatures
-                ) or bool(
-                    candidate_chemical_state_signature
-                    and candidate_chemical_state_signature
-                    in visited_chemical_state_signatures
+                    isinstance(cand_H, torch.Tensor)
+                    and state_memory.identify(list(cand_nodes or []), cand_H)[1]
                 )
                 predicted_sse_gain = float(
                     candidate_diagnostics.get("predicted_global_sse_gain", 0.0)
@@ -4173,6 +4308,7 @@ def run_block_c_resource_adjustment_loop_impl(
                         candidate_context=best_accepted_option[9],
                         context_restore_fn=context_restore_fn,
                         cycle_number=cycle_number, generation=graph_generation + 1,
+                        state_memory=state_memory,
                         options={
                             "E_target": E_target, "S_target": S_target,
                             "rebuild_fn": rebuild_fn, "validate_fn": validate_fn,
@@ -4207,7 +4343,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     )
                     if not followup_accepted:
                         spectrum_memory_entry["rejected_su24_signatures"].add(su24_signature)
-                        _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+                        append_cycle(cycles, Stage3WorkflowCycleRecord(
                             cycle=cycle_number, phase="remaining_pool_spectrum_rebalance",
                             accepted=False, applied=False, rebuild_valid=True,
                             layer2_r2=spectrum_candidate_r2, stop_reason=followup_reason,
@@ -4222,9 +4358,9 @@ def run_block_c_resource_adjustment_loop_impl(
                             row.applied = False
                             row.accepted_state_retained = False
                             row.acceptance_reason = "su24_two_cycle_rolled_back"
-                            _append_stage3_cycle(cycles, row)
+                            append_cycle(cycles, row)
                         if not followup_result.cycles:
-                            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+                            append_cycle(cycles, Stage3WorkflowCycleRecord(
                                 cycle=cycle_idx, phase="su24_topology_evaluation",
                                 accepted=False, stop_reason=followup_reason,
                                 accepted_state_retained=False,
@@ -4272,7 +4408,11 @@ def run_block_c_resource_adjustment_loop_impl(
                 _reset_stage3_generation_cursors(adjuster)
                 rejected_spectrum_histogram_signatures.clear()
                 rejected_spectrum_bundle_signatures.clear()
-                rejected_resource_conversion_signatures.clear()
+                generation_state_key, _ = state_memory.identify(nodes_current, H_current, remember=True)
+                rejected_resource_conversion_signatures = state_memory.rejected_candidates[generation_state_key]
+                if not _stop_after_cycle:
+                    search_budget.accepted()
+                committed_state = committed_snapshot()
                 selected_inverse_signature = str(
                     dict(getattr(candidate, "diagnostics", {}) or {}).get(
                         "primary_inverse_signature",
@@ -4318,7 +4458,7 @@ def run_block_c_resource_adjustment_loop_impl(
                             spectrum_memory_entry[
                                 "rejected_inverse_signatures"
                             ].add(rejected_inverse_signature)
-                _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+                append_cycle(cycles, Stage3WorkflowCycleRecord(
                     cycle=cycle_number,
                     phase="remaining_pool_spectrum_rebalance",
                     # Spectrum candidates are not internal histogram plans.
@@ -4350,7 +4490,7 @@ def run_block_c_resource_adjustment_loop_impl(
                 ))
                 if followup_result is not None:
                     for row in followup_result.cycles:
-                        _append_stage3_cycle(cycles, row)
+                        append_cycle(cycles, row)
                 if verbose:
                     print(
                         f"[Spectrum Trial Commit] cycle={cycle_number} "
@@ -4378,6 +4518,14 @@ def run_block_c_resource_adjustment_loop_impl(
                 })
                 if len(generation_metrics) > _MAX_RETAINED_GENERATION_SIGNATURES:
                     del generation_metrics[:-_MAX_RETAINED_GENERATION_SIGNATURES]
+                if checkpoint_callback is not None:
+                    observe('stage3_spectrum_rebuild_accepted', nodes=nodes_current,
+                            difference=diff_current, iteration=cycle_number,
+                            action=list(getattr(candidate, 'operations', []) or []),
+                            metadata={'generation_id': graph_generation,
+                                      'acceptance_reason': 'su24_two_cycle_accepted' if followup_result is not None else 'layer2_r2_gain_threshold_met',
+                                      'baseline_r2': baseline_r2, 'r2': diff_current.get('r2'),
+                                      'su24_followup_included': followup_result is not None})
                 generation_cycle_number = None
                 continue
             console_reporter.record_spectrum_trials(evaluated_candidates)
@@ -4411,7 +4559,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     ),
                     "spectrum_rebalance_rolled_back": True,
                 }
-                _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+                append_cycle(cycles, Stage3WorkflowCycleRecord(
                     cycle=cycle_number,
                     phase="remaining_pool_spectrum_rebalance",
                     **_cycle_internal_accounting_fields(None),
@@ -4598,7 +4746,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
                 **_cycle_internal_accounting_fields(histogram_plan),
@@ -4635,7 +4783,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
                 **_cycle_internal_accounting_fields(histogram_plan),
@@ -4688,7 +4836,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
                 **_cycle_internal_accounting_fields(histogram_plan),
@@ -4788,7 +4936,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
                 **_cycle_internal_accounting_fields(histogram_plan),
@@ -4966,7 +5114,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     )
                     if callable(context_restore_fn):
                         context_restore_fn(deepcopy(cycle_context_before))
-                    _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+                    append_cycle(cycles, Stage3WorkflowCycleRecord(
                         cycle=cycle_number,
                         phase="external_topology",
                         **_cycle_internal_accounting_fields(histogram_plan),
@@ -4989,6 +5137,26 @@ def run_block_c_resource_adjustment_loop_impl(
                     break
                 cand_nodes, cand_H = rebuild_result["nodes"], rebuild_result["H"]
                 cand_diff, cand_r2 = rebuild_result["difference"], rebuild_result["r2"]
+                if state_memory.identify(list(cand_nodes or []), cand_H)[1]:
+                    stop_reason = 'stage3_equivalent_state_detected'
+                    retry_signature = _register_rejected_resource_candidate(
+                        plan, histogram_plan, rejected_resource_conversion_signatures,
+                    )
+                    _rollback_stage3_plan_transactions(plan, stop_reason)
+                    _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
+                    _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
+                    if callable(context_restore_fn):
+                        context_restore_fn(deepcopy(cycle_context_before))
+                    append_cycle(cycles, Stage3WorkflowCycleRecord(
+                        cycle=cycle_number, phase='external_topology',
+                        accepted=False, applied=False, accepted_state_retained=True,
+                        rebuild_valid=True, layer2_r2=float(cand_r2), fresh_rebuild=True,
+                        stop_reason=stop_reason, acceptance_reason=stop_reason,
+                        blocked_reason=stop_reason,
+                    ))
+                    if retry_signature and not _stop_after_cycle:
+                        continue
+                    break
                 console_reporter.record_balance_operations(rebuild_result["balance"].get("operations", []))
                 rebuild_failure = {}
                 nodes_current = list(cand_nodes or [])
@@ -5016,7 +5184,11 @@ def run_block_c_resource_adjustment_loop_impl(
                 rejected_spectrum_histogram_signatures.clear()
                 rejected_spectrum_bundle_signatures.clear()
                 forbidden_spectrum_inverse_signatures.clear()
-                rejected_resource_conversion_signatures.clear()
+                generation_state_key, _ = state_memory.identify(nodes_current, H_current, remember=True)
+                rejected_resource_conversion_signatures = state_memory.rejected_candidates[generation_state_key]
+                if not _stop_after_cycle:
+                    search_budget.accepted()
+                committed_state = committed_snapshot()
                 visited_state_signatures.add(
                     _stage3_physical_state_signature(
                         nodes_current,
@@ -5027,7 +5199,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     _stage3_chemical_state_signature(nodes_current, H_current)
                 )
                 accepted_cycles += 1
-                _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+                append_cycle(cycles, Stage3WorkflowCycleRecord(
                     cycle=cycle_number,
                     phase="external_topology",
                     **_cycle_internal_accounting_fields(histogram_plan),
@@ -5045,6 +5217,12 @@ def run_block_c_resource_adjustment_loop_impl(
                     r2=float(cand_r2),
                     difference=diff_current,
                 )
+                if checkpoint_callback is not None:
+                    observe('stage3_external_rebuild_accepted', nodes=nodes_current,
+                            difference=diff_current, iteration=cycle_number,
+                            action=histogram_plan.to_dict() if hasattr(histogram_plan, 'to_dict') else None,
+                            metadata={'generation_id': graph_generation, 'phase': 'external_topology',
+                                      'acceptance_reason': 'external_generation_fresh_rebuild_accepted'})
                 if _stop_after_cycle:
                     return _stage3_single_cycle_result(
                         nodes_current, H_current, diff_current, cycles,
@@ -5139,7 +5317,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     _compact_stage3_plan_dict(plan).get("phase_result", {}) or {}
                 ),
             })
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase="complete",
                 applied=False,
@@ -5174,6 +5352,8 @@ def run_block_c_resource_adjustment_loop_impl(
                     **flex_coordination_diagnostics,
                     "terminal_state_signature": str(state_signature),
                     "visited_state_count": len(visited_state_signatures),
+                    "equivalent_state_count": len(state_memory),
+                    "search_budget": search_budget.to_dict(),
                     "retained_cycle_limit": int(_MAX_RETAINED_STAGE3_CYCLES),
                     "total_cycle_count": int(cycle_idx),
                     "total_planner_attempt_count": int(attempt_idx),
@@ -5310,7 +5490,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
                 **_cycle_internal_accounting_fields(histogram_plan),
@@ -5411,7 +5591,7 @@ def run_block_c_resource_adjustment_loop_impl(
                         "next_cursor", int(parity_cursor_before) + 1
                     )
                 )
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
                 **_cycle_internal_accounting_fields(histogram_plan),
@@ -5444,7 +5624,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _rollback_stage3_plan_transactions(plan, stop_reason)
             _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
             _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
                 **_cycle_internal_accounting_fields(histogram_plan),
@@ -5483,26 +5663,29 @@ def run_block_c_resource_adjustment_loop_impl(
                 difference=dict(cand_diff or {}),
             )
         except Exception as exc:
-            stop_reason = "layer12_rebuild_invalid"
+            stop_reason = search_budget.reason or "layer12_rebuild_invalid"
             rebuild_failure = {**rebuild_exception_proof(exc), "cycle": cycle_number,
                                "generation_id": graph_generation}
             rollback_reason = f"{stop_reason}:{exc}"
-            print(
-                f"[Block C:resource #{cycle_number}] fresh Layer1/2 rebuild failed: "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            retry_signature = _register_rejected_resource_candidate(
-                plan,
-                histogram_plan,
-                rejected_resource_conversion_signatures,
-            )
+            if search_budget.reason:
+                print(f"[Block C:resource #{cycle_number}] search limit reached: "
+                      f"{stop_reason}; retaining the last committed Layer2 state", flush=True)
+            else:
+                print(
+                    f"[Block C:resource #{cycle_number}] fresh Layer1/2 rebuild failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+            retry_signature = ('' if search_budget.reason else
+                               _register_rejected_resource_candidate(
+                                   plan, histogram_plan, rejected_resource_conversion_signatures,
+                               ))
             _rollback_stage3_plan_transactions(plan, rollback_reason)
             _restore_stage3_rotation_cursor(adjuster, rotation_cursor_before)
             _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
                 **_cycle_internal_accounting_fields(histogram_plan),
@@ -5542,7 +5725,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
                 **_cycle_internal_accounting_fields(histogram_plan),
@@ -5616,7 +5799,7 @@ def run_block_c_resource_adjustment_loop_impl(
             _restore_stage3_parity_cursor(adjuster, parity_cursor_before)
             if callable(context_restore_fn):
                 context_restore_fn(deepcopy(cycle_context_before))
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
                 **_cycle_internal_accounting_fields(histogram_plan),
@@ -5654,12 +5837,11 @@ def run_block_c_resource_adjustment_loop_impl(
             list(cand_nodes or []),
             cand_H,
         )
-        if (
-            candidate_state_signature in visited_state_signatures
-            or candidate_chemical_state_signature
-            in visited_chemical_state_signatures
-        ):
-            cycle_reason = "stage3_generation_cycle_detected"
+        equivalent_state = state_memory.identify(list(cand_nodes or []), cand_H)[1]
+        # Legacy ID/assignment hashes remain diagnostic only. In particular,
+        # an unchanged assignment can have a genuinely different topology.
+        if equivalent_state:
+            cycle_reason = 'stage3_equivalent_state_detected'
             retry_signature = _register_rejected_resource_candidate(
                 plan,
                 histogram_plan,
@@ -5681,7 +5863,7 @@ def run_block_c_resource_adjustment_loop_impl(
                     f"histogram={next_histogram_signature}",
                     flush=True,
                 )
-            _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+            append_cycle(cycles, Stage3WorkflowCycleRecord(
                 cycle=cycle_number,
                 phase=phase,
                 **_cycle_internal_accounting_fields(histogram_plan),
@@ -5771,9 +5953,13 @@ def run_block_c_resource_adjustment_loop_impl(
         rejected_spectrum_histogram_signatures.clear()
         rejected_spectrum_bundle_signatures.clear()
         forbidden_spectrum_inverse_signatures.clear()
-        rejected_resource_conversion_signatures.clear()
-        # Candidate signatures are generation-local; a fresh graph must be
-        # audited and planned without any blacklist from the previous graph.
+        generation_state_key, _ = state_memory.identify(nodes_current, H_current, remember=True)
+        rejected_resource_conversion_signatures = state_memory.rejected_candidates[generation_state_key]
+        if not _stop_after_cycle:
+            search_budget.accepted()
+        committed_state = committed_snapshot()
+        # Failures belong to their chemical graph. A genuinely new graph
+        # starts a fresh set; revisiting an equivalent graph retains history.
         visited_state_signatures.add(candidate_state_signature)
         if len(visited_state_signatures) > _MAX_RETAINED_GENERATION_SIGNATURES:
             visited_state_signatures.pop()
@@ -5781,7 +5967,7 @@ def run_block_c_resource_adjustment_loop_impl(
         if len(visited_chemical_state_signatures) > _MAX_RETAINED_GENERATION_SIGNATURES:
             visited_chemical_state_signatures.pop()
         accepted_cycles += 1
-        _append_stage3_cycle(cycles, Stage3WorkflowCycleRecord(
+        append_cycle(cycles, Stage3WorkflowCycleRecord(
             cycle=cycle_number,
             phase=phase,
             **_cycle_internal_accounting_fields(histogram_plan),
@@ -5798,6 +5984,12 @@ def run_block_c_resource_adjustment_loop_impl(
             parity_balance_count=_histogram_parity_balance_count(histogram_plan),
             fresh_rebuild=True,
         ))
+        if checkpoint_callback is not None:
+            observe('stage3_rebuild_accepted', nodes=nodes_current,
+                    difference=diff_current, iteration=cycle_number,
+                    action=histogram_plan.to_dict() if hasattr(histogram_plan, 'to_dict') else None,
+                    metadata={'generation_id': graph_generation, 'phase': phase,
+                              'acceptance_reason': acceptance_reason})
         if _stop_after_cycle:
             return _stage3_single_cycle_result(
                 nodes_current, H_current, diff_current, cycles,
@@ -5808,6 +6000,20 @@ def run_block_c_resource_adjustment_loop_impl(
         generation_cycle_number = None
 
     console_reporter.finish(boundary=str(stop_reason), complete=False)
+    if search_budget.reason:
+        # A budget can expire while the live assembler holds provisional
+        # conversions. Return a coherent Layer2 boundary, not a half-applied
+        # histogram paired with the previous generation's spectrum.
+        stop_reason = search_budget.reason
+        _rollback_stage3_plan_transactions(plan, stop_reason)
+        nodes_current, H_current, diff_current, committed_context = committed_state
+        if callable(context_restore_fn):
+            context_restore_fn(deepcopy(committed_context))
+        adjuster._stage3_external_assembler = None
+        plan.runtime = {}
+        external_generation_rebuild_pending = False
+        observe('stage3_search_stopped', spectrum_available=False,
+                metadata={'stop_reason': stop_reason, 'search_budget': search_budget.to_dict()})
     if _stop_after_cycle:
         return _stage3_single_cycle_result(
             nodes_current, H_current, diff_current, cycles,
@@ -5830,6 +6036,12 @@ def run_block_c_resource_adjustment_loop_impl(
             "failure_domain": rebuild_failure.get("failure_domain", "candidate_selection"),
             "rebuild_failure": rebuild_failure,
             "retained_plan": terminal_proof,
+        }
+    if search_budget.reason:
+        terminal_proof = {
+            'reason': search_budget.reason, 'failure_domain': 'convergence',
+            'search_budget': search_budget.to_dict(), 'retained_plan': terminal_proof,
+            'returned_state': 'last_committed_layer2_generation',
         }
     terminal_proof["external_budget"] = {
         "used": int(external_primary_adjustments_used),
@@ -5896,6 +6108,8 @@ def run_block_c_resource_adjustment_loop_impl(
             "terminal_state_signature": str(terminal_state_signature),
             "visited_state_count": len(visited_state_signatures),
             "visited_chemical_state_count": len(visited_chemical_state_signatures),
+            "equivalent_state_count": len(state_memory),
+            "search_budget": search_budget.to_dict(),
             "retained_cycle_limit": int(_MAX_RETAINED_STAGE3_CYCLES),
             "total_cycle_count": int(cycle_idx),
             "total_planner_attempt_count": int(attempt_idx),

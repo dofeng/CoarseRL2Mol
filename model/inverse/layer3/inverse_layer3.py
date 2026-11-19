@@ -1,6 +1,7 @@
 from pathlib import Path
 from copy import deepcopy
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -183,6 +184,7 @@ class Layer3Estimator:
         neg_top_k_peaks: int = 10,
         neg_peak_min_sep_ppm: float = 0.8,
         verbose: bool = True,
+        checkpoint_callback: Optional[Callable[..., Any]] = None,
     ) -> Tuple[List[_NodeV3], float]:
         lib = self._get_template_library()
         templates = (lib or {}).get('templates', {}) if isinstance(lib, dict) else {}
@@ -297,6 +299,20 @@ class Layer3Estimator:
         moves: List[Dict] = []
         stop_reason = 'max_iters'
 
+        def observe(stage, *, action=None):
+            if checkpoint_callback is not None:
+                try:
+                    checkpoint_callback(
+                        stage=stage, nodes=nodes, reconstruction=eval_current['S_recon'],
+                        iteration=len(moves), action=action,
+                        metadata={'r2': float(eval_current.get('r2', 0.0)),
+                                  'baseline_r2': baseline_r2,
+                                  'scope': 'provisional_layer3_candidate'},
+                    )
+                except Exception as exc:
+                    warnings.warn(f'Layer3 spectral observer failed: {exc}', RuntimeWarning)
+
+        observe('layer3_sample_initialization')
         if verbose:
             print("\n" + "=" * 60)
             print("Layer3: 固定模板潜变量 z 优化")
@@ -452,6 +468,7 @@ class Layer3Estimator:
                 'r2_before': old_r2,
                 'r2_after': current_r2,
             })
+            observe('layer3_sample_move', action=moves[-1])
 
         for node in carbon_nodes:
             if getattr(node, 'template_key', None) != fixed_template_keys[int(node.global_id)]:
@@ -536,15 +553,22 @@ class Layer3Estimator:
             return baseline_nodes, float(baseline_r2)
 
         if output_dir:
-            out = Path(output_dir)
-            out.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame({
-                'ppm': ppm_axis.detach().cpu().numpy(),
-                'target': target.detach().cpu().numpy(),
-                'reconstructed': spectrum_recon.detach().cpu().numpy(),
-                'difference': spectrum_diff.detach().cpu().numpy(),
-            }).to_csv(str(out / 'layer3_spectrum.csv'), index=False)
-            pd.DataFrame(moves).to_csv(str(out / 'layer3_z_moves.csv'), index=False)
+            try:
+                out = Path(output_dir)
+                out.mkdir(parents=True, exist_ok=True)
+                pd.DataFrame({
+                    'ppm': ppm_axis.detach().cpu().numpy(),
+                    'target': target.detach().cpu().numpy(),
+                    'reconstructed': spectrum_recon.detach().cpu().numpy(),
+                    'difference': spectrum_diff.detach().cpu().numpy(),
+                }).to_csv(str(out / 'layer3_spectrum.csv'), index=False)
+                pd.DataFrame(moves, columns=[
+                    'move_type', 'global_id', 'su_type', 'template_key', 'sample_idx',
+                    'negative_ppm', 'positive_ppm', 'positive_value', 'coarse_lo', 'coarse_hi',
+                    'old_mu', 'new_mu', 'r2_before', 'r2_after',
+                ]).to_csv(str(out / 'layer3_z_moves.csv'), index=False)
+            except OSError as exc:
+                warnings.warn(f'Layer3 output export failed: {exc}', RuntimeWarning)
 
         print(
             f"  最终调整结果: z_moves={len(moves)}, template_moves=0, "

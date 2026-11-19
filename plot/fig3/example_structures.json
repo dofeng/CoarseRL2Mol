@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "molecules": [
+    {
+      "source_path": "coarsedata_v1/test_single/15007.pt",
+      "smiles": "CC1=CN(C(=O)NC1=O)[C@H]2C[C@@H]([C@H](O2)CO)OC(=O)C",
+      "molecular_formula": "C12H16N2O6",
+      "reference_su_histogram": [
+        2.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        4.0,
+        0.0,
+        0.0,
+        2.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "reference_carbon_centers": [
+        {
+          "original_center_id": 0,
+          "center_su": 22,
+          "true_ppm": 12.1899995803833
+        },
+        {
+          "original_center_id": 1,
+          "center_su": 11,
+          "true_ppm": 109.6500015258789
+        },
+        {
+          "original_center_id": 2,
+          "center_su": 13,
+          "true_ppm": 135.72999572753906
+        },
+        {
+          "original_center_id": 3,
+          "center_su": 0,
+          "true_ppm": 150.41000366210938
+        },
+        {
+          "original_center_id": 4,
+          "center_su": 0,
+          "true_ppm": 163.58999633789062
+        },
+        {
+          "original_center_id": 5,
+          "center_su": 19,
+          "true_ppm": 83.79999542236328
+        },
+        {
+          "original_center_id": 6,
+          "center_su": 23,
+          "true_ppm": 36.439998626708984
+        },
+        {
+          "original_center_id": 7,
+          "center_su": 19,
+          "true_ppm": 74.62999725341797
+        },
+        {
+          "original_center_id": 8,
+          "center_su": 19,
+          "true_ppm": 84.51000213623047
+        },
+        {
+          "original_center_id": 10,
+          "center_su": 19,
+          "true_ppm": 61.2599983215332
+        },
+        {
+          "original_center_id": 12,
+          "center_su": 2,
+          "true_ppm": 169.94000244140625
+        },
+        {
+          "original_center_id": 13,
+          "center_su": 22,
+          "true_ppm": 20.75
+        }
+      ],
+      "provenance": {
+        "smiles_file": {
+          "path": "/mnt/e/code/spectra-scraper/NMR_spectral_data/organized_data/15007.txt",
+          "sha256": "7bf3147aa7b1422b470c40f6b4ecccfd34ef2a3a918d978a57918ea2eeadf027"
+        },
+        "graph_file": {
+          "path": "/mnt/e/code/NMRer-result/coarse_graph_data/15007.pt",
+          "sha256": "691a74c400057ba5118c8230a4741cd64e8e651c9aa9ab9028d87cf6e9b1cccb"
+        },
+        "related_atom_shift_file": {
+          "path": "/mnt/e/code/spectra-scraper/NMR_spectral_data/shift_rdkit_data/15007.csv",
+          "sha256": "a82253efa9369c094cebae0c13a5ede2553cf6f1ac577ceaf12016a3af7acee9"
+        }
+      },
+      "audit_note": "Raw graph SMILES, 33 SU reference counts, 12 carbon-center IDs/types and reference shifts match the saved S2N/G2S test records. The alternative data3-R/15007.pt has different reference shifts and is not the matched source.",
+      "reference_version_note": "Reference shifts are taken from the matched coarse_graph_data/15007.pt snapshot. The related shift_rdkit_data/15007.csv differs at carbon center 5 (83.61 ppm versus 83.79999542236328 ppm in the matched graph), so it is not asserted to be an identical atom-shift source and its values are not substituted."
+    }
+  ]
+}

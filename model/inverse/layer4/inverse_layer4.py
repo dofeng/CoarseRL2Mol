@@ -1394,6 +1394,11 @@ class Layer4Adjuster:
         spectrum_max_primary_adjustments: int = 10,
         spectrum_min_r2_gain: float = 0.0005,
         verbose: bool = False,
+        checkpoint_callback: Any = None,
+        max_rebuilds: int = 64,
+        max_planner_attempts: int = 256,
+        max_attempts_per_generation: int = 32,
+        max_no_progress_rebuilds: int = 8,
         **kwargs: Any,
     ) -> Any:
         if kwargs:
@@ -1422,6 +1427,11 @@ class Layer4Adjuster:
             outer_cycle=int(outer_cycle),
             context_snapshot_fn=context_snapshot_fn,
             context_restore_fn=context_restore_fn,
+            checkpoint_callback=checkpoint_callback,
+            max_rebuilds=max_rebuilds,
+            max_planner_attempts=max_planner_attempts,
+            max_attempts_per_generation=max_attempts_per_generation,
+            max_no_progress_rebuilds=max_no_progress_rebuilds,
             difference_spectrum=difference_spectrum,
             enable_post_external_spectrum=bool(enable_post_external_spectrum),
             spectrum_active_through_cycle=int(spectrum_active_through_cycle),

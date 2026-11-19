@@ -11,7 +11,7 @@ import shutil
 import time
 import warnings
 from pathlib import Path
-from typing import List, Tuple, Dict, Optional, Any, Sequence
+from typing import List, Tuple, Dict, Optional, Any, Sequence, Callable
 
 # 导入项目内部模块
 from ..shared.coarse_graph import (
@@ -47,6 +47,7 @@ from .layer1.inverse_layer1 import Layer1Assigner
 from .layer1.port_role_balance import audit_layer1_port_roles
 from .layer2.inverse_layer2 import Layer2Estimator
 from .layer3.inverse_layer3 import Layer3Estimator
+from .spectral_trace import SpectralTraceWriter
 from .layer4.inverse_layer4 import Layer4Adjuster
 from .topology import classify_topology_units
 from .topology.assembly.state.round_context import normalize_stage3_product
@@ -807,6 +808,10 @@ class InversePipelineV3:
             'spectrum_max_candidate_trials',
             'spectrum_max_primary_adjustments',
             'spectrum_min_r2_gain',
+            'max_rebuilds',
+            'max_planner_attempts',
+            'max_attempts_per_generation',
+            'max_no_progress_rebuilds',
             'verbose',
         }
         unknown_keys = set(resource_cfg) - supported_resource_keys
@@ -868,6 +873,10 @@ class InversePipelineV3:
             spectrum_max_candidate_trials=int(resource_cfg.get('spectrum_max_candidate_trials', 4)),
             spectrum_max_primary_adjustments=int(resource_cfg.get('spectrum_max_primary_adjustments', 10)),
             spectrum_min_r2_gain=float(resource_cfg.get('spectrum_min_r2_gain', 0.0005)),
+            max_rebuilds=resource_cfg.get('max_rebuilds', 64),
+            max_planner_attempts=resource_cfg.get('max_planner_attempts', 256),
+            max_attempts_per_generation=resource_cfg.get('max_attempts_per_generation', 32),
+            max_no_progress_rebuilds=resource_cfg.get('max_no_progress_rebuilds', 8),
             verbose=bool(resource_cfg.get('verbose', False)),
             output_dir=replay_output,
         )
@@ -1004,6 +1013,7 @@ class InversePipelineV3:
         layer2_output_dir: Optional[str] = None,
         identity_seed_nodes: Optional[List[_NodeV3]] = None,
         emit_summary: bool = True,
+        checkpoint_callback: Optional[Callable[..., Any]] = None,
     ) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], float]:
         if not eval_lib_path:
             raise ValueError('Layer1 requires eval_lib_path for exact shift lookup')
@@ -1436,6 +1446,19 @@ class InversePipelineV3:
             },
             'elapsed_s': float(time.perf_counter() - started_at),
         }
+
+        if checkpoint_callback is not None:
+            for stage, selected_nodes, snapshot in [
+                ('initial_layer1_raw', winner['raw_layer1_nodes'], winner['raw_layer1_snapshot']),
+                ('initial_layer2_raw', winner['raw_layer2_nodes'], None),
+                ('initial_layer1_refined', winner_layer1_nodes, layer1_snapshot),
+            ]:
+                checkpoint_callback(
+                    stage=stage, nodes=selected_nodes,
+                    reconstruction=(snapshot.get('S_recon') if snapshot is not None else None),
+                    metadata={'selected_variant_id': str(winner_row['variant_id']),
+                              'r2': (snapshot.get('r2') if snapshot is not None else winner_row['raw_layer2_r2'])},
+                )
 
         H_nodes = self._histogram_from_nodes(nodes).detach().clone()
         diff_info = self._compute_difference_spectrum_from_nodes_mu(
@@ -2864,7 +2887,12 @@ class InversePipelineV3:
                                              spectrum_max_primary_adjustments: int = 10,
                                              spectrum_min_r2_gain: float = 0.0005,
                                              verbose: bool = False,
-                                             output_dir: Optional[str] = None) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], Dict[str, Any]]:
+                                             output_dir: Optional[str] = None,
+                                             checkpoint_callback: Optional[Callable[..., Any]] = None,
+                                             max_rebuilds: int = 64,
+                                             max_planner_attempts: int = 256,
+                                             max_attempts_per_generation: int = 32,
+                                             max_no_progress_rebuilds: int = 8) -> Tuple[List[_NodeV3], torch.Tensor, Dict[str, object], Dict[str, Any]]:
         baseline_diff = dict(current_diff or {})
         if (
             str(baseline_diff.get('source_stage', '') or '') != 'layer2'
@@ -2928,6 +2956,11 @@ class InversePipelineV3:
             validate_fn=validate_fn,
             context_snapshot_fn=context_snapshot_fn,
             context_restore_fn=context_restore_fn,
+            checkpoint_callback=checkpoint_callback,
+            max_rebuilds=max_rebuilds,
+            max_planner_attempts=max_planner_attempts,
+            max_attempts_per_generation=max_attempts_per_generation,
+            max_no_progress_rebuilds=max_no_progress_rebuilds,
             output_dir=output_dir,
             flex_max_primary_adjustments=int(flex_max_primary_adjustments),
             external_max_primary_adjustments=int(external_max_primary_adjustments),
@@ -3170,6 +3203,50 @@ class InversePipelineV3:
                     list(getattr(workflow_result, 'nodes', []) or [])
                 ),
             }
+        if output_dir and dict(workflow_diagnostics.get('search_budget', {}) or {}).get('stop_reason'):
+            # Budget exits retain a coherent Layer2 boundary. Persist it in
+            # the existing replay format in both output modes, so a limited
+            # search does not lose accepted work or reactivate an ended
+            # spectrum window when restarted from this checkpoint.
+            resume_cfg = {
+                'enabled': True,
+                'flex_max_primary_adjustments': flex_max_primary_adjustments,
+                'external_max_primary_adjustments': external_max_primary_adjustments,
+                'internal_max_primary_adjustments': internal_max_primary_adjustments,
+                'max_h_compensation_ops_per_adjustment': max_h_compensation_ops_per_adjustment,
+                'residual_flex_preferred_23': residual_flex_preferred_23,
+                'residual_flex_min_23': residual_flex_min_23,
+                'residual_side_preferred_23': residual_side_preferred_23,
+                'residual_side_min_23': residual_side_min_23,
+                'h_tolerance': h_tolerance,
+                'enable_post_external_spectrum': bool(enable_post_external_spectrum
+                    and not workflow_diagnostics.get('spectrum_rebalance_finalized', False)),
+                'spectrum_active_through_cycle': spectrum_active_through_cycle,
+                'spectrum_candidate_limit': spectrum_candidate_limit,
+                'spectrum_max_candidate_trials': spectrum_max_candidate_trials,
+                'spectrum_max_primary_adjustments': spectrum_max_primary_adjustments,
+                'spectrum_min_r2_gain': spectrum_min_r2_gain,
+                'max_rebuilds': max_rebuilds, 'max_planner_attempts': max_planner_attempts,
+                'max_attempts_per_generation': max_attempts_per_generation,
+                'max_no_progress_rebuilds': max_no_progress_rebuilds,
+                'verbose': verbose,
+            }
+            try:
+                resume_path = self._save_stage3_input_snapshot(
+                    output_dir=str(Path(output_dir) / 'stopped_checkpoint'),
+                    nodes=workflow_result.nodes, H=workflow_result.H,
+                    S_target=S_target, E_target=E_target, current_diff=workflow_result.diff,
+                    fixed_partition_meta=copy.deepcopy(self.layer4_adjuster.fixed_partition_meta),
+                    layer1_runtime_cfg=layer1_runtime_cfg, stage3_resource_cfg=resume_cfg,
+                    eval_lib_path=str(eval_lib_path or ''), outer_idx=outer_idx,
+                    run_id=f'stage3-stopped-{outer_idx + 1}-{workflow_diagnostics.get("total_planner_attempt_count", 0)}',
+                )
+                meta['resume_snapshot_dir'] = str(resume_path)
+                meta['terminal_diagnostics']['resume_snapshot_dir'] = str(resume_path)
+                print(f'[Stage3 Checkpoint] {resume_path}', flush=True)
+            except Exception as exc:
+                meta['resume_snapshot_error'] = str(exc)
+                warnings.warn(f'Stage3 stopped checkpoint could not be saved: {exc}', RuntimeWarning)
         completion = dict(meta.get('completion_diagnostics', {}) or {})
         if bool(completion.get('stage3_complete', False)):
             # Persist the exact committed Stage3 ledger for the final report.
@@ -3468,7 +3545,8 @@ class InversePipelineV3:
               stage_configs: Optional[Dict[str, Dict]] = None,
               outer_max_cycles: int = 8,
               outer_improve_eps: float = 1e-4,
-              final_output_detail: str = 'compact') -> Tuple[List[_NodeV3], torch.Tensor]:
+              final_output_detail: str = 'compact',
+              output_mode: str = 'simple') -> Tuple[List[_NodeV3], torch.Tensor]:
         """
         逆向推理主入口
         
@@ -3516,6 +3594,13 @@ class InversePipelineV3:
                 - Layer4 -> Layer1/2 -> Layer3 宏循环次数上限
             outer_improve_eps:
                 - block_a / block_b 的最小 Layer2 R2 提升阈值
+            output_mode:
+                - ``simple`` (default): preserve the existing output and runtime path.
+                - ``detailed``: additionally stream figure-ready spectra, residuals,
+                  SU counts, node states and actions to spectral_trace/<run_id>/.
+                  Records accepted Layer4 rebuilds and provisional Layer3 moves;
+                  also enables full final diagnostics. Does not change inference.
+                  Independent of save_intermediates; no per-checkpoint PNGs.
             final_output_detail:
                 - ``compact`` 只保留下游组装与结果审阅必需的最终文件
                 - ``full`` 额外保留环与 JSONL 调试账本
@@ -3535,7 +3620,10 @@ class InversePipelineV3:
                 "final_output_detail must be either 'compact' or 'full', "
                 f"got {final_output_detail!r}"
             )
-        include_final_diagnostics = final_output_detail == 'full'
+        output_mode = str(output_mode or 'simple').strip().lower()
+        if output_mode not in {'simple', 'detailed'}:
+            raise ValueError(f"output_mode must be either 'simple' or 'detailed', got {output_mode!r}")
+        include_final_diagnostics = output_mode == 'detailed' or final_output_detail == 'full'
 
         # Select the response once from the unmodified target spectrum.  Every
         # subsequent structure reconstruction uses this scalar, while the
@@ -3607,6 +3695,10 @@ class InversePipelineV3:
                 'spectrum_max_candidate_trials': 4,
                 'spectrum_max_primary_adjustments': 10,
                 'spectrum_min_r2_gain': 0.0005,
+                'max_rebuilds': 64,
+                'max_planner_attempts': 256,
+                'max_attempts_per_generation': 32,
+                'max_no_progress_rebuilds': 8,
                 'verbose': False,
             },
         }
@@ -3650,6 +3742,10 @@ class InversePipelineV3:
             'spectrum_max_candidate_trials',
             'spectrum_max_primary_adjustments',
             'spectrum_min_r2_gain',
+            'max_rebuilds',
+            'max_planner_attempts',
+            'max_attempts_per_generation',
+            'max_no_progress_rebuilds',
             'verbose',
         }
         unknown_resource_keys = set(resource_cfg) - supported_resource_keys
@@ -3671,6 +3767,43 @@ class InversePipelineV3:
         resource_cfg['h_tolerance'] = stage3_h_tolerance
         self.layer4_adjuster._h_tolerance = stage3_h_tolerance
 
+        spectral_trace = None
+        if output_mode == 'detailed':
+            try:
+                library_path = Path(eval_lib_path)
+                library_stat = library_path.stat() if library_path.exists() else None
+                spectral_trace = SpectralTraceWriter(
+                    output_root=output_root, run_id=run_id, target=S_target,
+                    ppm_axis=PPM_AXIS, reconstruct=self.reconstruct_spectrum,
+                    metadata={
+                        'template_library': str(library_path),
+                        'template_library_size_bytes': library_stat.st_size if library_stat else None,
+                        'template_library_mtime_ns': library_stat.st_mtime_ns if library_stat else None,
+                        'aromatic_response_scale': self.aromatic_response_scale,
+                        'aromatic_area_fraction': self.aromatic_area_fraction,
+                        'target_elements': E_target, 'layer1_config': layer1_runtime_cfg,
+                        'layer3_config': layer3_runtime_cfg, 'stage_configs': default_stage_configs,
+                        'outer_max_cycles': outer_max_cycles, 'outer_improve_eps': outer_improve_eps,
+                        'save_intermediates': save_intermediates,
+                    },
+                )
+                print(f"[Detailed spectral output] {spectral_trace.directory}", flush=True)
+            except Exception as exc:
+                warnings.warn(f'Detailed spectral output could not start: {exc}', RuntimeWarning)
+        layer2_trace_seed = ''
+        cycle_trace_endpoints: Dict[int, str] = {}
+
+        def initial_checkpoint(**payload):
+            if spectral_trace is None:
+                return None
+            stage = payload['stage']
+            raw = spectral_trace.latest('initial_layer1_raw')
+            return spectral_trace.checkpoint(
+                **payload, decision='diagnostic' if stage == 'initial_layer2_raw' else 'accepted',
+                parent_checkpoint_id=raw if stage != 'initial_layer1_raw' else '',
+                spectral_contract='hop1_library_mu' if 'layer1_' in stage else 'template_center_mu',
+            )
+
         print("\n>>> Layer0: 估计SU直方图")
         H_init = self.estimate_su_histogram(S_target, E_target)
         try:
@@ -3689,7 +3822,14 @@ class InversePipelineV3:
             eval_nmr=True,
             eval_output_dir=(str(Path(output_dir) / 'initial_layer12') if save_intermediates and output_dir else None),
             layer2_output_dir=(str(Path(output_dir) / 'initial_layer12') if save_intermediates and output_dir else None),
+            checkpoint_callback=initial_checkpoint if spectral_trace is not None else None,
         )
+        if spectral_trace is not None:
+            layer2_trace_seed = spectral_trace.checkpoint(
+                stage='initial_layer2', nodes=initial_layer12_nodes,
+                difference=initial_layer12_diff,
+                parent_checkpoint_id=spectral_trace.latest('initial_layer1_refined'),
+            ) or layer2_trace_seed
         hop1_adjuster = getattr(self.layer1_assigner, '_hop1_adjuster', None)
         self.layer4_adjuster.set_spectrum_hop1_template_options(
             getattr(hop1_adjuster, 'shift_options_by_su', {}) or {}
@@ -3744,6 +3884,32 @@ class InversePipelineV3:
                 f"spectral_contract={cycle_input_spectral_contract}",
                 flush=True,
             )
+
+            if spectral_trace is not None:
+                layer2_trace_seed = spectral_trace.checkpoint(
+                    stage='outer_cycle_input', nodes=current_nodes, difference=current_diff,
+                    outer_cycle=outer_idx + 1, parent_checkpoint_id=layer2_trace_seed,
+                    metadata={'seed_contract': cycle_input_spectral_contract,
+                              'seed_is_previous_layer2_not_layer3': True},
+                ) or layer2_trace_seed
+
+            def stage3_checkpoint(*, stage, nodes=None, difference=None, iteration=None,
+                                  action=None, metadata=None, spectrum_available=True):
+                nonlocal layer2_trace_seed
+                if spectral_trace is None:
+                    return None
+                if not spectrum_available:
+                    spectral_trace.event(stage, outer_cycle=outer_idx + 1, iteration=iteration,
+                                         action=action, metadata=metadata,
+                                         spectrum_available=False,
+                                         parent_checkpoint_id=layer2_trace_seed)
+                    return None
+                layer2_trace_seed = spectral_trace.checkpoint(
+                    stage=stage, nodes=nodes, difference=difference,
+                    outer_cycle=outer_idx + 1, iteration=iteration, action=action,
+                    metadata=metadata, parent_checkpoint_id=layer2_trace_seed,
+                ) or layer2_trace_seed
+                return layer2_trace_seed
 
             cycle_best_layer2_r2 = float(accepted_layer2_r2)
             cycle_pre_layer3_r2 = float('nan')
@@ -3815,6 +3981,11 @@ class InversePipelineV3:
                         print(f"[Block A #{block_a_iter + 1}] 回退并尝试其他组合: candidate invalid ({cand_reason})")
                         continue
                     if not float(cand_r2) > float(cycle_best_layer2_r2) + float(outer_improve_eps):
+                        if spectral_trace is not None:
+                            spectral_trace.event('block_a_candidate', outer_cycle=outer_idx + 1,
+                                                 iteration=block_a_iter + 1, accepted=False,
+                                                 reason='insufficient_layer2_r2_gain', candidate_r2=cand_r2,
+                                                 baseline_r2=cycle_best_layer2_r2, action=_meta_a)
                         print(
                             f"[Block A #{block_a_iter + 1}] 回退并尝试其他组合: candidate_r2={cand_r2:.4f} "
                             f"<= accept_ref_layer2_r2={cycle_best_layer2_r2:.4f}"
@@ -3834,6 +4005,15 @@ class InversePipelineV3:
                     historical_best_layer2_r2 = max(float(historical_best_layer2_r2), float(cand_r2))
                     cycle_best_layer2_r2 = float(cand_r2)
                     accepted_a = True
+                    if spectral_trace is not None:
+                        layer2_trace_seed = spectral_trace.checkpoint(
+                            stage='block_a_accepted', nodes=current_nodes, difference=current_diff,
+                            outer_cycle=outer_idx + 1, iteration=block_a_iter + 1,
+                            parent_checkpoint_id=layer2_trace_seed, action=_meta_a,
+                            metadata={'acceptance_reason': 'layer2_r2_gain',
+                                      'baseline_r2': diff_block_a_base.get('r2'),
+                                      'layer12_summary': cand_diff.get('layer12_summary', {})},
+                        ) or layer2_trace_seed
                     print(f"[Block A #{block_a_iter + 1}] 接受: layer2_r2={cand_r2:.4f}")
                     self._print_histogram_and_elements(current_H, E_target, label=f'Block A #{block_a_iter + 1} Accepted', nodes=current_nodes)
                     self._print_effective_resource_summary(current_H, label=f'Block A #{block_a_iter + 1} Accepted')
@@ -3842,6 +4022,12 @@ class InversePipelineV3:
                     self._set_fixed_partition_meta(meta_block_a_base)
                     print(f"[Block A #{block_a_iter + 1}] 无其他可接受调整，保留上次结果")
                     break
+
+            if spectral_trace is not None:
+                layer2_trace_seed = spectral_trace.checkpoint(
+                    stage='block_a_complete', nodes=current_nodes, difference=current_diff,
+                    outer_cycle=outer_idx + 1, parent_checkpoint_id=layer2_trace_seed,
+                ) or layer2_trace_seed
 
             # Stage B: evaluate each hetero-anchor substage immediately.  The
             # following substage must see the accepted graph/diff from the
@@ -3977,6 +4163,14 @@ class InversePipelineV3:
                             cand_H,
                             tag=f'BlockB:{family_name}/{substage}',
                         )
+                        if spectral_trace is not None:
+                            spectral_trace.event(
+                                'block_b_candidate', outer_cycle=outer_idx + 1,
+                                iteration=block_b_iter + 1, family=family_name, substage=substage,
+                                accepted=bool(cand_valid and float(cand_r2) > float(cycle_best_layer2_r2) + float(outer_improve_eps)),
+                                valid=cand_valid, validity_reason=cand_reason,
+                                candidate_r2=cand_r2, baseline_r2=cycle_best_layer2_r2, action=moves_b,
+                            )
                         if cand_valid and float(cand_r2) > float(cycle_best_layer2_r2) + float(outer_improve_eps):
                             current_nodes = cand_nodes
                             current_H = cand_H.detach().clone()
@@ -3992,6 +4186,16 @@ class InversePipelineV3:
                             historical_best_layer2_r2 = max(float(historical_best_layer2_r2), float(cand_r2))
                             cycle_best_layer2_r2 = float(cand_r2)
                             block_b_progress = True
+                            if spectral_trace is not None:
+                                layer2_trace_seed = spectral_trace.checkpoint(
+                                    stage='block_b_accepted', nodes=current_nodes, difference=current_diff,
+                                    outer_cycle=outer_idx + 1, iteration=block_b_iter + 1,
+                                    parent_checkpoint_id=layer2_trace_seed, action=moves_b,
+                                    metadata={'family': family_name, 'substage': substage,
+                                              'acceptance_reason': 'layer2_r2_gain',
+                                              'baseline_r2': diff_stage_base.get('r2'),
+                                              'layer12_summary': cand_diff.get('layer12_summary', {})},
+                                ) or layer2_trace_seed
                             layer12_summary = dict(
                                 cand_diff.get('layer12_summary', {}) or {}
                             )
@@ -4048,6 +4252,13 @@ class InversePipelineV3:
                 if not bool(block_b_progress) and not bool(block_b_attempted):
                     break
 
+            if spectral_trace is not None:
+                layer2_trace_seed = spectral_trace.checkpoint(
+                    stage='block_b_complete', nodes=current_layer2_nodes,
+                    difference=current_layer2_diff, outer_cycle=outer_idx + 1,
+                    parent_checkpoint_id=layer2_trace_seed,
+                ) or layer2_trace_seed
+
             stage3_complete_for_layer3 = not bool(resource_enabled)
             stage3_nodes = copy.deepcopy(current_layer2_nodes)
             stage3_H = current_layer2_H.detach().clone()
@@ -4099,6 +4310,7 @@ class InversePipelineV3:
                         eval_lib_path=eval_lib_path,
                         layer1_runtime_cfg=layer1_runtime_cfg,
                         outer_idx=int(outer_idx),
+                        checkpoint_callback=stage3_checkpoint if spectral_trace is not None else None,
                         flex_max_primary_adjustments=int(resource_cfg.get('flex_max_primary_adjustments', 10)),
                         external_max_primary_adjustments=int(resource_cfg.get('external_max_primary_adjustments', 10)),
                         internal_max_primary_adjustments=int(resource_cfg.get('internal_max_primary_adjustments', 30)),
@@ -4114,6 +4326,10 @@ class InversePipelineV3:
                         spectrum_max_candidate_trials=int(resource_cfg.get('spectrum_max_candidate_trials', 4)),
                         spectrum_max_primary_adjustments=int(resource_cfg.get('spectrum_max_primary_adjustments', 10)),
                         spectrum_min_r2_gain=float(resource_cfg.get('spectrum_min_r2_gain', 0.0005)),
+                        max_rebuilds=resource_cfg.get('max_rebuilds', 64),
+                        max_planner_attempts=resource_cfg.get('max_planner_attempts', 256),
+                        max_attempts_per_generation=resource_cfg.get('max_attempts_per_generation', 32),
+                        max_no_progress_rebuilds=resource_cfg.get('max_no_progress_rebuilds', 8),
                         verbose=bool(resource_cfg.get('verbose', False)),
                         output_dir=(
                             str(Path(output_dir) / f'outer_cycle_{outer_idx + 1}' / 'block_c')
@@ -4179,6 +4395,26 @@ class InversePipelineV3:
                 cycle_pre_layer3_r2 = float(current_layer2_diff.get('r2', float('nan')))
 
             if stage3_complete_for_layer3:
+                if spectral_trace is not None:
+                    layer2_trace_seed = spectral_trace.checkpoint(
+                        stage='stage3_complete' if resource_enabled else 'layer3_input',
+                        nodes=current_nodes, difference=current_diff,
+                        outer_cycle=outer_idx + 1, parent_checkpoint_id=layer2_trace_seed,
+                        metadata={'stage3_stop_reason': stage3_stop_reason},
+                    ) or layer2_trace_seed
+                layer3_trace_parent = layer2_trace_seed
+
+                def layer3_checkpoint(**payload):
+                    nonlocal layer3_trace_parent
+                    if spectral_trace is None:
+                        return None
+                    layer3_trace_parent = spectral_trace.checkpoint(
+                        **payload, outer_cycle=outer_idx + 1,
+                        parent_checkpoint_id=layer3_trace_parent, decision='provisional',
+                        spectral_contract='template_sample_mu_layer3',
+                    ) or layer3_trace_parent
+                    return layer3_trace_parent
+
                 layer3_input_nodes = copy.deepcopy(current_nodes)
                 layer3_input_H = current_H.detach().clone()
                 layer3_input_diff = copy.deepcopy(current_diff)
@@ -4188,7 +4424,9 @@ class InversePipelineV3:
                         S_target=S_target,
                         E_target=E_target,
                         lib_path=eval_lib_path,
-                        output_dir=None,
+                        output_dir=(str(spectral_trace.directory / f'outer_cycle_{outer_idx + 1}_layer3')
+                                    if spectral_trace is not None else None),
+                        checkpoint_callback=layer3_checkpoint if spectral_trace is not None else None,
                         **layer3_runtime_cfg,
                     )
                 except Exception as e:
@@ -4255,6 +4493,21 @@ class InversePipelineV3:
             else:
                 current_diff['layer3_candidate_diagnostics'] = layer3_diagnostics
             cycle_post_layer3_r2 = float(current_diff.get('r2', float('nan')))
+            if spectral_trace is not None:
+                committed_trace = spectral_trace.checkpoint(
+                    stage='layer3_accepted' if layer3_accepted else 'layer3_rollback',
+                    nodes=current_nodes, difference=current_diff, outer_cycle=outer_idx + 1,
+                    parent_checkpoint_id=layer3_trace_parent if layer3_accepted else layer2_trace_seed,
+                    spectral_contract=str(current_diff.get('spectral_contract', 'template_center_mu')),
+                    decision='accepted' if layer3_accepted else 'retained',
+                    metadata=layer3_diagnostics,
+                )
+                cycle_trace_endpoints[outer_idx] = committed_trace or layer2_trace_seed
+                spectral_trace.event(
+                    'layer3_decision', outer_cycle=outer_idx + 1, accepted=layer3_accepted,
+                    provisional_endpoint=layer3_trace_parent, committed_checkpoint=committed_trace,
+                    input_checkpoint=layer2_trace_seed, diagnostics=layer3_diagnostics,
+                )
             round_identity_audit = self._audit_final_su_identity(current_nodes)
             round_completion_authoritative = bool(
                 not resource_enabled
@@ -4465,6 +4718,8 @@ class InversePipelineV3:
             terminal_proof = dict(terminal_diagnostics.get('infeasibility_proof', {}) or {})
             failed_contract = dict(terminal_proof.get('failed_contract', {}) or {})
             contract_proof = dict(failed_contract.get('proof', {}) or {})
+            if spectral_trace is not None:
+                spectral_trace.finish(status='incomplete', reason=stage3_stop_reason)
             raise RuntimeError(
                 'final_result_requires_completed_stage3_and_layer3: '
                 f'stage3_stop={stage3_stop_reason}; '
@@ -4556,6 +4811,8 @@ class InversePipelineV3:
             'next_cycle_seed_source_stage': 'layer2',
             'next_cycle_seed_contract': 'template_center_mu',
             'final_output_detail': str(final_output_detail),
+            'output_mode': output_mode,
+            'spectral_trace_directory': str(spectral_trace.directory) if spectral_trace is not None else None,
             'aromatic_plan_file': 'final_aromatic_clusters.json',
             'aromatic_plan_authoritative': True,
         }
@@ -4605,6 +4862,16 @@ class InversePipelineV3:
         print("逆向推理完成！")
         print("=" * 80)
 
+        if spectral_trace is not None:
+            final_checkpoint = spectral_trace.checkpoint(
+                stage='final_selected', nodes=nodes, difference=current_diff,
+                outer_cycle=selected_best_outer_idx + 1,
+                parent_checkpoint_id=cycle_trace_endpoints.get(selected_best_outer_idx, ''),
+                spectral_contract=str(current_diff.get('spectral_contract', 'unknown')),
+                decision='selected_final',
+            )
+            spectral_trace.finish(status='complete', selected_outer_cycle=selected_best_outer_idx + 1,
+                                  final_checkpoint_id=final_checkpoint)
         return nodes, H_final
 
     def _compute_difference_spectrum_from_nodes_mu(
@@ -4742,7 +5009,8 @@ class InversePipelineV3:
                                 top_k_samples: int = 8,
                                 neg_top_k_peaks: int = 10,
                                 neg_peak_min_sep_ppm: float = 0.8,
-                                layer3_verbose: bool = True) \
+                                layer3_verbose: bool = True,
+                                checkpoint_callback: Optional[Callable[..., Any]] = None) \
                                 -> Tuple[List[_NodeV3], float]:
         """
         在固定 Layer2 模板内选择配对 z/mu 样本，以全谱 R² 验收移动。
@@ -4764,6 +5032,7 @@ class InversePipelineV3:
             neg_top_k_peaks=int(neg_top_k_peaks),
             neg_peak_min_sep_ppm=float(neg_peak_min_sep_ppm),
             verbose=bool(layer3_verbose),
+            checkpoint_callback=checkpoint_callback,
         )
 
     def layer3_adjust_templates_impl(
@@ -4780,6 +5049,7 @@ class InversePipelineV3:
         neg_top_k_peaks: int = 10,
         neg_peak_min_sep_ppm: float = 0.8,
         verbose: bool = True,
+        checkpoint_callback: Optional[Callable[..., Any]] = None,
     ) -> Tuple[List[_NodeV3], float]:
         lib_path = lib_path or self.default_template_lib_path
         if lib_path:
@@ -4808,6 +5078,7 @@ class InversePipelineV3:
             neg_top_k_peaks=int(neg_top_k_peaks),
             neg_peak_min_sep_ppm=float(neg_peak_min_sep_ppm),
             verbose=bool(verbose),
+            checkpoint_callback=checkpoint_callback,
         )
 
     def _save_final_nmr_comparison(self,
@@ -6279,6 +6550,10 @@ if __name__ == '__main__':
     parser.add_argument('--elements', type=str, required=True, help='元素组成，如 C=100 H=150 O=10')
     parser.add_argument('--device', type=str, default='cuda', help='计算设备')
     parser.add_argument('--output', type=str, default='inverse_result', help='输出目录')
+    parser.add_argument('--output-mode', choices=['simple', 'detailed'], default='simple',
+                        help='simple保留常规输出；detailed额外保存逐阶段谱线、节点和动作数据')
+    parser.add_argument('--final-output-detail', choices=['compact', 'full'], default='compact',
+                        help='最终拓扑诊断的兼容开关；detailed模式自动包含full诊断')
 
     args = parser.parse_args()
 
@@ -6303,6 +6578,8 @@ if __name__ == '__main__':
         save_intermediates=True,
         output_dir=args.output,
         eval_lib_path=args.templates,
+        output_mode=args.output_mode,
+        final_output_detail=args.final_output_detail,
     )
 
     print(f"\n推理完成！结果已保存至 {args.output}/")
