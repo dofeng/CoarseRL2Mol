@@ -30,6 +30,10 @@ nodes, H_final = pipeline.infer(
 
 ## 数据位置和字段
 
+命令行和逆向 Notebook 默认在重采样后用 1.5 ppm 窗口做二阶 Savitzky–Golay 平滑，然后连接低信号窗口中最低 20% 采样点的中位坐标得到分段直线。默认窗口为 0–7、65–95、186–194 和 223–240 ppm。扣除基线后将负值截到零，再按 `π × 碳数` 归一化。`input_spectrum.csv` 保存重采样谱（`raw`）、平滑谱（`smoothed`）、实际扣除的基线（`baseline`）、扣除后未归一化的谱（`corrected`）和推理输入（`target`）。`observed` 标记 CSV 覆盖的化学位移范围，`baseline_anchor` 标记最接近所选锚点的采样位置。默认窗口在裁剪谱上不足两个时，改用实测范围的两端估计一条直线。
+
+两个入口默认完整扣除估计基线。命令行用 `--smooth-window-ppm` 和 `--baseline-strength` 调节平滑和基线扣除，两者同时设为 0 可复现仅面积归一化的输入。输入谱在默认窗口有明显信号时，可重复使用 `--baseline-window LOW HIGH` 选择窗口，Notebook 中使用 `baseline_windows=[(low, high), ...]`。指定两个窗口以拟合一条直线。
+
 详细输出保存在 `<output_dir>/spectral_trace/<run_id>/`，运行时会打印完整路径。已有同名追踪目录时自动增加后缀，不覆盖早先追踪文件。
 
 ```text

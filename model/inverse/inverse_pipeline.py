@@ -27,8 +27,6 @@ from ..shared.inverse_common import (
     SU_DEFS,
     visualize_su_distribution,
     evaluate_spectrum_reconstruction,
-    resample_spectrum_to_ppm_axis,
-    normalize_spectrum_to_carbon_count,
     get_effective_hist_element_vector,
     get_effective_nodes_element_vector,
     get_node_degree_hint,
@@ -47,6 +45,9 @@ from .layer1.inverse_layer1 import Layer1Assigner
 from .layer1.port_role_balance import audit_layer1_port_roles
 from .layer2.inverse_layer2 import Layer2Estimator
 from .layer3.inverse_layer3 import Layer3Estimator
+from .spectrum_input import DEFAULT_SMOOTH_WINDOW_PPM
+from .spectrum_input import load_target_spectrum_csv as load_target_spectrum_csv
+from .spectrum_input import read_spectrum_csv as read_spectrum_csv
 from .spectral_trace import SpectralTraceWriter
 from .layer4.inverse_layer4 import Layer4Adjuster
 from .topology import classify_topology_units
@@ -6517,16 +6518,6 @@ def load_pipeline(s2n_ckpt: str, vae_ckpt: Optional[str] = None,
     return InversePipelineV3(s2n_model, templates=str(Path(templates_pkl)), device=device)
 
 
-def read_spectrum_csv(path: str) -> torch.Tensor:
-    """从CSV读取谱图数据"""
-    df = pd.read_csv(path, sep=r'[;, \t]', engine='python', header=None)
-    if df.shape[1] < 2:
-        raise ValueError("CSV需要两列: ppm, intensity")
-    ppm = pd.to_numeric(df.iloc[:, 0], errors='coerce').values
-    intensity = pd.to_numeric(df.iloc[:, 1], errors='coerce').values
-    return resample_spectrum_to_ppm_axis(ppm, intensity, ppm_axis=PPM_AXIS)
-
-
 def parse_elements(expr: str) -> torch.Tensor:
     """解析元素表达式，如 'C=100 H=150 O=10 N=2'"""
     import re
@@ -6548,6 +6539,12 @@ if __name__ == '__main__':
     parser.add_argument('--templates', type=str, required=True, help='模板库pkl路径')
     parser.add_argument('--spectrum', type=str, required=True, help='目标谱图CSV路径')
     parser.add_argument('--elements', type=str, required=True, help='元素组成，如 C=100 H=150 O=10')
+    parser.add_argument('--baseline-strength', type=float, default=1.0,
+                        help='基线扣除比例 0–1，默认 1。设为 0 可跳过基线扣除')
+    parser.add_argument('--smooth-window-ppm', type=float, default=DEFAULT_SMOOTH_WINDOW_PPM,
+                        help='Savitzky–Golay 平滑窗口（ppm），设为 0 可关闭平滑')
+    parser.add_argument('--baseline-window', type=float, nargs=2, action='append', metavar=('LOW', 'HIGH'),
+                        help='可重复给出低信号窗口（ppm）。两个窗口拟合一条直线')
     parser.add_argument('--device', type=str, default='cuda', help='计算设备')
     parser.add_argument('--output', type=str, default='inverse_result', help='输出目录')
     parser.add_argument('--output-mode', choices=['simple', 'detailed'], default='simple',
@@ -6563,11 +6560,16 @@ if __name__ == '__main__':
 
     # 读取输入
     print(f"读取谱图: {args.spectrum}")
-    S_target_raw = read_spectrum_csv(args.spectrum)
-
     print(f"解析元素: {args.elements}")
     E_target = parse_elements(args.elements)
-    S_target = normalize_spectrum_to_carbon_count(S_target_raw, float(E_target[0].item()))
+    S_target = load_target_spectrum_csv(
+        args.spectrum,
+        float(E_target[0].item()),
+        baseline_strength=args.baseline_strength,
+        smooth_window_ppm=args.smooth_window_ppm,
+        baseline_windows=args.baseline_window,
+        diagnostic_path=Path(args.output) / 'input_spectrum.csv',
+    )
 
     print(f"目标谱图维度: {S_target.shape}, 元素组成: {E_target.tolist()}")
 
